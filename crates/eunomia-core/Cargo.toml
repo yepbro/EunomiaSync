@@ -1,9 +1,9 @@
 [package]
 name = "eunomia-core"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Core library for EunomiaSync: storage, markdown, diff, sync, and watch logic, independent of Tauri."
-license = "MIT OR Apache-2.0"
+license.workspace = true
 publish = false
 
 [dependencies]
