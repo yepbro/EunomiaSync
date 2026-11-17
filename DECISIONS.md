@@ -100,3 +100,92 @@ watcher in the MVP (notify-debouncer-full per D-004, display-only, sync semantic
 unchanged, spec 5.7), the updater confirmed as MVP scope, and e2e confirmed as
 Playwright against the Vite dev server with a mocked IPC (tauri-driver is out of v1,
 spec 15.1).
+
+### D-012 — Agent skills: rust-skills (leonardomso) installed — 2026-11-17
+
+Problem: Rust guidance for the workspace was ad hoc. The rust-skills set (265 rules,
+26 categories, MIT) fits the context budget — an index SKILL.md plus per-rule files
+loaded on demand — but its recommendations must not silently override project decisions.
+
+Solution: installed as `.opencode/skills/rust-skills` (index + `rules/`; the source
+repo's own checks/ crate, AGENTS.md/CLAUDE.md/meta files excluded). An "EunomiaSync
+Notes" section in the index pins the overlays: clippy `-D warnings` beats rule advice;
+new crates (thiserror/anyhow/smallvec/…) only via a task + DECISIONS.md entry
+(cargo-deny applies); the project stays unsafe-free; no preemptive tokio; resource
+policy overrides parallelism advice. Invocation: the description auto-gates it to Rust
+tasks; the moment is pinned in AGENTS.local.md (any task touching `crates/**` or
+`src-tauri/**`); Rust subagent briefs carry the skill path.
+
+### D-013 — Tauri skills: fxckcode set + LevyBytes router; full-stack set rejected — 2026-11-17
+
+Problem: Tauri 2 knowledge was scattered; three candidate skill sets had different
+shapes and overlaps (fxckcode 9 compact gate-skills MIT; LevyBytes one router with deep
+references Apache-2.0; full-stack-skills 52 per-plugin skills Apache-2.0).
+
+Solution: installed the fxckcode set minus `tauri-mobile` (desktop-only project) as
+eight workflow gates: setup, architecture, frontend, rust, security, plugins, testing,
+release; its repo-level `references/` (official docs map, version-sensitive notes) went
+to `.opencode/references/` so the setup skill's relative link resolves. Installed the
+LevyBytes router as `tauri-develop` (SKILL.md + references/ + LICENSE + NOTICE) for the
+deep topics the gates lack: IPC mocks (matches the D-007/D-011 mocked-IPC e2e),
+Rust/WebView debugging, sidecars/resources, icons, webdriver. Precedence is pinned in
+AGENTS.local.md: fx gates decide, `tauri-develop` supplies detail. Overlays applied:
+D-003 (no raw `invoke()`, tauri-specta `commands`) onto tauri-frontend and the router;
+Playwright-over-Vite e2e onto tauri-testing; updater MVP scope onto tauri-release.
+The 52-skill full-stack set was rejected: registry pollution, and its updater skill is
+a thin scope blurb with links, covered by `tauri-release` + official docs.
+
+### D-014 — Vue skills: 7 of 17 from KIMJINWOO4/vue-skills — 2026-11-17
+
+Problem: the frontend layer had no framework-level guidance (only the TS layer via
+typescript-best-practices and the IPC layer via tauri-frontend). The upstream set ships
+17 skills, several irrelevant to this repo (Nuxt, VitePress, antfu conventions,
+component/query/validation libraries, pnpm/Turborepo tooling).
+
+Solution: installed `vue` (core: reactivity, SFC, Pinia, testing references),
+`vue-debug`, `vue-review`, `vue-performance`, `vue-clean-components`, `vue-a11y`,
+`build-tooling`; each with provenance LICENSE and overlay footers (no Nuxt/SSR; D-003
+no raw `invoke()`; npm not pnpm — no pnpm workspaces/Turborepo/tsdown; cargo resource
+policy). Skipped: `vue-data` (query layer — no HTTP API; data flows via IPC per D-003),
+`vue-ui` (no component library decided), `vue-forms` (validation library = dependency
+decision), `design` (UnoCSS-centric), `vue-ci` (CI stable), `vue-upgrade` (add when a
+Vue upgrade task lands), `nuxt`/`vitepress`/`antfu`/`find-skills` (out of scope).
+Layering pinned in AGENTS.local.md: typescript-best-practices (TS) → `vue` (framework)
+→ `tauri-frontend` (IPC gate); subagent briefs for Vue tasks carry the core skill path.
+
+### D-015 — Overlay cleanup: provenance/restating footers removed, guards kept — 2026-11-17
+
+Problem: skill files accumulated overlay footers restating facts already authoritative
+elsewhere (AGENTS.local.md layering notes, ARCHITECTURE.md, DECISIONS.md) — duplication
+that also complicates future upstream syncs.
+
+Solution: stripped provenance and application-site footers from 15 files (seven pstack
+principles, five fx tauri gates, five vue skills; typescript-best-practices lost only
+its provenance line). Kept the load-bearing set: create-verification-skill intact
+(section 0 policies govern the generated skill; .opencode paths); rust-skills
+"EunomiaSync Notes" (qualifies 265 rules: clippy wins, new crates via DECISIONS.md,
+unsafe-free, no preemptive tokio, resource policy); typescript-best-practices notes
+(.vue script blocks despite the paths filter, generated bindings.ts, no zod adopted);
+one-line guards where upstream text actively contradicts repo rules — D-003 no-raw-
+invoke on tauri-frontend/tauri-develop/vue, Playwright e2e on tauri-testing, updater
+MVP scope on tauri-release, npm-not-pnpm on build-tooling — and the DECISIONS.md
+carve-out in encode-lessons-in-structure (upstream corollary must not suppress the
+record). Rationale: guards must live inside the skill file because auto-triggered
+reads and subagent briefs reach the skill without AGENTS.local.md context.
+
+### D-016 — Architecture-patterns skill installed (operator-provided) — 2026-11-17
+
+Problem: no installed skill covered the language-agnostic design layer — planning
+decisions (state modeling, invariants, side effects, ownership) and architecture-level
+reviews. The pstack principles cover specific techniques; rust-skills/vue are
+language-level.
+
+Solution: installed the operator-provided `architecture-patterns` skill (English
+original, unmodified; no upstream repository tracked) as `.opencode/skills/architecture-
+patterns/`: 9 patterns, 11 anti-patterns, decision rules, and an evidence-based review
+format. Wired as the design/review gate in AGENTS.local.md — applied when planning
+features or reviewing structure, before language-level skills; precedence over the
+overlapping pstack principles pinned there (idempotent expands its pattern 4, boundary
+discipline its pattern 6, type-system discipline its invariants/primitive-obsession
+guidance). Its audit rules match the repo discipline: reviews never modify code unless
+implementation was explicitly requested.
