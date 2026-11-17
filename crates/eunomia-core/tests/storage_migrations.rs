@@ -1,0 +1,48 @@
+use eunomia_core::storage::run_migrations;
+use rusqlite::Connection;
+
+#[test]
+fn fresh_database_reaches_latest_migration() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    run_migrations(&mut conn).expect("migrations should apply cleanly on a fresh database");
+
+    // The `meta` table created by 0001_init.sql must be usable.
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('schema', '0001')",
+        [],
+    )
+    .unwrap();
+
+    let value: String = conn
+        .query_row("SELECT value FROM meta WHERE key = 'schema'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(value, "0001");
+}
+
+#[test]
+fn migrations_run_on_file_backed_database() {
+    let path =
+        std::env::temp_dir().join(format!("eunomia-core-test-{}.sqlite3", std::process::id()));
+    // A pre-existing file would leak state between runs; start fresh.
+    let _ = std::fs::remove_file(&path);
+
+    {
+        let mut conn = Connection::open(&path).unwrap();
+        run_migrations(&mut conn).unwrap();
+    }
+
+    // Reopening must report a fully migrated database.
+    {
+        let mut conn = Connection::open(&path).unwrap();
+        run_migrations(&mut conn)
+            .expect("re-running migrations on a migrated database must be a no-op");
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert!(user_version > 0, "schema version must be recorded");
+    }
+
+    std::fs::remove_file(&path).unwrap();
+}

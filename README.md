@@ -20,17 +20,17 @@ Together, **EunomiaSync** represents order, consistency, and effortless rule man
 
 ### Tech Stack
 
-| Component          | Technology           |
-|--------------------|----------------------|
-| Backend            | Rust                 |
-| Desktop framework  | Tauri 2              |
-| Frontend           | Vue 3 + TypeScript   |
-| UI                 | Tailwind CSS         |
-| Database           | SQLite               |
-| Markdown           | pulldown-cmark       |
-| Diff               | similar              |
-| File watching      | notify               |
-| Config             | serde + YAML/TOML    |
+| Component         | Technology         |
+| ----------------- | ------------------ |
+| Backend           | Rust               |
+| Desktop framework | Tauri 2            |
+| Frontend          | Vue 3 + TypeScript |
+| UI                | Tailwind CSS       |
+| Database          | SQLite             |
+| Markdown          | pulldown-cmark     |
+| Diff              | similar            |
+| File watching     | notify             |
+| Config            | serde + YAML/TOML  |
 
 ## License
 

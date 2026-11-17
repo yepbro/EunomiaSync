@@ -4,8 +4,8 @@
 
 EunomiaSync is under active development. Security fixes are applied to the latest release and the `main` branch.
 
-| Version | Supported          |
-| ------- | ------------------ |
+| Version        | Supported          |
+| -------------- | ------------------ |
 | latest release | :white_check_mark: |
 | older releases | :x:                |
 

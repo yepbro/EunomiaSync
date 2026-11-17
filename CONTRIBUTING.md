@@ -55,12 +55,24 @@ npm run tauri dev    # run the app in development mode
 Before submitting a pull request, please make sure all checks pass:
 
 ```bash
-cargo fmt --all          # format Rust code
-cargo clippy --all-targets --all-features -- -D warnings   # lint Rust code
-cargo test               # run Rust tests
-npm run lint             # lint frontend code
-npm run typecheck        # TypeScript type checking
+cargo fmt --all -- --check   # check Rust formatting
+cargo clippy --workspace --all-targets -- -D warnings   # lint Rust code
+cargo deny check             # lint dependencies (licenses, advisories, duplicates)
+cargo test --workspace       # run Rust tests
+npm run lint                 # lint frontend code (ESLint)
+npm run format:check         # check frontend formatting (Prettier)
+npm run typecheck            # TypeScript type checking
+npm run test                 # run frontend unit tests (Vitest)
+npm run e2e                  # run browser end-to-end tests (Playwright)
 ```
+
+### Pre-commit Hooks
+
+Git pre-commit hooks are installed automatically: running `npm install`
+executes the `prepare` script, which sets
+`git config core.hooksPath .githooks`. The hook runs `cargo fmt --check`,
+`npm run lint`, `npm run format:check`, and `npm run typecheck` before each
+commit, so most style issues are caught locally before they reach CI.
 
 ## Commit Messages
 

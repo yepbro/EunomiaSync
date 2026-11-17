@@ -1,0 +1,33 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "MPL-2.0",
+  "CDLA-Permissive-2.0",
+  "CC0-1.0",
+]
+
+[advisories]
+yanked = "warn"
+# Unmaintained advisories only fail for workspace crates. Transitive
+# unmaintained crates (e.g. zvariant_derive via tauri-plugin-opener,
+# RUSTSEC-2026-0372, no safe upgrade available) are tolerated until
+# upstream ships a fix.
+unmaintained = "workspace"
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+# cargo-deny >= 0.18 replaced the single `unknown` key with these two;
+# the intent (warn on unknown sources) is unchanged.
+unknown-registry = "warn"
+unknown-git = "warn"
