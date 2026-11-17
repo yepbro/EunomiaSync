@@ -18,12 +18,13 @@ each other. Everything marked **planned** is not implemented yet.
 
 ```text
 crates/
-  eunomia-core/            # Core library, no Tauri dependency
-    src/storage.rs         #   SQLite storage + migrations   (working)
+  eunomia-core/            # Core library, no Tauri dependency, no I/O
     markdown               #   Markdown processing           (planned)
     diff                   #   Text diffing                  (planned)
     sync                   #   AGENTS.md sync engine         (planned)
     watch                  #   File watching                 (planned)
+  eunomia-store/           # Database layer (SQLite), no Tauri dependency
+    src/storage.rs         #   SQLite storage + migrations   (working)
     migrations/            #   Embedded SQL migration files
 src-tauri/
   src/commands.rs          # Tauri commands (via tauri-specta)  (working)
@@ -35,10 +36,13 @@ src/                      # Frontend
   views/, stores/          # Vue views / Pinia stores            (planned)
 ```
 
-`eunomia-core` is deliberately independent of Tauri so that storage,
-markdown, diff, sync, and watch logic can be tested without a UI layer
-(see DECISIONS.md D-006). `src-tauri` is a thin shell: commands, managed
-state, and specta wiring.
+`eunomia-core` is deliberately independent of Tauri so that markdown,
+diff, sync, and watch logic can be tested without a UI layer (see
+DECISIONS.md D-006); it is also free of database dependencies, so the
+"core = pure logic, no I/O" rule holds at the dependency level. SQLite
+storage lives in `eunomia-store` (see DECISIONS.md D-010), which is free
+of Tauri dependencies for the same reason. `src-tauri` is a thin shell:
+commands, managed state, and specta wiring.
 
 ## IPC contract
 
@@ -61,10 +65,10 @@ Rust commands are registered through `tauri-specta`:
 SQLite is accessed with `rusqlite` (feature `bundled`, so no system SQLite
 is required) and schema evolution uses `rusqlite_migration`
 (DECISIONS.md D-002). Migration files live in
-`crates/eunomia-core/migrations/*.sql`, are embedded with `include_str!`,
-and applied by `storage::run_migrations(&mut Connection)`, which brings any
-database to the latest schema version. Tests run against in-memory SQLite
-through the public API only.
+`crates/eunomia-store/migrations/*.sql`, are embedded with `include_str!`,
+and applied by `eunomia_store::storage::run_migrations(&mut Connection)`,
+which brings any database to the latest schema version. Tests run against
+in-memory SQLite and one file-backed database through the public API only.
 
 ## Config
 
@@ -94,7 +98,7 @@ updater is part of the MVP scope (spec 7.9).
 | Level       | Scope                                 | Tooling / command                                    |
 | ----------- | ------------------------------------- | ---------------------------------------------------- |
 | Unit        | Rust crates and Vue components        | `cargo test --workspace` / `npm run test` (Vitest)   |
-| Integration | `eunomia-core` storage & migrations   | `cargo test -p eunomia-core` (in-memory + file DB)   |
+| Integration | `eunomia-store` storage & migrations  | `cargo test -p eunomia-store` (in-memory + file DB)  |
 | API         | Tauri commands over mock IPC runtime  | `cargo test -p eunomia-sync` (`tauri::test` mocks)   |
 | E2E         | Browser scenarios against Vite server | `npm run e2e` (Playwright, DECISIONS.md D-007)       |
 | Smoke       | App builds on all three platforms     | CI `build` matrix: `tauri build --debug --no-bundle` |

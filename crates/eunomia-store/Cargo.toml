@@ -1,0 +1,14 @@
+[package]
+name = "eunomia-store"
+version.workspace = true
+edition.workspace = true
+description = "Database layer for EunomiaSync: SQLite storage and embedded SQL migrations, independent of Tauri."
+license.workspace = true
+publish = false
+
+[dependencies]
+# rusqlite version must stay aligned with rusqlite_migration's own rusqlite
+# requirement (^0.41), otherwise two libsqlite3-sys copies (links = "sqlite3")
+# conflict within the workspace.
+rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite_migration = "2.7"

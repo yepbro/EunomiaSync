@@ -2,13 +2,19 @@
 name = "eunomia-core"
 version.workspace = true
 edition.workspace = true
-description = "Core library for EunomiaSync: storage, markdown, diff, sync, and watch logic, independent of Tauri."
+description = "Core library for EunomiaSync: domain types, markdown, diff, sync, and watch logic, independent of Tauri and of any database."
 license.workspace = true
 publish = false
 
 [dependencies]
-# rusqlite version must stay aligned with rusqlite_migration's own rusqlite
-# requirement (^0.41), otherwise two libsqlite3-sys copies (links = "sqlite3")
-# conflict within the workspace.
-rusqlite = { version = "0.41", features = ["bundled"] }
-rusqlite_migration = "2.7"
+# Dependency allow-list pinned by the spec (docs/spec.md 5.2): core stays
+# pure logic with no I/O — database code lives in `eunomia-store`. These
+# dependencies serve the domain side still to be built here: serde for
+# domain/config types, sha2 for build hashes, thiserror for error types.
+# They are intentionally idle until those modules land. Note: the spec's
+# tech stack (5.3) also names `similar` for text diffing, which is outside
+# this allow-list — adopting it (or placing diff elsewhere) is a decision
+# for the diff task, not a silent addition.
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"

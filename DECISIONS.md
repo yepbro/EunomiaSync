@@ -189,3 +189,28 @@ overlapping pstack principles pinned there (idempotent expands its pattern 4, bo
 discipline its pattern 6, type-system discipline its invariants/primitive-obsession
 guidance). Its audit rules match the repo discipline: reviews never modify code unless
 implementation was explicitly requested.
+
+### D-017 — eunomia-store extracted; core keeps the spec dependency allow-list — 2026-11-17
+
+Problem: D-010 planned the store split but left open three details: which crate owns the
+rusqlite/rusqlite_migration version-alignment constraint, whether `eunomia-store` gets a
+`core` dependency right away (spec 5.2 lists it), and how core's dependency allow-list
+(serde, sha2, thiserror) becomes enforceable before the domain modules exist.
+
+Solution: the split was executed (T-002) as a mechanical move — `storage.rs`, `migrations/`
+and their tests moved to `crates/eunomia-store` with the public API renamed to
+`eunomia_store::storage`. The alignment comment travels with the dependencies into the
+store manifest (it constrains whoever depends on rusqlite + rusqlite_migration).
+`eunomia-store` does NOT depend on `eunomia-core` yet: nothing in the moved code uses core
+types, so the edge would be an unused dependency; it is added by the first task whose store
+code actually references core types. Core's manifest now carries the spec-pinned allow-list
+serde, sha2, thiserror ahead of use (per the T-002 card and spec 5.2): an empty
+`[dependencies]` would let the next task silently add anything, while the pinned list makes
+"core = pure logic, these three deps only" reviewable at the dependency level; they stay
+idle until the domain-type tasks land, and `eunomia-store` deliberately keeps hand-rolled
+error impls instead of pulling thiserror. The allow-list covers the three deps only:
+spec 5.3 additionally names `similar` for text diffing, which is outside it — whether
+`similar` joins the allow-list or diff logic lives in another crate is a decision for the
+diff task. `src-tauri` swapped its path dependency
+`eunomia-core` → `eunomia-store` (it had no code referencing core; core comes back with the
+first command that needs its types).

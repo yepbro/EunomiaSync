@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/eunomia-core", "src-tauri"]
+members = ["crates/eunomia-core", "crates/eunomia-store", "src-tauri"]
 resolver = "2"
 
 [workspace.package]

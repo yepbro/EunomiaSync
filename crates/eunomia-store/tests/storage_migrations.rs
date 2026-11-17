@@ -1,4 +1,4 @@
-use eunomia_core::storage::run_migrations;
+use eunomia_store::storage::run_migrations;
 use rusqlite::Connection;
 
 #[test]
@@ -24,7 +24,7 @@ fn fresh_database_reaches_latest_migration() {
 #[test]
 fn migrations_run_on_file_backed_database() {
     let path =
-        std::env::temp_dir().join(format!("eunomia-core-test-{}.sqlite3", std::process::id()));
+        std::env::temp_dir().join(format!("eunomia-store-test-{}.sqlite3", std::process::id()));
     // A pre-existing file would leak state between runs; start fresh.
     let _ = std::fs::remove_file(&path);
 

@@ -984,6 +984,15 @@ dependencies = [
 name = "eunomia-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "eunomia-store"
+version = "0.1.0"
+dependencies = [
  "rusqlite",
  "rusqlite_migration",
 ]
@@ -992,7 +1001,7 @@ dependencies = [
 name = "eunomia-sync"
 version = "0.1.0"
 dependencies = [
- "eunomia-core",
+ "eunomia-store",
  "serde",
  "serde_json",
  "specta",
