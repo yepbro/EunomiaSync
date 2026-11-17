@@ -1,3 +1,6 @@
 # Local tooling artifacts
 .codegraphcontext/
 .opencode/
+
+# Local agent instructions (not committed)
+AGENTS.local.md
