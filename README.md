@@ -15,3 +15,17 @@ This reflects the core purpose of the application: bringing order to a growing c
 **Sync** represents keeping `AGENTS.md` files across projects aligned with their source instructions, making it easy to roll out new rules and keep everything up to date as projects evolve.
 
 Together, **EunomiaSync** represents order, consistency, and effortless rule management across multiple projects — without forcing them all to follow exactly the same rules.
+
+### Tech Stack
+
+| Component          | Technology           |
+|--------------------|----------------------|
+| Backend            | Rust                 |
+| Desktop framework  | Tauri 2              |
+| Frontend           | Vue 3 + TypeScript   |
+| UI                 | Tailwind CSS         |
+| Database           | SQLite               |
+| Markdown           | pulldown-cmark       |
+| Diff               | similar              |
+| File watching      | notify               |
+| Config             | serde + YAML/TOML    |
