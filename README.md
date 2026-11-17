@@ -2,6 +2,10 @@
 
 EunomiaSync helps developers maintain accurate and up-to-date `AGENTS.md` files across multiple projects. It brings shared instructions and project-specific variations into one manageable system, accounting for differences in tech stacks, development methodologies, conventions, and workflows. It also makes it easy to introduce new rules across all relevant projects without manually updating each file.
 
+<p align="center">
+  <img src="logo.png" alt="EunomiaSync — Agent Instructions Manager" width="100%">
+</p>
+
 ### Why the name EunomiaSync?
 
 **Eunomia** comes from Greek mythology and represents good order, sound governance, and the proper arrangement of things.
