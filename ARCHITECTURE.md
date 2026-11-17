@@ -97,10 +97,10 @@ updater is part of the MVP scope (spec 7.9).
 
 | Level       | Scope                                 | Tooling / command                                    |
 | ----------- | ------------------------------------- | ---------------------------------------------------- |
-| Unit        | Rust crates and Vue components        | `cargo test --workspace` / `npm run test` (Vitest)   |
+| Unit        | Rust crates and Vue components        | `cargo test --workspace` / `pnpm run test` (Vitest)  |
 | Integration | `eunomia-store` storage & migrations  | `cargo test -p eunomia-store` (in-memory + file DB)  |
 | API         | Tauri commands over mock IPC runtime  | `cargo test -p eunomia-sync` (`tauri::test` mocks)   |
-| E2E         | Browser scenarios against Vite server | `npm run e2e` (Playwright, DECISIONS.md D-007)       |
+| E2E         | Browser scenarios against Vite server | `pnpm run e2e` (Playwright, DECISIONS.md D-007)      |
 | Smoke       | App builds on all three platforms     | CI `build` matrix: `tauri build --debug --no-bundle` |
 
 ## CI
