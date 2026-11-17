@@ -82,4 +82,4 @@ Common types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`.
 
 ## License
 
-By contributing to EunomiaSync, you agree that your contributions will be licensed under the project's dual license: [MIT](LICENSE-MIT) or [Apache License 2.0](LICENSE-APACHE), at your choice.
+By contributing to EunomiaSync, you agree that your contributions will be licensed under the project's dual license (MIT OR Apache-2.0), with no additional terms.
