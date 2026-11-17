@@ -30,7 +30,7 @@ Together, **EunomiaSync** represents order, consistency, and effortless rule man
 | Markdown          | pulldown-cmark     |
 | Diff              | similar            |
 | File watching     | notify             |
-| Config            | serde + YAML/TOML  |
+| Config            | serde + TOML       |
 
 ## License
 
