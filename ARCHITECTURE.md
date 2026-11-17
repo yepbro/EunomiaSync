@@ -2,7 +2,9 @@
 
 EunomiaSync keeps `AGENTS.md` files consistent across many projects. This
 document describes how the codebase is laid out and how the pieces talk to
-each other. Everything marked **planned** is not implemented yet.
+each other. Everything marked **planned** is not implemented yet; everything
+marked **skeleton** is a declared-but-empty crate or module stub (docs and
+planned responsibilities only, see DECISIONS.md D-019).
 
 ## Overview
 
@@ -23,6 +25,11 @@ crates/
     diff                   #   Text diffing                  (planned)
     sync                   #   AGENTS.md sync engine         (planned)
     watch                  #   File watching                 (planned)
+  eunomia-fs/              # File-system layer (scan/paths/backup/atomic), no Tauri dependency
+    src/scan.rs            #   Repository tree scanning           (skeleton)
+    src/paths.rs           #   Path normalization and validation  (skeleton)
+    src/backup.rs          #   Backup copies before writes        (skeleton)
+    src/atomic.rs          #   Atomic writes with retries         (skeleton)
   eunomia-store/           # Database layer (SQLite), no Tauri dependency
     src/storage.rs         #   SQLite storage + migrations   (working)
     migrations/            #   Embedded SQL migration files
@@ -41,7 +48,11 @@ diff, sync, and watch logic can be tested without a UI layer (see
 DECISIONS.md D-006); it is also free of database dependencies, so the
 "core = pure logic, no I/O" rule holds at the dependency level. SQLite
 storage lives in `eunomia-store` (see DECISIONS.md D-010), which is free
-of Tauri dependencies for the same reason. `src-tauri` is a thin shell:
+of Tauri dependencies for the same reason. File-system work — repository
+scan, path normalization and validation, backup copies, atomic writes —
+lives in `eunomia-fs` (see DECISIONS.md D-019), currently a skeleton: the
+module plan is fixed and its dependencies are pinned ahead of use, but no
+module is implemented yet. `src-tauri` is a thin shell:
 commands, managed state, and specta wiring.
 
 ## IPC contract
@@ -82,8 +93,9 @@ data is written to the file.
 File watching uses `notify` with debouncing through `notify-debouncer-full`
 (DECISIONS.md D-004). **Planned** — not implemented yet. Scope: the target files
 of active, available projects, display-only — external edits are shown in the UI
-and overwritten by the next sync (spec 5.7); the watcher backend will live in
-`eunomia-fs` once that crate is extracted. On Linux, the
+and overwritten by the next sync (spec 5.7); the watcher backend lives in
+`eunomia-fs` (the crate skeleton exists since D-019; the watch module and the
+`notify-debouncer-full` dependency land with the watching task). On Linux, the
 `fs.inotify.max_user_watches` limit must be respected; hitting it should
 surface as a clear, actionable error message.
 

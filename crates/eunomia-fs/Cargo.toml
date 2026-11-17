@@ -1,0 +1,32 @@
+[package]
+name = "eunomia-fs"
+version.workspace = true
+edition.workspace = true
+description = "File-system layer for EunomiaSync: repository scan, path normalization, backup copies, and atomic writes, independent of Tauri."
+license.workspace = true
+publish = false
+
+[dependencies]
+# Dependency set pinned by the T-003 card and the spec (docs/spec.md 5.2);
+# the modules are skeleton stubs, so each dependency below is intentionally
+# idle until the task that implements its module lands (precedent: the
+# spec-pinned allow-list of eunomia-core, DECISIONS.md D-017):
+# - `ignore` drives the repository scan (spec 9.6, ALG-050): its parallel
+#   WalkBuilder, run with .gitignore reading disabled;
+# - `walkdir` covers plain recursive traversal outside the repository-scan
+#   algorithm, e.g. the app's own data directory (scan, backup);
+# - `tempfile` stages same-folder write-then-rename file updates (atomic,
+#   spec 9.5);
+# - `dunce` canonicalizes paths without Windows verbatim (`\\?\`) prefixes,
+#   so canonical paths compare equal across the app (paths).
+# Target-file watching (spec 5.7) needs `notify-debouncer-full`; it is not
+# part of this card's dependency set and joins with its own module and task.
+ignore = "0.4"
+walkdir = "2"
+tempfile = "3"
+dunce = "1"
+# Domain types for scan/backup results (spec 5.2 lists `core`). Deliberate
+# departure from D-017's store rule (core edge only with the first
+# consumer): the card fixes this crate's dependency set at creation, so the
+# edge is wired now; the skeleton references none of core's types yet.
+eunomia-core = { path = "../eunomia-core" }

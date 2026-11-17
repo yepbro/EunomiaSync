@@ -259,3 +259,40 @@ would be overwritten by the next regeneration. Caveat for the owner: the
 `npm (not pnpm)` guard line inside the owner-local build-tooling skill copy is
 now outdated and needs a manual footer edit (skills are gitignored and
 read-only for agent tasks).
+
+### D-019 — eunomia-fs crate added as a skeleton — 2026-11-17
+
+Problem: the spec (5.2) and D-010 plan the fs crate, but the workspace had no
+`crates/eunomia-fs`: the scan/backup/atomic tasks have nothing to land in, and
+the file-system dependencies (ignore/walkdir, tempfile, dunce) would otherwise
+ride in silently with the first implementing task.
+
+Solution: added the crate as a skeleton per the T-003 card — four modules
+declared empty, each with a doc-commented planned responsibility and testing
+plan, no implementation: `scan` (repository traversal per spec 9.6,
+ALG-050..054: `ignore`'s parallel WalkBuilder with `.gitignore` reading
+disabled — a repository under an ignored directory must stay visible — and
+`walkdir` for plain recursive traversal outside the repository-scan
+algorithm, e.g. the data directory), `paths` (normalization and validation;
+`dunce` keeps canonical Windows paths free of verbatim `\\?\` prefixes;
+SEC-003 checks land here, fed by app/DB-layer allowlists), `backup` (copies
+before writes and copy checks, spec 5.5 layout, BKP-010/SEC-006), `atomic`
+(write-then-rename via `tempfile` with the spec 9.5 invariants: same-folder
+staging, sync/fsync points, hash verification, 3 retries 100/300/900 ms then
+`E_FILE_LOCKED`). The four external dependencies follow the
+spec-pinned-ahead-of-use pattern of D-017 (core's own allow-list): each is
+pinned by the card and the spec and stays idle until its module lands. The
+`eunomia-core` path edge deliberately departs from D-017's other rule (the
+store adds core only with its first consumer): the T-003 card fixes this
+crate's dependency set at creation, so the edge is wired now — the skeleton
+references none of core's types yet, which is expected, but the edge is
+compiled and covered by clippy/deny from day one. Deliberately absent:
+`notify-debouncer-full` (spec 5.7 watching) — it is outside the T-003 card's
+dependency set and the skeleton has no watch module; watching joins with its
+own task, matching ARCHITECTURE.md. Tests: none in the crate yet — the
+skeleton declares no public items with behavior to assert on, so each module
+doc carries the testing plan and T-003 verification is the workspace check
+suite (build/fmt/clippy/test/deny); empty `#[test] fn it_works()` markers
+were rejected as proving nothing. The module boundaries are the crate's
+public contract: implementing tasks fit their code into the declared
+modules, and a boundary change requires its own DECISIONS.md entry.
