@@ -69,20 +69,25 @@ through the public API only.
 ## Config
 
 Configuration format is TOML (serde + `toml`), per DECISIONS.md D-001.
-**Planned** — not implemented yet.
+**Planned** — not implemented yet. It is a machine-level `config.toml` in the
+data directory (spec 5.8); user-managed settings stay in SQLite, and no library
+data is written to the file.
 
 ## Watcher
 
 File watching uses `notify` with debouncing through `notify-debouncer-full`
-(DECISIONS.md D-004). **Planned** — not implemented yet. On Linux, the
+(DECISIONS.md D-004). **Planned** — not implemented yet. Scope: the target files
+of active, available projects, display-only — external edits are shown in the UI
+and overwritten by the next sync (spec 5.7); the watcher backend will live in
+`eunomia-fs` once that crate is extracted. On Linux, the
 `fs.inotify.max_user_watches` limit must be respected; hitting it should
 surface as a clear, actionable error message.
 
 ## Updater
 
 Auto-updates are planned via `tauri-plugin-updater` (DECISIONS.md D-005).
-**Planned** — signing keys and the update endpoint are separate tasks; not
-part of the MVP.
+**Planned** — signing keys and the update endpoint are separate tasks. The
+updater is part of the MVP scope (spec 7.9).
 
 ## Testing strategy
 

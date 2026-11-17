@@ -1,6 +1,6 @@
 # Technical Specification: EunomiaSync
 
-Spec version 1.0 · 17.11.2026 · based on: Product Requirements v0.3 and the customer's answers
+Spec version 1.1 · 17.11.2026 · based on: Product Requirements v0.3 and the customer's answers
 
 ## 1. General Information
 
@@ -22,11 +22,11 @@ EunomiaSync is a cross-platform desktop app (Windows, macOS, Linux). It stores i
 
 ### 1.3. Scope of the First Version
 
-**In scope:** local instruction library, projects, assignment matrix, three write schemes, sync, backups, change history (version records), updates, English UI.
+**In scope:** local instruction library, projects, assignment matrix, three write schemes, sync, backups, change history (version records), updates, watching of target files for external changes, English UI.
 
 **Next stage (P1):** diff between versions and version rollback, restoring a file from a backup in the UI, and JSON export and import of the library and settings.
 
-**Out of scope for v1:** cloud sync and a server side; roles and multi-user work; detecting, comparing, and merging external edits to target files; Git operations (commit, push, editing `.gitignore`); automatic sync runs; telemetry and automatic error reports; a portable build; a tray icon and autostart; any localization other than English; a command-line interface.
+**Out of scope for v1:** cloud sync and a server side; roles and multi-user work; merging external edits to target files (external changes are detected and shown, section 5.7, and the next sync overwrites them); Git operations (commit, push, editing `.gitignore`); automatic sync runs; telemetry and automatic error reports; a portable build; a tray icon and autostart; any localization other than English; a command-line interface.
 
 ### 1.4. Sources and Priority
 
@@ -59,6 +59,8 @@ If sources conflict, this order applies: (1) the customer's answers from 17.11.2
 | Dirty                 | A project state where the current build hash differs from the hash of the last successful sync                        |
 | Data directory        | The app folder with the database, backups, and logs (section 5.5)                                                     |
 
+| Externally modified | A project state where the target file on disk no longer matches the project's current build by the ALG-033 comparison; detected by the watcher (5.7) |
+
 ## 3. Decisions Made
 
 ### 3.1. Customer Answers (17.11.2026)
@@ -71,34 +73,34 @@ If sources conflict, this order applies: (1) the customer's answers from 17.11.2
 
 ### 3.2. Default Decisions (confirmed)
 
-| ID   | Topic (PR question)                            | Decision                                                                                                                                                                                                                                    |
-| ---- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D-04 | Scan depth (1)                                 | 6 levels by default, configurable from 1 to 20                                                                                                                                                                                              |
-| D-05 | Scan exclusions (2)                            | By default, folders named `node_modules`, `vendor`, `.git`, `dist`, `build`, `target`, `.venv` are skipped. The list is editable                                                                                                            |
-| D-06 | What counts as a repository (3, 4)             | A folder with a `.git` directory. If `.git` is a file (submodule or linked worktree), the folder is skipped with the status "skipped" and a reason; you can add it by hand. Nested regular repositories are registered as separate projects |
-| D-07 | Symlinks (PRJ)                                 | Not followed during a scan. When a project is added by hand, the path is converted to its canonical form                                                                                                                                    |
-| D-08 | Non-Git folders (6)                            | Not supported. If the user picks a subfolder of a repository, the app offers the repository root (PRJ-003)                                                                                                                                  |
-| D-09 | Moved project (5)                              | The "unavailable" status is computed at startup and before a sync. Actions: "Set new path" or "Archive". The sync skips such a project and does not stop                                                                                    |
-| D-10 | Archive and exclusions (7)                     | An "Archived projects" screen with a "Restore" button, and an "Excluded paths" screen where you can delete an entry. Restore removes the path from the exclusions                                                                           |
-| D-11 | Hidden instruction (9, 10)                     | Assignments are kept, but it is not included in the build. Physical deletion is not in v1 (P1: purge hidden instructions with confirmation)                                                                                                 |
-| D-12 | Main variant (11)                              | When the main variant is deleted, the user picks a new main variant in a dialog. Deleting the only variant is not allowed (LIB-025)                                                                                                         |
-| D-13 | Empty variant (15)                             | Outputs no text. Counts as assigned for the purpose of including headings. The instruction name does not go into the file                                                                                                                   |
-| D-14 | Search, tags (12, 32)                          | Search and filters by name in the library and by project. No categories or tags. No dependencies between instructions (13)                                                                                                                  |
-| D-15 | Markdown (14)                                  | Preview in the editor (pulldown-cmark). Validation gives warnings only (for example, an unclosed code fence) and does not block writing                                                                                                     |
-| D-16 | History (22–24)                                | A version is created only on a real change. Limit of 200 versions per entity; old ones are deleted. Diff between versions and version rollback are not in the MVP; they are the next stage (P1)                                             |
-| D-17 | Backups (25–27)                                | Default limit is 10 per file (1–200). Restoring a file from a backup in the UI is not in the MVP; it is the next stage (P1). A database copy is made before a migration                                                                     |
-| D-18 | Storage (28–31)                                | SQLite is the only store; settings are in it too. TOML is not used. Export and import of the library and default settings in JSON (projects are not transferred) is not in the MVP; it is the next stage (P1)                               |
-| D-19 | Scheme B markers (19)                          | `<!-- EUNOMIASYNC:BEGIN -->` and `<!-- EUNOMIASYNC:END -->`, one pair, each on its own line                                                                                                                                                 |
-| D-20 | Scheme C (18)                                  | The app does not edit the main file. It shows a ready snippet with a "Copy" button. Names depend on the stem: `<STEM>.project.md` and `<STEM>.local.md`                                                                                     |
-| D-21 | Text inserted into files                       | English. For "read this file" lines: `If <file> exists in the repository root, read it before starting work and follow its instructions.` This wording has been checked with the target agents and works                                    |
-| D-22 | Encoding and line breaks                       | UTF-8 without BOM, LF. In scheme B, the file's BOM and line breaks are kept for the content outside the block                                                                                                                               |
-| D-23 | Creation marker                                | HTML comment `<!-- Created by EunomiaSync 2026-11-17 14:03:22 Europe/Prague +01:00 -->`. Without an IANA name: `UTC+01:00`                                                                                                                  |
-| D-24 | Identical content                              | If the new content matches the existing file, ignoring the marker line, the file is not overwritten (status "unchanged"). This setting is on by default                                                                                     |
-| D-25 | Empty result                                   | If the build is empty but the file is not, a confirmation with a list of such projects is shown before the sync                                                                                                                             |
-| D-26 | Platforms (40)                                 | Windows 10 22H2+ (x64, arm64), macOS 12+ (arm64, x64), Ubuntu 22.04+ (x64; arm64 if possible)                                                                                                                                               |
-| D-27 | Release (38, 39)                               | GitHub Releases and the Tauri updater with signed updates. Installers are not signed for now (no Authenticode, no notarization)                                                                                                             |
-| D-28 | Telemetry (43), portable build (41), tray (36) | Not doing these                                                                                                                                                                                                                             |
-| D-29 | New project color (PRJ-010)                    | The least used palette color among active projects; on a tie, chosen by the hash of the project ID (deterministic)                                                                                                                          |
+| ID   | Topic (PR question)                            | Decision                                                                                                                                                                                                                                                                                                                        |
+| ---- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D-04 | Scan depth (1)                                 | 6 levels by default, configurable from 1 to 20                                                                                                                                                                                                                                                                                  |
+| D-05 | Scan exclusions (2)                            | By default, folders named `node_modules`, `vendor`, `.git`, `dist`, `build`, `target`, `.venv` are skipped. The list is editable                                                                                                                                                                                                |
+| D-06 | What counts as a repository (3, 4)             | A folder with a `.git` directory. If `.git` is a file (submodule or linked worktree), the folder is skipped with the status "skipped" and a reason; you can add it by hand. Nested regular repositories are registered as separate projects                                                                                     |
+| D-07 | Symlinks (PRJ)                                 | Not followed during a scan. When a project is added by hand, the path is converted to its canonical form                                                                                                                                                                                                                        |
+| D-08 | Non-Git folders (6)                            | Not supported. If the user picks a subfolder of a repository, the app offers the repository root (PRJ-003)                                                                                                                                                                                                                      |
+| D-09 | Moved project (5)                              | The "unavailable" status is computed at startup and before a sync. Actions: "Set new path" or "Archive". The sync skips such a project and does not stop                                                                                                                                                                        |
+| D-10 | Archive and exclusions (7)                     | An "Archived projects" screen with a "Restore" button, and an "Excluded paths" screen where you can delete an entry. Restore removes the path from the exclusions                                                                                                                                                               |
+| D-11 | Hidden instruction (9, 10)                     | Assignments are kept, but it is not included in the build. Physical deletion is not in v1 (P1: purge hidden instructions with confirmation)                                                                                                                                                                                     |
+| D-12 | Main variant (11)                              | When the main variant is deleted, the user picks a new main variant in a dialog. Deleting the only variant is not allowed (LIB-025)                                                                                                                                                                                             |
+| D-13 | Empty variant (15)                             | Outputs no text. Counts as assigned for the purpose of including headings. The instruction name does not go into the file                                                                                                                                                                                                       |
+| D-14 | Search, tags (12, 32)                          | Search and filters by name in the library and by project. No categories or tags. No dependencies between instructions (13)                                                                                                                                                                                                      |
+| D-15 | Markdown (14)                                  | Preview in the editor (pulldown-cmark). Validation gives warnings only (for example, an unclosed code fence) and does not block writing                                                                                                                                                                                         |
+| D-16 | History (22–24)                                | A version is created only on a real change. Limit of 200 versions per entity; old ones are deleted. Diff between versions and version rollback are not in the MVP; they are the next stage (P1)                                                                                                                                 |
+| D-17 | Backups (25–27)                                | Default limit is 10 per file (1–200). Restoring a file from a backup in the UI is not in the MVP; it is the next stage (P1). A database copy is made before a migration                                                                                                                                                         |
+| D-18 | Storage (28–31)                                | SQLite is the only store for library data, and user-managed settings are in it too (6.5). Machine-level app configuration lives in the `config.toml` file (5.8), not in the database. Export and import of the library and default settings in JSON (projects are not transferred) is not in the MVP; it is the next stage (P1) |
+| D-19 | Scheme B markers (19)                          | `<!-- EUNOMIASYNC:BEGIN -->` and `<!-- EUNOMIASYNC:END -->`, one pair, each on its own line                                                                                                                                                                                                                                     |
+| D-20 | Scheme C (18)                                  | The app does not edit the main file. It shows a ready snippet with a "Copy" button. Names depend on the stem: `<STEM>.project.md` and `<STEM>.local.md`                                                                                                                                                                         |
+| D-21 | Text inserted into files                       | English. For "read this file" lines: `If <file> exists in the repository root, read it before starting work and follow its instructions.` This wording has been checked with the target agents and works                                                                                                                        |
+| D-22 | Encoding and line breaks                       | UTF-8 without BOM, LF. In scheme B, the file's BOM and line breaks are kept for the content outside the block                                                                                                                                                                                                                   |
+| D-23 | Creation marker                                | HTML comment `<!-- Created by EunomiaSync 2026-11-17 14:03:22 Europe/Prague +01:00 -->`. Without an IANA name: `UTC+01:00`                                                                                                                                                                                                      |
+| D-24 | Identical content                              | If the new content matches the existing file, ignoring the marker line, the file is not overwritten (status "unchanged"). This setting is on by default                                                                                                                                                                         |
+| D-25 | Empty result                                   | If the build is empty but the file is not, a confirmation with a list of such projects is shown before the sync                                                                                                                                                                                                                 |
+| D-26 | Platforms (40)                                 | Windows 10 22H2+ (x64, arm64), macOS 12+ (arm64, x64), Ubuntu 22.04+ (x64; arm64 if possible)                                                                                                                                                                                                                                   |
+| D-27 | Release (38, 39)                               | GitHub Releases and the Tauri updater with signed updates. Installers are not signed for now (no Authenticode, no notarization)                                                                                                                                                                                                 |
+| D-28 | Telemetry (43), portable build (41), tray (36) | Not doing these                                                                                                                                                                                                                                                                                                                 |
+| D-29 | New project color (PRJ-010)                    | The least used palette color among active projects; on a tie, chosen by the hash of the project ID (deterministic)                                                                                                                                                                                                              |
 
 ## 4. Users and Scope
 
@@ -113,7 +115,7 @@ Vue 3 UI (WebView)
    │  Tauri IPC: invoke(command) / events
 Rust backend
    ├─ commands   — thin layer of Tauri commands, input validation
-   ├─ services   — sync, history, dirty-tracker, scan, backup-restore
+   ├─ services   — sync, watch, history, dirty-tracker, scan, backup-restore
    ├─ core       — pure logic without IO: builder, schemes, marker parser, hashes
    ├─ store      — SQLite, migrations, repositories
    └─ fs         — scanner, path normalization, backup, atomic write
@@ -123,33 +125,36 @@ The UI does not access the file system. Rust does all file and database operatio
 
 ### 5.2. Modules
 
-| Module (crate)  | Responsibility                                                                           | Dependencies                                    |
-| --------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| `eunomia-core`  | Domain types, text build, rendering schemes A/B/C, marker parser, build hash, validators | only `serde`, `sha2`, `thiserror`               |
-| `eunomia-store` | DB schema, migrations, repositories, transactions                                        | `rusqlite`, `core`                              |
-| `eunomia-fs`    | Repository scan, path canonicalization, backup and copy checks, atomic write, retries    | `ignore`/`walkdir`, `tempfile`, `dunce`, `core` |
-| `eunomia-app`   | Services, sync orchestrator, Tauri commands and events, app state                        | the other crates, `tauri`                       |
-| `ui/`           | Vue app, Pinia stores, i18n, matrix, modal windows                                       | Vue, Pinia, Tailwind                            |
+| Module (crate)  | Responsibility                                                                                              | Dependencies                                                             |
+| --------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `eunomia-core`  | Domain types, text build, rendering schemes A/B/C, marker parser, build hash, validators                    | only `serde`, `sha2`, `thiserror`                                        |
+| `eunomia-store` | DB schema, migrations, repositories, transactions                                                           | `rusqlite`, `core`                                                       |
+| `eunomia-fs`    | Repository scan, path canonicalization, backup and copy checks, atomic write, retries, target-file watching | `ignore`/`walkdir`, `tempfile`, `dunce`, `notify-debouncer-full`, `core` |
+| `eunomia-app`   | Services (sync, watch, dirty-tracker), Tauri commands and events, app state                                 | the other crates, `tauri`                                                |
+| `ui/`           | Vue app, Pinia stores, i18n, matrix, modal windows                                                          | Vue, Pinia, Tailwind                                                     |
 
 Rule: `core` does no input/output and is tested without the file system or the database.
 
 ### 5.3. Technologies
 
-| Area             | Choice                                                                      | Note                                                                                                                   |
-| ---------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Shell            | Tauri 2.x                                                                   | Versions are pinned when the project starts; versions were not checked for being current as of the spec date           |
-| Backend language | Rust stable                                                                 | `rust-toolchain.toml`, MSRV is pinned                                                                                  |
-| DB               | SQLite via `rusqlite` (feature `bundled`) and `rusqlite_migration`          | WAL, `foreign_keys=ON`, `busy_timeout=5000`, `synchronous=FULL`                                                        |
-| IDs              | `uuid` v7                                                                   | Text IDs, ordered by time                                                                                              |
-| Hashes, diff     | `sha2`, `similar`                                                           |                                                                                                                        |
-| Time             | `chrono`, `iana-time-zone`                                                  | For the creation marker and timestamps                                                                                 |
-| Logs             | `tracing`, `tracing-appender`                                               | File rotation                                                                                                          |
-| Markdown         | `pulldown-cmark`                                                            | Preview and warnings. Not used when building files                                                                     |
-| Frontend         | Vue 3, TypeScript (strict), Vite, Pinia, vue-i18n, Tailwind CSS             |                                                                                                                        |
-| UI components    | `@tanstack/vue-virtual`, `sortablejs` (Vue wrapper)                         | Matrix virtualization, drag-and-drop                                                                                   |
-| Tauri plugins    | dialog, updater, single-instance, opener                                    | No other plugins are used                                                                                              |
-| Tests            | `cargo test`, `proptest`, Vitest, Playwright (via tauri-driver / WebDriver) |                                                                                                                        |
-| License checks   | `cargo-deny`, `license-checker`                                             | App license: dual license, MIT License and Apache License, Version 2.0; dependency licenses must be compatible with it |
+| Area             | Choice                                                                                             | Note                                                                                                                   |
+| ---------------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Shell            | Tauri 2.x                                                                                          | Versions are pinned when the project starts; versions were not checked for being current as of the spec date           |
+| Backend language | Rust stable                                                                                        | `rust-toolchain.toml`, MSRV is pinned                                                                                  |
+| DB               | SQLite via `rusqlite` (feature `bundled`) and `rusqlite_migration`                                 | WAL, `foreign_keys=ON`, `busy_timeout=5000`, `synchronous=FULL`                                                        |
+| IDs              | `uuid` v7                                                                                          | Text IDs, ordered by time                                                                                              |
+| Hashes, diff     | `sha2`, `similar`                                                                                  |                                                                                                                        |
+| Time             | `chrono`, `iana-time-zone`                                                                         | For the creation marker and timestamps                                                                                 |
+| Logs             | `tracing`, `tracing-appender`                                                                      | File rotation                                                                                                          |
+| Markdown         | `pulldown-cmark`                                                                                   | Preview and warnings. Not used when building files                                                                     |
+| Frontend         | Vue 3, TypeScript (strict), Vite, Pinia, vue-i18n, Tailwind CSS                                    |                                                                                                                        |
+| UI components    | `@tanstack/vue-virtual`, `sortablejs` (Vue wrapper)                                                | Matrix virtualization, drag-and-drop                                                                                   |
+| Tauri plugins    | dialog, updater, single-instance, opener                                                           | No other plugins are used; `dialog` and `opener` are called from Rust only (SEC-001)                                   |
+| Tests            | `cargo test`, `proptest`, Vitest, Playwright (against the Vite dev server with a mocked IPC, 15.1) |                                                                                                                        |
+| License checks   | `cargo-deny`, `license-checker`                                                                    | App license: dual license, MIT License and Apache License, Version 2.0; dependency licenses must be compatible with it |
+
+| File watching | `notify` + `notify-debouncer-full` | Target files of active projects (5.7) |
+| Config file | `serde` + `toml` | Machine-level `config.toml` (5.8); user settings live in SQLite (6.5) |
 
 ### 5.4. Execution Threads
 
@@ -173,21 +178,37 @@ The data directory is the Tauri 2 default `app_local_data_dir()`, which is `loca
 Structure:
 
 ```
+config.toml
 db/eunomiasync.sqlite3 (+ -wal, -shm)
 db-backups/pre-migration-v<N>-<UTC>.sqlite3
 backups/<project_id>__<slug>/<file>.<UTC>.<hash8>.bak
 logs/eunomiasync.<date>.log
 ```
 
-Logs are kept in the `logs/` subfolder of this directory on all OSes. This matches the Tauri `app_log_dir()` default on Windows and Linux; on macOS the Tauri default would be `~/Library/Logs/pro.yepbro.eunomiasync/`, so the app sets the log path itself. On Windows and Linux, Tauri also keeps the WebView data in this directory by default.
+`config.toml` is the app configuration file (5.8). Logs are kept in the `logs/` subfolder of this directory on all OSes. This matches the Tauri `app_log_dir()` default on Windows and Linux; on macOS the Tauri default would be `~/Library/Logs/pro.yepbro.eunomiasync/`, so the app sets the log path itself. On Windows and Linux, Tauri also keeps the WebView data in this directory by default.
 
 Tip: if the user deletes the data, the app starts with an empty DB and says so (question 31); backups are not picked up without the DB.
 
 ### 5.6. Shell Security
 
-- **SEC-001 (P0).** The frontend does not get the `fs` and `shell` plugins. `capabilities` lists only the app commands, dialog, updater, and opener.
+- **SEC-001 (P0).** The frontend does not get the `fs` and `shell` plugins. `capabilities` lists only the app commands: the updater, dialog, and opener plugins are invoked from Rust (`update_*`, `dialog_pick_folder`, `app_open_data_folder`), never from the webview. This is also what lets SEC-003 track paths picked in the system dialog.
 - **SEC-002 (P0).** CSP: `default-src 'self'`; external scripts, styles, and images are blocked; DevTools are off in the release build.
 - **SEC-003 (P0).** All paths that come from the UI are checked in Rust: a path must be a registered project or must have been picked in the system dialog in this session.
+
+### 5.7. File Watching
+
+The app watches the target files of active, available projects (`AGENTS.md` and `CLAUDE.md`; for scheme C also `<STEM>.project.md`) so that external changes are visible before the next sync overwrites them. Watching is display-only: a watch event never writes a file, and there is no merge and no conflict dialog.
+
+- **SYS-007 (P0).** Watching uses `notify` with `notify-debouncer-full` and a 300 ms debounce. Only the target files above are watched, one watch per file. Watches are added when a project is added or its scheme or file name changes, and removed when a project is archived or becomes unavailable.
+- **SYS-008 (P0).** A project is externally modified when its target file on disk does not match the project's current build by the ALG-033 comparison. The state is computed at startup, right after a sync for projects that were written or left unchanged, and after debounced watch events (the file is re-read and re-checked to filter out noise). The state is shown in the matrix column (MAIN-028) and sent as the `state://file-changed` event. It is independent of the dirty flag (DB-021): a project can be dirty, externally modified, or both.
+- **SYS-009 (P0).** If the target file is deleted externally, the project shows a "target deleted" hint. The next sync recreates the file in schemes A and C; scheme B skips it with `E_MARKERS_INVALID` as usual.
+- **SYS-010 (P0).** On Linux, the watcher respects `fs.inotify.max_user_watches`. When the limit is reached or the event queue overflows, the watcher logs a warning, re-checks all target files once, and shows a non-blocking notice; it does not crash and does not lose the state silently.
+
+### 5.8. Configuration File (TOML)
+
+- **SYS-011 (P0).** Machine-level configuration is the `config.toml` file in the data directory (5.5). It is read at startup, before logging and the database are set up; if it is missing, it is created with default values. The file holds only machine-level settings; user-managed settings stay in the database (6.5), and no library data is ever written to it.
+- **SYS-012 (P0).** Keys: `log_level` — one of `trace`, `debug`, `info`, `warn`, `error`; default `info`. Unknown keys are ignored with a warning. A file that cannot be parsed falls back to defaults with a warning, and the app still starts.
+- **SYS-013 (P0).** The file is parsed with `serde` + `toml` (decision D-001). YAML is not used anywhere in the app.
 
 ## 6. Data Model
 
@@ -463,24 +484,24 @@ An instruction version snapshot stores the name and state (active or hidden). A 
 | MAIN-012…014               | P0  | "Hide" from the matrix, with confirmation. Files saved earlier do not change until a sync                                                                                                                                                                                                                                                                                                                                                               |                                                                                                            |
 | MAIN-015…023               | P0  | Adding, renaming, deleting, and moving headings and instructions between sections. The tree shows nesting with indents. A heading appears in a project file by rule ALG-020                                                                                                                                                                                                                                                                             | See section 9.2                                                                                            |
 | MAIN-024…027, 030, 031     | P0  | The sync panel is pinned outside the table's scroll area and is always visible. It has: "Run sync", the time of the last successful full sync (local time and time zone), and a counter of projects with unsynced changes (click for the list). During a sync, the button is disabled, and an animation and "k of N" progress are shown. When it finishes, a summary opens: "Written", "Unchanged", "Skipped", "Failed", with project, path, and reason | The button is visible at any scroll position and window size. A second start while running is not possible |
-| MAIN-028                   | P0  | A project column shows its state: unavailable (icon and text), dirty (dot icon with a tooltip), time of the last sync in a tooltip                                                                                                                                                                                                                                                                                                                      | States can be told apart without color                                                                     |
+| MAIN-028                   | P0  | A project column shows its state: unavailable (icon and text), dirty (dot icon with a tooltip), externally modified or target deleted (warning icon with a tooltip, 5.7), time of the last sync in a tooltip                                                                                                                                                                                                                                            | States can be told apart without color                                                                     |
 
 ### 7.5. Building and Writing Files
 
 The algorithms are described in section 9. This section has the requirements and acceptance.
 
-| ID                    | P   | Requirement                                                                                                                                                                  | Acceptance criterion                                                                                                 |
-| --------------------- | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| OUT-001…003, 004      | P0  | For each project, the build is made from the assigned variants, in the order of the shared library, by the project's scheme. The file name is `AGENTS.md` or `CLAUDE.md`     | The order in the file equals the order in the library (DoD 5)                                                        |
-| OUT-005, 015          | P0  | An existing target file is fully replaced (except the area outside the markers in scheme B). A missing file is created (schemes A and C)                                     | Content added to the file by hand disappears after a sync (scheme A), and a copy stays in the backup                 |
-| OUT-006, 019, BKP-005 | P0  | Before writing starts, backups of the existing target files are created and checked for all projects. An error in even one backup cancels writing in all projects of the run | Simulated backup error: no file is changed, and there is a detailed error                                            |
-| OUT-007, 008          | P0  | The write is atomic (section 9.5). Before writing, folder availability and write rights are checked                                                                          | Killing the process during a write does not leave a partly written file                                              |
-| OUT-009, MAIN-031     | P0  | After a run, a summary by project and file is shown, with reasons for skips and errors                                                                                       | Each project in the summary has exactly one status                                                                   |
-| OUT-011, 012          | P0  | Files change only with the "Run sync" command, which covers all active projects                                                                                              | No library operation changes files                                                                                   |
-| OUT-013, DB-021       | P0  | The app detects unsynced changes by the build hash and warns the user                                                                                                        | Any edit that affects a project's build makes it dirty; an edit to a hidden instruction with no assignments does not |
-| OUT-014               | P0  | External edits to target files are not tracked: no file watcher, no comparing, no merging                                                                                    | There is no watcher code and no conflict dialogs                                                                     |
-| OUT-016…018, D-23     | P0  | A creation marker at the end of each built content, local time with time zone. In scheme B, the marker is at the end of the managed block, before the closing marker         | The format matches the template in section 9.3                                                                       |
-| D-24                  | P0  | A file that did not change compared to the new build (ignoring the marker line) is not overwritten and not backed up; status `unchanged`. The project then counts as synced  | A second sync with no edits changes no files and creates no backups                                                  |
+| ID                    | P   | Requirement                                                                                                                                                                                    | Acceptance criterion                                                                                                 |
+| --------------------- | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| OUT-001…003, 004      | P0  | For each project, the build is made from the assigned variants, in the order of the shared library, by the project's scheme. The file name is `AGENTS.md` or `CLAUDE.md`                       | The order in the file equals the order in the library (DoD 5)                                                        |
+| OUT-005, 015          | P0  | An existing target file is fully replaced (except the area outside the markers in scheme B). A missing file is created (schemes A and C)                                                       | Content added to the file by hand disappears after a sync (scheme A), and a copy stays in the backup                 |
+| OUT-006, 019, BKP-005 | P0  | Before writing starts, backups of the existing target files are created and checked for all projects. An error in even one backup cancels writing in all projects of the run                   | Simulated backup error: no file is changed, and there is a detailed error                                            |
+| OUT-007, 008          | P0  | The write is atomic (section 9.5). Before writing, folder availability and write rights are checked                                                                                            | Killing the process during a write does not leave a partly written file                                              |
+| OUT-009, MAIN-031     | P0  | After a run, a summary by project and file is shown, with reasons for skips and errors                                                                                                         | Each project in the summary has exactly one status                                                                   |
+| OUT-011, 012          | P0  | Files change only with the "Run sync" command, which covers all active projects                                                                                                                | No library operation changes files                                                                                   |
+| OUT-013, DB-021       | P0  | The app detects unsynced changes by the build hash and warns the user                                                                                                                          | Any edit that affects a project's build makes it dirty; an edit to a hidden instruction with no assignments does not |
+| OUT-014               | P0  | External edits to target files are detected and displayed (5.7): the app never merges them and never writes a file because of a watch event. The next sync overwrites them as before (OUT-015) | An external edit flips the state without any dialog; a sync still overwrites the file and makes a backup             |
+| OUT-016…018, D-23     | P0  | A creation marker at the end of each built content, local time with time zone. In scheme B, the marker is at the end of the managed block, before the closing marker                           | The format matches the template in section 9.3                                                                       |
+| D-24                  | P0  | A file that did not change compared to the new build (ignoring the marker line) is not overwritten and not backed up; status `unchanged`. The project then counts as synced                    | A second sync with no edits changes no files and creates no backups                                                  |
 
 **Scheme A.** Implements OUT-A-001…004 as worded in D-01.
 
@@ -540,18 +561,20 @@ The algorithms are described in section 9. This section has the requirements and
 
 All commands return `Result<T, AppError>`, where `AppError` has `code`, `message_key`, `params`, and optional `details`. The UI shows localized text by `message_key` (NFR-006, NFR-018).
 
-| Module      | Commands                                                                                                                                                                                                                                           |
-| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Projects    | `projects_list`, `project_add_manual`, `scan_start`, `scan_cancel`, `scan_commit`, `project_update`, `project_archive`, `project_restore`, `project_relink`, `projects_reorder`, `exclusions_list`, `exclusion_remove`                             |
-| Settings    | `settings_get`, `settings_set`; P1: `library_export`, `library_import`                                                                                                                                                                             |
-| Library     | `library_get`, `instruction_create`, `instruction_update`, `instruction_hide`, `instruction_restore`, `variant_create`, `variant_update`, `variant_delete`, `variant_set_main`, `heading_create`, `heading_update`, `heading_delete`, `items_move` |
-| Assignments | `assignment_set`, `assignments_bulk`, `variant_fork_for_project`                                                                                                                                                                                   |
-| Sync        | `sync_status`, `sync_run`, `sync_cancel`, `sync_last_result`                                                                                                                                                                                       |
-| Backups     | `backups_list`; P1: `backup_diff`, `backup_restore`                                                                                                                                                                                                |
-| History     | `revisions_list`, `revision_get`, `activity_list`; P1: `revision_diff`, `revision_restore`                                                                                                                                                         |
-| System      | `update_check`, `update_install`, `app_info`, `db_verify`                                                                                                                                                                                          |
+| Module      | Commands                                                                                                                                                                                                                                                                                  |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Projects    | `projects_list`, `project_add_manual`, `scan_start`, `scan_cancel`, `scan_commit`, `project_update`, `project_archive`, `project_restore`, `project_relink`, `projects_reorder`, `exclusions_list`, `exclusion_remove`                                                                    |
+| Settings    | `settings_get`, `settings_set`; P1: `library_export`, `library_import`                                                                                                                                                                                                                    |
+| Library     | `library_get`, `instruction_create`, `instruction_update`, `instruction_hide`, `instruction_restore`, `variant_create`, `variant_update`, `variant_delete`, `variant_restore`, `variant_set_main`, `markdown_preview`, `heading_create`, `heading_update`, `heading_delete`, `items_move` |
+| Assignments | `assignment_set`, `assignments_bulk`, `variant_fork_for_project`                                                                                                                                                                                                                          |
+| Sync        | `sync_status`, `sync_run`, `sync_cancel`, `sync_last_result`                                                                                                                                                                                                                              |
+| Backups     | `backups_list`; P1: `backup_diff`, `backup_restore`                                                                                                                                                                                                                                       |
+| History     | `revisions_list`, `revision_get`, `activity_list`; P1: `revision_diff`, `revision_restore`                                                                                                                                                                                                |
+| System      | `update_check`, `update_install`, `app_info`, `app_open_data_folder`, `dialog_pick_folder`, `db_verify`, `db_backups_list`, `db_restore_backup`, `db_recreate`                                                                                                                            |
 
-Events: `scan://progress`, `sync://progress`, `state://dirty`, `state://project-availability`.
+Events: `scan://progress`, `sync://progress`, `state://dirty`, `state://project-availability`, `state://file-changed`.
+
+Command notes: `dialog_pick_folder` opens the system folder picker from Rust and returns the picked path (nothing on cancel); adding a project by hand and a scan start with it, and it feeds the SEC-003 session allowlist. `markdown_preview` renders Markdown into sanitized HTML (SEC-005) and returns Markdown warnings (D-15). `variant_restore` brings back a soft-deleted variant (7.3). `db_backups_list`, `db_restore_backup`, and `db_recreate` back the recovery screen for `E_DB_CORRUPT` (section 10): the first lists the copies in `db-backups/`; the second keeps the damaged database as `db-backups/pre-recovery-<UTC>.sqlite3`, replaces it with the chosen copy, and reopens it; the third does the same but starts with an empty database. `app_open_data_folder` shows the data directory in the OS file manager.
 
 ## 8. User Scenarios
 
@@ -854,16 +877,16 @@ Requirements SEC-001…003 are in 5.6. In addition:
 
 ### 15.1. Test Levels
 
-| Level                              | What is tested                                                                                                                                                                                                                                                                                                        | Tools                                                                        |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Unit (`core`)                      | Building the body and files by scheme, the heading inclusion rule, normalization, the marker parser, the hash, path normalization, the branch range. Property tests: for random trees, the order in the file equals the library order, the build is idempotent, a heading with no assigned instructions is not output | `cargo test`, `proptest`                                                     |
-| Integration (`store`, `fs`, `app`) | Migrations from each schema version, DB invariants, the sync pipeline on temporary Git repositories in all schemes, backups, retention, scan                                                                                                                                                                          | `cargo test`, `tempfile`                                                     |
-| Fault injection                    | Failure of the N-th backup, `rename` failure, out of space, read-only file, dangling symlink, locked file (Windows), force-killing the process between phases and inside a write                                                                                                                                      | failure points in `fs`, a child process with `SIGKILL` or `TerminateProcess` |
-| UI (components)                    | Matrix, editor, confirmation dialogs, validation, keyboard                                                                                                                                                                                                                                                            | Vitest, Testing Library                                                      |
-| E2E                                | Scenarios S1–S7, S9, S10 (P1: S8, S11)                                                                                                                                                                                                                                                                                | Playwright and `tauri-driver` on Windows and Linux                           |
-| Load                               | Section 12.2 metrics on sets M and L                                                                                                                                                                                                                                                                                  | `criterion` benchmarks and e2e scripts                                       |
+| Level                              | What is tested                                                                                                                                                                                                                                                                                                        | Tools                                                                                   |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Unit (`core`)                      | Building the body and files by scheme, the heading inclusion rule, normalization, the marker parser, the hash, path normalization, the branch range. Property tests: for random trees, the order in the file equals the library order, the build is idempotent, a heading with no assigned instructions is not output | `cargo test`, `proptest`                                                                |
+| Integration (`store`, `fs`, `app`) | Migrations from each schema version, DB invariants, the sync pipeline on temporary Git repositories in all schemes, backups, retention, scan, watcher state transitions (external edit, target deletion)                                                                                                              | `cargo test`, `tempfile`                                                                |
+| Fault injection                    | Failure of the N-th backup, `rename` failure, out of space, read-only file, dangling symlink, locked file (Windows), force-killing the process between phases and inside a write                                                                                                                                      | failure points in `fs`, a child process with `SIGKILL` or `TerminateProcess`            |
+| UI (components)                    | Matrix, editor, confirmation dialogs, validation, keyboard                                                                                                                                                                                                                                                            | Vitest, Testing Library                                                                 |
+| E2E                                | Scenarios S1–S7, S9, S10 (P1: S8, S11)                                                                                                                                                                                                                                                                                | Playwright against the Vite dev server with a mocked IPC backend, identical on all OSes |
+| Load                               | Section 12.2 metrics on sets M and L                                                                                                                                                                                                                                                                                  | `criterion` benchmarks and e2e scripts                                                  |
 
-Using `tauri-driver` on macOS depends on WebDriver support for WKWebView and must be checked when the project starts. If there is no support, on macOS we run backend integration tests and UI tests in browser mode with an IPC stub, and a manual run of scenarios S1–S7, S9, S10 is part of the release checklist.
+E2E runs the same way on all three OSes (D-007): Playwright drives the UI in a browser against the Vite dev server with a mocked IPC backend. The IPC contract itself is covered by Rust-side tests over the mock Tauri runtime, and the committed `bindings.ts` keep the frontend type-checked against the real commands. The real shell (native dialogs, updater, window behavior) is covered by the CI build smoke check, and a manual run of scenarios S1–S7, S9, S10 on each OS stays in the release checklist. `tauri-driver` is not used in v1; it may be revisited after 1.0 if real-shell e2e becomes necessary.
 
 ### 15.2. Required Failure Scenarios
 
@@ -881,6 +904,8 @@ Using `tauri-driver` on macOS depends on WebDriver support for WKWebView and mus
 | T-F10 | Backup limit 3 and five syncs with changes                            | The last 3 copies remain                                                                             |
 | T-F11 | DB newer than the app, damaged DB                                     | `E_DB_TOO_NEW` and `E_DB_CORRUPT`; data not changed                                                  |
 | T-F12 | A scheme B file with BOM and CRLF                                     | The area outside the markers is kept byte for byte                                                   |
+
+| T-F13 | A target file is edited externally between syncs | The project shows the externally modified state; the next sync overwrites the file and makes a backup |
 
 ### 15.3. Platform Matrix
 
@@ -923,29 +948,29 @@ Using `tauri-driver` on macOS depends on WebDriver support for WKWebView and mus
 
 Estimates are rough, for one developer who knows Rust and Vue. They are refined based on the customer's answers to the open questions.
 
-| Stage                | Contents                                                                       | Result                               | Depends on | Estimate |
-| -------------------- | ------------------------------------------------------------------------------ | ------------------------------------ | ---------- | -------- |
-| M0 Skeleton          | Repository, workspace, CI, Tauri, Vue, SQLite migrations, error contract, i18n | An empty app builds on three OSes    | —          | 1.5 wk   |
-| M1 Projects          | Adding by hand, scan, card, archive, exclusions, order                         | Scenarios S1, S2                     | M0         | 2 wk     |
-| M2 Library           | Items, headings, variants, editor, hiding, version history records             | Scenarios S3, S5                     | M0         | 2.5 wk   |
-| M3 Matrix            | Virtualization, assignments, bulk operations, `Edit for this project`, search  | Scenarios S4, S6                     | M1, M2     | 2.5 wk   |
-| M4 Build             | Builder, schemes A, B, C, marker, hash and dirty                               | Scenario S9, unit and property tests | M2         | 1.5 wk   |
-| M5 Sync              | Pipeline, atomic write, backups, summary, fault injection                      | Scenarios S7, S10                    | M3, M4     | 3 wk     |
-| M6 Service features  | Log, help, settings, updates, About                                            | All P0 screens                       | M5         | 2 wk     |
-| M7 Stabilization     | Cross-platform checks, accessibility, performance, packages                    | Confirmed section 12 targets         | M6         | 2.5 wk   |
-| M8 Release candidate | Fixes, documentation, release checklist                                        | Version 1.0.0                        | M7         | 1 wk     |
+| Stage                | Contents                                                                                           | Result                               | Depends on | Estimate |
+| -------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------ | ---------- | -------- |
+| M0 Skeleton          | Repository, workspace, CI, Tauri, Vue, SQLite migrations, error contract, config file (TOML), i18n | An empty app builds on three OSes    | —          | 1.5 wk   |
+| M1 Projects          | Adding by hand, scan, card, archive, exclusions, order                                             | Scenarios S1, S2                     | M0         | 2 wk     |
+| M2 Library           | Items, headings, variants, editor, hiding, version history records                                 | Scenarios S3, S5                     | M0         | 2.5 wk   |
+| M3 Matrix            | Virtualization, assignments, bulk operations, `Edit for this project`, search                      | Scenarios S4, S6                     | M1, M2     | 2.5 wk   |
+| M4 Build             | Builder, schemes A, B, C, marker, hash and dirty, target-file watcher                              | Scenario S9, unit and property tests | M2         | 1.5 wk   |
+| M5 Sync              | Pipeline, atomic write, backups, summary, fault injection                                          | Scenarios S7, S10                    | M3, M4     | 3 wk     |
+| M6 Service features  | Log, help, settings, updates, About                                                                | All P0 screens                       | M5         | 2 wk     |
+| M7 Stabilization     | Cross-platform checks, accessibility, performance, packages                                        | Confirmed section 12 targets         | M6         | 2.5 wk   |
+| M8 Release candidate | Fixes, documentation, release checklist                                                            | Version 1.0.0                        | M7         | 1 wk     |
 
-Total: about 18.5 person-weeks. Stages M1 and M2 can run in parallel if there is a second developer. The estimates were made before diff and version rollback, restore from backup, and export and import moved to P1, and need to be re-estimated.
+Total: about 18.5 person-weeks. Stages M1 and M2 can run in parallel if there is a second developer. The estimates were made before diff and version rollback, restore from backup, and export and import moved to P1, and before the target-file watcher and the TOML config file were added to the scope; they need to be re-estimated.
 
 **Next stage (P1), after 1.0.0:** diff between versions and version rollback (LIB-028, LIB-029, ALG-073, S8), restoring a file from a backup in the UI (BKP-007, S11), JSON export and import (D-18, SEC-009).
 
 ### Risks
 
-| Risk                                           | Impact                 | Mitigation                                                                |
-| ---------------------------------------------- | ---------------------- | ------------------------------------------------------------------------- |
-| Different `webkit2gtk` versions on Linux       | Layout and UI failures | Testing on Ubuntu 22.04 and 24.04, a minimal set of CSS features          |
-| File locks by antivirus and editors on Windows | Write errors           | Retries with pauses, a clear `E_FILE_LOCKED` error, backup before writing |
-| WebDriver limits on macOS                      | Weak e2e coverage      | Backend tests and a manual checklist (15.1)                               |
-| Matrix performance on set L                    | UI lag                 | Virtualization on both axes, an early benchmark in M3                     |
-| macOS permissions during a scan                | Skipped folders        | Clear messages in "Skipped", help                                         |
-| Loss of the update signing key                 | Cannot release updates | A backup of the key and a rotation procedure (SEC-011)                    |
+| Risk                                              | Impact                       | Mitigation                                                                |
+| ------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------- |
+| Different `webkit2gtk` versions on Linux          | Layout and UI failures       | Testing on Ubuntu 22.04 and 24.04, a minimal set of CSS features          |
+| File locks by antivirus and editors on Windows    | Write errors                 | Retries with pauses, a clear `E_FILE_LOCKED` error, backup before writing |
+| Browser-only e2e does not exercise the real shell | IPC regressions slip through | Mock-runtime IPC tests in Rust and the manual release checklist (15.1)    |
+| Matrix performance on set L                       | UI lag                       | Virtualization on both axes, an early benchmark in M3                     |
+| macOS permissions during a scan                   | Skipped folders              | Clear messages in "Skipped", help                                         |
+| Loss of the update signing key                    | Cannot release updates       | A backup of the key and a rotation procedure (SEC-011)                    |
