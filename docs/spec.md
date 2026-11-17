@@ -1,6 +1,6 @@
 # Technical Specification: EunomiaSync
 
-Spec version 1.0 (for approval) · 17.11.2026 · based on: Product Requirements v0.3 and the customer's answers
+Spec version 1.0 · 17.11.2026 · based on: Product Requirements v0.3 and the customer's answers
 
 ## 1. General Information
 
