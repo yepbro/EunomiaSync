@@ -31,3 +31,10 @@ Together, **EunomiaSync** represents order, consistency, and effortless rule man
 | Diff               | similar              |
 | File watching      | notify               |
 | Config             | serde + YAML/TOML    |
+
+## License
+
+EunomiaSync is dual-licensed under your choice of:
+
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
