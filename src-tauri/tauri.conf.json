@@ -12,9 +12,13 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "EunomiaSync",
-        "width": 800,
-        "height": 600
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 600,
+        "preventOverflow": true
       }
     ],
     "security": {

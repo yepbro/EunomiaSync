@@ -316,3 +316,25 @@ data folder needs no migration; on every OS the data directory ends with
 `$XDG_DATA_HOME/pro.yepbro.eunomiasync/`, default `~/.local/share/...`).
 `src-tauri/src/config_tests.rs` pins the identifier — and with it
 `app_local_data_dir()` on all OSes — against the spec value.
+
+### D-021 — Main window opens at 1280×800 with a clamped overflow, minimum 960×600 — 2026-11-17
+
+Problem: UI-001 (spec §11.1) pins only the minimum window size (960×600),
+not the startup size, while the scaffold opened at 800×600 — below the
+required minimum, so the startup size had to change too. The replacement
+value had to stay usable on small and scaled displays: at 1920×1080 with
+150% scaling (the most common laptop setup) the logical work area is only
+~1280×688, and tauri does not clamp an oversized startup window to the work
+area on its own (`preventOverflow` must be set; verified in
+tauri-runtime-wry `src/lib.rs` `config.prevent_overflow` → tao
+`prevent_overflow()`).
+
+Solution: the `main` window starts at 1280×800 — comfortably above the
+960×600 minimum and fully visible on ≥1080p displays at 100%/125% scaling —
+with `preventOverflow: true` so smaller work areas (150% scaling,
+1366×768) clamp the startup frame instead of pushing the always-visible
+sync panel (MAIN-025) off-screen; the 960×600 minimum still wins over the
+clamp. Window positioning (`center`) is deliberately not set: OS default
+placement is fine, and centering is not part of the T-005 card.
+`src-tauri/src/config_tests.rs` pins the minimum, the "startup ≥ minimum"
+floor, and locates the window by its label.
