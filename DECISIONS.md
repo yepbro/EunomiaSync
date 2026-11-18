@@ -1702,6 +1702,7 @@ and to executor-subagent briefs, which now carry the same rule. The
 failure that exposed it was fixed by a service commit (boxing
 `StorageError` in `DbInitError`); the false-green itself is what this
 entry prevents from recurring.
+
 ### D-042 — Domain types and the ALG-001 build snapshot in eunomia-core — 2026-11-18
 
 Problem: T-033 turns the spec vocabulary (§2) and the snapshot contract
