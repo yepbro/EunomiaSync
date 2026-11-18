@@ -181,8 +181,12 @@ exist under the §5.5 path — Linux
 `%LOCALAPPDATA%\pro.yepbro.eunomiasync\` — that a second launch adds
 nothing and changes nothing, and that the first launch creates
 `logs/eunomiasync.<date>.log` inside the data directory (see the
-Logging section). The same first launch must create
-`config.toml` with the default content (`log_level = "info"`, SYS-011),
+Logging section). The first launch also writes the day's ERR-001 copy
+`db-backups/daily-YYYYMMDD.sqlite3` (see the Storage section), and
+pays one full-copy `VACUUM INTO` of I/O doing it — not a hang; a
+second launch the same day must leave the copy untouched. The same
+first launch must create `config.toml` with the default content
+(`log_level = "info"`, SYS-011),
 a second launch must leave it untouched, and a deliberately broken
 `config.toml` must not prevent startup: the app starts with defaults and
 records a warning in the log file (SYS-012), with the file's bytes
@@ -288,6 +292,39 @@ behavior against real database files: mid-operation failures roll back
 everything, concurrent operations serialize on the connection, long
 operations leave the async runtime responsive, and a panicking
 operation neither commits nor poisons.
+
+The same `db-backups/` also holds the daily startup copies (spec §10
+ERR-001, DECISIONS.md D-046): after the database is open and
+migrated — and before the state is managed — the `setup` hook calls
+`Db::ensure_daily_backup(now)`, which locks the one connection and
+runs `eunomia_store::storage::daily_backup` into the directory
+`Db::open` derived once (`jiff::Timestamp` is the injectable "today"
+seam; only its UTC date names the copy `daily-YYYYMMDD.sqlite3`).
+At most one copy exists per UTC day (a run that finds the name
+present changes nothing — decided by the file name, the copy never
+opened), and after a copy is written the newest 7 daily names are
+kept, oldest deleted — never the copy just written, so a
+clock-set-back directory cannot cost the day its copy; pruning is
+best-effort throughout and never turns a successful copy into a
+reported failure. `pre-migration-*` names are outside the cap and
+never deleted. A fresh first launch gets its copy of the empty
+database too ("at every startup" — a cheap, honest baseline). The
+publication mechanics are the pre-migration scheme's (D-038): `.tmp`
+staging, `hard_link` no-clobber publication, §9.5 retries, and a
+per-scheme sweep of stale `.tmp` debris. Failure policy — degrade,
+never abort (the deliberate difference from a pre-migration copy
+failure, which aborts): the daily copy is extra reliability over a
+healthy database, so a failure is returned to the `setup` hook,
+logged through the facade (`logging::db_backup_daily_failed`, a
+`warn` — the launch continues; a written copy gets one
+`logging::db_backup_daily` `info` line, an existing same-day copy
+gets none), and every later command runs normally. The step runs
+synchronously in `setup`, so the first launch of a day pays one
+full-copy `VACUUM INTO` of I/O before the window exists — ERR-001's
+own cost, not a hang. Until the
+`action_log` service lands (spec §7.7 LOG-001..004, T-026), these
+file-log lines are the whole journal of daily-copy creation.
+
 The `settings` table has a typed repository, `eunomia_store::settings`
 (spec §6.5, DECISIONS.md D-039): the thirteen §6.5 keys as a
 `SettingKey` enum, values validated per key as JSON

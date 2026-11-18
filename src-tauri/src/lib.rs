@@ -251,6 +251,26 @@ pub fn run() {
                     return Err(error.into());
                 }
             };
+            // The ERR-001 daily backup (spec §10): after the database
+            // is open and migrated, one `VACUUM INTO` copy per UTC day
+            // (`db-backups/daily-YYYYMMDD.sqlite3`), the newest 7 kept
+            // — idempotent within a day, decided by the file name. A
+            // fresh first launch gets its copy too ("at every
+            // startup"): a cheap copy of the empty database is an
+            // honest baseline for the day. Degrade, never abort
+            // (DECISIONS.md D-046): the daily copy is extra
+            // reliability, not a precondition — a failure is logged
+            // through the facade and the launch continues (unlike a
+            // pre-migration copy failure, D-038). An existing same-day
+            // copy gets no line: it is the idempotent no-op, and a
+            // line per restart would only repeat itself.
+            match database.ensure_daily_backup(jiff::Timestamp::now()) {
+                Ok(eunomia_store::storage::DailyBackupOutcome::Written(path)) => {
+                    logging::db_backup_daily(&path);
+                }
+                Ok(eunomia_store::storage::DailyBackupOutcome::AlreadyPresent(_)) => {}
+                Err(error) => logging::db_backup_daily_failed(&error),
+            }
             app.manage(database);
             Ok(())
         })

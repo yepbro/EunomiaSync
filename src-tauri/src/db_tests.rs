@@ -47,6 +47,12 @@
 //! follows it: a file that fails `PRAGMA quick_check` — a garbage
 //! file, a malformed page, a finding row — is rejected as the typed
 //! `E_DB_CORRUPT` error with the file byte-identical.
+//!
+//! The T-021 daily backup (spec §10 ERR-001) is covered at the bottom:
+//! one `VACUUM INTO` copy per UTC day through the [`Db`] seam, into
+//! the layout's `db-backups/` — same-day idempotency, the 7-copy
+//! retention, and the degrade-never-abort failure policy (a failed
+//! copy is an error the caller logs while the database stays usable).
 
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -1770,4 +1776,247 @@ fn setup_logs_a_corrupt_database_through_the_facade_before_aborting() {
              before aborting (§6.3, D-032); marker positions: {positions:?}"
         );
     }
+}
+
+// ---- T-021: the ERR-001 daily backup (spec §10) ------------------------------
+
+/// A fixed UTC instant of 2026-11-18 — the date seam's test input, so
+/// the day the daily copy is named for never depends on the wall clock
+/// (the seam itself, `Db::ensure_daily_backup(now)`, takes it as a
+/// parameter; the `setup` hook passes the real clock).
+fn daily_seam_now() -> jiff::Timestamp {
+    "2026-11-18T10:00:00.000Z"
+        .parse()
+        .expect("the fixed seam timestamp must parse")
+}
+
+/// The `db-backups/` directory of a probe database's data directory —
+/// the layout created it (D-027), `Db::open` derived it (D-037), and
+/// the daily step must write into exactly it.
+fn backups_dir_of(temp: &tempfile::TempDir) -> PathBuf {
+    temp.path().join("db-backups")
+}
+
+/// The sorted `daily-*.sqlite3` names in `dir`.
+fn daily_backup_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("reading the backup directory must work")
+        .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_owned())
+        .filter(|name| name.starts_with("daily-"))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn the_daily_backup_writes_a_valid_copy_into_the_layouts_db_backups() {
+    // The app-layer half of ERR-001: the copy lands in the §5.5
+    // `db-backups/` next to the migration safety copies, as a valid
+    // database holding the state at the moment of the copy.
+    let (temp, db) = probe_db();
+    // The probe table with one row — the data the copy must preserve.
+    let writer = db.clone();
+    async_runtime::block_on(writer.run(|tx| {
+        tx.execute("INSERT INTO probe (name) VALUES ('daily-marker')", [])
+            .map_err(sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("seeding the probe row must work");
+
+    let outcome = db
+        .ensure_daily_backup(daily_seam_now())
+        .expect("the daily copy must be written");
+    assert_eq!(
+        outcome,
+        eunomia_store::storage::DailyBackupOutcome::Written(
+            backups_dir_of(&temp).join("daily-20261118.sqlite3")
+        ),
+        "the copy is named for the UTC day of the seam input, in the layout's db-backups/"
+    );
+
+    // The copy is a valid database with the data (the store suite pins
+    // the deeper mechanics; this pins the app-layer path plumbing).
+    let copy = rusqlite::Connection::open(backups_dir_of(&temp).join("daily-20261118.sqlite3"))
+        .expect("the copy must open");
+    let integrity: String = copy
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    let marker: String = copy
+        .query_row("SELECT name FROM probe", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(marker, "daily-marker", "the copy preserves the data");
+}
+
+#[test]
+fn a_same_day_rerun_of_the_daily_backup_writes_no_second_copy() {
+    // The ERR-001 acceptance criterion, through the app-layer seam:
+    // a second run on the same UTC day must not create a second copy.
+    let (temp, db) = probe_db();
+
+    let first = db
+        .ensure_daily_backup(daily_seam_now())
+        .expect("the first run of the day writes the copy");
+    assert!(matches!(
+        first,
+        eunomia_store::storage::DailyBackupOutcome::Written(_)
+    ));
+
+    // A later instant of the same UTC day — the restart shape; the
+    // store named the file from the date, so this is the same name.
+    let later = db.ensure_daily_backup(
+        "2026-11-18T22:30:00.000Z"
+            .parse()
+            .expect("the fixed seam timestamp must parse"),
+    );
+    assert_eq!(
+        later.expect("a same-day rerun must succeed"),
+        eunomia_store::storage::DailyBackupOutcome::AlreadyPresent(
+            backups_dir_of(&temp).join("daily-20261118.sqlite3")
+        ),
+        "the second run of the day must find the copy and write nothing"
+    );
+    assert_eq!(
+        daily_backup_names(&backups_dir_of(&temp)),
+        vec!["daily-20261118.sqlite3"],
+        "exactly one copy exists for the day"
+    );
+}
+
+#[test]
+fn the_eighth_daily_copy_through_the_db_seam_keeps_the_last_seven() {
+    // The ERR-001 acceptance criterion at the app layer: seven days of
+    // history plus today's copy is one too many — the oldest goes, and
+    // the pre-migration safety copies are outside the cap.
+    let (temp, db) = probe_db();
+    let backups = backups_dir_of(&temp);
+    for date in [
+        "20261111", "20261112", "20261113", "20261114", "20261115", "20261116", "20261117",
+    ] {
+        std::fs::write(backups.join(format!("daily-{date}.sqlite3")), b"history").unwrap();
+    }
+    let pre_migration = backups.join("pre-migration-v1-20261110T101500123Z.sqlite3");
+    std::fs::write(&pre_migration, b"safety copy").unwrap();
+
+    let outcome = db
+        .ensure_daily_backup(daily_seam_now())
+        .expect("today's copy must be written");
+    assert!(matches!(
+        outcome,
+        eunomia_store::storage::DailyBackupOutcome::Written(_)
+    ));
+
+    let mut expected: Vec<String> = [
+        "20261112", "20261113", "20261114", "20261115", "20261116", "20261117", "20261118",
+    ]
+    .iter()
+    .map(|date| format!("daily-{date}.sqlite3"))
+    .collect();
+    expected.sort();
+    assert_eq!(
+        daily_backup_names(&backups),
+        expected,
+        "eight daily copies existed; the oldest is deleted and the last 7 remain"
+    );
+    assert!(
+        pre_migration.is_file(),
+        "the retention never deletes pre-migration copies"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_daily_copy_degrades_and_the_database_stays_usable() {
+    // The D-046 policy, pinned at the seam: a copy that cannot be
+    // written is an error returned to the caller (which logs it and
+    // continues the launch) — the database itself keeps working.
+    use std::os::unix::fs::PermissionsExt;
+
+    let (temp, db) = probe_db();
+    let backups = backups_dir_of(&temp);
+
+    // No write rights in the backup directory: the copy cannot be
+    // staged. (Skipped as root, which bypasses permission bits — the
+    // same gate as the store suite.)
+    let is_root = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&backups).unwrap()) == 0;
+    if is_root {
+        return;
+    }
+    std::fs::set_permissions(&backups, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let failed = db.ensure_daily_backup(daily_seam_now());
+    std::fs::set_permissions(&backups, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let error = failed.expect_err("the unwritable directory must fail the copy");
+    assert!(
+        matches!(error, eunomia_store::storage::StorageError::Backup { .. }),
+        "the failure keeps its own shape, got: {error:?}"
+    );
+    assert!(
+        daily_backup_names(&backups).is_empty(),
+        "no copy and no debris survive the failure"
+    );
+
+    // Degradation, not abort: the next operation through the executor
+    // commits on the very same connection.
+    let writer = db.clone();
+    async_runtime::block_on(writer.run(|tx| {
+        tx.execute(
+            "INSERT INTO probe (name) VALUES ('after-the-failed-copy')",
+            [],
+        )
+        .map_err(sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("the database must stay usable after a failed daily copy");
+    assert_eq!(probe_count(&db), 1);
+}
+
+#[test]
+fn setup_runs_the_daily_backup_after_open_and_before_managing() {
+    // Wiring pin (the `config_tests.rs` style): the ERR-001 step must
+    // run at startup, after the database is open, before the state is
+    // published — and its failure arms must log through the facade.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    let markers = [
+        "db::Db::open(&data_dir)",
+        "database.ensure_daily_backup(jiff::Timestamp::now())",
+        "logging::db_backup_daily(",
+        "logging::db_backup_daily_failed(",
+        "app.manage(database);",
+    ];
+    let positions: Vec<usize> = markers
+        .iter()
+        .map(|marker| {
+            assert_eq!(
+                lib.matches(marker).count(),
+                1,
+                "lib.rs must contain `{marker}` exactly once, live (a \
+                 commented-out or duplicated line must not count)"
+            );
+            lib.find(marker)
+                .expect("the exactly-once check above guarantees one match")
+        })
+        .collect();
+
+    for pair in positions.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "lib.rs must open the database, run the ERR-001 daily \
+             backup (logging written copies and failures through the \
+             facade), and only then manage the state (spec §10, D-046); \
+             marker positions: {positions:?}"
+        );
+    }
+
+    // The never-abort half of the policy, pinned as text because the
+    // order above cannot see it: between the daily step and the manage
+    // call the hook must not bail out — no `return`, no `?` — or a
+    // failed copy would abort the launch exactly as a failed
+    // pre-migration copy does (the opposite of D-046).
+    let step = &lib[positions[1]..positions[4]];
+    assert!(
+        !step.contains('?') && !step.contains("return"),
+        "the daily backup step must degrade, never abort: no `?` or \
+         `return` between the call and `app.manage` (D-046), got: {step}"
+    );
 }

@@ -15,6 +15,12 @@
 //! failure carries the path of the copy that preserves the state the
 //! database is still at — the app layer's "install the previous
 //! version" pointer (spec UPD-004).
+//!
+//! The same directory also holds the daily startup copies of spec §10
+//! ERR-001 (`daily-YYYYMMDD.sqlite3`): [`daily_backup`] writes at most
+//! one copy per UTC day and keeps the last 7, reusing the
+//! pre-migration copy mechanics (staging, publication, retries — see
+//! [`run_migrations`] and DECISIONS.md D-038).
 
 use std::fmt;
 use std::io;
@@ -106,7 +112,9 @@ pub enum StorageError {
         /// The journal mode SQLite reported after the update attempt.
         mode: String,
     },
-    /// Writing the pre-migration backup copy failed (spec DB-004).
+    /// Writing a backup copy failed (spec DB-004 pre-migration, spec
+    /// §10 ERR-001 daily). Which scheme failed is visible from the
+    /// path's name and the call site.
     Backup {
         /// The backup path the run was producing (the final file name;
         /// its staged temporary is cleaned up best-effort), or the
@@ -126,7 +134,7 @@ pub enum StorageError {
     },
 }
 
-/// The step of a pre-migration backup write that failed.
+/// The step of a backup write that failed (pre-migration or daily).
 #[derive(Debug)]
 pub enum BackupError {
     /// The backup directory does not exist or is not a directory. The
@@ -208,7 +216,7 @@ impl fmt::Display for StorageError {
             StorageError::Backup { path, source } => {
                 write!(
                     f,
-                    "failed to write the pre-migration backup at {}: {source}",
+                    "failed to write the database backup at {}: {source}",
                     path.display()
                 )
             }
@@ -436,7 +444,9 @@ fn migrate(
         }
         // Debris of crashed earlier runs (see `sweep_stale_temporaries`);
         // safe under the serialized-runs assumption.
-        sweep_stale_temporaries(backup_dir)?;
+        sweep_stale_temporaries(backup_dir, |name| {
+            name.starts_with("pre-migration-v") && name.ends_with(".sqlite3.tmp")
+        })?;
     }
     for target in (start + 1)..=latest {
         // A database that already carries a schema version is backed up
@@ -489,17 +499,24 @@ fn backup_file_name(source_version: usize, stamp: &str, attempt: u32) -> String 
 /// write gives up — a guard against a pathological directory.
 const BACKUP_NAME_ATTEMPT_CAP: u32 = 1000;
 
-/// Removes leftover staging files of crashed earlier backup writes.
+/// Removes leftover staging files of crashed earlier backup writes —
+/// the `.tmp` debris this scheme's names leave behind (`is_own_debris`
+/// decides what belongs to the scheme: the pre-migration copies match
+/// their prefix, the daily copies their strict name pattern).
 ///
 /// A crash between `VACUUM INTO` and the final link leaves a
-/// `pre-migration-v*.sqlite3.tmp` file; the millisecond stamp makes the
-/// next run land on a fresh name, so without this sweep the debris would
-/// accumulate. Foreign `.tmp` files are deliberately untouched — only
-/// this crate's own naming pattern is removed. Runs are serialized (see
-/// [`migrate`]), so a `.tmp` matching this pattern can only be stale.
-/// Individual removal failures are ignored: a held file must not block
-/// the run, and the write path never reuses its exact name.
-fn sweep_stale_temporaries(backup_dir: &Path) -> Result<(), StorageError> {
+/// `<name>.sqlite3.tmp` file; the next run of the same kind lands
+/// on a fresh name (or finds its copy already present), so without
+/// this sweep the debris would accumulate. Foreign `.tmp` files —
+/// anything the predicate does not claim — are deliberately untouched.
+/// Runs are serialized (see [`migrate`] and [`daily_backup`]), so a
+/// `.tmp` matching the pattern can only be stale. Individual removal
+/// failures are ignored: a held file must not block the run, and the
+/// write path never reuses its exact name.
+fn sweep_stale_temporaries(
+    backup_dir: &Path,
+    is_own_debris: impl Fn(&str) -> bool,
+) -> Result<(), StorageError> {
     for entry in std::fs::read_dir(backup_dir).map_err(|err| StorageError::Backup {
         path: backup_dir.to_owned(),
         source: BackupError::Io(err),
@@ -511,7 +528,7 @@ fn sweep_stale_temporaries(backup_dir: &Path) -> Result<(), StorageError> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name.starts_with("pre-migration-v") && name.ends_with(".sqlite3.tmp") {
+        if is_own_debris(name) {
             let _ = retry_transient_hold(|| std::fs::remove_file(entry.path()));
         }
     }
@@ -547,14 +564,13 @@ fn is_transient_hold(err: &std::io::Error) -> bool {
 /// Writes a `VACUUM INTO` copy of the database into `backup_dir`.
 ///
 /// The copy is staged under a `.tmp` sibling of the final name and linked
-/// into place with [`std::fs::hard_link`] (the temporary is removed
-/// afterwards): unlike a rename, which silently replaces an existing
-/// destination on every supported platform, a hard link fails if the
-/// final name exists — so an existing copy is never overwritten even in
-/// the window between the name search and the link. A crash mid-copy
-/// leaves the `.tmp` file, which the next run removes (see
-/// [`sweep_stale_temporaries`]); the final name only ever appears
-/// complete.
+/// into place with [`std::fs::hard_link`] (see [`stage_and_link_copy`]):
+/// unlike a rename, which silently replaces an existing destination on
+/// every supported platform, a hard link fails if the final name exists
+/// — so an existing copy is never overwritten even in the window between
+/// the name search and the link. A crash mid-copy leaves the `.tmp`
+/// file, which the next run removes (see [`sweep_stale_temporaries`]);
+/// the final name only ever appears complete.
 fn vacuum_into_backup(
     conn: &Connection,
     backup_dir: &Path,
@@ -584,66 +600,276 @@ fn vacuum_into_backup(
             }
             continue;
         }
+        match stage_and_link_copy(conn, &final_path)? {
+            CopyPublication::Linked => return Ok(final_path),
+            // A file appeared under the name in the window between the
+            // search and the link: take the next name and copy again.
+            CopyPublication::NameTaken => attempt += 1,
+        }
+    }
+}
 
-        let mut tmp_name = final_path.clone().into_os_string();
-        tmp_name.push(".tmp");
-        let tmp_path = PathBuf::from(tmp_name);
+/// What [`stage_and_link_copy`] found at the final name: the staged
+/// copy was linked into place, or the name was already occupied (the
+/// link refuses to replace an existing file) — each caller decides
+/// what an occupied name means for its scheme (the pre-migration
+/// copies take the next name; the daily copies take it as their
+/// same-day answer).
+enum CopyPublication {
+    /// The copy is linked under the final name, complete.
+    Linked,
+    /// The final name existed at the link — nothing was overwritten.
+    NameTaken,
+}
 
-        // A `.tmp` at this exact name can only be left over from a
-        // crashed earlier run (the caller serializes migration runs);
-        // `VACUUM INTO` refuses an existing file, so remove it first.
-        if let Err(err) = retry_transient_hold(|| std::fs::remove_file(&tmp_path))
-            && err.kind() != io::ErrorKind::NotFound
-        {
+/// Stages one `VACUUM INTO` copy of `conn`'s database at
+/// `<final_path>.tmp` and links it into place — the publication
+/// mechanics both backup schemes share (the pre-migration copies,
+/// DB-004, and the daily copies, ERR-001; DECISIONS.md D-038).
+///
+/// The staging and link discipline: the copy is written to the `.tmp`
+/// sibling (a leftover `.tmp` at that exact name can only be stale
+/// debris of a crashed earlier run — the callers serialize their runs
+/// — and is removed first, `VACUUM INTO` refusing an existing file);
+/// the finished temporary is then linked under the final name, which
+/// fails rather than replaces an occupied destination, so the final
+/// name only ever appears complete and an existing copy is never
+/// overwritten. Filesystem mutations retry the spec §9.5 backoff (see
+/// [`retry_transient_hold`]); once the link is in place the temporary's
+/// removal is best-effort — the copy is complete, a file some scanner
+/// keeps holding must not fail it, and the sweep collects the leftover.
+fn stage_and_link_copy(
+    conn: &Connection,
+    final_path: &Path,
+) -> Result<CopyPublication, StorageError> {
+    let mut tmp_name = final_path.as_os_str().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_name);
+
+    if let Err(err) = retry_transient_hold(|| std::fs::remove_file(&tmp_path))
+        && err.kind() != io::ErrorKind::NotFound
+    {
+        return Err(StorageError::Backup {
+            path: final_path.to_owned(),
+            source: BackupError::Io(err),
+        });
+    }
+
+    let tmp_str = tmp_path.to_str().ok_or_else(|| StorageError::Backup {
+        path: final_path.to_owned(),
+        source: BackupError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the backup path is not valid UTF-8",
+        )),
+    })?;
+    if let Err(err) = conn.execute("VACUUM INTO ?1", [tmp_str]) {
+        // Best-effort cleanup; a surviving `.tmp` stays recognizable.
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(StorageError::Backup {
+            path: final_path.to_owned(),
+            source: BackupError::Sqlite(err),
+        });
+    }
+    match retry_transient_hold(|| std::fs::hard_link(&tmp_path, final_path)) {
+        Ok(()) => {}
+        // A file appeared under the name in the window between the
+        // caller's check and the link. This branch is defensive — under
+        // the serialized-runs assumption nothing else creates files
+        // here — and is deliberately not covered by a test.
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Ok(CopyPublication::NameTaken);
+        }
+        Err(err) => {
+            // Best-effort cleanup of the staged temporary; a survivor
+            // stays recognizable (the sweep removes it).
+            let _ = std::fs::remove_file(&tmp_path);
             return Err(StorageError::Backup {
-                path: final_path,
+                path: final_path.to_owned(),
                 source: BackupError::Io(err),
             });
         }
+    }
+    // The final name is complete now; the temporary link is pure
+    // debris, so its removal is best-effort: a file a scanner keeps
+    // holding must not fail an otherwise finished copy (the sweep
+    // removes the leftover on a later run).
+    let _ = retry_transient_hold(|| std::fs::remove_file(&tmp_path));
+    Ok(CopyPublication::Linked)
+}
 
-        let tmp_str = tmp_path.to_str().ok_or_else(|| StorageError::Backup {
-            path: final_path.clone(),
-            source: BackupError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "the backup path is not valid UTF-8",
-            )),
-        })?;
-        if let Err(err) = conn.execute("VACUUM INTO ?1", [tmp_str]) {
-            // Best-effort cleanup; a surviving `.tmp` stays recognizable.
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(StorageError::Backup {
-                path: final_path,
-                source: BackupError::Sqlite(err),
-            });
+// ---- Daily startup copies (spec §10 ERR-001) --------------------------------
+//
+// One `VACUUM INTO` copy per UTC day, `daily-YYYYMMDD.sqlite3`, at most
+// 7 kept — the redundancy half of the backup directory, next to the
+// migration-safety copies above. The two schemes share the publication
+// mechanics (`stage_and_link_copy`) but never each other's names: the
+// retention below counts and deletes daily names only.
+
+/// How many daily copies are kept (spec §10 ERR-001: "keeps the last
+/// 7"). The cap applies to the `daily-*.sqlite3` names only — the
+/// pre-migration copies are outside it and accumulate uncapped (their
+/// retention is a separate concern, D-038).
+const DAILY_BACKUPS_KEPT: usize = 7;
+
+/// The daily copy name for the UTC day of `now`:
+/// `daily-YYYYMMDD.sqlite3` (spec §10 ERR-001). The date is the same
+/// filesystem-safe shape the pre-migration stamps use for their date
+/// part — 8 ASCII digits, no separators (nothing to escape on any
+/// supported platform, D-038) — and its fixed width is what makes a
+/// name-ordered listing of daily copies chronological.
+fn daily_file_name(now: Timestamp) -> String {
+    format!("daily-{}.sqlite3", now.strftime("%Y%m%d"))
+}
+
+/// Whether `name` is a daily copy of this scheme: exactly
+/// `daily-<8 ASCII digits>.sqlite3`. Everything else is not this
+/// scheme's to count or delete — other prefixes (`pre-migration-v…`),
+/// suffixed variants of this prefix (`daily-20261118-1.sqlite3`), and
+/// dates of any other width (`daily-2026111.sqlite3`,
+/// `daily-notes.sqlite3`).
+fn is_daily_copy_name(name: &str) -> bool {
+    name.strip_prefix("daily-")
+        .and_then(|rest| rest.strip_suffix(".sqlite3"))
+        .is_some_and(|date| date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// The outcome of a [`daily_backup`] run.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DailyBackupOutcome {
+    /// The day's copy was written and linked into place; the path.
+    Written(PathBuf),
+    /// A copy for the day already existed, so nothing was written —
+    /// ERR-001's "if there is none for today yet". Decided by the file
+    /// name alone: the existing copy is never opened, read or
+    /// validated, and never replaced; the path.
+    AlreadyPresent(PathBuf),
+}
+
+/// Writes the daily startup copy of the database (spec §10 ERR-001):
+/// `db-backups/daily-YYYYMMDD.sqlite3`, at most one per UTC day, the
+/// newest [`DAILY_BACKUPS_KEPT`] kept.
+///
+/// `now` is the injection seam for "today" (system time is not
+/// mockable at the call site): only the UTC date of `now` is used, so
+/// every instant of one UTC day maps to exactly one file name, and the
+/// day boundary is the UTC midnight the stamp encodes.
+///
+/// Semantics:
+///
+/// * **Idempotency** — a run whose day already has a copy changes
+///   nothing (not even pruning): a restart on the same day must not
+///   create a second copy. The check is the file name; the copy is
+///   never opened.
+/// * **Publication** — the copy is staged and linked by the shared
+///   D-038 mechanics ([`stage_and_link_copy`]): `.tmp` staging,
+///   `hard_link` publication that refuses to replace an existing file,
+///   §9.5 retries, and a sweep of this scheme's stale `.tmp` debris at
+///   the start of the run (the sweep is the one thing a no-op run may
+///   still remove — crashed-run debris, never a copy).
+/// * **Retention** — after a copy is *written*, daily copies beyond
+///   the newest [`DAILY_BACKUPS_KEPT`] are removed, oldest first, by
+///   name order (fixed-width dates: lexicographic = chronological) —
+///   **but never the copy this run just wrote**: a clock-set-back
+///   directory may hold seven names newer than today, and deleting by
+///   age alone would delete today's fresh copy, leave the day without
+///   one and repeat a full `VACUUM INTO` on every restart. A run that
+///   found its copy present does not prune at all: it wrote nothing,
+///   so the cap from the previous write still holds; pathological
+///   states (clock steps, files restored by hand) self-heal on the
+///   next write. Pruning is best-effort throughout — the retention
+///   runs *after* the copy is complete, so a listing that cannot be
+///   read or a file that stays held (after its §9.5 retries) must not
+///   turn a successful copy into a reported failure; the next write
+///   prunes again. Pre-migration names are never counted or deleted.
+///
+/// The backup directory is a parameter and is required to exist, like
+/// for the pre-migration copies: the app layer's layout creates
+/// `db-backups/` (spec §5.5, D-027) and this crate creates nothing.
+///
+/// # Errors
+///
+/// Returns [`StorageError::Backup`] when the directory is missing or
+/// not a directory, or the copy cannot be written. Retention failures
+/// are *not* errors (see above). ERR-001 frames the daily copy as
+/// extra reliability, not a precondition — the caller logs the
+/// failure and continues (unlike a failed *pre-migration* copy, which
+/// aborts the run, D-038); that degradation policy is the caller's to
+/// apply.
+pub fn daily_backup(
+    conn: &Connection,
+    backup_dir: &Path,
+    now: Timestamp,
+) -> Result<DailyBackupOutcome, StorageError> {
+    if !backup_dir.is_dir() {
+        return Err(StorageError::Backup {
+            path: backup_dir.to_owned(),
+            source: BackupError::Directory,
+        });
+    }
+    sweep_stale_temporaries(backup_dir, is_daily_debris)?;
+    let name = daily_file_name(now);
+    let final_path = backup_dir.join(&name);
+    if final_path.exists() {
+        return Ok(DailyBackupOutcome::AlreadyPresent(final_path));
+    }
+    match stage_and_link_copy(conn, &final_path)? {
+        CopyPublication::Linked => {
+            // Retention runs on the write path only, and never deletes
+            // the copy this run just wrote (see `prune_daily_backups`)
+            // — a clock-set-back directory must not cost the day its
+            // copy and thrash a full `VACUUM INTO` into every restart.
+            prune_daily_backups(backup_dir, &name);
+            Ok(DailyBackupOutcome::Written(final_path))
         }
-        match retry_transient_hold(|| std::fs::hard_link(&tmp_path, &final_path)) {
-            Ok(()) => {}
-            // A file appeared under the name in the window between the
-            // search and the link: take the next name and copy again.
-            // This branch is defensive — under the serialized-runs
-            // assumption nothing else creates files here — and is
-            // deliberately not covered by a test.
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                let _ = std::fs::remove_file(&tmp_path);
-                attempt += 1;
-                continue;
-            }
-            Err(err) => {
-                // Best-effort cleanup of the staged temporary; a
-                // survivor stays recognizable (the sweep removes it).
-                let _ = std::fs::remove_file(&tmp_path);
-                return Err(StorageError::Backup {
-                    path: final_path,
-                    source: BackupError::Io(err),
-                });
-            }
+        // The name was taken between the existence check and the link
+        // (nothing else does, under the serialized-runs assumption):
+        // the day already has its copy, and a run that wrote nothing
+        // deletes nothing.
+        CopyPublication::NameTaken => Ok(DailyBackupOutcome::AlreadyPresent(final_path)),
+    }
+}
+
+/// Whether `name` is stale `.tmp` debris of a crashed daily write: the
+/// `.tmp`-stripped name is a full daily copy name of this scheme
+/// (`daily-<8 digits>.sqlite3`). Stricter than a prefix match on
+/// purpose: `daily-notes.sqlite3.tmp` is not this scheme's file and
+/// stays untouched, exactly like the retention's name policy.
+fn is_daily_debris(name: &str) -> bool {
+    name.strip_suffix(".tmp").is_some_and(is_daily_copy_name)
+}
+
+/// Removes the oldest daily copies beyond [`DAILY_BACKUPS_KEPT`],
+/// never `keep` — the name this run just wrote (a clock-set-back
+/// directory may hold seven names newer than today; deleting by age
+/// alone would delete today's fresh copy, leave the day without one
+/// and repeat a full `VACUUM INTO` on every restart).
+///
+/// Best-effort throughout, on purpose: this runs *after* the copy is
+/// linked and complete, so a failure here must not turn a successful
+/// copy into a reported one — the listing that cannot be read and the
+/// file that stays held (after its §9.5 retries) are both left for
+/// the next write, which prunes again.
+fn prune_daily_backups(backup_dir: &Path, keep: &str) {
+    let Ok(entries) = std::fs::read_dir(backup_dir) else {
+        return;
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok()?.file_name().to_str().map(str::to_owned))
+        .filter(|name| is_daily_copy_name(name))
+        .collect();
+    names.sort_unstable();
+    let excess = names.len().saturating_sub(DAILY_BACKUPS_KEPT);
+    let mut removed = 0;
+    for name in names {
+        if removed >= excess {
+            break;
         }
-        // The final name is complete now; the temporary link is pure
-        // debris, so its removal is best-effort: a file a scanner keeps
-        // holding must not fail an otherwise finished copy (the sweep
-        // removes the leftover on a later run).
-        let _ = retry_transient_hold(|| std::fs::remove_file(&tmp_path));
-        return Ok(final_path);
+        if name == keep {
+            continue;
+        }
+        let _ = retry_transient_hold(|| std::fs::remove_file(backup_dir.join(&name)));
+        removed += 1;
     }
 }
 
@@ -1696,5 +1922,487 @@ mod tests {
         assert!(!is_transient_hold(&err));
         assert!(is_transient_hold(&std::io::Error::from_raw_os_error(32)));
         assert!(is_transient_hold(&std::io::Error::from_raw_os_error(5)));
+    }
+
+    // ---- daily startup copies (spec §10 ERR-001) ------------------------------
+
+    /// Parses an RFC 3339 instant — the date seam's inputs are fixed
+    /// timestamps, never the wall clock, so the day boundaries below
+    /// are deterministic.
+    fn ts(text: &str) -> Timestamp {
+        text.parse()
+            .unwrap_or_else(|err| panic!("a fixed test timestamp must parse: {text}: {err}"))
+    }
+
+    /// A real database with one marker row, opened through `open_db`
+    /// (the production WAL/`synchronous=FULL` configuration, D-030).
+    /// The writer connection is returned alive and must outlive the
+    /// `daily_backup` call: with the last connection to a WAL database
+    /// closed, SQLite checkpoints and deletes the `-wal` file — the
+    /// writer staying open is what keeps the marker row in
+    /// un-checkpointed WAL frames, so the copy is proven to capture
+    /// them. Drop it before the teardown (the Windows rule: no open
+    /// handles under a removed directory).
+    fn database_with_marker(dir: &Path) -> (PathBuf, Connection) {
+        let db_path = dir.join("db.sqlite3");
+        let mut conn = open_db(&db_path).unwrap();
+        run_migrations(&mut conn, Path::new(UNUSED_BACKUP_DIR)).unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) \
+             VALUES ('daily.marker', '\"present\"', '2026-11-18T09:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        (db_path, conn)
+    }
+
+    /// The `daily-*.sqlite3` names currently in `dir`, sorted.
+    fn daily_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_owned())
+            .filter(|name| name.starts_with("daily-"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn daily_file_name_is_the_utc_day() {
+        // Any instant of one UTC day maps to the same name; the day
+        // boundary is UTC midnight.
+        assert_eq!(
+            daily_file_name(ts("2026-11-18T23:59:59.999Z")),
+            "daily-20261118.sqlite3"
+        );
+        assert_eq!(
+            daily_file_name(ts("2026-11-19T00:00:00.000Z")),
+            "daily-20261119.sqlite3"
+        );
+        assert_eq!(
+            daily_file_name(ts("2026-11-18T00:00:00.000Z")),
+            "daily-20261118.sqlite3"
+        );
+        assert_eq!(
+            daily_file_name(ts("2026-11-18T12:00:00.000Z")),
+            "daily-20261118.sqlite3"
+        );
+    }
+
+    #[test]
+    fn the_daily_name_pattern_admits_only_eight_digit_dates() {
+        assert!(is_daily_copy_name("daily-20261118.sqlite3"));
+        for foreign in [
+            "daily-20261118-1.sqlite3",
+            "daily-2026111.sqlite3",
+            "daily-202611181.sqlite3",
+            "daily-notes.sqlite3",
+            "daily-.sqlite3",
+            "daily-20261118.sqlite3.tmp",
+            "pre-migration-v1-20261118T101500123Z.sqlite3",
+            "daily-20261118.sqlite",
+            "daily-20261118",
+        ] {
+            assert!(
+                !is_daily_copy_name(foreign),
+                "the pattern must not claim `{foreign}`"
+            );
+        }
+    }
+
+    #[test]
+    fn daily_backup_writes_one_valid_copy_named_for_the_utc_day() {
+        let dir = temp_dir("daily-first");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+        let (_db_path, writer) = database_with_marker(&dir);
+
+        let outcome = daily_backup(&writer, &backup_dir, ts("2026-11-18T15:30:00.000Z"))
+            .expect("the daily copy should be written");
+        let DailyBackupOutcome::Written(backup) = outcome else {
+            panic!("a day without a copy must be Written, got {outcome:?}");
+        };
+        assert_eq!(
+            backup,
+            backup_dir.join("daily-20261118.sqlite3"),
+            "the copy is named for the UTC day"
+        );
+
+        // The copy is a valid database holding exactly the state at the
+        // moment of the copy — un-checkpointed WAL frames included: the
+        // writer connection is still open, so the marker row lives in
+        // the `-wal` file, not the main database file.
+        assert!(
+            dir.join("db.sqlite3-wal").is_file(),
+            "the fixture must hold un-checkpointed WAL frames"
+        );
+        let copy = Connection::open(&backup).unwrap();
+        let integrity: String = copy
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        assert_eq!(user_version(&copy), 1, "the copy carries the schema");
+        let marker: String = copy
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'daily.marker'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, "\"present\"", "the copy preserves the data");
+        drop(copy);
+
+        // No staging debris survives.
+        assert_eq!(daily_names(&backup_dir), vec!["daily-20261118.sqlite3"]);
+
+        // Windows: close the handles before removing the directory.
+        drop(writer);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_same_day_rerun_writes_no_second_copy_and_changes_nothing() {
+        // The ERR-001 acceptance criterion: a second run on the same
+        // day must not create a second copy.
+        let dir = temp_dir("daily-same-day");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+        let (db_path, writer) = database_with_marker(&dir);
+
+        let first = daily_backup(&writer, &backup_dir, ts("2026-11-18T08:00:00.000Z")).unwrap();
+        let DailyBackupOutcome::Written(first_path) = &first else {
+            panic!("the morning run writes the copy: {first:?}");
+        };
+        let bytes_before = fs::read(first_path).unwrap();
+        let listing_before = fs::read_dir(&backup_dir).unwrap().count();
+
+        // A later instant of the same UTC day, a different connection —
+        // the restart shape.
+        let second = {
+            let conn = open_db(&db_path).unwrap();
+            daily_backup(&conn, &backup_dir, ts("2026-11-18T21:45:00.000Z")).unwrap()
+        };
+        assert_eq!(
+            second,
+            DailyBackupOutcome::AlreadyPresent(backup_dir.join("daily-20261118.sqlite3")),
+            "the evening run must find the copy and write nothing"
+        );
+        assert_eq!(
+            fs::read(first_path).unwrap(),
+            bytes_before,
+            "the existing copy is never replaced"
+        );
+        assert_eq!(
+            fs::read_dir(&backup_dir).unwrap().count(),
+            listing_before,
+            "no second copy, no debris: the directory is unchanged"
+        );
+        assert_eq!(daily_names(&backup_dir), vec!["daily-20261118.sqlite3"]);
+
+        // Windows: close the handles before removing the directory.
+        drop(writer);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Seeds `backup_dir` with synthetic daily copies for the given
+    /// dates — the accumulated history of past startups (plain files
+    /// suffice: the retention counts names, it never opens a copy).
+    fn seed_daily_copies(backup_dir: &Path, dates: &[&str]) {
+        for date in dates {
+            fs::write(
+                backup_dir.join(format!("daily-{date}.sqlite3")),
+                b"synthetic history",
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn the_eighth_daily_copy_deletes_the_oldest_and_keeps_seven() {
+        // The ERR-001 acceptance criterion: eight copies are one too
+        // many — the oldest goes.
+        let dir = temp_dir("daily-eighth");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+        seed_daily_copies(
+            &backup_dir,
+            &[
+                "20261112", "20261113", "20261114", "20261115", "20261116", "20261117", "20261119",
+            ],
+        );
+        // A pre-migration copy and a foreign file: outside the cap's
+        // pattern, they must both survive it.
+        let pre_migration = backup_dir.join("pre-migration-v1-20261110T101500123Z.sqlite3");
+        fs::write(&pre_migration, b"safety copy").unwrap();
+        let foreign = backup_dir.join("user-notes.txt");
+        fs::write(&foreign, b"user data").unwrap();
+        let (_db_path, writer) = database_with_marker(&dir);
+
+        let outcome = daily_backup(&writer, &backup_dir, ts("2026-11-18T10:00:00.000Z")).unwrap();
+        assert!(
+            matches!(outcome, DailyBackupOutcome::Written(_)),
+            "the day had no copy: {outcome:?}"
+        );
+
+        // Eight daily names existed; the oldest (20261112) is gone and
+        // exactly the newest seven remain.
+        assert_eq!(
+            daily_names(&backup_dir),
+            vec![
+                "daily-20261113.sqlite3",
+                "daily-20261114.sqlite3",
+                "daily-20261115.sqlite3",
+                "daily-20261116.sqlite3",
+                "daily-20261117.sqlite3",
+                "daily-20261118.sqlite3",
+                "daily-20261119.sqlite3",
+            ],
+            "the eighth copy deletes the oldest daily copy"
+        );
+        assert!(
+            pre_migration.is_file(),
+            "the cap never deletes pre-migration copies"
+        );
+        assert!(foreign.is_file(), "the cap never deletes foreign files");
+
+        // Windows: close the handle before removing the directory.
+        drop(writer);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_prune_never_deletes_the_copy_it_just_wrote() {
+        // The clock-set-back state: seven daily copies whose names are
+        // all *newer* than "today". Writing today's copy must keep it
+        // — the prune drops the oldest of the others instead — or the
+        // day would lose its copy immediately and every restart would
+        // repeat a full `VACUUM INTO`.
+        let dir = temp_dir("daily-keep-written");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+        seed_daily_copies(
+            &backup_dir,
+            &[
+                "20261119", "20261120", "20261121", "20261122", "20261123", "20261124", "20261125",
+            ],
+        );
+        let (_db_path, writer) = database_with_marker(&dir);
+
+        let outcome = daily_backup(&writer, &backup_dir, ts("2026-11-18T10:00:00.000Z")).unwrap();
+        let DailyBackupOutcome::Written(backup) = outcome else {
+            panic!("today had no copy: {outcome:?}");
+        };
+        assert!(
+            backup.is_file(),
+            "the copy just written must survive the prune"
+        );
+        let names = daily_names(&backup_dir);
+        assert_eq!(names.len(), 7, "the cap still holds: {names:?}");
+        assert_eq!(
+            names.first(),
+            Some(&"daily-20261118.sqlite3".to_owned()),
+            "today's copy is the oldest name and still kept: {names:?}"
+        );
+        assert!(
+            !backup_dir.join("daily-20261119.sqlite3").exists(),
+            "the oldest of the *others* is the one deleted"
+        );
+
+        // Windows: close the handle before removing the directory.
+        drop(writer);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_seventh_daily_copy_deletes_nothing() {
+        // The cap boundary from below: seven copies fit.
+        let dir = temp_dir("daily-seventh");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+        seed_daily_copies(
+            &backup_dir,
+            &[
+                "20261113", "20261114", "20261115", "20261116", "20261117", "20261118",
+            ],
+        );
+        let (_db_path, writer) = database_with_marker(&dir);
+
+        daily_backup(&writer, &backup_dir, ts("2026-11-19T10:00:00.000Z")).unwrap();
+        assert_eq!(
+            daily_names(&backup_dir),
+            vec![
+                "daily-20261113.sqlite3",
+                "daily-20261114.sqlite3",
+                "daily-20261115.sqlite3",
+                "daily-20261116.sqlite3",
+                "daily-20261117.sqlite3",
+                "daily-20261118.sqlite3",
+                "daily-20261119.sqlite3",
+            ],
+            "seven copies: nothing is deleted"
+        );
+
+        // Windows: close the handle before removing the directory.
+        drop(writer);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_no_op_daily_run_does_not_prune() {
+        // A run that finds its copy present changes nothing — even
+        // when the directory holds more daily copies than the cap
+        // (clock stepped back, files restored by hand): the cap is
+        // enforced by writes, and the next write restores it.
+        let dir = temp_dir("daily-no-prune");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+        seed_daily_copies(
+            &backup_dir,
+            &[
+                "20261118", "20261119", "20261120", "20261121", "20261122", "20261123", "20261124",
+                "20261125",
+            ],
+        );
+        let (db_path, writer) = database_with_marker(&dir);
+
+        let outcome = daily_backup(&writer, &backup_dir, ts("2026-11-18T10:00:00.000Z")).unwrap();
+        assert!(
+            matches!(outcome, DailyBackupOutcome::AlreadyPresent(_)),
+            "today's copy exists: {outcome:?}"
+        );
+        assert_eq!(
+            daily_names(&backup_dir).len(),
+            8,
+            "a no-op run deletes nothing"
+        );
+
+        // And the self-heal: the next *write* prunes back to seven.
+        {
+            let conn = open_db(&db_path).unwrap();
+            daily_backup(&conn, &backup_dir, ts("2026-11-26T10:00:00.000Z")).unwrap();
+        }
+        assert_eq!(
+            daily_names(&backup_dir).len(),
+            7,
+            "the next write restores the cap"
+        );
+
+        // Windows: close the handles before removing the directory.
+        drop(writer);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_daily_run_sweeps_its_own_stale_temporaries_only() {
+        let dir = temp_dir("daily-sweep");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+        // Debris of a crashed daily run (a full daily name plus the
+        // staging suffix), near-miss names that must NOT be claimed
+        // (a daily-shaped word, another scheme's debris), and a
+        // finished daily copy that must not be touched.
+        let stale = backup_dir.join("daily-20260101.sqlite3.tmp");
+        fs::write(&stale, b"half-written debris").unwrap();
+        let near_miss_word = backup_dir.join("daily-notes.sqlite3.tmp");
+        fs::write(&near_miss_word, b"a user file in daily clothing").unwrap();
+        let foreign_scheme = backup_dir.join("pre-migration-v1-20000101T000000000Z.sqlite3.tmp");
+        fs::write(&foreign_scheme, b"other scheme's debris").unwrap();
+        let existing = backup_dir.join("daily-20261118.sqlite3");
+        fs::write(&existing, b"today's copy").unwrap();
+        let (_db_path, writer) = database_with_marker(&dir);
+
+        let outcome = daily_backup(&writer, &backup_dir, ts("2026-11-18T10:00:00.000Z")).unwrap();
+        assert!(
+            matches!(outcome, DailyBackupOutcome::AlreadyPresent(_)),
+            "today's copy exists: {outcome:?}"
+        );
+        assert!(
+            !stale.exists(),
+            "the daily run sweeps its own `.tmp` debris"
+        );
+        assert!(
+            near_miss_word.exists(),
+            "a `.tmp` that is not a full daily name is not this scheme's to delete"
+        );
+        assert!(
+            foreign_scheme.exists(),
+            "the pre-migration scheme's `.tmp` is the migration sweep's, not the daily run's"
+        );
+        assert_eq!(
+            fs::read(&existing).unwrap(),
+            b"today's copy",
+            "an existing copy is never replaced or removed"
+        );
+
+        // Windows: close the handle before removing the directory.
+        drop(writer);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_backup_directory_fails_the_daily_copy_without_creating_it() {
+        let dir = temp_dir("daily-missing-dir");
+        let (_db_path, writer) = database_with_marker(&dir);
+        // `db-backups` deliberately not created: the layout is the app
+        // layer's (D-027).
+        let backup_dir = dir.join("db-backups");
+
+        let err = daily_backup(&writer, &backup_dir, ts("2026-11-18T10:00:00.000Z"))
+            .expect_err("a missing backup directory must fail the daily copy");
+        match err {
+            StorageError::Backup { path, source } => {
+                assert_eq!(path, backup_dir, "the error names the directory");
+                assert!(
+                    matches!(source, BackupError::Directory),
+                    "expected BackupError::Directory, got: {source:?}"
+                );
+            }
+            other => panic!("expected StorageError::Backup, got: {other:?}"),
+        }
+        assert!(
+            !backup_dir.exists(),
+            "the crate must not create the directory"
+        );
+
+        // Windows: close the handle before removing the directory.
+        drop(writer);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_backup_directory_fails_the_daily_copy_and_leaves_no_debris() {
+        // The failure the degradation policy exists for: the copy
+        // cannot be written, the error keeps its own shape
+        // (`StorageError::Backup`), and no half-written file survives.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("daily-unwritable");
+        if running_as_root_is_untestable(&dir) {
+            fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+        let (_db_path, writer) = database_with_marker(&dir);
+
+        fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o555))
+            .expect("removing write rights must work");
+        let result = daily_backup(&writer, &backup_dir, ts("2026-11-18T10:00:00.000Z"));
+        fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o755))
+            .expect("restoring write rights must work");
+        let err = result.expect_err("the unwritable directory must fail the copy");
+        assert!(
+            matches!(err, StorageError::Backup { .. }),
+            "a failed daily copy must surface as StorageError::Backup, got: {err:?}"
+        );
+        assert!(
+            daily_names(&backup_dir).is_empty(),
+            "no copy and no debris survive the failure"
+        );
+
+        // Windows: close the handle before removing the directory.
+        drop(writer);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

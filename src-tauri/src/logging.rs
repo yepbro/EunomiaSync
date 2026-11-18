@@ -366,6 +366,41 @@ pub(crate) fn db_corrupt(error: &AppError) {
     );
 }
 
+/// The startup daily database copy was written (spec §10 ERR-001):
+/// the `db-backups/daily-YYYYMMDD.sqlite3` copy of this UTC day.
+/// `info`: a routine reliability event, not a failure. A day whose
+/// copy already exists gets **no** line — that is ERR-001's idempotent
+/// no-op, and a line per restart would only repeat itself.
+///
+/// Boundary with the future `action_log` service (spec §7.7,
+/// LOG-001..004 records "backup creation"): until that service exists
+/// (T-026), this file-log line is the whole journal of daily-copy
+/// creation; wiring the same event into `action_log` belongs to that
+/// task, which owns its visibility rules (LOG-005).
+pub(crate) fn db_backup_daily(path: &Path) {
+    tracing::info!(
+        target: "eunomia::db",
+        path = %path.display(),
+        "daily database copy written (VACUUM INTO)"
+    );
+}
+
+/// The startup daily database copy could not be written (spec §10
+/// ERR-001): `warn`, not `error`, because the launch deliberately
+/// continues — the daily copy is extra reliability over a database
+/// that opened and migrated cleanly (the recorded policy,
+/// DECISIONS.md D-046), and an `error` line would read as a failed
+/// launch in log triage. The error's own `Display` carries the
+/// offending path and OS cause; nothing free-text is added
+/// (SEC-008 — the payload is a path-bearing storage error).
+pub(crate) fn db_backup_daily_failed(error: &eunomia_store::storage::StorageError) {
+    tracing::warn!(
+        target: "eunomia::db",
+        error = %error,
+        "daily database copy failed; continuing without it"
+    );
+}
+
 /// A file operation on a project's library file — the SEC-008 core
 /// event. The upcoming variant, sync and backup tasks log through this
 /// helper: it takes the operation code, the file's path and the numeric
@@ -1060,5 +1095,63 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             tracing::info!("this line cannot be written and must be dropped");
         });
+    }
+
+    #[test]
+    fn a_written_daily_backup_logs_its_path() {
+        // The ERR-001 success line: one `info` event carrying the copy
+        // path (paths are allowed in logs, SEC-008) — nothing else.
+        let (_temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+
+        tracing::subscriber::with_default(subscriber, || {
+            db_backup_daily(Path::new("/data/db-backups/daily-20261118.sqlite3"));
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("daily-20261118.sqlite3"),
+            "the line must carry the copy path, got: {log}"
+        );
+        assert!(
+            log.contains("daily database copy written"),
+            "the line must say what happened, got: {log}"
+        );
+    }
+
+    #[test]
+    fn a_failed_daily_backup_logs_its_reason_and_stays_a_warning() {
+        // The ERR-001 degradation line: a `warn` that survives the
+        // default `info` level (the launch continues — an `error` would
+        // read as a failed launch in log triage), carrying the storage
+        // error's own text (which names the offending path).
+        let (_temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Warn)
+            .expect("building the subscriber must work");
+        let error = eunomia_store::storage::StorageError::Backup {
+            path: PathBuf::from("/data/db-backups/daily-20261118.sqlite3"),
+            source: eunomia_store::storage::BackupError::Directory,
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            db_backup_daily_failed(&error);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains(" WARN ") && log.contains("daily database copy failed"),
+            "the failure must be a visible warning, got: {log}"
+        );
+        assert!(
+            log.contains("daily-20261118.sqlite3"),
+            "the line must carry the failed path from the error's own Display, got: {log}"
+        );
+        assert!(
+            log.contains("continuing without it"),
+            "the line must say the launch continues, got: {log}"
+        );
     }
 }

@@ -27,6 +27,12 @@ eunomia-store = { path = "../crates/eunomia-store" }
 # declaration point for the build shape (bundled SQLite), which the
 # version comment in its manifest pins against rusqlite_migration.
 rusqlite = "0.41"
+# The injectable date seam of the ERR-001 daily backup (db.rs,
+# DECISIONS.md D-046): `Timestamp::now()` at the setup call site and
+# the `Timestamp` parameter the seam takes. Not a new crate in the
+# graph: jiff 1 is already built through eunomia-store (values.rs,
+# D-035) — this adds an edge, not a version.
+jiff = { version = "1", default-features = false, features = ["std"] }
 tauri = { version = "2", features = [] }
 # The full allowed Tauri plugin set (spec §5.3). All four plugins are
 # invoked from Rust only (SEC-001): the webview gets neither their JS

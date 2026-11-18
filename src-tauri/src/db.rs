@@ -122,6 +122,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use jiff::Timestamp;
 use rusqlite::{Connection, Transaction};
 use tauri::async_runtime;
 
@@ -131,6 +132,7 @@ use tauri::async_runtime;
 use rusqlite::ErrorCode as SqliteCode;
 
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
+use eunomia_store::storage::{DailyBackupOutcome, StorageError};
 
 /// The application database state (SYS-002): the one SQLite
 /// connection behind a mutex, published as managed state by the
@@ -147,6 +149,13 @@ pub(crate) struct Db {
     /// an await point.
     #[allow(dead_code)] // consumed by the first database command task; tested today
     connection: Arc<Mutex<Connection>>,
+    /// The `db-backups/` directory of the same data directory the
+    /// connection was opened from (§5.5) — kept so the ERR-001 daily
+    /// copy step ([`Db::ensure_daily_backup`]) writes next to the
+    /// migration safety copies without a second path derivation at a
+    /// call site (the same drift-avoidance reasoning as [`Db::open`]'s
+    /// path handling, D-037).
+    backups_dir: PathBuf,
 }
 
 impl Db {
@@ -248,7 +257,52 @@ impl Db {
         )?;
         Ok(Db {
             connection: Arc::new(Mutex::new(connection)),
+            backups_dir,
         })
+    }
+
+    /// The ERR-001 startup step (spec §10): one `VACUUM INTO` copy per
+    /// UTC day — `db-backups/daily-YYYYMMDD.sqlite3` — with the newest
+    /// 7 kept. The store's `eunomia_store::storage::daily_backup` owns
+    /// the semantics (same-day idempotency by file name, retention by
+    /// name order, the D-038 staging/publication mechanics); this
+    /// method is the app-layer seam: it locks the one connection like
+    /// any operation (at startup it is uncontended) and hands the
+    /// store the `db-backups/` path derived once in [`Db::open`].
+    ///
+    /// `now` is the date seam — the injectable "today": only its UTC
+    /// day names the copy, so the same-day and retention behavior is
+    /// deterministic under test. The `setup` hook passes the real
+    /// clock.
+    ///
+    /// Not callable from inside a [`Db::run`] closure: this method
+    /// takes the connection lock itself, and the `std::sync::Mutex` is
+    /// not reentrant — an operation already holding the guard would
+    /// deadlock. Startup (the only caller today) runs before any
+    /// operation exists.
+    ///
+    /// **Degrade, never abort** (the recorded ERR-001 policy,
+    /// DECISIONS.md D-046): the daily copy is extra reliability, not a
+    /// precondition — a database that opened and migrated cleanly is
+    /// worth running even when its redundant copy cannot be written
+    /// (unlike a failed *pre-migration* copy, which aborts, D-038).
+    /// The failure is returned for the caller to log (through the
+    /// facade) and the launch continues; this method therefore never
+    /// wraps it into a [`DbInitError`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::Backup`] when the copy cannot be
+    /// written (missing/unwritable directory, failed `VACUUM INTO`).
+    /// Retention is best-effort and never surfaces as an error (see
+    /// the store's `daily_backup` docs) — the caller's degradation
+    /// decision, not an abort.
+    pub(crate) fn ensure_daily_backup(
+        &self,
+        now: Timestamp,
+    ) -> Result<DailyBackupOutcome, StorageError> {
+        let connection = lock_recovering_poison(&self.connection);
+        eunomia_store::storage::daily_backup(&connection, &self.backups_dir, now)
     }
 
     /// Runs `operation` on the blocking pool inside one transaction

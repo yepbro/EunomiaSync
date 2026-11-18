@@ -71,7 +71,8 @@ const SUBDIRECTORIES: &[&str] = &[
 
 /// `db/` — the SQLite file and its WAL/-shm siblings (DB-001).
 const DB_SUBDIRECTORY: &str = "db";
-/// `db-backups/` — pre-migration copies (DB-004).
+/// `db-backups/` — pre-migration copies (DB-004) and the ERR-001
+/// daily startup copies (spec §10).
 const DB_BACKUPS_SUBDIRECTORY: &str = "db-backups";
 /// `backups/` — project file backups.
 const BACKUPS_SUBDIRECTORY: &str = "backups";
@@ -96,13 +97,15 @@ pub(crate) fn db_file_path(root: &Path) -> PathBuf {
     root.join(DB_SUBDIRECTORY).join(DB_FILE_NAME)
 }
 
-/// Returns the pre-migration backup directory inside the layout:
+/// Returns the backup directory inside the layout:
 /// `<data dir>/db-backups` (spec §5.5) — where `run_migrations`
 /// writes its `VACUUM INTO` safety copies (DB-004, DECISIONS.md
-/// D-038). Like the database file's parent, the directory must
-/// already exist: the store creates no directories, and an upgrade
-/// run that needs a copy fails before applying anything when it is
-/// missing (the layout step creates it).
+/// D-038) and where the ERR-001 daily startup copies live
+/// (`daily-YYYYMMDD.sqlite3`, spec §10, DECISIONS.md D-046). Like the
+/// database file's parent, the directory must already exist: the
+/// store creates no directories, and an upgrade run that needs a copy
+/// fails before applying anything when it is missing (the layout step
+/// creates it).
 pub(crate) fn db_backups_dir(root: &Path) -> PathBuf {
     root.join(DB_BACKUPS_SUBDIRECTORY)
 }

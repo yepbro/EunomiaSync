@@ -2169,3 +2169,136 @@ No new dependencies. Boundaries unchanged: the store knows no
 `AppError` (D-017) and no quick_check gate — the check is a startup
 gate of the app shell, like the too-new gate before it (D-040);
 src-tauri still depends on `rusqlite_migration` not at all.
+
+### D-046 — ERR-001 daily backups: same-day by name, last 7 kept, degrade on failure; the date is an injected `Timestamp` — 2026-11-18
+
+Problem: ERR-001 (spec §10) requires a `VACUUM INTO` copy
+`db-backups/daily-YYYYMMDD.sqlite3` at every startup when none exists
+for today yet, keeping the last 7. Open questions: how to reuse the
+D-038 pre-migration mechanics without duplicating them; how "today"
+is injected (system time is not mockable); whether the cap touches
+`pre-migration-*` files; where the call sits (store vs `Db::open` vs
+the `setup` hook); whether a fresh first launch copies its empty
+database; and what a failed daily copy does to the launch (a failed
+pre-migration copy aborts, D-038).
+
+Solution: `eunomia_store::storage::daily_backup(conn, backup_dir,
+now)`, next to the pre-migration code it shares mechanics with. The
+D-038 staging/publication path was extracted into one helper,
+`stage_and_link_copy(conn, final_path)` (`.tmp` staging, `hard_link`
+no-clobber publication, §9.5 retries, best-effort temporary removal),
+which both schemes call — `vacuum_into_backup` keeps only its
+attempt-loop name search; the debris sweep was parameterized by a
+per-scheme predicate (`sweep_stale_temporaries(dir, is_own_debris)`):
+the pre-migration scheme matches `pre-migration-v*.sqlite3.tmp`, the
+daily scheme requires the `.tmp`-stripped name to be a full
+`daily-<8 digits>.sqlite3` (`is_daily_debris`), so each run cleans
+its own scheme's debris and `daily-notes.sqlite3.tmp` stays
+untouched. Seven decisions inside:
+
+- _Date seam_: `now: jiff::Timestamp` is a parameter; only its UTC
+  date (`strftime("%Y%m%d")`, the same UTC-rendering `utc_stamp`
+  already relies on) names the copy, so every instant of one UTC day
+  maps to one name and the day boundary is UTC midnight. The setup
+  hook passes `Timestamp::now()`; tests pass fixed instants. src-tauri
+  gains a direct `jiff = "1"` edge — no new crate version (already
+  built via eunomia-store, D-035; the lockfile-reuse pattern of
+  D-029's `toml` and D-037's `rusqlite`).
+- _Same-day idempotency by name, without opening the copy_: the run
+  checks `daily-<today>.sqlite3` exists → `AlreadyPresent(path)` and
+  writes nothing. Doubly enforced: even with the check removed, the
+  `hard_link` publication refuses the occupied name (`NameTaken` →
+  `AlreadyPresent`), the same race-closing property D-038 built.
+- _Cap semantics_: after a copy is _written_, daily names beyond the
+  newest 7 are deleted, oldest first — name order is chronological
+  because the date is fixed-width 8 digits — **but never the copy that
+  run just wrote** (round-1 review finding): a clock-set-back
+  directory may hold seven names newer than today, and deleting by age
+  alone would delete today's fresh copy, leave the day without one and
+  repeat a full `VACUUM INTO` on every restart. The pattern is strict
+  (`daily-<exactly 8 ASCII digits>.sqlite3`): suffixed variants,
+  other widths and other prefixes are neither counted nor deleted,
+  and `pre-migration-*` files are outside the cap entirely (ERR-001's
+  "keeps the last 7" is about the daily copies; pre-migration
+  retention stays uncapped per D-038). A run that found its copy
+  present does not prune (it changed nothing; the cap from the last
+  write still holds) — pathological states (clock stepped back, files
+  restored by hand) self-heal on the next write. Pruning is
+  best-effort throughout, and deliberately so (round-1 review): it
+  runs _after_ the copy is linked and complete, so a listing that
+  cannot be read or a file that stays held after its §9.5 retries
+  must not turn a successful copy into a reported failure — the next
+  write prunes again.
+- _Fresh first launch copies too_: ERR-001 says "at every startup",
+  and a copy of the just-created empty database is cheap and an
+  honest baseline for the day (restoring it equals the "start with
+  an empty database" option). No special case exists for it.
+- _Call site_: `Db::ensure_daily_backup(now)` — a method on the
+  managed state, called by the `setup` hook after `Db::open` and
+  before `app.manage`. `Db` gained a `backups_dir` field (derived
+  once in `Db::open` through `data_dirs`, so the file and its
+  backups cannot drift at a call site — D-037's reasoning); the
+  method locks the connection like any operation. A separate method,
+  not a step inside `Db::open`, keeps the open chain's
+  error contract untouched (`DbInitError` gains nothing) and lets the
+  degradation decision live at the orchestration layer, where
+  logging already sits; the wiring is pinned by a `db_tests.rs` text
+  pin (open → daily → manage, facade calls present).
+- _Degrade, never abort_: the deliberate difference from D-038's
+  pre-migration abort. The daily copy is extra reliability over a
+  database that opened and migrated cleanly; failing the launch over
+  a redundant copy would trade a working app for nothing. A failure
+  keeps its own shape (`StorageError::Backup`), is logged by the
+  setup hook through `logging::db_backup_daily_failed` (a `warn`, not
+  `error` — the launch continues, and an `error` line would read as
+  a failed launch in log triage), and every later command runs
+  normally (pinned: an operation commits on the same connection
+  after a failed copy). A written copy gets one
+  `logging::db_backup_daily` `info` line; an existing same-day copy
+  gets none (the idempotent no-op would repeat on every restart).
+  §10's error-code registry is not involved — this is not a §10 user
+  situation, and the D-037 gap stays as recorded.
+- _action_log boundary_: spec §7.7 LOG-001..004 has backup creation
+  recorded in `action_log`; that service is T-026's and does not
+  exist yet, so the facade lines above are the whole journal of
+  daily-copy creation until that task wires the same event into
+  `action_log` (visibility per LOG-005 is its decision).
+
+SEC-007 boundary, extended by this task (round-1 review): the D-030
+addendum already records that the database file is created with the
+OS default mode instead of the required `0600`; the copies in
+`db-backups/` — pre-migration (D-038) and now up to 8 daily ones —
+inherit the same gap, and `db-backups/` itself is `0755`-under-umask
+rather than `0700`. Fixing it per-file here would leave the two
+schemes inconsistent; it belongs to the dedicated SEC-007 task, which
+now owns the directory mode and every copy's mode together.
+
+Testing: the store suite covers the name/UTC-day mapping (fixed
+instants at the 23:59:59.999Z/00:00:00.000Z boundary), the strict
+pattern (unit test over near-miss names), the valid-copy acceptance
+(`integrity_check = ok`, schema version and marker row preserved,
+produced through `open_db`'s WAL configuration with the writer
+connection held open, so the marker really lives in un-checkpointed
+WAL frames when the copy is taken), the two card
+criteria (same-day rerun writes no second copy and changes nothing —
+bytes compared; the eighth copy deletes the oldest, with
+`pre-migration-*` and foreign files surviving), the
+prune-keeps-what-it-wrote contract (seven names newer than today),
+the below-cap
+boundary (7 copies, nothing deleted), the no-op-no-prune contract
+plus its next-write self-heal, the per-scheme sweep (a daily run
+removes only debris whose `.tmp`-stripped name is a full daily name —
+`daily-notes.sqlite3.tmp` survives like the migration scheme's and a
+user's `.tmp`), the missing directory (fails, creates nothing), and
+the unwritable directory (unix, skipped as root: fails as
+`StorageError::Backup`, no debris). `db_tests.rs` repeats the two
+acceptance criteria and the degradation contract through the `Db`
+seam over the §5.5 layout, plus the wiring pin (open → daily →
+manage, the facade calls present, and no `?`/`return` between the
+daily call and the manage step — the never-abort half pinned as
+text); `logging.rs` tests pin both facade lines' payloads and levels.
+Mutations verified the suite bites: disabling the prune fails the
+eighth-copy and no-op tests; disabling the same-day existence check
+fails the no-op test (the rerun test stays green through the
+hard-link no-clobber — the double enforcement working as designed);
+widening the name pattern fails the pattern unit test.
