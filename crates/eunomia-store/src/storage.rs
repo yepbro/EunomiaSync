@@ -2,8 +2,10 @@
 //!
 //! The database schema is managed with SQL migration files embedded into
 //! the binary via [`include_str!`]. `rusqlite_migration` tracks the applied
-//! schema version through the SQLite `user_version` pragma, so upgrading an
-//! existing database only requires adding the next migration file.
+//! schema version through the SQLite `user_version` pragma (spec DB-004),
+//! so upgrading an existing database only requires adding the next
+//! migration file. Schema version 1 — the eleven tables of spec §6.2 — is
+//! defined by `migrations/0001_init.sql`.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -13,6 +15,15 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
 /// The ordered list of embedded SQL migrations applied by [`run_migrations`].
+///
+/// Version 1 (`migrations/0001_init.sql`) creates the full §6.2 schema:
+/// `settings`, `projects`, `project_exclusions`, `library_items`,
+/// `instruction_variants`, `project_instructions`, `revisions`,
+/// `sync_runs`, `sync_run_projects`, `backup_records` and `action_log`,
+/// with every CHECK, UNIQUE and foreign-key constraint plus the indexes
+/// the spec names (including the extra `project_instructions` indexes on
+/// `instruction_id` and `variant_id`). After it runs,
+/// `PRAGMA user_version` is 1.
 const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
 
 /// The busy handler timeout applied by [`open_db`] (spec DB-001).
@@ -177,14 +188,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_migrations_creates_meta_table() {
+    fn run_migrations_creates_the_settings_table() {
         let mut conn = Connection::open_in_memory().unwrap();
         run_migrations(&mut conn).unwrap();
 
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM meta", [], |row| row.get(0))
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES ('ui.language', '\"en\"', '2026-11-18T10:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+
+        let value: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'ui.language'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
-        assert_eq!(count, 0);
+        assert_eq!(value, "\"en\"");
     }
 
     #[test]

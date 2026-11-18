@@ -6,17 +6,19 @@ fn fresh_database_reaches_latest_migration() {
     let mut conn = Connection::open_in_memory().unwrap();
     run_migrations(&mut conn).expect("migrations should apply cleanly on a fresh database");
 
-    // The `meta` table created by 0001_init.sql must be usable.
+    // The `settings` table created by 0001_init.sql must be usable.
     conn.execute(
-        "INSERT INTO meta (key, value) VALUES ('schema', '0001')",
+        "INSERT INTO settings (key, value, updated_at) VALUES ('schema', '0001', '2026-11-18T10:00:00.000Z')",
         [],
     )
     .unwrap();
 
     let value: String = conn
-        .query_row("SELECT value FROM meta WHERE key = 'schema'", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'schema'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(value, "0001");
 }
@@ -33,7 +35,8 @@ fn migrations_run_on_file_backed_database() {
         run_migrations(&mut conn).unwrap();
     }
 
-    // Reopening must report a fully migrated database.
+    // Reopening must report a fully migrated database: schema version 1
+    // (0001_init.sql is the only migration so far, spec DB-004).
     {
         let mut conn = Connection::open(&path).unwrap();
         run_migrations(&mut conn)
@@ -41,7 +44,7 @@ fn migrations_run_on_file_backed_database() {
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert!(user_version > 0, "schema version must be recorded");
+        assert_eq!(user_version, 1, "schema version must be exactly 1");
     }
 
     std::fs::remove_file(&path).unwrap();

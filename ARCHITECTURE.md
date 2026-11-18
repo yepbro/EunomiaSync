@@ -175,8 +175,11 @@ open when WAL cannot be used (D-030). Migration files live in
 `crates/eunomia-store/migrations/*.sql`, are embedded with
 `include_str!`, and applied by
 `eunomia_store::storage::run_migrations(&mut Connection)`, which brings
-any database to the latest schema version. Tests run against in-memory
-SQLite and file-backed databases through the public API only.
+any database to the latest schema version. Schema version 1 — the eleven
+§6.2 tables with their full constraint set — lives in
+`migrations/0001_init.sql` (see DECISIONS.md D-036 for the two
+strengthened constraints and the testing contract). Tests run against
+in-memory SQLite and file-backed databases through the public API only.
 
 ## Config
 

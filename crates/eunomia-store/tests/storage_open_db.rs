@@ -184,14 +184,14 @@ fn open_db_then_run_migrations_on_the_same_connection() {
             .expect("migrations should apply on the pragma-configured connection");
 
         conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('schema', '0001')",
+            "INSERT INTO settings (key, value, updated_at) VALUES ('schema', '0001', '2026-11-18T10:00:00.000Z')",
             [],
         )
-        .expect("a meta write should succeed after migrations");
+        .expect("a settings write should succeed after migrations");
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("user_version should be readable");
-        assert!(user_version > 0, "schema version must be recorded");
+        assert_eq!(user_version, 1, "schema version must be exactly 1");
         assert_db001_pragmas(&read_pragmas(&conn));
     }
 

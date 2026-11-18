@@ -1143,3 +1143,74 @@ workspace member depending on chrono, deny.toml's
 `unmaintained = "workspace"` rule no longer fires, so the
 RUSTSEC-2026-0543 ignore and its comment block are deleted rather than
 left as a dead exception; `cargo deny check` passes with zero ignores.
+
+### D-036 — Schema v1: the §6.2 DDL kept verbatim, two constraints strengthened — 2026-11-18
+
+Problem: T-016 turns the `meta`-table stub of `0001_init.sql` into the
+full version-1 schema of spec §6.2 (eleven tables). The spec preamble
+allows adjusting column names but not constraints and relations, and two
+places needed a real decision: which half of DB-005 ("integer `position`
+starting from 1, with no gaps") is enforceable in DDL, and a
+three-valued-logic hole in the reference `library_items` CHECK.
+
+Solution: the migration implements the §6.2 DDL verbatim — no column
+renames were needed — with two deliberate deviations, both strengthening
+(not weakening) constraints. (1) `library_items.position` carries
+`CHECK (position >= 1)` as the DB-enforceable floor of DB-005; the
+no-gaps invariant (DB-011) stays in the service layer, which renumbers
+the affected range in one transaction. (2) The first table-level
+`library_items` CHECK spells out `heading_level IS NOT NULL` before
+`heading_level BETWEEN 2 AND 6`: under SQL three-valued logic the §6.2
+expression alone accepts a heading with a NULL level (`NULL BETWEEN 2
+AND 6` is NULL, and a CHECK only rejects FALSE), defeating the
+constraint's evident intent — the heading/level matrix is now fully
+enforced. The two extra `project_instructions` indexes the spec's
+closing paragraph requires (on `instruction_id` and `variant_id`) are
+named `ix_project_instructions_instruction_id` /
+`ix_project_instructions_variant_id` (index names are an implementation
+choice). The stub's `meta` table is gone: application key/value state
+lives in `settings` (§6.5); the three tests that used `meta` moved to
+`settings`.
+
+Testing contract: the negative tests in `tests/schema_v1.rs` cover every
+CHECK, UNIQUE, PK and FK of the schema and pin the SQLite extended
+result code of each rejection (`SQLITE_CONSTRAINT_CHECK`, `_UNIQUE`,
+`_PRIMARYKEY`, `_FOREIGNKEY`, `_NOTNULL` via the `rusqlite::ffi`
+re-export — no new dependency), so a broken statement, a wrong
+constraint class or a silently missing constraint all fail the suite
+(the schema's NOT NULL columns are deliberately only sampled — one
+representative rejection — since the acceptance matrix names
+CHECK/UNIQUE/FK, not NOT NULL).
+Empirical SQLite facts the tests encode (bundled build, rusqlite 0.41.1
+/ libsqlite3-sys 0.39.1): a RESTRICT-blocked parent DELETE reports
+`SQLITE_CONSTRAINT_TRIGGER` (1811) while an FK violation on INSERT (and
+on parent-key UPDATE under the default NO ACTION) reports
+`SQLITE_CONSTRAINT_FOREIGNKEY` (787); for `instruction_variants` a
+duplicate id surfaces through the composite `UNIQUE (instruction_id, id)`
+index (`_UNIQUE`, 2067) rather than the PK autoindex; `PRAGMA
+foreign_key_list` returns one row per referenced _column_, so a
+composite FK counts once via `COUNT(DISTINCT id)`; `AUTOINCREMENT` adds
+`sqlite_sequence` to `sqlite_master` (excluded from the table-set check
+by the `sqlite_%` filter, as any schema introspection should).
+Foreign-key tests set `PRAGMA foreign_keys=ON` explicitly instead of
+leaning on the bundled default — the pragma is per-connection and the
+production path (`open_db`) sets it on every connection (D-030).
+Mutations verified the tests bite: removing the `scheme` CHECK,
+downgrading the sync-run CASCADE to NO ACTION, and dropping the
+`variant_id` index each failed exactly the corresponding test. The
+round-1 review tightened the suite with its own mutation runs: the
+`instruction_variants` PK is exercised across two different instructions
+(the composite UNIQUE masks a same-instruction duplicate), `action_log`
+pins the AUTOINCREMENT behavior (sequential ids, no reuse of deleted
+ids, the `sqlite_sequence` counter) and its insert-reachable duplicate-id
+PK violation, an accept-side matrix covers every member of every enum
+CHECK (a narrowed enum fails it even when every reject test still
+passes), the six explicit indexes are pinned by table and columns via
+`sqlite_master`/`PRAGMA index_info`, and the DB-006 boundary includes a
+262144-two-byte-character row so a byte-semantics regression
+(`CAST(content AS BLOB)`) cannot pass unnoticed. One migration-mechanics
+note: the stub is replaced in place — same file, still version 1 —
+which is safe only because the app is pre-release with no installed or
+shared database (D-020); a developer database created from the old stub
+reports `user_version = 1` and would keep the `meta` table, so it has
+to be deleted by hand.
