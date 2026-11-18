@@ -1938,3 +1938,90 @@ the last false claim (the None arm no longer says "was rolled back"
 No new dependencies. Boundaries unchanged: the store knows no
 `AppError` (D-017), src-tauri still depends on `rusqlite_migration`
 not at all (D-040).
+
+### D-044 — ALG-002 normalization: ASCII whitespace class, blank-line edges, BOM run, fixpoint idempotency — 2026-11-18
+
+Problem: T-034 implements ALG-002 ("CRLF and a single CR are replaced
+with LF, the BOM is removed, and leading empty lines and all trailing
+whitespace of the block are dropped. Spaces inside the text are not
+touched"), and the spec fixes the rules but not their boundaries: which
+characters count as "whitespace" (ASCII vs Unicode White_Space),
+whether a "leading empty line" includes whitespace-only lines, whether
+"the BOM" is one character or a run, at which position a BOM counts as
+removed (a BOM after a leading empty line is not at the text start),
+and where the function should live relative to `Variant` and the
+snapshot.
+
+Solution: `eunomia_core::normalize::variant_text(&str) -> String` in a
+new `normalize` module — a pure function over the text, not a method on
+`Variant` and not a snapshot mutation (D-042: texts ride the snapshot
+raw; the build calls this per variant, and ALG-002 names it an algorithm
+of §9.1 in its own right). Four boundary decisions:
+
+1. Whitespace class = ASCII whitespace per Rust
+   `char::is_ascii_whitespace` (WhatWG: space, `\t`, `\n`, `\f`,
+   `\r`) — one class for both edge rules. These are the characters
+   that shape lines and blank lines in a UTF-8/LF file (D-22). Unicode
+   whitespace (NBSP `U+00A0`, the `U+2000`…`U+200A` block, `U+3000`,
+   the Unicode line/paragraph separators) and the vertical tab
+   `U+000B` are Markdown text, not line structure — for the leading
+   rule CommonMark's own blank line is space/tab only, and ALG-002's
+   protection sentence itself anchors on Markdown — so they survive
+   even at the block edges. (The Unicode separators are also not line
+   endings here: ALG-002 converts CR/CRLF only, so they stay ordinary
+   characters.) The chosen blank-line class is deliberately one notch
+   broader than CommonMark's space/tab — a form-feed-only line counts
+   as empty here — because one ASCII class serves both edge rules.
+   Accepted consequence: a variant whose last line ends in
+   NBSP builds a line with invisible trailing "whitespace" — content
+   fidelity beats cosmetics there; ALG-002 does not fix it.
+2. "Leading empty lines" = leading lines that are empty or hold only
+   characters of that ASCII class — the Markdown blank line. The
+   strict reading (zero-length lines only) would leave whitespace-only
+   lines at the join points where ALG-022 separates blocks by "exactly
+   one empty line", and the spec's own trailing rule ("all trailing
+   whitespace") shows the edges are meant whitespace-clean. Spaces
+   after the first content character of a line are inside the text and
+   preserved (the first line's indentation survives).
+3. Trailing rule = trim the ASCII-whitespace suffix of the whole block
+   (final line breaks, trailing empty lines, trailing spaces/tabs of
+   the last content line). A two-space Markdown hard break at the very
+   end of a block is therefore dropped — "all trailing whitespace" is
+   unconditional; hard breaks on inner lines keep their spaces.
+4. BOM = a leading RUN of `U+FEFF`, and the rule is positional:
+   leading means the very start of the block or immediately behind its
+   leading empty lines (`"\n\u{feff}text"` → `"text"` in one call; the
+   same holds after a lone CR); a `U+FEFF` anywhere else — after the
+   first line's own characters, or inside the text — is content and
+   preserved. The leading edge is consumed by one linear scan that
+   repeats {strip the BOM run, drop empty lines} until neither
+   applies, because the two rules interleave (an empty line can hide a
+   BOM). The first draft re-ran the whole pass to a fixed point
+   instead; the round-1 review measured that formulation at 13.6 s on
+   a crafted 131k-character `"\u{feff}\n"`-chain — quadratic, and
+   SEC-009 treats imports as untrusted — so the scan was rewritten as
+   the linear equivalent (the result of either is the same contiguous
+   middle slice of the CR-converted text: trailing edge =
+   `trim_end`, leading edge = the scan's stopping point). The output
+   is already normalized, so the function is idempotent by
+   construction.
+
+Also recorded: §6.9 already folds CRLF→LF at save time, but a lone CR,
+a BOM and edge whitespace can still arrive (import per SEC-009, older
+databases, direct SQL), and D-22 keeps a scheme-B file's own BOM and
+line breaks only OUTSIDE the managed block — so the build-time pass is
+unconditional and this module is the rule's single owner. No new
+dependencies (the D-017 allow-list is untouched — a pure function over
+`&str`). Tests: 27 unit tests + a doctest pin every ALG-002 rule, the
+inner-whitespace invariants (indentation, inner empty lines, inner
+trailing spaces/tabs), the class boundaries (Unicode whitespace and
+`\v` as content, a form-feed-only line blank at the leading edge), the
+BOM position rules (behind an empty line: removed; after the first
+line's indentation: kept), degenerate inputs (empty, BOM-only,
+CR-only, whitespace-only), idempotency (including the
+BOM-after-empty-line and double-BOM cases) and a linear-time guard
+over the crafted 65,536×`"\u{feff}\n"` chain; five behavior mutations
+verified the suite bites (BOM strip removed → 5 unit failures,
+trailing trim removed → 5, leading-edge drop removed → 9, BOM-run
+strip alone removed → 5, CRLF-pair handling removed → 3 — unit-test
+counts throughout; the doctest fails on top of the first three).

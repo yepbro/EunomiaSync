@@ -23,8 +23,11 @@
 //! - [`library`] — library items: instructions, headings, variants
 //! - [`assignment`] — the project ↔ instruction ↔ variant link
 //! - [`snapshot`] — the immutable build snapshot (ALG-001)
+//! - [`normalize`] — the ALG-002 variant text normalization the build
+//!   applies to every snapshot text before it reaches a file
 
 pub mod assignment;
 pub mod library;
+pub mod normalize;
 pub mod project;
 pub mod snapshot;

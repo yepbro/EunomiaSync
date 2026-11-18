@@ -25,6 +25,7 @@ crates/
     src/library.rs         #   Library items: instructions, headings, variants (working)
     src/assignment.rs      #   The project ↔ instruction ↔ variant link (working)
     src/snapshot.rs        #   Immutable build snapshot, ALG-001 (working)
+    src/normalize.rs       #   ALG-002 variant text normalization (working)
     markdown               #   Markdown processing           (planned)
     diff                   #   Text diffing                  (planned)
     sync                   #   AGENTS.md sync engine         (planned)
@@ -59,13 +60,18 @@ immutable `BuildSnapshot` of spec ALG-001 — assembled by the store
 layer in one read transaction, validated by core's
 `BuildSnapshot::new`, and handed to the build as a plain value
 (ordering carried by collection order; every assignment resolves inside
-the value, so the builder is a total function). SQLite
-storage lives in `eunomia-store` (see DECISIONS.md D-010), which is free
-of Tauri dependencies for the same reason. File-system work — repository
-scan, path normalization and validation, backup copies, atomic writes —
-lives in `eunomia-fs` (see DECISIONS.md D-019), currently a skeleton: the
-module plan is fixed and its dependencies are pinned ahead of use, but no
-module is implemented yet. `src-tauri` is a thin shell:
+the value, so the builder is a total function). Variant texts ride the
+snapshot raw and are normalized per ALG-002 before reaching a file
+(`normalize::variant_text`, a pure function — CR/CRLF become LF, the
+BOM and the block's leading empty lines and trailing whitespace are
+dropped, everything inside the text is untouched; spec D-22, recorded
+in DECISIONS.md D-044). SQLite storage lives in `eunomia-store` (see
+DECISIONS.md D-010), which is free of Tauri dependencies for the same
+reason. File-system work — repository scan, path normalization and
+validation, backup copies, atomic writes — lives in `eunomia-fs` (see
+DECISIONS.md D-019), currently a skeleton: the module plan is fixed
+and its dependencies are pinned ahead of use, but no module is
+implemented yet. `src-tauri` is a thin shell:
 commands, managed state, and specta wiring.
 
 ## IPC contract
