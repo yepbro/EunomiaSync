@@ -40,7 +40,9 @@ crates/
     src/values.rs          #   UUIDv7 ids, ISO-8601 UTC times (working)
     migrations/            #   Embedded SQL migration files
 src-tauri/
-  src/db.rs               # DB state + one-transaction executor   (working)
+  src/db.rs                # DB state + one-transaction executor   (working)
+  src/recovery.rs          # Recovery-screen file mechanics       (working)
+  src/commands.rs          # IPC commands (recovery group)        (working)
   src/errors.rs            # AppError + MVP error-code registry  (working)
   src/lib.rs               # App builder, specta registration   (working)
 src/                      # Frontend
@@ -78,13 +80,17 @@ commands, managed state, and specta wiring.
 
 Rust commands are registered through `tauri-specta`:
 
-1. A command in a `src-tauri/src` module (the `commands.rs` placeholder
-   was removed with D-037; the first command task adds its module back)
-   is annotated with `#[tauri::command]` and `#[specta::specta]`.
+1. A command in a `src-tauri/src` module (`src-tauri/src/commands.rs`,
+   added back by the recovery task after D-037's removal of the
+   template demo) is annotated with `#[tauri::command]` and
+   `#[specta::specta]`. Commands that take an `AppHandle` are generic
+   over `R: Runtime` — the documented tauri-specta shape — and the
+   registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in `src-tauri/src/lib.rs`.
-   No commands are registered yet — every name is fixed by spec §7.10
-   and belongs to its own task — so the builder currently registers an
-   empty command set and `src/bindings.ts` carries only types.
+   The registered set is the recovery-screen group of the System
+   module (spec §7.10/D-009): `app_open_data_folder`,
+   `db_backups_list`, `db_restore_backup`, `db_recreate`. Every
+   further command name is fixed by §7.10 and belongs to its own task.
 3. On debug builds the specta `Builder` exports `src/bindings.ts`
    (`specta_typescript::Typescript`). The file is **committed** so the
    frontend type-checks and lints without a Rust toolchain; it is excluded
@@ -94,9 +100,11 @@ Rust commands are registered through `tauri-specta`:
 
 **Rule: no raw `invoke()` calls in the frontend.** Always use the generated
 `commands` (see DECISIONS.md D-003). Every command returns
-`Result<T, AppError>` and reaches the database through the one-transaction
+`Result<T, AppError>`; database commands reach the one-transaction
 executor (`db::Db::run`, see the Storage section), which is what makes
-SYS-001/SYS-002 hold for every command alike.
+SYS-001/SYS-002 hold for every command alike — the one deliberate
+exception is the recovery group, which by design runs when no database
+exists (see the Storage section's recovery paragraph and D-049).
 
 The error half of the contract — `AppError` (spec §7.10: every command
 returns `Result<T, AppError>`) — lives in `src-tauri/src/errors.rs`: the
@@ -105,11 +113,13 @@ twenty-code MVP registry of the spec §10 table (`E_SYNC_RUNNING` …
 excluded until their tasks land), the stable default `message_key` per
 code, interpolation `params`, and structured `details` carrying the OS
 error code/kind/message. It reaches `src/bindings.ts` through the specta
-builder's `typ` registration (no registered command exists yet); the
-first database commands will return it through the executor's classified
-errors. `errors_tests.rs` pins the registration and
-the exported literal set. DECISIONS.md D-034 records the field design;
-the SQLite→registry classifier lives in `db.rs` (D-037).
+builder's `typ` registration (kept beside the command registration so a
+command-set change cannot drop it silently); the recovery commands
+return it directly — the first registered fallible commands, with the
+§7.10 rejection envelope pinned by `ipc_tests.rs`. `errors_tests.rs`
+pins the registration and the exported literal set. DECISIONS.md D-034
+records the field design; the SQLite→registry classifier lives in
+`db.rs` (D-037).
 
 ## Plugins
 
@@ -123,7 +133,8 @@ the Rust side:
   DECISIONS.md D-024) — application commands are not capability-gated, so
   this leaves the UI exactly its typed command surface.
 - `dialog`, `opener`, and `updater` are invoked from Rust behind the app
-  commands (`dialog_pick_folder`, `app_open_data_folder`, `update_*`,
+  commands (`app_open_data_folder` since T-024 opens the data directory
+  through the opener's Rust API; `dialog_pick_folder` and `update_*` are
   planned separately); no `fs` or `shell` plugin is registered or granted
   (`tauri-plugin-fs` reaches the binary only as an unregistered
   transitive dependency of `dialog`, never initialized as a plugin), the
@@ -283,9 +294,9 @@ nothing), garbage fails it with `SQLITE_NOTADB`, a malformed image
 with `SQLITE_CORRUPT`, and any non-corruption read failure
 (busy/locked, I/O) degrades to the canonical failure one step later
 instead of a false corrupt verdict. §10's "start in recovery mode"
-is, until the recovery screen task lands, this typed error, the
-`logging::db_corrupt` facade line and the abort (the same honest
-boundary as the too-new screen). Only then do `open_db` +
+is, since T-024, this typed verdict plus continuation: the hook logs
+`logging::db_corrupt` and returns `Ok` with no `Db` managed — see the
+recovery paragraph below (DECISIONS.md D-049). Only then do `open_db` +
 `run_migrations` run (the store stays the only SQLite/schema owner).
 A migration step that fails is rolled back by its own transaction;
 the failure surfaces as the typed `DbInitError::Migration` (UPD-004,
@@ -350,6 +361,62 @@ full-copy `VACUUM INTO` of I/O before the window exists — ERR-001's
 own cost, not a hang. Until the
 `action_log` service lands (spec §7.7 LOG-001..004, T-026), these
 file-log lines are the whole journal of daily-copy creation.
+
+**Recovery mode** (spec §10 `E_DB_CORRUPT` row, §7.10 command notes;
+DECISIONS.md D-049): when the startup open fails the quick_check gate,
+the `setup` hook logs the verdict and continues **without** managing a
+`Db` — that state (layout up, `DataRoot` published, no database) is
+recovery mode, and the §10 screen that replaces the app is what it
+exists for; the too-new, rolled-back-migration and generic-open
+failures keep their abort. The recovery commands
+(`src-tauri/src/commands.rs`, the first registered command group since
+D-037) run in exactly that state: they are file operations over the
+managed `DataRoot` (`src-tauri/src/recovery.rs`), not `Db::run`
+executor work — there is no connection to run anything through. The
+read-only pair: `db_backups_list` (the `*.sqlite3` regular files of
+`db-backups/` — `name`, `size_bytes`, `modified_utc` UTC ISO-8601,
+newest first; staging debris, preserve siblings, foreign files and
+symlinks are not copies) and `app_open_data_folder`
+(the opener plugin's Rust API; SEC-001 — the webview holds no
+`opener:` permission). The destructive pair — `db_recreate`, `db_restore_backup(backup_name)`
+— is guarded three times (a healthy `Db` already managed →
+`E_VALIDATION`; a concurrent recovery → `E_VALIDATION` over an
+async-mutex gate; and for `db_recreate` alone, a live file both
+startup gates accept → `E_VALIDATION` "a working database is already
+in place": the empty start never silently discards a working
+unmanaged database — the state a restore whose reopen failed leaves)
+and then, inside one `spawn_blocking`: validate the selection (a
+plain `*.sqlite3` base name only — no separators, `.`/`..`, `.tmp`
+staging debris or `-wal`/`-shm`/`-journal` siblings, a 0-byte
+sibling would pass both gates and silently bootstrap an empty
+database; missing → `E_VALIDATION`; symlinks not followed), re-run
+the startup gates over the chosen copy (`E_DB_TOO_NEW`/`E_DB_CORRUPT`
+before anything is touched), **stage the copy** (`db/`eunomiasync.sqlite3.tmp`:
+a byte copy, never a hard link — a link would let later writes
+mutate the backup — `0600`before publication, fsynced, while the
+live file is still in place, so a full disk or a permission leaves`db/`exactly as it was), preserve the damaged database as`db-backups/pre-recovery-<UTC>.sqlite3`(renamed, never deleted —
+chmod`0600`before the rename, stale`-journal`/`-wal`/`-shm`siblings renamed alongside first — though a gate read over the
+damaged file already lets SQLite's own crash recovery remove bogus
+siblings, the preserve catches what those reads leave — the main
+rename as the commit point), publish the staged copy by one rename
+(§9.5's staging pattern, parent-directory fsync best-effort), reopen
+through the full`Db::open`chain, write the day's ERR-001 copy, and`app.manage`the reopened database — §7.10's "…and reopens it": the
+app continues without a restart. The window in which the database
+path is empty is the two renames; the preserve audit line rides the`on_preserved` callback into it. Every recovery step is audited
+through the facade (`recovery_preserved`/
+`recovery_recreated`/`recovery_restored`/`recovery_failed`, plus the
+opener's two lines — the failure lines carry the code literal, the
+params, and the OS facts when the failure had any).
+`recovery_tests.rs`pins both card criteria through the real seams,
+the escape/gate rejections, the failed-stage window and the
+healthy-refusal;`ipc_tests.rs`drives the commands over mock IPC,
+including the §7.10 error envelope of a rejected invoke — the D-034
+pin. Honest boundaries (D-049): a crash between the two renames
+leaves the next startup to bootstrap fresh while the original sits
+under its`pre-recovery-`name;`pre-recovery-*` files are outside
+the daily cap and accumulate across recoveries until an owner
+decides their retention; and the frontend screen itself is the
+recovery-UI task's.
 
 The `settings` table has a typed repository, `eunomia_store::settings`
 (spec §6.5, DECISIONS.md D-039): the thirteen §6.5 keys as a

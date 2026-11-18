@@ -26,6 +26,16 @@ pub(crate) mod data_dirs;
 // executor (SYS-001/SYS-002, NFR-008; DECISIONS.md D-037).
 pub(crate) mod db;
 
+// The recovery-screen backend (spec §7.10 command notes, §10
+// E_DB_CORRUPT row; T-024): the file mechanics behind
+// `db_recreate`/`db_restore_backup` and the `db-backups/` listing.
+pub(crate) mod recovery;
+
+// The IPC commands (spec §7.10): the recovery-screen group of the
+// System module — the first registered commands since `greet` was
+// removed (D-037); every later command task extends this module.
+pub(crate) mod commands;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -39,22 +49,27 @@ pub(crate) mod single_instance;
 /// registered. Shared by the app entry point and the binding export test.
 pub fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
-        // No commands are registered yet: the demo command that
-        // shipped with the template was removed with D-037, and every
-        // command name is fixed by spec §7.10/D-009 — the first real
-        // command task (dialog, settings, …) lists its commands here
-        // and adds the `commands` module back.
-        .commands(collect_commands![])
+        // The recovery-screen group of the System module (spec §7.10,
+        // D-009) — the first registered commands since the template's
+        // demo was removed (D-037). Every later command task (dialog,
+        // settings, …) lists its own §7.10 names here. The commands
+        // are runtime-generic (the tauri-specta shape for commands
+        // that take an `AppHandle`), so the registration pins the
+        // concrete runtime of the shipped app.
+        .commands(collect_commands![
+            commands::app_open_data_folder::<tauri::Wry>,
+            commands::db_backups_list::<tauri::Wry>,
+            commands::db_restore_backup::<tauri::Wry>,
+            commands::db_recreate::<tauri::Wry>,
+        ])
         // `AppError` (§7.10: every command returns `Result<T, AppError>`)
         // is registered directly instead of through a command
-        // signature: no registered command exists yet (see above), and
-        // the first real commands return `Result<T, AppError>` through
-        // the DB executor (`db::Db::run`), which keeps the type
-        // reachable on its own. `typ` is tauri-specta's documented
-        // mechanism for types not reachable from commands or events;
-        // the type (and its `ErrorCode`/`ErrorDetails` dependencies)
-        // reaches `src/bindings.ts` through it, pinned by
-        // `errors_tests.rs`.
+        // signature: the type must stay reachable even when a command
+        // set change would otherwise drop it from the export, and
+        // `typ` is tauri-specta's documented mechanism for types not
+        // reachable from commands or events; the type (and its
+        // `ErrorCode`/`ErrorDetails` dependencies) reaches
+        // `src/bindings.ts` through it, pinned by `errors_tests.rs`.
         .typ::<errors::AppError>()
 }
 
@@ -149,6 +164,13 @@ pub fn run() {
             // D-027).
             let data_dir = app.path().app_local_data_dir()?;
             data_dirs::ensure_data_layout(&data_dir)?;
+            // The resolved root, published for the recovery commands
+            // (T-024): they run exactly when the database step below
+            // fails, so the one path fact they need must be managed
+            // before it can fail — and being a plain value (not a
+            // resolver call) is what keeps the IPC tests on temp
+            // roots instead of the real user data directory.
+            app.manage(data_dirs::DataRoot(data_dir.clone()));
 
             // Machine-level config (spec §5.8, SYS-011…013): read or
             // create `config.toml` from the data directory — before
@@ -195,53 +217,65 @@ pub fn run() {
             // paths — `db/eunomiasync.sqlite3` and the `db-backups/`
             // the migration run's safety copies go to — are derived
             // inside `db::Db::open`) with the DB-001 pragma set and
-            // migrated to the latest schema, then published as
-            // managed state. Every database command goes through its
+            // migrated to the latest schema, then published as managed
+            // state. Every database command goes through its
             // `run` executor — one operation, one transaction, off
             // the async runtime (SYS-001, NFR-008; DECISIONS.md
-            // D-037). Like the layout and config steps, a failure
-            // aborts the launch — without the database there is
-            // nothing to run — but unlike them this step runs after
-            // logging is up, so its three typed §10 situations are
-            // also observable in the log file (the other failures
-            // surface through the startup panic's `Display` text;
-            // logging those §10 lines belongs to the recovery task,
-            // which owns their screens). A database newer than this
-            // app (DB-004, NFR-010) is one of them: the seam rejects
-            // it before anything touches the file and hands back the
-            // typed `E_DB_TOO_NEW` `AppError`
+            // D-037). A database newer than this app (DB-004,
+            // NFR-010) is rejected before anything touches the file
+            // and hands back the typed `E_DB_TOO_NEW` `AppError`
             // (`DbInitError::app_error`), logged here through the
-            // facade with its §10 code. A database damaged enough to
-            // fail `PRAGMA quick_check` (spec §6.3, NFR-007…010,
-            // T-F11's damaged-DB half) is the second: rejected the
-            // same way — before the pragma set can touch the file —
-            // and logged as `E_DB_CORRUPT`; §10's "start in recovery
-            // mode" is, for now, this typed error and abort (the
-            // screen with the `db-backups/` list is the future
-            // recovery task's, blocked on this contract). A migration
-            // step that failed and was rolled back (UPD-004) is the
-            // third: the error names the pre-migration copy, and the
-            // typed `E_UPDATE_FAILED` form is logged through its own
-            // facade event before the abort. A migration failure
-            // *without* a copy (the run created the database)
-            // deliberately gets no facade line: not the UPD-004
-            // situation, it keeps the D-027 anonymous-abort treatment
-            // — the panic `Display` is its report, and its §10 line
-            // belongs to the recovery task like every generic init
-            // failure's (D-043). The launch still aborts either way
-            // (D-027/D-028: nothing to run without the database); the
-            // screens the §10/UPD-004 rows assign to these situations
-            // are the future recovery/update task's to build — the
-            // typed errors and these log lines are its contract.
+            // facade with its §10 code. A migration step that failed
+            // and was rolled back (UPD-004) is another: the error
+            // names the pre-migration copy, and the typed
+            // `E_UPDATE_FAILED` form is logged through its own facade
+            // event. A migration failure *without* a copy (the run
+            // created the database) deliberately gets no facade line:
+            // not the UPD-004 situation, it keeps the D-027
+            // anonymous-abort treatment — the panic `Display` is its
+            // report (D-043). These failures still ABORT the launch
+            // (D-027/D-028): their §10 effects ("Update the app",
+            // "install the previous version") end the session, and
+            // their screens are the future update task's.
+            //
+            // A database damaged enough to fail `PRAGMA quick_check`
+            // (spec §6.3, §10 `E_DB_CORRUPT`, T-F11's damaged-DB
+            // half) is the deliberate exception since T-024: the
+            // verdict is logged through the facade and the hook
+            // returns `Ok` with **no** `Db` managed — recovery mode.
+            // §10's effect for this code is a screen *instead of* the
+            // app ("data directory path, the list of `db-backups/`
+            // copies, 'Open data folder' and 'Start with empty
+            // database' buttons"), which requires a live process: the
+            // recovery commands (`db_backups_list`,
+            // `db_restore_backup`, `db_recreate`,
+            // `app_open_data_folder`) work in exactly this state over
+            // the managed `DataRoot`, and the recreate/restore ones
+            // reopen and manage the database themselves (§7.10: "…
+            // and reopens it"). The frontend screen itself is the
+            // recovery-UI task's; this hook's contract is: corrupt →
+            // logged, alive, database-less.
             let database = match db::Db::open(&data_dir) {
                 Ok(database) => database,
+                Err(error @ db::DbInitError::Corrupt { .. }) => {
+                    // The typed verdict exists (the match arm owns
+                    // it); log it through the facade and continue
+                    // without the database. `app_error()` is `Some`
+                    // for this shape by construction (D-045).
+                    if let Some(app_error) = error.app_error() {
+                        logging::db_corrupt(&app_error);
+                    }
+                    // Recovery mode: no `Db` is managed, the daily
+                    // step below is skipped with it (there is no
+                    // database to copy), and the window opens into
+                    // the recovery UI. The command that recovers
+                    // performs this step's daily+manage tail itself.
+                    return Ok(());
+                }
                 Err(error) => {
                     match (&error, error.app_error()) {
                         (db::DbInitError::TooNew { .. }, Some(app_error)) => {
                             logging::db_too_new(&app_error);
-                        }
-                        (db::DbInitError::Corrupt { .. }, Some(app_error)) => {
-                            logging::db_corrupt(&app_error);
                         }
                         (db::DbInitError::Migration { .. }, Some(app_error)) => {
                             logging::db_migration_failed(&app_error);
@@ -286,6 +320,12 @@ mod db_tests;
 
 #[cfg(test)]
 mod errors_tests;
+
+#[cfg(test)]
+mod recovery_tests;
+
+#[cfg(test)]
+mod ipc_tests;
 
 #[cfg(test)]
 mod tests {

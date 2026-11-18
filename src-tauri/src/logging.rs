@@ -343,11 +343,11 @@ pub(crate) fn db_migration_failed(error: &AppError) {
 /// The startup integrity gate rejected the database file as damaged
 /// (spec §6.3, §10): `PRAGMA quick_check` failed — the §10
 /// `E_DB_CORRUPT` row, "Start in recovery mode" over the untouched
-/// file (the list of `db-backups/` copies and the "start with an
-/// empty database" option are the recovery screen's, the future
-/// recovery task's). Logged at `error` on purpose: the launch aborts
-/// on this verdict, so the line must stay visible at
-/// `log_level = "error"` (the same reasoning as [`db_too_new`]).
+/// file. Logged at `error` on purpose: since T-024 the launch
+/// deliberately *continues* from this verdict into recovery mode (the
+/// screen replacing the app needs a live process), and the line is
+/// what marks the session as a recovery one in log triage — a verdict
+/// this serious must stay visible at `log_level = "error"`.
 ///
 /// The payload is the error's own §7.10 vocabulary — the code literal
 /// and its interpolation params (the database path and SQLite's own
@@ -398,6 +398,98 @@ pub(crate) fn db_backup_daily_failed(error: &eunomia_store::storage::StorageErro
         target: "eunomia::db",
         error = %error,
         "daily database copy failed; continuing without it"
+    );
+}
+
+/// A recovery operation preserved the damaged database (T-024, §10's
+/// recovery screen): renamed — never deleted — from the database path
+/// to `db-backups/pre-recovery-<UTC>.sqlite3`. `info` with both paths:
+/// this is the audit line that answers "where did my old database
+/// go?", and it must be reconstructable from the log alone. Emitted
+/// before the replacement is published, so a crash between the two
+/// still leaves the trail.
+pub(crate) fn recovery_preserved(from: &Path, to: &Path) {
+    tracing::info!(
+        target: "eunomia::db",
+        from = %from.display(),
+        to = %to.display(),
+        "recovery: the damaged database was preserved (renamed, not deleted)"
+    );
+}
+
+/// A `db_recreate` completed: the damaged database is preserved under
+/// its `pre-recovery-<UTC>` name and an empty database was created and
+/// reopened at the database path (§7.10). `info`: the audit line of a
+/// completed user-visible recovery action.
+pub(crate) fn recovery_recreated(db_path: &Path) {
+    tracing::info!(
+        target: "eunomia::db",
+        path = %db_path.display(),
+        "recovery: started with an empty database (the damaged file is in db-backups/)"
+    );
+}
+
+/// A `db_restore_backup` completed: the chosen copy replaced the
+/// database and was reopened (§7.10). `info`, both paths — the source
+/// copy stays where it was (never consumed), and the line is the audit
+/// record of which copy became the database.
+pub(crate) fn recovery_restored(backup: &Path, db_path: &Path) {
+    tracing::info!(
+        target: "eunomia::db",
+        backup = %backup.display(),
+        path = %db_path.display(),
+        "recovery: the chosen copy replaced the database (the copy itself is untouched)"
+    );
+}
+
+/// A recovery command failed (§10's rule that every error reaches the
+/// log with its code): the payload is the error's own §7.10 vocabulary
+/// — the code literal and its interpolation params (which name the
+/// rejected backup, the failed step's path, or the gate evidence) —
+/// exactly the `db_too_new`/`db_corrupt` shape, plus the OS facts from
+/// `details` when the failure had any (§10 names the OS code a
+/// first-class fact of every error line; the I/O-mapped errors carry
+/// theirs only there). `error` level: the recovery screen shows the
+/// failure to the user, and the log line is its durable half.
+pub(crate) fn recovery_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::db",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "recovery operation failed"
+    );
+}
+
+/// The data directory was opened in the OS file manager
+/// (`app_open_data_folder`, §7.10). `info`: a user-visible action with
+/// no failure state of its own — the audit fact is that the folder was
+/// shown.
+pub(crate) fn data_folder_opened(path: &Path) {
+    tracing::info!(
+        target: "eunomia::system",
+        path = %path.display(),
+        "data directory opened in the file manager"
+    );
+}
+
+/// Opening the data directory in the OS file manager failed
+/// (`app_open_data_folder`): the opener plugin's own failure, mapped
+/// to its §7.10 wire form (the D-037 fallback code, the opener's text
+/// in `details`). `error` level with the code literal and params —
+/// the same §10 payload shape as [`recovery_failed`], OS facts
+/// included when present.
+pub(crate) fn data_folder_open_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::system",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "opening the data directory failed"
     );
 }
 
@@ -1152,6 +1244,142 @@ mod tests {
         assert!(
             log.contains("continuing without it"),
             "the line must say the launch continues, got: {log}"
+        );
+    }
+
+    #[test]
+    fn recovery_lines_carry_both_paths_and_the_action() {
+        // The T-024 audit lines: preserve names where the damaged
+        // database went and where it came from; recreate/restore name
+        // what the database now is and where the copy came from. All
+        // `info` (completed user-visible actions), all paths-only
+        // (SEC-008: no database content crosses into the log).
+        let (_temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+
+        tracing::subscriber::with_default(subscriber, || {
+            recovery_preserved(
+                Path::new("/data/db/eunomiasync.sqlite3"),
+                Path::new("/data/db-backups/pre-recovery-20261118T120000000Z.sqlite3"),
+            );
+            recovery_recreated(Path::new("/data/db/eunomiasync.sqlite3"));
+            recovery_restored(
+                Path::new("/data/db-backups/daily-20261117.sqlite3"),
+                Path::new("/data/db/eunomiasync.sqlite3"),
+            );
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("from=/data/db/eunomiasync.sqlite3")
+                && log.contains("to=/data/db-backups/pre-recovery-20261118T120000000Z.sqlite3")
+                && log.contains("preserved"),
+            "the preserve line must carry both paths, got: {log}"
+        );
+        assert!(
+            log.contains("started with an empty database"),
+            "the recreate line must name the action, got: {log}"
+        );
+        assert!(
+            log.contains("backup=/data/db-backups/daily-20261117.sqlite3")
+                && log.contains("the chosen copy replaced the database"),
+            "the restore line must name the copy and the action, got: {log}"
+        );
+    }
+
+    #[test]
+    fn a_failed_recovery_logs_its_code_params_and_os_facts() {
+        // §10's rule for the recovery commands: every error reaches
+        // the log with its code — the same payload shape as the
+        // startup verdicts (code literal + params), at `error` level
+        // so it survives the strictest config — plus the OS facts a
+        // file-mechanics failure carries in `details` (the round-2
+        // pin: the line must surface them, not only code + params).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut error = AppError::new(crate::errors::ErrorCode::NoWriteAccess);
+        error
+            .params
+            .insert("name".to_owned(), "../daily-20261117.sqlite3".to_owned());
+        error
+            .params
+            .insert("reason".to_owned(), "not a plain file name".to_owned());
+        error.details = Some(crate::errors::ErrorDetails {
+            os_code: Some(13),
+            os_kind: Some("PermissionDenied".to_owned()),
+            os_message: Some("Permission denied (os error 13)".to_owned()),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            recovery_failed(&error);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("code=\"E_NO_WRITE_ACCESS\""),
+            "the line must carry the §10 code literal, got: {log}"
+        );
+        assert!(
+            log.contains("os_code=Some(13)")
+                && log.contains("PermissionDenied")
+                && log.contains("Permission denied (os error 13)"),
+            "the line must carry the OS facts from details (§10: the OS code \
+             is a first-class fact of every error line), got: {log}"
+        );
+        assert!(
+            log.contains("../daily-20261117.sqlite3") && log.contains("not a plain file name"),
+            "the line must carry the error's params (which name the rejected \
+             selection), got: {log}"
+        );
+        assert!(
+            log.contains("recovery operation failed"),
+            "the line must say what failed, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn data_folder_lines_carry_the_path_and_level() {
+        // The opener command's two lines: a success `info` with the
+        // data directory path, and a failure `error` with the mapped
+        // wire payload (code + params; the opener's own text lives in
+        // `details`, which the line format prints as the params debug
+        // only when present — the pinned fact here is the code and
+        // the path).
+        let (_temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+
+        tracing::subscriber::with_default(subscriber, || {
+            data_folder_opened(Path::new("/data"));
+            let mut error = AppError::new(crate::errors::ErrorCode::DbLocked);
+            error.details = Some(crate::errors::ErrorDetails {
+                os_code: None,
+                os_kind: Some("OpenerError".to_owned()),
+                os_message: Some("xdg-open not found".to_owned()),
+            });
+            data_folder_open_failed(&error);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("path=/data") && log.contains("data directory opened"),
+            "the success line must carry the path, got: {log}"
+        );
+        assert!(
+            log.contains("code=\"E_DB_LOCKED\"")
+                && log.contains("opening the data directory failed"),
+            "the failure line must carry the mapped code literal, got: {log}"
+        );
+        assert!(
+            log.contains("xdg-open not found"),
+            "the failure line must carry the opener's own text from details, \
+             got: {log}"
         );
     }
 }

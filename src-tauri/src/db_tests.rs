@@ -1742,17 +1742,19 @@ fn a_too_new_and_damaged_database_answers_too_new_first() {
 }
 
 #[test]
-fn setup_logs_a_corrupt_database_through_the_facade_before_aborting() {
+fn setup_logs_a_corrupt_database_and_continues_in_recovery_mode() {
     // Arrange & Act: `lib.rs`, compile-time constant, comments
-    // stripped (the shared helper). The corrupt branch of the DB step
-    // must log through its own facade event before returning the
-    // error that aborts the launch (§6.3/§10; the same wiring shape as
-    // the too-new and migration pins above).
+    // stripped (the shared helper). Since T-024 the corrupt branch of
+    // the DB step logs through its own facade event and returns Ok —
+    // recovery mode: the §10 screen replaces the app, so the process
+    // must stay alive (the abort stays for the other init shapes; its
+    // own pin in recovery_tests.rs covers the same file from the
+    // recovery side).
     let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
     let markers = [
         "db::Db::open(&data_dir)",
         "logging::db_corrupt(",
-        "return Err(error.into());",
+        "return Ok(());",
     ];
     let positions: Vec<usize> = markers
         .iter()
@@ -1768,12 +1770,13 @@ fn setup_logs_a_corrupt_database_through_the_facade_before_aborting() {
         })
         .collect();
 
-    // Assert: open, facade log, abort — in that order.
+    // Assert: open, facade log, continue — in that order.
     for pair in positions.windows(2) {
         assert!(
             pair[0] < pair[1],
             "lib.rs must log the corrupt rejection through the facade \
-             before aborting (§6.3, D-032); marker positions: {positions:?}"
+             before continuing into recovery mode (§6.3, §10, T-024); \
+             marker positions: {positions:?}"
         );
     }
 }

@@ -123,8 +123,11 @@ pub(crate) fn db_file_path(root: &Path) -> PathBuf {
 /// Returns the backup directory inside the layout:
 /// `<data dir>/db-backups` (spec §5.5) — where `run_migrations`
 /// writes its `VACUUM INTO` safety copies (DB-004, DECISIONS.md
-/// D-038) and where the ERR-001 daily startup copies live
-/// (`daily-YYYYMMDD.sqlite3`, spec §10, DECISIONS.md D-046). Like the
+/// D-038), where the ERR-001 daily startup copies live
+/// (`daily-YYYYMMDD.sqlite3`, spec §10, DECISIONS.md D-046), and where
+/// the recovery screen's `db_recreate`/`db_restore_backup` keep the
+/// damaged database as `pre-recovery-<UTC>.sqlite3` (§7.10, T-024).
+/// Like the
 /// database file's parent, the directory must already exist: the
 /// store creates no directories, and an upgrade run that needs a copy
 /// fails before applying anything when it is missing (the layout step
@@ -132,6 +135,21 @@ pub(crate) fn db_file_path(root: &Path) -> PathBuf {
 pub(crate) fn db_backups_dir(root: &Path) -> PathBuf {
     root.join(DB_BACKUPS_SUBDIRECTORY)
 }
+
+/// The resolved data-directory root, published as managed state by the
+/// `setup` hook right after [`ensure_data_layout`] (T-024).
+///
+/// The recovery commands operate exactly when the database is *not*
+/// managed — the startup open failed as `E_DB_CORRUPT` — so they cannot
+/// derive their paths from any DB-owned state; this handle is the one
+/// path fact that survives a failed open. Publishing the resolved root
+/// also keeps the commands off `app.path().app_local_data_dir()` at
+/// call time: the resolver would answer with the real user data
+/// directory on every platform, including the mock runtime of the IPC
+/// tests, while this state is a plain value the tests (and only they)
+/// point at a temp root.
+#[derive(Debug, Clone)]
+pub(crate) struct DataRoot(pub(crate) PathBuf);
 
 /// Why [`ensure_data_layout`] gave up: the path it could not create or
 /// secure, plus the OS cause. The path is kept in the message (not only

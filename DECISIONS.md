@@ -2139,6 +2139,13 @@ invariants need the service layer and belong to the diagnostics task.
 This narrows D-037/D-040's "a corrupt file keeps the plain abort until
 the recovery task lands" to "until the recovery _screen_ task lands".
 
+Addendum (2026-11-18, T-024/D-049): the abort half of this entry's
+startup paragraph is narrowed — the corrupt verdict no longer aborts
+the launch. The `setup` hook logs this entry's facade line and
+continues without managing a `Db` (recovery mode), which is what
+makes the §10 screen and its `db_backups_list`/`db_restore_backup`/
+`db_recreate`/`app_open_data_folder` commands reachable; see D-049.
+
 Testing, all through the real `Db::open` seam: three detection shapes
 (finding-rows fixture via a shrunk in-header page count — header and
 `user_version` stay readable so the too-new gate demonstrably passes
@@ -2427,3 +2434,208 @@ ARCHITECTURE.md; the Windows no-op halves are compile-checked there.
 
 (The D-047 number is not used by this entry: it was issued inside
 another task's window and belongs to that task's record.)
+
+### D-049 — Recovery mode: the corrupt startup continues without a Db; the recovery commands are file operations over a published DataRoot — 2026-11-18
+
+Problem: T-024 builds the backend of the §10 recovery screen: four
+commands (`db_backups_list`, `db_restore_backup`, `db_recreate`,
+`app_open_data_folder` — names fixed by §7.10/D-009) must work exactly
+when the startup database open has failed, yet every command
+infrastructure so far assumes the managed `Db`. Open questions: what
+the process does after the `E_DB_CORRUPT` verdict (D-027 aborts every
+init failure — a dead process shows no screen); where recovery
+operations sit relative to the `Db::run` executor (D-037); how the
+commands get their paths without touching the real user data
+directory from tests; what the damaged file's preserved name is and
+how the replacement is applied atomically; which §10 codes the
+recovery's own failures map to; and what the list DTO carries.
+
+Solution, six decisions:
+
+- _Lifecycle — the corrupt startup continues, database-less._ The
+  `setup` hook's corrupt arm now logs through `logging::db_corrupt`
+  and returns `Ok` with **no** `Db` managed: recovery mode. §10's
+  `E_DB_CORRUPT` effect is a screen _instead of_ the app (data
+  directory path, `db-backups/` list, "Open data folder", "Start with
+  empty database"), which requires a live process; every other init
+  failure (too-new, rolled-back migration, generic open) keeps the
+  D-027 abort — their §10 effects end the session and their screens
+  are the update task's. The frontend screen is the recovery-UI
+  task's; the hook's backend contract is "corrupt → logged, alive,
+  database-less", narrowed from D-045's "typed error + facade line +
+  abort". After a successful recreate/restore the command itself
+  performs the hook's tail — `Db::open` over the replaced path
+  (§7.10's own "…and reopens it"), the ERR-001 daily copy, then
+  `app.manage` — so the app continues without a restart.
+- _Boundary — recovery is NOT `Db::run`._ The executor serves
+  commands over a _working_ database; recovery is plain filesystem
+  work plus the bare read-only startup gates re-run over a chosen
+  copy (`reject_too_new`/`reject_corrupt`, made `pub(crate)` — one
+  detection mechanic for the live file and the copies it may be
+  replaced from, T-018/T-020 BYO as the card asked). The mechanics
+  live in `recovery.rs` (`recreate_files`/`restore_files`/
+  `list_backups`), composed with `Db::open` by `commands.rs` inside
+  one `spawn_blocking` closure (SYS-001's policy applied to file
+  copies and quick_check scans, not just SQLite). Paths come from a
+  new managed `data_dirs::DataRoot` — the root the hook resolved
+  _before_ the open could fail; a plain value, so the mock-runtime
+  IPC tests point it at temp roots instead of the real
+  `~/.local/share/pro.yepbro.eunomiasync` that a call-time
+  `app_local_data_dir()` would resolve.
+- _Preserve mechanics — renamed, never deleted, siblings first._
+  Both destructive commands first preserve the damaged database under
+  the §7.10-fixed name `db-backups/pre-recovery-<UTC>.sqlite3`
+  (stamp `YYYYMMDDTHHMMSSSSSZ`, the store's shape, with `-N` suffix
+  variants on a same-millisecond collision — uniqueness is a Windows
+  correctness requirement: renaming onto an existing target fails
+  there; the free-name probe checks the sibling spellings too, so a
+  half-completed earlier attempt cannot break a retry). Stale
+  `-journal`/`-wal`/`-shm` siblings are renamed _before_ the main
+  file and alongside it (`pre-recovery-…-wal`): a sibling left in
+  `db/` would be presented to the _next_ database file that opens
+  there, and renaming siblings first makes the main rename the commit
+  point — a halfway failure leaves the damaged file in place and the
+  step re-runnable; siblings move even when the main file is missing
+  (a hand-deleted `db/` still must not feed a stale WAL to the next
+  bootstrap). The preserved file is chmod'ed `0600` _before_ the
+  rename and the siblings best-effort on the way (D-048: this step
+  creates new artifacts in `db-backups/`, and the creating layer
+  enforces its mode). Round-1-review discovery, verified empirically:
+  a bare gate read over a damaged rollback-mode database makes
+  SQLite's own crash recovery _remove_ siblings it considers bogus
+  (fake `-journal`/`-wal`/`-shm` do not survive `reject_too_new`) —
+  the D-040/D-045 accepted boundary doing this code's pre-work; the
+  preserve's sibling handling is the belt-and-suspenders for what
+  those reads leave behind (a `-wal` SQLite could not checkpoint), so
+  its contract is pinned at the `preserve_damaged` seam, not through
+  the composed commands.
+- _Replacement order — stage before the preserve, publish after it_
+  (round-1 review finding, now the recorded shape): the chosen copy is
+  staged as `db/eunomiasync.sqlite3.tmp` (a stale staging file swept
+  first, `0600` before publication, fsynced) **while the live file is
+  still in place** — the most failure-prone step (copying bytes: a
+  full disk, a permission, an unreadable source) runs with the
+  damaged database still at its path, so its failure leaves `db/`
+  exactly as it was; then the preserve renames the damaged file away,
+  and one rename publishes the staged copy (§9.5's staging pattern,
+  parent-directory fsync included, best-effort). The window in which
+  the database path is empty is the two renames; the preserve audit
+  line rides an `on_preserved` callback into that window, so a crash
+  between the renames still leaves the "where did my old database
+  go?" trail in the log. The copy in `db-backups/` is only ever read:
+  the published database is a byte copy, never a hard link (a link
+  would make every later SQLite write mutate the backup it came
+  from), and it is never consumed.
+- _Validation — base names of database copies, gates before touch._
+  The UI sends a base name; anything with separators, `.`/`..`, or a
+  `.tmp` staging suffix is `E_VALIDATION` (reason params: "not a
+  plain file name" / "a staging file, not a copy" / "not a database
+  copy" / "no such copy"), as is a name with no regular file behind
+  it — the escape attempts the screen must survive (SEC-009's
+  spirit). The "not a database copy" reason carries round-1 review
+  finding 2: only `*.sqlite3` names list and restore — the listing
+  and the selection share the rule, because a 0-byte `-wal` sibling
+  would pass both gates (they skip empty files) and silently
+  bootstrap an empty database; both halves also refuse to follow
+  symlinks. The copy itself must pass both startup gates _before_
+  anything is staged: too-new copy → `E_DB_TOO_NEW`, damaged copy →
+  `E_DB_CORRUPT` (a 0-byte daily copy of a fresh database stays a
+  valid restore target — D-046's own case). File-mechanics failures
+  map contextually on the OS cause: permission → `E_NO_WRITE_ACCESS`,
+  full → `E_DISK_FULL`, everything else → the recorded D-037 fallback
+  with the reason in `details`; a reopen failure after the
+  replacement keeps the `DbInitError::app_error()` typed form where
+  one exists (the fallback otherwise — a command cannot perform the
+  D-027 abort). Three command-level guards are `E_VALIDATION` too: a
+  call while a healthy `Db` is managed ("a database is already
+  running" — the §10 screen is not shown in that state), a concurrent
+  recovery ("already in progress" — both end in `app.manage`, which
+  panics on duplicates; the gate is a `LazyLock`-held async mutex so
+  its `Send` guard covers the `.await`, the deliberate inverse of
+  D-037's std-mutex rule), and — round-1 review finding 9, scoped to
+  `db_recreate` only — a live file both gates accept ("a working
+  database is already in place — restart the app"): the empty start
+  is the screen's last resort, and the one state with a healthy
+  unmanaged file is a restore whose placement succeeded but whose
+  reopen failed, where the honest answers are retrying the restore
+  (the copy is still there) or restarting, never silently discarding
+  a working database. `db_restore_backup` stays exempt: swapping one
+  validated copy for another with the previous file preserved loses
+  nothing.
+- _DTO and the opener seam._ `db_backups_list` returns
+  `DbBackupInfo { name, size_bytes, modified_utc }` — the screen's
+  own facts; the copy's kind (pre-migration/daily/pre-recovery)
+  stays readable from the name, not duplicated as a field. All
+  regular files are listed (a preserved damaged copy included —
+  picking it answers with the honest gate rejection, not a hidden
+  row), staging debris excluded, newest mtime first, ties by name.
+  `size_bytes` is `u32` (saturating): specta forbids BigInt-style
+  types on the TS wire, and a >4 GiB copy is outside this app's
+  envelope. `modified_utc` is jiff's RFC 3339 UTC rendering.
+  `app_open_data_folder` calls the opener plugin's Rust API
+  (`OpenerExt::open_path`) — SEC-001's Rust-only plugin rule, with
+  `capabilities/default.json` still `permissions: []` (pinned). Its
+  real call is the one untestable seam (spawning the desktop file
+  manager from a test is a side effect): the error mapping is
+  unit-tested, the wiring is text-pinned, the call itself is the
+  manual smoke runs'.
+- _Audit._ Recovery is audit-important (SEC-008): six facade lines —
+  `recovery_preserved` (both paths; emitted before the replacement is
+  published so a crash between them still leaves the trail),
+  `recovery_recreated`/`recovery_restored` (what the database now is,
+  where the copy came from), `recovery_failed` (§10's every-error
+  rule, code + params), `data_folder_opened`/
+  `data_folder_open_failed`. The `db_backups_list` failures log
+  through `recovery_failed` too.
+
+Testing: `recovery_tests.rs` covers both card criteria through the
+real seams (recreate over a quick_check-failing file → the original
+preserved byte-identically under the pinned name at `0600`, `Db::open`
+bootstraps a working empty database; restore from a copy holding a
+marker → the marker readable through the reopened `Db`, the damaged
+file preserved, the copy itself untouched and still readable), the
+listing (DTO fields, newest-first, tie-by-name, debris/directory
+exclusion of staging debris, preserve siblings, foreign files and
+directories, the honest empty list), the escape/non-copy matrix
+(eleven spellings rejected as `E_VALIDATION` with nothing touched —
+bytes compared, no preserve file), the gate rejections over the copy
+(`E_DB_CORRUPT` with SQLite's own evidence, `E_DB_TOO_NEW` with the
+fixture version), sibling preservation at the owning seam (content
+and the best-effort re-tightened mode, `-journal` included) and the
+missing-main-file sibling sweep, same-millisecond name uniqueness,
+the missing-file bootstrap, staging sweep, the failed-stage window
+(an unwritable `db/` fails as `E_NO_WRITE_ACCESS` with the live file
+byte-identical and nothing preserved — the round-1 criterion), the
+recreate refusal over a healthy unmanaged database, and the restored
+file's mode; `ipc_tests.rs` (recreated in the removed greet tests'
+harness) drives the commands over real mock IPC — the DTO wire form,
+the §7.10 error envelope of a rejected escape (the D-034 pin for the
+first fallible commands), full recreate and restore round trips
+(preserved + managed `Db` afterwards, the copy's data readable
+through it), the stale-screen rejection, and the wrong-payload
+rejection.
+before the open, corrupt → log → `Ok`, the others' abort) and the
+registration (four names, opener from Rust, empty capabilities)
+from unwiring. The commands are runtime-generic (`R: Runtime` — the
+tauri-specta-documented shape), which is what makes the mock-IPC
+drive possible. No new dependencies; `jiff`'s and `rusqlite`'s edges
+predate this task, and tauri-specta's generic-command support is
+already in the pinned RC.
+
+Honest boundaries: a crash between the preserve rename and the
+publication rename leaves the database path empty (the two-rename
+window the staging order shrank to its minimum) — the next startup
+bootstraps fresh while the original sits under its `pre-recovery-`
+name (the data is never lost, but the user must know to look there;
+the preserve audit line, logged inside the window, names it); the
+copy/publish steps carry no §9.5 transient-hold retry loop (a
+Windows sharing violation surfaces as the retryable D-037 fallback —
+polish for a follow-up, like the store's `retry_transient_hold`);
+the daily-cap prune deliberately never touches `pre-recovery-*`
+files, so repeated recoveries accumulate (retention is a future
+owner decision); `db_backups_list` may briefly list a copy mid-write
+of a concurrent startup (the name exists before its content is
+linked — the screen picks from names, and the restore's own gates
+re-verify); and the recovery commands do not exist for the
+too-new/migration aborts — those keep the abort until their own
+screen tasks.

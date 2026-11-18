@@ -218,19 +218,16 @@ impl Db {
     /// app version" instruction (spec UPD-004) — and
     /// [`DbInitError::Open`] when the file cannot be opened or
     /// configured, WAL cannot be enabled, or a safety copy cannot be
-    /// written. A startup failure of any of these kinds aborts the
-    /// launch: without the database there is nothing to run — the same
-    /// policy as the layout and config steps (D-027/D-028) — and
-    /// unlike them this step runs after logging is up, so the three
-    /// typed §10 situations (too-new, corrupt, rolled-back migration)
-    /// are also logged through the facade with their §10 codes
+    /// written. A too-new, migration or generic open failure aborts
+    /// the launch at the caller (D-027/D-028); the corrupt verdict is
+    /// the exception since T-024 — the `setup` hook logs it and
+    /// continues into recovery mode (§10's screen replacing the app),
+    /// and the recovery commands (`commands.rs`/`recovery.rs`) call
+    /// this same `Db::open` to reopen the replaced database. All of
+    /// this runs after logging is up, so every typed §10 situation is
+    /// also logged through the facade with its §10 code
     /// (`logging::db_too_new`, `logging::db_corrupt`,
-    /// `logging::db_migration_failed`, wired in the `setup` hook). The
-    /// §10 screens the three errors describe — "Update the app" for
-    /// `E_DB_TOO_NEW`, recovery for `E_DB_CORRUPT` — are the future
-    /// recovery/update task's to build (`db_verify`/
-    /// `db_restore_backup`/`db_recreate`); the typed errors on this
-    /// seam are their contract, and the launch aborts until they land.
+    /// `logging::db_migration_failed`, wired in the `setup` hook).
     pub(crate) fn open(data_dir: &Path) -> Result<Self, DbInitError> {
         let db_path = crate::data_dirs::db_file_path(data_dir);
         let backups_dir = crate::data_dirs::db_backups_dir(data_dir);
@@ -413,8 +410,11 @@ fn schema_version_of(db_path: &Path) -> Option<i64> {
 /// itself opens a bare connection and reads one pragma (see
 /// [`schema_version_of`]); src-tauri owning `Connection` directly is
 /// the D-037 shape, and the schema knowledge (what "latest" is) stays
-/// in the store.
-fn reject_too_new(db_path: &Path) -> Result<(), DbInitError> {
+/// in the store. The recovery commands (`recovery.rs`, T-024) re-run
+/// this gate over a chosen `db-backups/` copy before applying it, so a
+/// copy made by a newer app version is rejected before it replaces
+/// anything.
+pub(crate) fn reject_too_new(db_path: &Path) -> Result<(), DbInitError> {
     let app_schema_version = eunomia_store::storage::latest_schema_version();
     if let Some(database_schema_version) = schema_version_of(db_path)
         && database_schema_version > app_schema_version as i64
@@ -451,7 +451,10 @@ fn reject_too_new(db_path: &Path) -> Result<(), DbInitError> {
 ///
 /// The check runs on a **bare** connection — no DB-001 pragma set, the
 /// same D-037/D-040 shape as the too-new gate; src-tauri owning
-/// `Connection` directly for a read-only startup gate. `quick_check`
+/// `Connection` directly for a read-only startup gate. The recovery
+/// commands (`recovery.rs`, T-024) re-run this very gate over a chosen
+/// `db-backups/` copy before applying it — one detection mechanic for
+/// the startup file and the copies it may be replaced from. `quick_check`
 /// is read-only: a rollback-journal database gains no `-journal` or
 /// sidecars from it, and for a database already in WAL mode SQLite
 /// creates the `-shm`/`-wal` siblings for the read and removes them on
@@ -500,7 +503,7 @@ fn reject_too_new(db_path: &Path) -> Result<(), DbInitError> {
 /// policy (D-040) with the same consequence: a corrupt file whose
 /// read fails for a non-corruption reason degrades to the generic
 /// abort instead of the typed verdict.
-fn reject_corrupt(db_path: &Path) -> Result<(), DbInitError> {
+pub(crate) fn reject_corrupt(db_path: &Path) -> Result<(), DbInitError> {
     // Skip the missing and the empty: nothing to verify (see the
     // method docs). `metadata` failing on an existing-but-unstatable
     // path is also "cannot verify" — `open_db` reports it canonically.
@@ -634,9 +637,9 @@ fn lock_recovering_poison(connection: &Mutex<Connection>) -> MutexGuard<'_, Conn
 /// [`lock_recovering_poison`]); what is left is not losing the
 /// failure silently. The registry has no "internal error" code
 /// (D-037's gap), so both land on the same fallback as unclassifiable
-/// storage failures.
-#[allow(dead_code)] // consumed by the first database command task; tested today
-fn join_failure_to_app_error(error: tauri::Error) -> AppError {
+/// storage failures. Consumed by the executor and the recovery
+/// commands' blocking closures.
+pub(crate) fn join_failure_to_app_error(error: tauri::Error) -> AppError {
     let (os_kind, os_message) = match error {
         tauri::Error::JoinError(join) if join.is_panic() => {
             let payload = join.into_panic();
