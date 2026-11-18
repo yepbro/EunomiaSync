@@ -1061,6 +1061,7 @@ dependencies = [
  "jiff 1.0.1",
  "rusqlite",
  "rusqlite_migration",
+ "serde_json",
  "uuid",
 ]
 

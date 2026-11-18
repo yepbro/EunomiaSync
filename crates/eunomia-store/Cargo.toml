@@ -25,3 +25,10 @@ uuid = { version = "1", features = ["v7"] }
 # off until the creation-marker task needs local time — jiff then covers
 # that natively, without the separate iana-time-zone crate (D-035).
 jiff = { version = "1", default-features = false, features = ["std"] }
+# JSON encoding of setting values in the `settings` table (spec §6.5;
+# DECISIONS.md D-039). No `serde` derive: values are parsed from
+# `serde_json::Value` directly, keeping the dependency surface at one
+# crate. The version is already resolved workspace-wide (1.0.154 via
+# src-tauri), so this adds no new crate version to the graph — the
+# same lockfile-reuse pattern as `uuid` (D-031).
+serde_json = "1"

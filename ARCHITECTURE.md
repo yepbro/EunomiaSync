@@ -226,6 +226,16 @@ behavior against real database files: mid-operation failures roll back
 everything, concurrent operations serialize on the connection, long
 operations leave the async runtime responsive, and a panicking
 operation neither commits nor poisons.
+The `settings` table has a typed repository, `eunomia_store::settings`
+(spec §6.5, DECISIONS.md D-039): the thirteen §6.5 keys as a
+`SettingKey` enum, values validated per key as JSON
+(`SettingValue::from_json` — one parse for reads, writes and the
+future IPC), §6.5 defaults applied by reads when a row is missing, and
+an explicit `StorageError::Settings` when a stored cell is corrupt —
+never a silent default (the table is machine-written, unlike the
+hand-editable `config.toml`, SYS-012). `default.*` keys are read only
+by project creation; changing them never touches existing projects
+(DEF-005).
 
 ## Config
 

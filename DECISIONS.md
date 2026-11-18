@@ -1455,3 +1455,86 @@ best-effort, cleaned up the staged temporary on link failure, and
 flagged the `AlreadyExists` race branch as defensive and deliberately
 untested (nothing else creates files in the directory under the
 serialized-runs assumption).
+
+### D-039 — Settings repository: typed §6.5 keys, one JSON validation path, corrupt cells error instead of defaulting — 2026-11-18
+
+Problem: T-028 turns the §6.5 `settings` table into a repository. Open
+questions: how to type keys and values without primitive obsession and
+without speculative layers (the IPC commands are T-030, not this task);
+where the ranges live; what a read does when a stored cell is corrupt;
+and whether `serde_json` joins the crate (a dependency decision, D-012
+policy).
+
+Solution: `eunomia_store::settings`. Four decisions inside it.
+
+(1) Typing. A runtime `SettingKey` enum — the thirteen §6.5 keys, `ALL`
+in table order, string literals both ways (`as_str`/`from_key`) —
+because a runtime set is required anyway by get-all and by the future
+string-keyed IPC, so a type-level key→value mapping (ZST keys plus a
+trait) would duplicate the canon. Values are a `SettingValue` enum
+whose variants carry domain enums (`Scheme`, `BaseName`, `Position`,
+`ExtraFile`) instead of raw strings. Two validation gates: `set` first
+rejects a variant that does not belong to the key (a kind check before
+serialization, so a Rust-side caller mistake like pairing `Scheme`
+with `ui.language` cannot be silently coerced through the JSON form),
+and `SettingValue::from_json(key, &Value)` is the single place that
+knows the §6.5 types and ranges: integers with
+inclusive bounds 1–200 (`backup.retention`, spec D-17), 1–20
+(`scan.max_depth`, D-04), 10–1000, 1000–100000, 7–3650; enum members
+case-sensitive, matching the schema CHECK vocabularies of §6.2; the
+extra files one JSON object with exactly `enabled` (boolean) and
+`position` (`start`/`end`); `scan.exclude_names` an array of strings
+(§6.5 pins no content rules — an empty list is valid). Integers that
+fit u64 but not i64 are range-rejected, not type-rejected
+(`as_i128`; anything larger is already a float inside serde_json and
+therefore a type error). `set` validates by re-parsing the value's
+canonical JSON through the same function, so write validation ≡ read
+validation ≡ future IPC validation — a stored value can never fail its
+own read unless the table changed behind the app's back.
+
+(2) Corrupt-cell policy: a stored value that is not JSON, or valid
+JSON outside the key's contract, fails the read with the new
+`StorageError::Settings { key, source: SettingsError }` (variants
+Type/Range/Member/Shape/Json — an explicit error, never a silent
+default). The settings table is machine-written (only `set` writes
+it), so a bad cell means corruption or version skew and must surface;
+this deliberately differs from `config.toml` (SYS-012/D-028), where a
+hand-edited broken file degrades to defaults with a warning. Rows with
+keys outside the §6.5 set are ignored by `get_all` (forward
+compatibility: a newer app version may add keys; this repository
+serves the set it knows).
+
+(3) `default.*` semantics (DEF-005/PRJ-012): these are defaults _for
+new projects_. The repository stores and returns them like any key and
+never propagates them — pinned by a test that changes all four
+`default.*` settings in a database holding a project row and asserts
+the project's scheme/base_name/extra-file columns untouched; copying
+defaults into a newly created project belongs to the future
+project-creation task.
+
+(4) `serde_json = "1"` joins as the crate's fifth dependency, for the
+JSON `value` column (§6.5). It is already resolved workspace-wide
+(1.0.154, via src-tauri/tauri), so no new crate version enters the
+graph — the same lockfile-reuse pattern as `toml` (D-029) and `uuid`
+(D-031); `cargo deny check` stays green with no new ignores. No
+`serde` derive dependency: values are parsed from `serde_json::Value`
+manually, keeping the surface at one crate.
+
+Layering unchanged (D-017): the store knows no `AppError`; mapping
+`StorageError::Settings` to `E_VALIDATION` is the future command
+layer's job (T-030). Testing split: in-module unit tests pin the §6.5
+canon (key literals both directions, defaults, ranges with both bounds
+and one-past-each-side rejections, non-integer type errors, enum
+member case sensitivity, the extra-file shape matrix, canonical JSON
+forms round-tripping) — with expected defaults, bounds and the
+seven-name exclusion list hardcoded as spec literals, so the tests are
+oracles independent of the production constants (a mutated constant
+fails them; round-1 review finding). `tests/settings.rs` (tempdir +
+`open_db` + `run_migrations`, the production configuration) pins
+repository behavior: defaults on a fresh empty database (zero rows,
+and reads write nothing), set→get round-trips with the stored JSON
+text and a DB-002 `updated_at` pinned per key, `updated_at` moving on
+rewrite, out-of-range, type-mismatched and wrong-variant writes
+rejected with the stored state untouched (including no row created
+where none existed), corrupt stored cells failing `get` and `get_all`
+explicitly, unknown rows ignored, and the DEF-005 pin.

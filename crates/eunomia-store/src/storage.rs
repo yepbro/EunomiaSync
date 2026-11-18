@@ -22,6 +22,8 @@ use jiff::Timestamp;
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
+use crate::settings::SettingsError;
+
 /// The ordered list of embedded SQL migrations applied by [`run_migrations`].
 ///
 /// Version 1 (`migrations/0001_init.sql`) creates the full §6.2 schema:
@@ -80,6 +82,15 @@ pub enum StorageError {
         path: PathBuf,
         /// The step that failed.
         source: BackupError,
+    },
+    /// Reading or writing a setting failed (spec §6.5): the value does
+    /// not fit the key's type or range, or the stored JSON text is
+    /// corrupt.
+    Settings {
+        /// The dotted settings key, e.g. `backup.retention`.
+        key: String,
+        /// The validation or decoding failure.
+        source: SettingsError,
     },
 }
 
@@ -148,6 +159,9 @@ impl fmt::Display for StorageError {
                     path.display()
                 )
             }
+            StorageError::Settings { key, source } => {
+                write!(f, "invalid setting {key}: {source}")
+            }
         }
     }
 }
@@ -160,6 +174,7 @@ impl std::error::Error for StorageError {
             StorageError::Open { source, .. } => Some(source),
             StorageError::JournalMode { .. } => None,
             StorageError::Backup { source, .. } => Some(source),
+            StorageError::Settings { source, .. } => Some(source),
         }
     }
 }
