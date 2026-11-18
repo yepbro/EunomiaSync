@@ -11,6 +11,10 @@ use tauri_specta::{Builder, collect_commands};
 
 pub mod commands;
 
+// The machine-level `config.toml` (spec §5.8, SYS-011…013) is needed on
+// every platform, exactly like the app itself.
+pub(crate) mod config;
+
 // The data directory layout (spec §5.5) is needed on every platform,
 // exactly like the app itself.
 pub(crate) mod data_dirs;
@@ -113,6 +117,26 @@ pub fn run() {
             // D-027).
             let data_dir = app.path().app_local_data_dir()?;
             data_dirs::ensure_data_layout(&data_dir)?;
+
+            // Machine-level config (spec §5.8, SYS-011…013): read or
+            // create `config.toml` from the data directory — before
+            // logging (the tracing task reads `log_level` from here) and
+            // before the database (both spec §5.8; the failure policy is
+            // DECISIONS.md D-028, the seam shape D-029). A missing file
+            // is created with defaults; unknown keys are ignored with a
+            // warning; unparseable content — invalid UTF-8, broken TOML
+            // or an invalid `log_level` — falls back to in-memory
+            // defaults with a warning and the file is never rewritten
+            // (SYS-012). Only an unreadable/unwritable file aborts the
+            // launch, like the layout above. There is no log subscriber
+            // yet (tracing is the next startup step), so the warnings go
+            // to stderr lossily — a failed write must not abort the
+            // launch (same no-panic policy as `single_instance.rs`).
+            // The config is published as managed state: `app.state::<AppConfig>()`
+            // is the seam the tracing task consumes to filter the log.
+            let (config, warnings) = config::load_or_create(&data_dir)?;
+            config::emit_warnings(&warnings);
+            app.manage(config);
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -68,6 +68,14 @@
 //! the Common-Controls v6 dependency), so the pins cover both halves:
 //! the reproduced dependency (needed by the dialog plugin) and the
 //! added `longPathAware`/`asInvoker` settings.
+//!
+//! The config startup wiring (SYS-011, §5.8) is pinned the same way: the
+//! `setup` hook must load `config.toml` after the layout (the file lives
+//! in the data directory), print its warnings, and publish the config as
+//! managed state — the seam the tracing task reads `log_level` from.
+//! The seam's own behavior (defaults, unknown keys, broken-file policy)
+//! is unit-tested in `config.rs`; the pin here keeps the wiring from
+//! silently unwiring.
 
 use serde_json::Value;
 
@@ -298,6 +306,56 @@ fn setup_resolves_the_data_directory_and_creates_its_layout() {
             "lib.rs must resolve `app_local_data_dir()` inside `setup` \
              and create the spec §5.5 layout from it, in that order; \
              marker positions: {positions:?}"
+        );
+    }
+}
+
+#[test]
+fn setup_loads_config_after_the_layout_and_manages_it() {
+    // Arrange & Act: `lib.rs`, compile-time constant, with line and
+    // block comments stripped so prose about the config cannot satisfy
+    // the pin. SYS-011 orders the config before logging and the
+    // database, and the file lives in the data directory (spec §5.5),
+    // so the markers pin the full startup order: layout first, then the
+    // config seam, then the warning print, then the managed state. The
+    // `?` is part of the config marker, so wiring that swallows the
+    // error (`let _ = …`, `unwrap_or_default()`, a gated-off call)
+    // fails here too. `app.manage(config)` is the seam the logging task
+    // consumes (`app.state::<AppConfig>()`); dropping it would strand
+    // that task.
+    let lib = strip_comments(include_str!("lib.rs"));
+    let markers = [
+        "data_dirs::ensure_data_layout(&data_dir)?",
+        "config::load_or_create(&data_dir)?",
+        "config::emit_warnings(&warnings);",
+        "app.manage(config);",
+    ];
+    let positions: Vec<usize> = markers
+        .iter()
+        .map(|marker| {
+            assert_eq!(
+                lib.matches(marker).count(),
+                1,
+                "lib.rs must contain `{marker}` exactly once, live (a \
+                 commented-out or duplicated line must not count)"
+            );
+            lib.find(marker)
+                .expect("the exactly-once check above guarantees one match")
+        })
+        .collect();
+
+    // Assert: the config is loaded from the data directory inside
+    // `setup`, after the layout, and published as managed state. Honest
+    // boundary, same as the layout and plugin pins: this proves the
+    // wiring exists and stays wired and ordered, not that the OS file
+    // appeared — the runtime effect is covered by the `config.rs` seam
+    // tests plus a manual first launch on a clean system.
+    for pair in positions.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "lib.rs must load the config after the layout, print its \
+             warnings and manage it, in that order; marker positions: \
+             {positions:?}"
         );
     }
 }

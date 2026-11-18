@@ -117,8 +117,9 @@ hook runs, and their WebView data sits under this root on Windows and
 Linux, so the webview layer may create the root first; the layout step is
 idempotent, so that is harmless.) The per-OS path table is pinned by
 `config_tests.rs` (bundle identifier plus the unset
-`appDirectoriesOverride`), and the `setup` wiring — including that both
-fallible steps propagate with `?` — by a text pin there. `config.toml` is
+`appDirectoriesOverride`), and the `setup` wiring — including that the
+fallible steps (path resolution, layout creation, config loading)
+propagate with `?` — by a text pin there. `config.toml` is
 not created by the layout — it is the config task's job (spec 5.8,
 SYS-011), which only needs the directory to exist first. Logs live in
 `logs/` inside the data directory on every OS: on macOS the Tauri
@@ -137,7 +138,11 @@ exist under the §5.5 path — Linux
 `~/.local/share/pro.yepbro.eunomiasync/`, macOS
 `~/Library/Application Support/pro.yepbro.eunomiasync/`, Windows
 `%LOCALAPPDATA%\pro.yepbro.eunomiasync\` — and that a second launch adds
-nothing and changes nothing.
+nothing and changes nothing. The same first launch must create
+`config.toml` with the default content (`log_level = "info"`, SYS-011),
+a second launch must leave it untouched, and a deliberately broken
+`config.toml` must not prevent startup: the app starts with defaults and
+prints a warning (SYS-012), with the file's bytes preserved.
 
 ## Storage
 
@@ -159,9 +164,27 @@ SQLite and file-backed databases through the public API only.
 ## Config
 
 Configuration format is TOML (serde + `toml`), per DECISIONS.md D-001.
-**Planned** — not implemented yet. It is a machine-level `config.toml` in the
-data directory (spec 5.8); user-managed settings stay in SQLite, and no library
-data is written to the file.
+At startup, right after the data-directory layout and before logging and
+the database are set up (spec 5.8, SYS-011), the `setup` hook calls
+`src-tauri/src/config.rs` (`load_or_create`): a missing `config.toml` is
+created with the pinned default content (`log_level = "info"`) — staged
+in a `.tmp` sibling renamed into place, so a crash mid-write cannot tear
+the file — and an existing file is parsed and **never rewritten**: a
+broken TOML, invalid UTF-8 bytes or an invalid `log_level` fall back to
+in-memory defaults with a warning and the app still starts (SYS-012),
+unknown keys are ignored with a warning naming the key (manual diff of
+the parsed `toml::Value`'s top-level keys against the `KNOWN_KEYS` list
+— no `serde_ignored` dependency), and only an unreadable/unwritable file
+aborts the launch like the layout step does (DECISIONS.md D-028).
+Warnings come back as a `Vec<String>` from the seam and are printed
+lossily to stderr until the tracing subscriber exists; the config itself
+is published as managed state, and the logging task (T-012) reads it via
+`app.state::<AppConfig>()` to filter the log — applying `log_level` to
+the log output is that task's criterion (DECISIONS.md D-029). The
+startup wiring is pinned by a `config_tests.rs` text pin (layout →
+config → warnings → `app.manage`); the seam behavior is unit-tested in
+`config.rs` over `tempfile` roots. User-managed settings stay in SQLite
+(spec 6.5) and no library data is ever written to the file.
 
 ## Watcher
 

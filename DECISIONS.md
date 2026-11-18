@@ -632,6 +632,94 @@ eunomia-fs. The per-OS "first launch on a clean system" GUI check is
 recorded as pending in ARCHITECTURE.md (Data directory section) until
 the first smoke run.
 
+### D-028 — Config file failure policy: broken file → defaults + warning, never rewritten; IO failure aborts — 2026-11-17
+
+Problem: SYS-012 says an unparseable `config.toml` falls back to defaults
+with a warning and the app still starts, but leaves three things open:
+whether the broken file gets rewritten with the defaults, what happens
+when the file cannot be _read_ or _created_ at all (OS-level failure, not
+a parse failure), and whether a partial file (missing `log_level`) is an
+error.
+
+Solution: `config::load_or_create` (`src-tauri/src/config.rs`) writes the
+file exactly once — when it is missing, with the pinned default content,
+staged in a `.tmp` sibling and renamed into place so a crash mid-write
+cannot leave a torn config file that the never-rewrite policy would
+preserve forever (a stale `.tmp` from such a crash is simply overwritten
+by the next attempt) — and never touches an existing file's bytes,
+whatever they contain: the file is user data, a typo must not cost them
+the rest of the file, and rewriting would hide the problem from whoever
+comes to fix it (the warning points at the exact bytes that failed). A
+parse failure or an invalid `log_level` value (including a non-string)
+returns in-memory defaults plus a warning (SYS-012); a missing key falls
+back to its default silently (`#[serde(default)]`) — a partial file is a
+valid config. The same fallback covers invalid UTF-8 bytes (e.g. a
+UTF-16 file written by a Windows shell redirect or an editor): the
+content cannot be parsed, which is SYS-012's domain, not the data
+directory's. OS-level failures — the existing file unreadable (e.g.
+mode 000), the missing file unwritable (e.g. a read-only directory), the
+data dir not a directory — are `ConfigError` and abort the launch by
+propagating out of `setup` (the tauri `Failed to setup app: …` panic
+prints the path and cause, same as the layout step, D-027): a data
+directory that cannot hand over its config file is broken the same way
+as one that cannot hold the database, and there is no diagnostics
+channel yet to degrade into. The seam deliberately does not create
+parent directories: `ensure_data_layout` runs first and owns that (the
+order is pinned in `config_tests.rs`), so a wiring regression that calls
+the config seam before the layout fails loudly instead of silently
+re-deriving the layout's responsibility. Testing: thirteen seam tests
+over `tempfile` (defaults created and pinned byte-for-byte, rerun no-op,
+all five SYS-012 spellings, partial file, unknown keys, broken TOML,
+invalid value, non-UTF-8 bytes, not-a-directory read failure, read-only
+directory write failure and unreadable file — the last two unix-gated
+and skipped as root, which bypasses permission bits — plus the
+known-keys/diff agreement and a failing-writer test for the
+no-panic warning writer), mutation-checked (mutated default content,
+wrong fallback level, suppressed unknown-key warning, dropped
+`app.manage`, swapped layout/config order, UTF-8 fallback turned into a
+hard error, write errors swallowed into pretended success, creation
+branch removed, emptied known-key list, panicking warning writer — each
+caught by its test), plus the wiring text pin.
+
+### D-029 — Config seam shape: warning Vec + lossy stderr before tracing; unknown keys via `toml::Value` diff; `AppConfig` as managed state — 2026-11-17
+
+Problem: the config is read before any log subscriber exists (tracing is
+the next startup task, T-012), so its warnings — unknown keys ignored,
+broken-file fallbacks (SYS-012) — had no channel; unknown-key detection
+needed a mechanism (`serde_ignored` crate vs a manual diff); and the
+logging task needed a defined way to read the loaded config back.
+
+Solution: three pieces. First, the seam returns
+`Result<(AppConfig, Vec<String>), ConfigError>` — warnings are data, so
+they are unit-testable; the `setup` wiring prints them to stderr lossily
+(`writeln!` with the error ignored — a broken stderr must not abort the
+launch, the same policy as `single_instance.rs`; the writer is an
+extracted `write_warnings` so the no-panic guarantee has a failing-writer
+test) until the tracing subscriber gives warnings a real destination,
+and the criterion "`log_level` is applied to the log" is therefore
+deferred to that task, which reads `app.state::<AppConfig>()`. Second,
+unknown keys are found by diffing the parsed `toml::Value`'s top-level
+keys against the `KNOWN_KEYS` list — kept in sync with `AppConfig`'s
+fields by a dedicated test that serializes the default config and
+compares the field-name set to the list in both directions (the config
+types derive `Serialize` for exactly this check; the diff-side half
+parses a known-keys-only document expecting zero warnings) — and
+warning per unknown key —
+`serde_ignored` was rejected as an
+extra dependency for a check a handful of lines covers (new crates are
+task decisions, D-012 policy); only top-level keys are named, the
+content of an unknown table is not enumerated, and the same parsed value
+then deserializes into `AppConfig`, so an invalid enum value lands in
+the same fallback path. Third, the config is published with
+`app.manage(config)` — tauri's state container is the idiomatic seam a
+Tauri command or handler reads from (`app.state::<AppConfig>()`),
+survives the whole app lifetime, and needs no global static; the wiring
+is pinned in `config_tests.rs`. The `toml = "1"` dependency reuses the
+1.2.1 already resolved in the lockfile (via tauri), so no new crate
+version enters the graph (cargo-deny green). The on-disk key spelling is
+the spec's literal `log_level` (snake_case); the `LogLevel` enum is
+lowercase-serialized so the five SYS-012 words are the only accepted
+values.
 ### D-030 — `open_db` applies the DB-001 pragma set; pragma defaults make three of four mutations unobservable — 2026-11-17
 
 Problem: spec DB-001 requires `journal_mode=WAL`, `foreign_keys=ON`,
