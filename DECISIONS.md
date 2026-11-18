@@ -1316,6 +1316,11 @@ newer than the app is now rejected by a typed gate before `open_db`
 the facade, launch still aborted); a corrupt file keeps the plain
 open/migration abort described here until the recovery task lands.
 
+Addendum (2026-11-18, T-020/D-045): the corrupt half is narrowed too —
+a damaged database now fails the typed `quick_check` gate
+(`DbInitError::Corrupt` → the `E_DB_CORRUPT` AppError, logged through
+the facade, launch still aborted); see D-045.
+
 greet: removed entirely — command, registration, mock-IPC tests
 (`ipc_tests.rs`), the demo form in `App.vue`, and the regenerated
 `src/bindings.ts` (which now carries only types; tauri-specta emits no
@@ -1624,6 +1629,12 @@ log line are its contract; until it exists the panic's `Display` text
 diagnostic. D-037's "corrupt/too-new abort" phrasing is thereby
 narrowed: too-new is typed and logged, corrupt keeps the plain abort
 until the recovery task.
+
+Addendum (2026-11-18, T-020/D-045): the corrupt half of that narrowing
+is itself narrowed — a damaged database is now rejected by the typed
+`quick_check` gate as the second step of `Db::open`, still before
+`open_db` (D-045); "until the recovery task" now means until the
+recovery _screen_ task (T-024), not the corrupt detection.
 
 Byte-level facts, verified empirically and pinned by tests: a
 rollback-journal (hand-made) database gains nothing from the gate's
@@ -2025,3 +2036,136 @@ verified the suite bites (BOM strip removed → 5 unit failures,
 trailing trim removed → 5, leading-edge drop removed → 9, BOM-run
 strip alone removed → 5, CRLF-pair handling removed → 3 — unit-test
 counts throughout; the doctest fails on top of the first three).
+
+### D-045 — E_DB_CORRUPT: the quick_check gate runs second, before the pragma set; garbage and malformed files are both corrupt — 2026-11-18
+
+Problem: T-020 turns spec §6.3/§10/NFR-007…010/T-F11's damaged-DB half
+into behavior: at startup the app must run `PRAGMA quick_check` and, on
+failure, surface `E_DB_CORRUPT` and head for recovery mode. Open
+questions: where in the `Db::open` chain the check runs (T-018's
+too-new gate is fixed first by DB-004, D-030's pragma set _writes_, and
+D-038's migrations write more); what happens to files quick_check
+cannot meaningfully check (garbage, empty, missing, locked); what
+"recovery mode" means before the recovery screen task (T-024) exists;
+and what the quick_check evidence is on the wire, given D-034 reserved
+`params` for user-visible interpolation and `details` for OS facts.
+
+Solution: `reject_corrupt(db_path)` in `src-tauri/src/db.rs` is the
+**second** step of `Db::open` — after `reject_too_new`, before
+`open_db`. Both directions of that placement are load-bearing. After
+the too-new gate: DB-004 fixes that gate as the first step (D-040),
+its verdict stays decisive on a file that is both too-new and damaged
+(the version is a header fact answered cheaper than a full-file scan,
+and a too-new file never pays the scan — it is presumably healthy).
+Before `open_db`: the DB-001 pragma set writes to the file (the WAL
+switch rewrites the header of a rollback-journal database), and §10's
+`E_DB_CORRUPT` effect starts recovery over a database the app has not
+touched — T-F11's "data not changed", asserted on the bytes (the
+mutation "gate after `open_db`" fails the byte-identity test exactly;
+removing the gate fails the three detection tests). The check runs on
+a bare connection (the D-037/D-040 gate shape) with the gate's own
+5000 ms `busy_timeout`; `quick_check` is read-only, so the D-040
+sidecar facts and accepted boundaries apply verbatim: no `-wal`/`-shm`
+debris on a clean drop, and SQLite's own crash recovery during the
+read (a pending WAL checkpointed, a hot journal rolled back) may move
+bytes while preserving content — learning corruption without opening
+the file would mean re-implementing SQLite's formats.
+
+Skip and degrade conditions, so the gate costs nothing where there is
+nothing to verify and claims nothing it cannot prove: a **missing**
+file and a **0-byte** file (a valid empty SQLite database; the gate
+connection the too-new gate opened may have just created the 0-byte
+one) are not checked at all. `quick_check` reads every page of the
+file, so the skip is also what keeps that cost inside spec §12.2's
+startup budget ("startup until the window is ready", 2 s for set L):
+existing databases pay one full read of the file at every startup —
+mandated by §6.3's own "checked at startup" wording and well inside
+the budget at the §12.2 data-set scale on the reference machine, with
+the release benchmark of §12.2 as the enforcing measurement — and
+fresh launches pay nothing. A read that
+fails for a **non-corruption** reason (busy/locked beyond the timeout,
+an I/O error, an unopenable path) is "cannot verify", not "verified
+corrupt": the gate proceeds and the canonical failure surfaces in
+`open_db`/`run_migrations` — the too-new gate's "unknown → proceed"
+policy (D-040) mirrored here, because a false corrupt verdict would
+steer the user to the destructive empty-database recovery on what may
+be a transient lock (the misclassification D-037 recorded rejecting).
+
+Detection shapes, verified empirically against the bundled build
+(the sqlite3 3.46 CLI plus a first-row C probe; each shape pinned by a
+test): a **garbage** file fails the pragma query at prepare with
+`SQLITE_NOTADB` ("file is not a database") — it is typed `Corrupt`
+too, the same verdict D-037's statement classifier already gives
+notadb (`E_DB_CORRUPT`); subtler damage makes the query **return
+finding rows** instead of erroring — a shrunk in-header page count
+yields "Tree 2 page 2 … invalid page number 3", and a smashed b-tree
+page a row that itself carries the b-tree init error ("*** in
+database main *** / Tree 2 page 2: btreeInitPage() returns error code
+11"), both with the `***` prefix and an embedded newline, carried
+verbatim (the CLI's bare "database disk image is malformed" arrives
+only on rows after the first, which the first-row read never reaches;
+a `SQLITE_CORRUPT` prepare/step failure is nevertheless classified the
+same way — the defensive arm for build-dependent shapes). Only
+`NotADatabase` and `DatabaseCorrupt` failures and non-`ok` first rows
+reject; the shapes are pinned apart by their detail wording ("not a
+database" / "btreeInitPage" vs the page-count finding), so neither
+classification arm can drift into the other silently. One
+honest limitation recorded: quick_check skips index-correlation
+checks (a flipped byte in an index page passed it in verification) —
+that is SQLite's trade-off for the speed §6.3 names, not a gate
+defect; `integrity_check` is the diagnostics screen's on-demand tool,
+not a startup requirement.
+
+The typed error: `DbInitError::Corrupt { path, detail }` — `detail` is
+SQLite's own evidence (finding row or error text), never prose this
+layer composed. `app_error()` is `E_DB_CORRUPT` with the default key
+(`errors.db_corrupt`, no per-instance override needed) and params
+`path` + `detail`, `details: null` (a verdict like TooNew; the
+quick_check evidence is an interpolation value for the recovery
+screen, not an OS fact — D-034's ErrorDetails stays OS-shaped; the
+alternative of growing a quick_check field into ErrorDetails was
+rejected as a wire-contract change the screen task does not need yet).
+`Display` (the startup panic text) names the path, the evidence, the
+§10 effect and the code literal. Startup behavior: the abort policy is
+UNCHANGED (D-027/D-028); "recovery mode" today is honestly the typed
+error + the `logging::db_corrupt` facade line (error level, §10 code +
+params, wired in `setup` before the abort) — the §10 screen (data
+directory path, `db-backups/` list, "Open data folder"/"Start with
+empty database" buttons, the `db_backups_list`/`db_restore_backup`/
+`db_recreate` commands) is T-024's, blocked on exactly this contract;
+the §6.3 "invariant check" (DB-010…) is not this gate either — those
+invariants need the service layer and belong to the diagnostics task.
+This narrows D-037/D-040's "a corrupt file keeps the plain abort until
+the recovery task lands" to "until the recovery _screen_ task lands".
+
+Testing, all through the real `Db::open` seam: three detection shapes
+(finding-rows fixture via a shrunk in-header page count — header and
+`user_version` stay readable so the too-new gate demonstrably passes
+first; malformed-page fixture via a smashed b-tree root page; the
+garbage fixture), each asserting the `E_DB_CORRUPT` wire form (code,
+default key, path + non-empty detail params, `details: null`), the
+byte-identical file, no sidecars, nothing else written and the
+`Display` contents, with the malformed and finding-row details pinned
+to their shape's wording; the same rejection on a **WAL-mode** damaged
+database (the production shape: store-made, settled, then damaged) —
+main file byte-identical and no `-wal`/`-shm` debris, the D-040
+sidecar facts exercised on the rejection path (a corrupt file with
+_pending_ WAL frames stays deliberately untested for D-040's own
+reason: simulating one requires leaking an open connection, which
+breaks the Windows teardown rule; the checkpoint-on-drop is SQLite's
+documented close-time recovery); the empty-file skip (opens as a
+fresh bootstrap); the gate order (too-new wins on a file that is
+both); the honesty guard (an unopenable path — a directory where the
+database belongs — keeps the generic `Open` abort, no typed verdict:
+the same "cannot verify → proceed" branch a busy/locked file takes,
+untestable there without a multi-second stall); the facade line (code
+literal, path, evidence, §10 action; survives `log_level = "error"`);
+and a `lib.rs` wiring pin (facade log before the abort return).
+Mutations verified the suite bites: removing the gate fails exactly
+the three detection tests; moving it after `open_db` fails the
+byte-identity assertions exactly.
+
+No new dependencies. Boundaries unchanged: the store knows no
+`AppError` (D-017) and no quick_check gate — the check is a startup
+gate of the app shell, like the too-new gate before it (D-040);
+src-tauri still depends on `rusqlite_migration` not at all.

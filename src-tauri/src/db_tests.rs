@@ -42,6 +42,11 @@
 //! bottom: a newer database — however it was created — is rejected as
 //! the typed `E_DB_TOO_NEW` error and the file stays byte-identical,
 //! while every other open failure keeps its D-027 abort shape.
+//!
+//! The T-020 gate (spec §6.3/§10, the "damaged DB" half of T-F11)
+//! follows it: a file that fails `PRAGMA quick_check` — a garbage
+//! file, a malformed page, a finding row — is rejected as the typed
+//! `E_DB_CORRUPT` error with the file byte-identical.
 
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -891,46 +896,6 @@ fn a_newer_wal_database_is_rejected_and_leaves_no_sidecar_files() {
 }
 
 #[test]
-fn a_non_database_file_keeps_the_generic_abort_and_is_not_touched() {
-    // Arrange: garbage bytes where the database belongs. The corrupt
-    // file keeps its D-037 behavior — the launch aborts as a plain
-    // open/migration failure (the `E_DB_CORRUPT` recovery screen is
-    // the recovery task's), never as the too-new rejection.
-    let temp = tempfile::tempdir().expect("failed to create a temp directory");
-    crate::data_dirs::ensure_data_layout(temp.path())
-        .expect("creating the data-directory layout must work");
-    let db_path = crate::data_dirs::db_file_path(temp.path());
-    let garbage = b"definitely not a sqlite database, just bytes in the way";
-    std::fs::write(&db_path, garbage).expect("writing the fixture file must work");
-
-    // Act
-    let Err(error) = Db::open(temp.path()) else {
-        panic!("a non-database file must fail the open");
-    };
-
-    // Assert: no typed AppError (the D-027/D-028 abort path), the
-    // message names the database file (the panic prints `Display`),
-    // and the failed open modified nothing.
-    assert!(
-        error.app_error().is_none(),
-        "a corrupt file must not masquerade as a too-new rejection"
-    );
-    assert!(
-        error.to_string().contains(&db_path.display().to_string()),
-        "the abort message must name the database file, got: {error}"
-    );
-    assert!(
-        error.to_string().to_lowercase().contains("not a database"),
-        "the store's corruption reason must stay in the message, got: {error}"
-    );
-    assert_eq!(
-        file_bytes(&db_path),
-        garbage.to_vec(),
-        "the failed open must not modify the file"
-    );
-}
-
-#[test]
 fn a_migration_failure_on_a_now_too_new_file_classifies_as_too_new() {
     // The D-038 backstop of the gate: `reject_too_new` passed, then
     // the file became newer under the open (swapped or rewritten
@@ -1335,6 +1300,474 @@ fn setup_logs_a_rolled_back_migration_through_the_facade_before_aborting() {
             pair[0] < pair[1],
             "lib.rs must log the rolled-back migration through the facade \
              before aborting (UPD-004, D-032); marker positions: {positions:?}"
+        );
+    }
+}
+
+// ---- T-020: the §6.3 quick_check gate (T-F11's damaged-DB half) ---------------
+
+/// Builds a database whose damage `quick_check` reports as a **finding
+/// row**: the file is a valid hand-made SQLite database (header and
+/// `user_version` intact, so the too-new gate passes), but the
+/// in-header page count (offset 28, big-endian) is shrunk below the
+/// pages the file actually holds — the first row `quick_check` returns
+/// is a page-level finding ("Tree 2 page 2 … invalid page number 3" in
+/// the verified shape), not "ok".
+fn database_with_a_quick_check_finding(db_path: &Path) {
+    let connection =
+        rusqlite::Connection::open(db_path).expect("creating the fixture database must work");
+    connection
+        .execute("CREATE TABLE marker (value TEXT NOT NULL)", [])
+        .expect("creating the fixture table must work");
+    // A row big enough to spill the table b-tree past page 2, so the
+    // shrunk page count orphans real content (the verified CLI shape:
+    // a 6000-character text puts the leaf's cell out of the "valid"
+    // page range).
+    connection
+        .execute(
+            "INSERT INTO marker (value) VALUES (hex(randomblob(3000)))",
+            [],
+        )
+        .expect("seeding the fixture row must work");
+    drop(connection);
+
+    let mut bytes = file_bytes(db_path);
+    let page_size = u16::from_be_bytes([bytes[16], bytes[17]]) as usize;
+    let page_size = if page_size == 1 { 65536 } else { page_size };
+    let pages = bytes.len() / page_size;
+    assert!(
+        pages >= 3,
+        "the fixture must hold at least 3 pages (found {pages}), or the \
+         shrunk count has nothing to orphan"
+    );
+    bytes[28..32].copy_from_slice(&((pages - 1) as u32).to_be_bytes());
+    std::fs::write(db_path, &bytes).expect("damaging the fixture file must work");
+}
+
+/// Builds a database whose damage `quick_check` reports as an
+/// **error**: the file's header stays valid (the too-new gate still
+/// reads `user_version`), but the first page after the header page —
+/// the table b-tree root — is overwritten with non-page bytes, so the
+/// check fails with SQLite's own "database disk image is malformed"
+/// instead of returning rows.
+fn database_with_a_malformed_page(db_path: &Path) {
+    let connection =
+        rusqlite::Connection::open(db_path).expect("creating the fixture database must work");
+    connection
+        .execute("CREATE TABLE marker (value TEXT NOT NULL)", [])
+        .expect("creating the fixture table must work");
+    connection
+        .execute("INSERT INTO marker (value) VALUES ('user data')", [])
+        .expect("seeding the fixture row must work");
+    drop(connection);
+
+    let mut bytes = file_bytes(db_path);
+    let page_size = u16::from_be_bytes([bytes[16], bytes[17]]) as usize;
+    let page_size = if page_size == 1 { 65536 } else { page_size };
+    assert!(
+        bytes.len() >= page_size + 16,
+        "the fixture must hold a second page to damage"
+    );
+    // Smash the page-type byte (and a few neighbors) of the table's
+    // root page: no valid b-tree page starts like this.
+    bytes[page_size..page_size + 16].copy_from_slice(b"NOT-A-BTREE-PAGE");
+    std::fs::write(db_path, &bytes).expect("damaging the fixture file must work");
+}
+
+/// Builds a **WAL-mode** damaged database — the production shape: a
+/// database this app's own store made (`open_db` + `run_migrations`;
+/// the clean close checkpoints and settles the file with the WAL
+/// flag in its header and no sidecars), then a page of the settled
+/// file is smashed by hand. The DELETE-mode fixtures above cannot
+/// produce sidecars at all; this fixture makes the gate's bare read
+/// exercise its WAL path — SQLite creates the `-shm`/`-wal` siblings
+/// for the read and must remove them on the clean drop (the D-040
+/// sidecar facts, here on the corrupt rejection path).
+fn damaged_wal_database(db_path: &Path, backups_dir: &Path) {
+    let mut connection = eunomia_store::storage::open_db(db_path)
+        .expect("opening a fresh database through the store must work");
+    eunomia_store::storage::run_migrations(&mut connection, backups_dir)
+        .expect("migrating the fresh database must work");
+    drop(connection);
+
+    let mut bytes = file_bytes(db_path);
+    let page_size = u16::from_be_bytes([bytes[16], bytes[17]]) as usize;
+    let page_size = if page_size == 1 { 65536 } else { page_size };
+    assert!(
+        bytes.len() >= page_size + 16,
+        "the migrated fixture must hold a second page to damage"
+    );
+    // Smash the root page of the first object after the schema page:
+    // the header (and `user_version`) stays valid, the b-tree walk
+    // does not.
+    bytes[page_size..page_size + 16].copy_from_slice(b"NOT-A-BTREE-PAGE");
+    std::fs::write(db_path, &bytes).expect("damaging the fixture file must work");
+}
+
+/// Asserts the §7.10 wire form of a corrupt rejection: the §10
+/// literal `E_DB_CORRUPT`, its default message key, the params a
+/// recovery screen interpolates — the database path and SQLite's own
+/// evidence, non-empty but not pinned word-for-word (SQLite owns that
+/// text) — and `details: null` (a verdict, not an OS failure; D-034's
+/// optional-details contract).
+fn assert_corrupt_wire(app_error: &AppError, db_path: &Path) {
+    let wire = serde_json::to_value(app_error).expect("the typed error must serialize");
+    assert_eq!(wire["code"], serde_json::json!("E_DB_CORRUPT"));
+    assert_eq!(wire["message_key"], serde_json::json!("errors.db_corrupt"));
+    assert_eq!(
+        wire["params"]["path"],
+        serde_json::json!(db_path.display().to_string()),
+        "the params must carry the rejected database path, got: {wire}"
+    );
+    let detail = wire["params"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        !detail.is_empty(),
+        "the params must carry SQLite's quick_check evidence, got: {wire}"
+    );
+    assert_eq!(
+        wire["details"],
+        serde_json::json!(null),
+        "a corrupt rejection carries no OS details, got: {wire}"
+    );
+}
+
+#[test]
+fn a_corrupt_database_is_rejected_as_e_db_corrupt_and_left_byte_identical() {
+    // Arrange: the full layout plus a hand-made database whose damage
+    // `quick_check` reports as a finding row (T-F11's "damaged DB"
+    // half) in rollback journal mode — the file open_db's WAL switch
+    // would rewrite if the gate ran after it.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    database_with_a_quick_check_finding(&db_path);
+    let bytes_before = file_bytes(&db_path);
+
+    // Act: the tested path — the same `Db::open` the `setup` hook
+    // runs.
+    let Err(error) = Db::open(temp.path()) else {
+        panic!("a damaged database must be rejected");
+    };
+
+    // Assert: the typed §10/§7.10 rejection, and §10's "start in
+    // recovery mode" over a database the app did not touch — verified
+    // on the actual bytes (T-F11), with no WAL sidecars and no safety
+    // copies (the gate never opened a WAL-capable connection). The
+    // detail pin proves this is the finding-row shape (SQLite's page
+    // finding), not the error shape — the classification the gate
+    // docs and D-045 document, which would otherwise drift silently.
+    let app_error = error
+        .app_error()
+        .expect("a corrupt rejection must map to the typed AppError");
+    assert_corrupt_wire(&app_error, &db_path);
+    let detail = app_error
+        .params
+        .get("detail")
+        .expect("the corrupt rejection carries SQLite's evidence");
+    assert!(
+        detail.contains("invalid page number"),
+        "the finding-row shape carries SQLite's own page finding, got: {detail}"
+    );
+    assert!(
+        !detail.to_lowercase().contains("malformed"),
+        "a finding row must not be confused with the error shape, got: {detail}"
+    );
+    assert_eq!(
+        file_bytes(&db_path),
+        bytes_before,
+        "the rejected database file must be byte-identical (T-F11)"
+    );
+    let [wal, shm] = sidecar_paths(&db_path);
+    assert!(
+        !wal.exists() && !shm.exists(),
+        "the rejected open must not leave WAL sidecar files behind"
+    );
+    assert_nothing_else_was_written(temp.path(), &db_path);
+    // The panic-path diagnostic (the abort's `Display` is the console
+    // message until the recovery screen exists): it names the path and
+    // the §10 code literal.
+    let message = error.to_string();
+    assert!(
+        message.contains(&db_path.display().to_string())
+            && message.contains("E_DB_CORRUPT")
+            && message.contains("recovery mode"),
+        "the abort message must name the path, the code literal and the \
+         §10 effect, got: {message}"
+    );
+}
+
+#[test]
+fn a_malformed_database_is_rejected_as_e_db_corrupt_and_left_byte_identical() {
+    // The other detection shape: the damage makes `quick_check` itself
+    // fail with SQLite's "database disk image is malformed" error
+    // rather than return a finding row — the rejection must be the
+    // same typed verdict over the same untouched file.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    database_with_a_malformed_page(&db_path);
+    let bytes_before = file_bytes(&db_path);
+
+    // Act
+    let Err(error) = Db::open(temp.path()) else {
+        panic!("a malformed database must be rejected");
+    };
+
+    // Assert: the same typed rejection, the same untouched file. The
+    // detail is SQLite's own evidence (carried verbatim), pinned to
+    // this shape's marker: on the bundled build a malformed image
+    // surfaces as a finding row that itself carries the b-tree init
+    // error — the counterpart of the page-count pin above, so neither
+    // detection shape can drift into the other unnoticed.
+    let app_error = error
+        .app_error()
+        .expect("a malformed database must map to the typed AppError");
+    assert_corrupt_wire(&app_error, &db_path);
+    let detail = app_error
+        .params
+        .get("detail")
+        .expect("the corrupt rejection carries SQLite's evidence");
+    assert!(
+        detail.contains("btreeInitPage"),
+        "the malformed shape carries SQLite's own b-tree error, got: {detail}"
+    );
+    assert!(
+        !detail.contains("invalid page number"),
+        "the malformed shape must not be confused with the page-count finding, got: {detail}"
+    );
+    assert_eq!(
+        file_bytes(&db_path),
+        bytes_before,
+        "the rejected database file must be byte-identical (T-F11)"
+    );
+    assert_nothing_else_was_written(temp.path(), &db_path);
+}
+
+#[test]
+fn a_damaged_wal_database_is_rejected_and_leaves_no_sidecar_files() {
+    // The production shape of the damaged DB: the file is WAL-mode
+    // (this app's own store made it), so the gate's bare read creates
+    // the `-shm`/`-wal` siblings for the read and must remove them on
+    // the clean drop — the D-040 sidecar facts, exercised on the
+    // corrupt rejection path. The DELETE-mode fixtures cannot produce
+    // sidecars at all; this is the meaningful half of the no-debris
+    // assertion.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    let backups_dir = crate::data_dirs::db_backups_dir(temp.path());
+    damaged_wal_database(&db_path, &backups_dir);
+    let bytes_before = file_bytes(&db_path);
+
+    // Act
+    let Err(error) = Db::open(temp.path()) else {
+        panic!("a damaged WAL database must be rejected");
+    };
+
+    // Assert: the typed rejection, the main file byte-identical, and
+    // no sidecar debris next to it.
+    let app_error = error
+        .app_error()
+        .expect("a damaged WAL database must map to the typed AppError");
+    assert_corrupt_wire(&app_error, &db_path);
+    assert_eq!(
+        file_bytes(&db_path),
+        bytes_before,
+        "the rejected WAL database file must be byte-identical (T-F11)"
+    );
+    let [wal, shm] = sidecar_paths(&db_path);
+    assert!(
+        !wal.exists() && !shm.exists(),
+        "the rejected open must not leave WAL sidecar files behind"
+    );
+    assert_nothing_else_was_written(temp.path(), &db_path);
+}
+
+#[test]
+fn an_unopenable_database_path_is_not_a_corrupt_verdict() {
+    // The gate's honesty guard: a path the bare open cannot even open
+    // (here: a directory where the database belongs — `metadata` sees
+    // a non-empty "file") is "cannot verify", not "verified corrupt":
+    // the gate proceeds and `open_db` produces the canonical generic
+    // abort naming the path. The same branch covers a busy/locked file
+    // beyond the busy timeout — untestable without a multi-second
+    // stall, so this test pins the branch's other arm.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    std::fs::create_dir(&db_path).expect("creating a directory at the db path must work");
+
+    // Act
+    let Err(error) = Db::open(temp.path()) else {
+        panic!("an unopenable path must fail the open");
+    };
+
+    // Assert: the generic `Open` abort with no typed verdict — the
+    // corrupt rejection must not fire on a file that could not be
+    // read at all.
+    assert!(
+        matches!(error, crate::db::DbInitError::Open { .. }),
+        "an unopenable path must keep the generic Open abort, got: {error:?}"
+    );
+    assert!(
+        error.app_error().is_none(),
+        "no typed verdict may be invented for an unopenable path"
+    );
+    assert!(
+        error.to_string().contains(&db_path.display().to_string()),
+        "the abort message must name the database path, got: {error}"
+    );
+}
+
+#[test]
+fn a_non_database_file_is_rejected_as_e_db_corrupt_and_not_touched() {
+    // Arrange: garbage bytes where the database belongs — the third
+    // detection shape: `quick_check` fails at prepare with
+    // SQLITE_NOTADB, "file is not a database". Until T-020 this kept
+    // the D-037 generic abort; the integrity gate now types it. It
+    // must still never masquerade as the too-new rejection.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    let garbage = b"definitely not a sqlite database, just bytes in the way";
+    std::fs::write(&db_path, garbage).expect("writing the fixture file must work");
+
+    // Act
+    let Err(error) = Db::open(temp.path()) else {
+        panic!("a non-database file must fail the open");
+    };
+
+    // Assert: the typed `E_DB_CORRUPT` rejection with SQLite's own
+    // "not a database" evidence in the params, the message naming the
+    // file (the panic prints `Display`), and the failed open having
+    // modified nothing.
+    let app_error = error
+        .app_error()
+        .expect("a garbage file must map to the typed corrupt rejection");
+    assert_corrupt_wire(&app_error, &db_path);
+    assert!(
+        !matches!(error, crate::db::DbInitError::TooNew { .. }),
+        "a garbage file must not masquerade as a too-new rejection"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(&db_path.display().to_string()),
+        "the abort message must name the database file, got: {message}"
+    );
+    let detail = app_error
+        .params
+        .get("detail")
+        .expect("the corrupt rejection carries SQLite's evidence");
+    assert!(
+        detail.to_lowercase().contains("not a database"),
+        "SQLite's corruption reason must stay in the detail, got: {detail}"
+    );
+    assert_eq!(
+        file_bytes(&db_path),
+        garbage.to_vec(),
+        "the failed open must not modify the file"
+    );
+}
+
+#[test]
+fn an_empty_database_file_is_not_corrupt_and_opens() {
+    // The gate's skip condition (T-F11 says "data not changed", not
+    // "every file must pass the check"): a 0-byte file is a valid
+    // empty SQLite database — nothing to verify — so the open proceeds
+    // as a fresh bootstrap instead of failing the integrity check.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    std::fs::write(&db_path, b"").expect("creating the empty fixture file must work");
+
+    // Act & Assert: the open succeeds and migrates the empty file —
+    // the version fact a fresh bootstrap leaves behind.
+    let db = Db::open(temp.path()).expect("an empty database file must open, not fail the check");
+    let probed = db.clone();
+    let version = async_runtime::block_on(probed.run(|tx| {
+        tx.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .map_err(sqlite_error_to_app_error)
+    }))
+    .expect("reading user_version through the executor must work");
+    assert_eq!(version, app_schema_version());
+}
+
+#[test]
+fn a_too_new_and_damaged_database_answers_too_new_first() {
+    // The gates' order: DB-004 fixes the too-new gate as the first
+    // step (D-040), so a file that is both newer than the app and
+    // damaged answers "too new" — the cheaper, header-only verdict —
+    // and never pays the full-file scan or surfaces the damage.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    database_with_a_quick_check_finding(&db_path);
+    {
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .pragma_update(None, "user_version", app_schema_version() + 1)
+            .expect("bumping user_version must work");
+    }
+    let bytes_before = file_bytes(&db_path);
+
+    // Act
+    let Err(error) = Db::open(temp.path()) else {
+        panic!("a newer database must be rejected");
+    };
+
+    // Assert: the too-new rejection, not the corrupt one, over the
+    // same untouched file.
+    assert!(
+        matches!(error, crate::db::DbInitError::TooNew { .. }),
+        "the too-new gate must decide before the integrity gate, got: {error:?}"
+    );
+    assert_eq!(
+        file_bytes(&db_path),
+        bytes_before,
+        "the rejected database file must be byte-identical (T-F11)"
+    );
+}
+
+#[test]
+fn setup_logs_a_corrupt_database_through_the_facade_before_aborting() {
+    // Arrange & Act: `lib.rs`, compile-time constant, comments
+    // stripped (the shared helper). The corrupt branch of the DB step
+    // must log through its own facade event before returning the
+    // error that aborts the launch (§6.3/§10; the same wiring shape as
+    // the too-new and migration pins above).
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    let markers = [
+        "db::Db::open(&data_dir)",
+        "logging::db_corrupt(",
+        "return Err(error.into());",
+    ];
+    let positions: Vec<usize> = markers
+        .iter()
+        .map(|marker| {
+            assert_eq!(
+                lib.matches(marker).count(),
+                1,
+                "lib.rs must contain `{marker}` exactly once, live (a \
+                 commented-out or duplicated line must not count)"
+            );
+            lib.find(marker)
+                .expect("the exactly-once check above guarantees one match")
+        })
+        .collect();
+
+    // Assert: open, facade log, abort — in that order.
+    for pair in positions.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "lib.rs must log the corrupt rejection through the facade \
+             before aborting (§6.3, D-032); marker positions: {positions:?}"
         );
     }
 }

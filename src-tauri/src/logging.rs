@@ -340,6 +340,32 @@ pub(crate) fn db_migration_failed(error: &AppError) {
     );
 }
 
+/// The startup integrity gate rejected the database file as damaged
+/// (spec §6.3, §10): `PRAGMA quick_check` failed — the §10
+/// `E_DB_CORRUPT` row, "Start in recovery mode" over the untouched
+/// file (the list of `db-backups/` copies and the "start with an
+/// empty database" option are the recovery screen's, the future
+/// recovery task's). Logged at `error` on purpose: the launch aborts
+/// on this verdict, so the line must stay visible at
+/// `log_level = "error"` (the same reasoning as [`db_too_new`]).
+///
+/// The payload is the error's own §7.10 vocabulary — the code literal
+/// and its interpolation params (the database path and SQLite's own
+/// `quick_check` evidence), values already curated by the error
+/// contract; nothing free-text enters the log (SEC-008 — SQLite's
+/// finding describes pages, never instruction text or file content,
+/// and is machine-generated).
+pub(crate) fn db_corrupt(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::db",
+        code = error.code.as_str(),
+        params = ?error.params,
+        "database failed the startup integrity check (quick_check); the \
+         app does not change the database — start in recovery mode: pick \
+         a copy from db-backups/ or an empty database"
+    );
+}
+
 /// A file operation on a project's library file — the SEC-008 core
 /// event. The upcoming variant, sync and backup tasks log through this
 /// helper: it takes the operation code, the file's path and the numeric
@@ -878,6 +904,72 @@ mod tests {
         drop(guard);
         assert!(
             read_log_file(&root_strict).contains("code=\"E_UPDATE_FAILED\""),
+            "the abort verdict must survive log_level = \"error\""
+        );
+        drop(temp_strict);
+    }
+
+    #[test]
+    fn a_corrupt_database_logs_its_code_path_and_evidence() {
+        // Arrange: the §10 shape of the rejection — the `E_DB_CORRUPT`
+        // code with the database path and SQLite's own quick_check
+        // evidence as its interpolation params (the payload
+        // `DbInitError::app_error` builds; the param values themselves
+        // are pinned by the db suite, this test pins what the facade
+        // does with them).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+        let mut error = AppError::new(crate::errors::ErrorCode::DbCorrupt);
+        error.params.insert(
+            "path".to_owned(),
+            temp.path()
+                .join("db")
+                .join("eunomiasync.sqlite3")
+                .display()
+                .to_string(),
+        );
+        error.params.insert(
+            "detail".to_owned(),
+            "*** in database main ***\nTree 2 page 2: invalid page number 3".to_owned(),
+        );
+
+        // Act: the `setup` hook's call for this §10 situation.
+        tracing::subscriber::with_default(subscriber, || {
+            db_corrupt(&error);
+        });
+        drop(guard);
+
+        // Assert: the line carries the code literal (§10: "every error
+        // is written to the log with its code … path …"), the path and
+        // SQLite's evidence from the params, and the §10 recovery
+        // action.
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("code=\"E_DB_CORRUPT\""),
+            "the log line must carry the §10 code literal, got: {log}"
+        );
+        assert!(
+            log.contains("eunomiasync.sqlite3") && log.contains("invalid page number"),
+            "the log line must carry the path and the quick_check evidence, \
+             got: {log}"
+        );
+        assert!(
+            log.contains("recovery mode"),
+            "the log line must name the §10 effect, got: {log}"
+        );
+
+        // And the verdict survives the strictest level: the launch
+        // aborts on it, so `log_level = "error"` must not filter it.
+        let (temp_strict, root_strict) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root_strict, LogLevel::Error)
+            .expect("building the subscriber must work");
+        tracing::subscriber::with_default(subscriber, || {
+            db_corrupt(&error);
+        });
+        drop(guard);
+        assert!(
+            read_log_file(&root_strict).contains("code=\"E_DB_CORRUPT\""),
             "the abort verdict must survive log_level = \"error\""
         );
         drop(temp_strict);

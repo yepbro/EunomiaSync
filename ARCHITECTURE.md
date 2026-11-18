@@ -241,7 +241,21 @@ and an "unknown" verdict (unreadable version) degrading the
 rejection to the post-pragma backstop. A migration-run failure on a
 file that became newer mid-open is classified from the version fact
 the same way (the app layer's mapping of the store's
-`DatabaseTooFarAhead`, D-038). Only then do `open_db` +
+`DatabaseTooFarAhead`, D-038). As the **second** step, the integrity
+gate (spec §6.3, DECISIONS.md D-045) runs `PRAGMA quick_check` on an
+existing, non-empty file — still on a bare, read-only connection,
+still before `open_db`, so a damaged database is rejected as the
+typed `DbInitError::Corrupt` (wire form `E_DB_CORRUPT` with the path
+and SQLite's own finding as params) with the file byte-identical
+(T-F11's damaged-DB half); a missing or 0-byte file skips the check
+(a valid empty database — nothing to verify, so a first launch pays
+nothing), garbage fails it with `SQLITE_NOTADB`, a malformed image
+with `SQLITE_CORRUPT`, and any non-corruption read failure
+(busy/locked, I/O) degrades to the canonical failure one step later
+instead of a false corrupt verdict. §10's "start in recovery mode"
+is, until the recovery screen task lands, this typed error, the
+`logging::db_corrupt` facade line and the abort (the same honest
+boundary as the too-new screen). Only then do `open_db` +
 `run_migrations` run (the store stays the only SQLite/schema owner).
 A migration step that fails is rolled back by its own transaction;
 the failure surfaces as the typed `DbInitError::Migration` (UPD-004,

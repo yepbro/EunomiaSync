@@ -202,36 +202,46 @@ pub fn run() {
             // D-037). Like the layout and config steps, a failure
             // aborts the launch — without the database there is
             // nothing to run — but unlike them this step runs after
-            // logging is up, so its two typed §10 situations are also
-            // observable in the log file (the other failures surface
-            // through the startup panic's `Display` text; logging
-            // those §10 lines belongs to the recovery task, which
-            // owns their screens). A database newer than this app
-            // (DB-004, NFR-010) is one of them: the seam rejects it
-            // before anything touches the file and hands back the
+            // logging is up, so its three typed §10 situations are
+            // also observable in the log file (the other failures
+            // surface through the startup panic's `Display` text;
+            // logging those §10 lines belongs to the recovery task,
+            // which owns their screens). A database newer than this
+            // app (DB-004, NFR-010) is one of them: the seam rejects
+            // it before anything touches the file and hands back the
             // typed `E_DB_TOO_NEW` `AppError`
             // (`DbInitError::app_error`), logged here through the
-            // facade with its §10 code. A migration step that failed
-            // and was rolled back (UPD-004) is the other: the error
-            // names the pre-migration copy, and the typed
-            // `E_UPDATE_FAILED` form is logged through its own facade
-            // event before the abort. A migration failure *without* a
-            // copy (the run created the database) deliberately gets no
-            // facade line: not the UPD-004 situation, it keeps the
-            // D-027 anonymous-abort treatment — the panic `Display` is
-            // its report, and its §10 line belongs to the recovery
-            // task like every generic init failure's (D-043). The
-            // launch still aborts either way (D-027/D-028: nothing to
-            // run without the database); the screens the §10/UPD-004
-            // rows assign to these situations are the future
-            // recovery/update task's to build — the typed errors and
-            // these log lines are its contract.
+            // facade with its §10 code. A database damaged enough to
+            // fail `PRAGMA quick_check` (spec §6.3, NFR-007…010,
+            // T-F11's damaged-DB half) is the second: rejected the
+            // same way — before the pragma set can touch the file —
+            // and logged as `E_DB_CORRUPT`; §10's "start in recovery
+            // mode" is, for now, this typed error and abort (the
+            // screen with the `db-backups/` list is the future
+            // recovery task's, blocked on this contract). A migration
+            // step that failed and was rolled back (UPD-004) is the
+            // third: the error names the pre-migration copy, and the
+            // typed `E_UPDATE_FAILED` form is logged through its own
+            // facade event before the abort. A migration failure
+            // *without* a copy (the run created the database)
+            // deliberately gets no facade line: not the UPD-004
+            // situation, it keeps the D-027 anonymous-abort treatment
+            // — the panic `Display` is its report, and its §10 line
+            // belongs to the recovery task like every generic init
+            // failure's (D-043). The launch still aborts either way
+            // (D-027/D-028: nothing to run without the database); the
+            // screens the §10/UPD-004 rows assign to these situations
+            // are the future recovery/update task's to build — the
+            // typed errors and these log lines are its contract.
             let database = match db::Db::open(&data_dir) {
                 Ok(database) => database,
                 Err(error) => {
                     match (&error, error.app_error()) {
                         (db::DbInitError::TooNew { .. }, Some(app_error)) => {
                             logging::db_too_new(&app_error);
+                        }
+                        (db::DbInitError::Corrupt { .. }, Some(app_error)) => {
+                            logging::db_corrupt(&app_error);
                         }
                         (db::DbInitError::Migration { .. }, Some(app_error)) => {
                             logging::db_migration_failed(&app_error);

@@ -11,10 +11,13 @@
 //!   `run_migrations`, safety copies into the layout's `db-backups/`
 //!   included (D-038) — but only after a DB-004 gate rejects a
 //!   database newer than this app as the very first step, before
-//!   anything can touch the file (NFR-010, `E_DB_TOO_NEW`). The app
-//!   shell applies no SQLite flags or pragmas itself (the gate's bare
-//!   connection only reads), and the store crate stays the only
-//!   schema owner (D-010/D-017).
+//!   anything can touch the file (NFR-010, `E_DB_TOO_NEW`), and an
+//!   integrity gate runs `PRAGMA quick_check` as the second step
+//!   (spec §6.3, `E_DB_CORRUPT`, T-F11's damaged-DB half) — both on
+//!   bare, read-only connections, because every later step writes.
+//!   The app shell applies no SQLite flags or pragmas itself beyond
+//!   the gates' read-only `busy_timeout`, and the store crate stays
+//!   the only schema owner (D-010/D-017).
 //! - [`Db::run`] is the executor every future database command goes
 //!   through: it moves the operation onto the blocking thread pool
 //!   with [`tauri::async_runtime::spawn_blocking`] (SYS-001), locks
@@ -157,19 +160,25 @@ impl Db {
     /// DB-001 pragma set *writes* to the file (the `journal_mode=WAL`
     /// switch rewrites the header of a rollback-journal database), and
     /// §10's `E_DB_TOO_NEW` effect is "The app does not change the
-    /// database" (T-F11: the file stays byte-identical). Only then
-    /// does `eunomia_store::storage::open_db` apply the pragma set
-    /// (D-030) — it creates the file when missing, but never the
-    /// parent directory: the caller (the `setup` hook) must have
-    /// created the data-directory layout first — both halves of it,
-    /// because `run_migrations` needs the existing `db-backups/` for
-    /// its safety copies before it applies anything (D-038). Both
-    /// paths are derived here from the one `data_dir` root through
-    /// the `data_dirs` helpers, so the file and its backups cannot
-    /// drift apart at a call site.
+    /// database" (T-F11: the file stays byte-identical). As the
+    /// **second** step, the integrity gate ([`reject_corrupt`]) runs
+    /// `PRAGMA quick_check` (spec §6.3) on an existing, non-empty file
+    /// — still on a bare, read-only connection, still before
+    /// `open_db`, for the same reason: a damaged database is rejected
+    /// as the typed `E_DB_CORRUPT` §10 situation with the file
+    /// byte-identical (T-F11's damaged-DB half). Only then does
+    /// `eunomia_store::storage::open_db` apply the pragma set (D-030)
+    /// — it creates the file when missing, but never the parent
+    /// directory: the caller (the `setup` hook) must have created the
+    /// data-directory layout first — both halves of it, because
+    /// `run_migrations` needs the existing `db-backups/` for its
+    /// safety copies before it applies anything (D-038). Both paths
+    /// are derived here from the one `data_dir` root through the
+    /// `data_dirs` helpers, so the file and its backups cannot drift
+    /// apart at a call site.
     ///
-    /// Sidecar files of the rejected open, recorded for T-F11: the
-    /// gate's bare connection only *reads*, which writes nothing — a
+    /// Sidecar files of the rejected open, recorded for T-F11: both
+    /// gates' bare connections only *read*, which writes nothing — a
     /// rollback-journal (default-mode) database gains no `-wal`/`-shm`
     /// siblings at all, and for a database already in WAL mode SQLite
     /// creates both siblings for the read and removes them again when
@@ -191,26 +200,28 @@ impl Db {
     ///
     /// Returns [`DbInitError::TooNew`] when the database was created
     /// by a newer app version (its typed wire form is
-    /// [`DbInitError::app_error`]), [`DbInitError::Migration`] when a
-    /// migration step fails — the step's transaction was rolled back,
-    /// the database keeps its schema and data, and the error carries
-    /// the copy of that state plus the "install the previous app
-    /// version" instruction (spec UPD-004) — and [`DbInitError::Open`]
-    /// when the file cannot be opened or configured, WAL cannot be
-    /// enabled, or a safety copy cannot be written. A startup failure
-    /// of any of these kinds aborts the launch: without the database
-    /// there is nothing to run — the same policy as the layout and
-    /// config steps (D-027/D-028) — and unlike them this step runs
-    /// after logging is up, so the two typed §10 situations (too-new,
-    /// rolled-back migration) are also logged through the facade with
-    /// their §10 codes (`logging::db_too_new`,
+    /// [`DbInitError::app_error`]), [`DbInitError::Corrupt`] when
+    /// `quick_check` rejects the file as damaged (spec §6.3 — the
+    /// typed wire form is `E_DB_CORRUPT`), [`DbInitError::Migration`]
+    /// when a migration step fails — the step's transaction was rolled
+    /// back, the database keeps its schema and data, and the error
+    /// carries the copy of that state plus the "install the previous
+    /// app version" instruction (spec UPD-004) — and
+    /// [`DbInitError::Open`] when the file cannot be opened or
+    /// configured, WAL cannot be enabled, or a safety copy cannot be
+    /// written. A startup failure of any of these kinds aborts the
+    /// launch: without the database there is nothing to run — the same
+    /// policy as the layout and config steps (D-027/D-028) — and
+    /// unlike them this step runs after logging is up, so the three
+    /// typed §10 situations (too-new, corrupt, rolled-back migration)
+    /// are also logged through the facade with their §10 codes
+    /// (`logging::db_too_new`, `logging::db_corrupt`,
     /// `logging::db_migration_failed`, wired in the `setup` hook). The
-    /// §10 screens both errors describe — "Update the app" for
+    /// §10 screens the three errors describe — "Update the app" for
     /// `E_DB_TOO_NEW`, recovery for `E_DB_CORRUPT` — are the future
-    /// recovery/update task's to build; the typed error on this seam
-    /// is their contract, and a corrupt file keeps aborting as a plain
-    /// open/migration failure until then
-    /// (`db_verify`/`db_restore_backup`/`db_recreate`).
+    /// recovery/update task's to build (`db_verify`/
+    /// `db_restore_backup`/`db_recreate`); the typed errors on this
+    /// seam are their contract, and the launch aborts until they land.
     pub(crate) fn open(data_dir: &Path) -> Result<Self, DbInitError> {
         let db_path = crate::data_dirs::db_file_path(data_dir);
         let backups_dir = crate::data_dirs::db_backups_dir(data_dir);
@@ -218,6 +229,11 @@ impl Db {
         // newer database is rejected before the pragma set can touch
         // the file (see the method docs).
         reject_too_new(&db_path)?;
+        // §6.3/§10 order: the integrity gate runs next, still before
+        // `open_db` — `quick_check` is read-only, so a damaged
+        // database is rejected with the file untouched (T-F11) while
+        // the pragma set would already have written to it.
+        reject_corrupt(&db_path)?;
         let mut connection =
             eunomia_store::storage::open_db(&db_path).map_err(|source| DbInitError::Open {
                 path: db_path.clone(),
@@ -312,12 +328,13 @@ impl Db {
 /// one, exactly what `open_db` would create a moment later), the
 /// parent directory is missing, the bytes are not a database, a lock
 /// that outlasts the timeout — has its canonical failure mode one step
-/// later, in `open_db` or `run_migrations` (D-030's `StorageError::Open`
-/// names the path; a corrupt file keeps its D-037 abort). Claiming
-/// "too new" for a version that could not be read would misclassify
-/// those cases and bypass their errors; D-040 records that an
-/// "unknown" verdict degrades the byte-identity guarantee to the
-/// backstop, which runs after the pragmas.
+/// later: a damaged file in the integrity gate ([`reject_corrupt`],
+/// `E_DB_CORRUPT`), everything else in `open_db` or `run_migrations`
+/// (D-030's `StorageError::Open` names the path). Claiming "too new"
+/// for a version that could not be read would misclassify those cases
+/// and bypass their errors; D-040 records that an "unknown" verdict
+/// degrades the byte-identity guarantee to the backstop, which runs
+/// after the pragmas.
 fn schema_version_of(db_path: &Path) -> Option<i64> {
     let connection = Connection::open(db_path).ok()?;
     // Same 5000 ms as `open_db`'s DB-001 set (the constant lives in
@@ -355,6 +372,126 @@ fn reject_too_new(db_path: &Path) -> Result<(), DbInitError> {
         });
     }
     Ok(())
+}
+
+/// The §6.3/§10 startup integrity gate (NFR-007…010, T-F11's
+/// damaged-DB half): an **existing, non-empty** database file must
+/// pass `PRAGMA quick_check` before the app opens it for real.
+///
+/// Placement in [`Db::open`]'s chain — after the too-new gate, before
+/// `open_db` — is the load-bearing decision, in both directions:
+///
+/// - *After* [`reject_too_new`]: DB-004 fixes that gate as the first
+///   step (D-040), and its verdict stays decisive on a file that is
+///   both too new and damaged — the version is a header fact the gate
+///   answers cheaper (one pragma read) than a full-file scan. A file
+///   that is only too new is presumably healthy (a newer app made it)
+///   and never pays the scan.
+/// - *Before* `open_db`: the DB-001 pragma set **writes** to the file
+///   (the `journal_mode=WAL` switch rewrites the header of a
+///   rollback-journal database, D-030/D-040), and §10's `E_DB_CORRUPT`
+///   effect starts recovery mode over a database the app has not
+///   touched — T-F11's "data not changed" criterion, asserted on the
+///   bytes in the tests below (the mutation "gate after `open_db`"
+///   fails the byte-identity assertion exactly).
+///
+/// The check runs on a **bare** connection — no DB-001 pragma set, the
+/// same D-037/D-040 shape as the too-new gate; src-tauri owning
+/// `Connection` directly for a read-only startup gate. `quick_check`
+/// is read-only: a rollback-journal database gains no `-journal` or
+/// sidecars from it, and for a database already in WAL mode SQLite
+/// creates the `-shm`/`-wal` siblings for the read and removes them on
+/// the clean drop (the D-040 sidecar facts, verbatim). The accepted
+/// D-040 boundaries apply here too, all of them SQLite's own crash
+/// recovery running during the read — bytes move, logical content
+/// does not: a WAL with pending frames is checkpointed by the clean
+/// drop, and a hot rollback journal is rolled back.
+///
+/// Skip conditions, so the gate costs nothing where there is nothing
+/// to verify: a **missing** file (a fresh first launch — the bare
+/// `Connection::open` the too-new gate already performed may have
+/// created a 0-byte one) and a **0-byte** file (a valid empty SQLite
+/// database; `quick_check` would answer "ok") are not checked at all.
+/// `quick_check` reads every page of the file, so this skip is also
+/// the performance boundary the spec's "at startup" wording leaves
+/// open: existing databases pay one full read at every startup (spec
+/// §6.3 names the check there), fresh launches pay nothing.
+///
+/// Only a **definitive** corruption verdict rejects. SQLite reports
+/// damage in two shapes, both handled (verified empirically against
+/// the bundled build; both pinned by tests):
+///
+/// - the pragma query itself fails — a garbage file at prepare with
+///   `SQLITE_NOTADB` ("file is not a database"); a
+///   `SQLITE_CORRUPT` prepare/step failure is classified the same way
+///   (the same-verdict arm; on the bundled build a malformed image
+///   instead surfaces as the first finding row below, and the query
+///   only errors on rows after it, which the first-row read never
+///   reaches);
+/// - the query returns a first row other than `ok` — a finding,
+///   carried verbatim: a shrunk page count yields "Tree 2 page 2 …
+///   invalid page number 3", and a smashed b-tree page a row that
+///   itself carries the b-tree init error ("*** in database main ***
+///   / Tree 2 page 2: btreeInitPage() returns error code 11") — both
+///   possibly with the `***` prefix and an embedded newline.
+///
+/// Every other failure of the read — busy/locked beyond the timeout,
+/// an I/O error, an unopenable file — is *not* a corruption verdict:
+/// the gate proceeds and the canonical failure surfaces one step
+/// later in `open_db`/`run_migrations` (D-030's `StorageError::Open`
+/// names the path). Claiming "corrupt" for a file that could not be
+/// read would steer the user to the destructive recovery on what may
+/// be a transient lock — the same misclassification D-037 recorded
+/// rejecting. This mirrors the too-new gate's "unknown → proceed"
+/// policy (D-040) with the same consequence: a corrupt file whose
+/// read fails for a non-corruption reason degrades to the generic
+/// abort instead of the typed verdict.
+fn reject_corrupt(db_path: &Path) -> Result<(), DbInitError> {
+    // Skip the missing and the empty: nothing to verify (see the
+    // method docs). `metadata` failing on an existing-but-unstatable
+    // path is also "cannot verify" — `open_db` reports it canonically.
+    let exists_non_empty = std::fs::metadata(db_path).is_ok_and(|metadata| metadata.len() > 0);
+    if !exists_non_empty {
+        return Ok(());
+    }
+    // A file the bare open cannot even open is not a corruption
+    // verdict either (permissions, a directory): proceed, and let
+    // `open_db` produce the canonical failure.
+    let Ok(connection) = Connection::open(db_path) else {
+        return Ok(());
+    };
+    // Same 5000 ms as `open_db`'s DB-001 set and the too-new gate (the
+    // constant lives in the store); duplicated here for the same
+    // reason — the gate must decide before the pragma set runs.
+    let _ = connection.busy_timeout(std::time::Duration::from_millis(5000));
+    match connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0)) {
+        // `quick_check` answers exactly "ok" on a healthy database.
+        Ok(finding) if finding == "ok" => Ok(()),
+        // A finding row: SQLite's own evidence, verbatim.
+        Ok(finding) => Err(DbInitError::Corrupt {
+            path: db_path.to_owned(),
+            detail: finding,
+        }),
+        // The check itself failed on the file — definitive damage: on
+        // the bundled build this arm fires for a garbage file
+        // (`NotADatabase`, "file is not a database"); a
+        // `DatabaseCorrupt` failure is classified the same way. The
+        // message is SQLite's own, not prose composed here.
+        Err(error @ rusqlite::Error::SqliteFailure(sqlite_error, _))
+            if matches!(
+                sqlite_error.code,
+                SqliteCode::NotADatabase | SqliteCode::DatabaseCorrupt
+            ) =>
+        {
+            Err(DbInitError::Corrupt {
+                path: db_path.to_owned(),
+                detail: error.to_string(),
+            })
+        }
+        // Anything else is "cannot verify", not "verified corrupt":
+        // proceed to the canonical failure (see the method docs).
+        Err(_) => Ok(()),
+    }
 }
 
 /// Classifies a `run_migrations` failure for [`Db::open`]: the
@@ -532,17 +669,19 @@ pub(crate) fn sqlite_error_to_app_error(error: rusqlite::Error) -> AppError {
 /// app: …`, which prints the `Display` form, so the path must be in
 /// the message itself (D-027's reasoning, applied here too).
 ///
-/// Two variants are named user situations rather than anonymous
+/// Three variants are named user situations rather than anonymous
 /// infrastructure failures: [`DbInitError::TooNew`] (DB-004/NFR-010) —
 /// a database created by a newer app version, which the app must not
-/// change and the user answers with "Update the app" — and
-/// [`DbInitError::Migration`] (spec UPD-004) — a migration step that
-/// failed and was rolled back, leaving the database unchanged, with
-/// the user's remedy "install the previous app version" and the
+/// change and the user answers with "Update the app" —
+/// [`DbInitError::Corrupt`] (spec §6.3/§10, NFR-007…010) — a database
+/// damaged enough to fail `PRAGMA quick_check`, which the app must
+/// not change either and the user answers from the recovery screen —
+/// and [`DbInitError::Migration`] (spec UPD-004) — a migration step
+/// that failed and was rolled back, leaving the database unchanged,
+/// with the user's remedy "install the previous app version" and the
 /// pre-migration copy as the pointer. Their typed §7.10/§10 wire
 /// forms are [`DbInitError::app_error`]; every other failure stays an
-/// open error that aborts the launch (D-027/D-028 — the corrupt-file
-/// recovery screen is the recovery task's).
+/// open error that aborts the launch (D-027/D-028).
 #[derive(Debug)]
 pub(crate) enum DbInitError {
     /// The file could not be opened or configured — every failure
@@ -590,6 +729,24 @@ pub(crate) enum DbInitError {
         /// The latest schema version this app knows.
         app_schema_version: usize,
     },
+    /// The database file is damaged: `PRAGMA quick_check` failed (spec
+    /// §6.3, §10 `E_DB_CORRUPT`, NFR-007…010, T-F11's damaged-DB half).
+    /// Detected as the second step of [`Db::open`], after the too-new
+    /// gate and before `open_db` — the DB-001 pragma set *writes* to
+    /// the file, and §10's effect is "Start in recovery mode" on an
+    /// unchanged file. `detail` is SQLite's own evidence, carried
+    /// verbatim: the finding row `quick_check` returned (a page-level
+    /// finding, or — for a malformed image on the bundled build — a
+    /// row that itself carries the b-tree init error), or the error
+    /// message when the query itself failed (a garbage file's "file is
+    /// not a database") — never prose this layer composed.
+    Corrupt {
+        /// The rejected database file.
+        path: PathBuf,
+        /// SQLite's own finding or error text, carried to the wire
+        /// params and the log verbatim.
+        detail: String,
+    },
 }
 
 impl DbInitError {
@@ -602,10 +759,16 @@ impl DbInitError {
     /// to `E_UPDATE_FAILED` with the `errors.update_migration_failed`
     /// message key and the database and copy paths as params — see
     /// that arm's comment for why that code is the registry's best
-    /// carrier. `None` for every other init failure (including a
-    /// migration failure without a copy: not the UPD-004 situation):
-    /// their effect is the D-027/D-028 abort, and inventing a code for
-    /// them is the registry gap D-037 records.
+    /// carrier. A damaged database maps to `E_DB_CORRUPT` (§10) with
+    /// the path and SQLite's own `quick_check` evidence as params —
+    /// the contract the recovery screen (§10's effect: data directory
+    /// path, `db-backups/` list, "Open data folder" and "Start with
+    /// empty database") interpolates; the default key fits
+    /// (`errors.db_corrupt`, no per-instance override needed). `None`
+    /// for every other init failure (including a migration failure
+    /// without a copy: not the UPD-004 situation): their effect is the
+    /// D-027/D-028 abort, and inventing a code for them is the
+    /// registry gap D-037 records.
     pub(crate) fn app_error(&self) -> Option<AppError> {
         match self {
             DbInitError::TooNew {
@@ -625,6 +788,19 @@ impl DbInitError {
                     "app_schema_version".to_owned(),
                     app_schema_version.to_string(),
                 );
+                Some(error)
+            }
+            DbInitError::Corrupt { path, detail } => {
+                // A verdict, not an OS failure: the quick_check evidence
+                // is SQLite's own text, and `details` (UI-011's collapsed
+                // OS section) stays null like the other verdicts' — the
+                // finding travels as an interpolation param so the
+                // recovery screen can show it inline next to the path.
+                let mut error = AppError::new(ErrorCode::DbCorrupt);
+                error
+                    .params
+                    .insert("path".to_owned(), path.display().to_string());
+                error.params.insert("detail".to_owned(), detail.clone());
                 Some(error)
             }
             DbInitError::Migration {
@@ -743,6 +919,16 @@ impl fmt::Display for DbInitError {
                     path.display()
                 )
             }
+            DbInitError::Corrupt { path, detail } => {
+                write!(
+                    f,
+                    "the database at {} is damaged and cannot be opened: \
+                     {detail}; the app does not change the database — \
+                     start in recovery mode and pick a copy from \
+                     db-backups/ or an empty database (E_DB_CORRUPT)",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -753,10 +939,10 @@ impl std::error::Error for DbInitError {
             DbInitError::Open { source, .. } | DbInitError::Migration { source, .. } => {
                 Some(source.as_ref())
             }
-            // A verdict, not a wrapper: the version facts are the
-            // whole failure, already in the message and the typed
-            // `AppError`.
-            DbInitError::TooNew { .. } => None,
+            // A verdict, not a wrapper: the version facts and the
+            // quick_check evidence are the whole failure, already in
+            // the message and the typed `AppError`.
+            DbInitError::TooNew { .. } | DbInitError::Corrupt { .. } => None,
         }
     }
 }
