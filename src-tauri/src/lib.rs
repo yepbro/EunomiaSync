@@ -11,6 +11,11 @@ use tauri_specta::{Builder, collect_commands};
 
 pub mod commands;
 
+// The IPC error contract (spec §7.10, §10): AppError and the MVP
+// error-code registry, exported to the frontend through the specta
+// builder below.
+pub(crate) mod errors;
+
 // The machine-level `config.toml` (spec §5.8, SYS-011…013) is needed on
 // every platform, exactly like the app itself.
 pub(crate) mod config;
@@ -31,7 +36,17 @@ pub(crate) mod single_instance;
 /// Constructs the tauri-specta builder with all commands and events
 /// registered. Shared by the app entry point and the binding export test.
 pub fn specta_builder() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new().commands(collect_commands![commands::greet,])
+    Builder::<tauri::Wry>::new()
+        .commands(collect_commands![commands::greet,])
+        // `AppError` (§7.10: every command returns `Result<T, AppError>`)
+        // is registered directly instead of through a command signature:
+        // the one existing command (`greet`) cannot fail, and faking
+        // `Result<String, AppError>` on it would advertise an error path
+        // that never occurs. `typ` is tauri-specta's documented mechanism
+        // for types not reachable from commands or events; the type (and
+        // its `ErrorCode`/`ErrorDetails` dependencies) reaches
+        // `src/bindings.ts` through it, pinned by `errors_tests.rs`.
+        .typ::<errors::AppError>()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -175,6 +190,9 @@ pub fn run() {
 mod config_tests;
 
 #[cfg(test)]
+mod errors_tests;
+
+#[cfg(test)]
 mod ipc_tests;
 
 #[cfg(test)]
@@ -185,10 +203,30 @@ mod tests {
     /// bindings in sync with the Rust command definitions. Run
     /// `cargo test -p eunomia-sync` after changing any command, then commit
     /// the updated file.
+    ///
+    /// The export is followed by an equality check: the file is read back
+    /// after the export and compared with the content `include_str!`
+    /// embedded at compile time (before this test rewrote the working-tree
+    /// copy). A developer who changed the Rust contract but has not
+    /// regenerated `src/bindings.ts` sees the test red on that first run —
+    /// the same run performs the regeneration, so repeating it is green;
+    /// CI, which compiles the committed file before any export, stays red
+    /// until the regenerated file is committed. Without the check the test
+    /// would silently rewrite the file and stay green (D-034; tightened in
+    /// the T-013 review).
     #[test]
     fn export_bindings_are_up_to_date() {
         specta_builder()
             .export(Typescript::default(), "../src/bindings.ts")
             .expect("Failed to export typescript bindings");
+        let on_disk = std::fs::read_to_string("../src/bindings.ts")
+            .expect("the exported bindings file must be readable");
+        assert_eq!(
+            on_disk,
+            include_str!("../../src/bindings.ts"),
+            "src/bindings.ts is stale: the committed bindings differ from \
+             what the registered commands and types generate — commit the \
+             regenerated file"
+        );
     }
 }

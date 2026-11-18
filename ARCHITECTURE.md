@@ -36,6 +36,7 @@ crates/
     migrations/            #   Embedded SQL migration files
 src-tauri/
   src/commands.rs          # Tauri commands (via tauri-specta)  (working)
+  src/errors.rs            # AppError + MVP error-code registry  (working)
   src/lib.rs               # App builder, specta registration   (working)
   state                    # Managed app state                  (planned)
 src/                      # Frontend
@@ -71,6 +72,17 @@ Rust commands are registered through `tauri-specta`:
 
 **Rule: no raw `invoke()` calls in the frontend.** Always use the generated
 `commands` (see DECISIONS.md D-003).
+
+The error half of the contract — `AppError` (spec §7.10: every command
+returns `Result<T, AppError>`) — lives in `src-tauri/src/errors.rs`: the
+twenty-code MVP registry of the spec §10 table (`E_SYNC_RUNNING` …
+`E_UPDATE_FAILED`; the two P1 codes of that table are deliberately
+excluded until their tasks land), the stable default `message_key` per
+code, interpolation `params`, and structured `details` carrying the OS
+error code/kind/message. It reaches `src/bindings.ts` through the specta
+builder's `typ` registration (`greet` cannot fail, so no command
+signature carries it yet); `errors_tests.rs` pins the registration and
+the exported literal set. DECISIONS.md D-034 records the field design.
 
 ## Plugins
 

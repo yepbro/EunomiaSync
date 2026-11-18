@@ -1206,7 +1206,10 @@ fn app_defines_no_acl_manifest() {
 /// text, so it can never over-detect a marker — the worst case is a
 /// string-embedded comment delimiter hiding a live marker, which fails
 /// the pin with its exactly-once message instead of passing silently.
-fn strip_comments(source: &str) -> String {
+///
+/// Shared with the other test modules (`errors_tests.rs` pins its wiring
+/// markers over comment-stripped sources the same way).
+pub(crate) fn strip_comments(source: &str) -> String {
     let mut stripped = String::with_capacity(source.len());
     let mut rest = source;
     while !rest.is_empty() {

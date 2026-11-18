@@ -11,3 +11,209 @@ export const commands = {
 	 */
 	greet: (name: string, options?: InvokeOptions) => __TAURI_INVOKE<string>("greet", { name }, options),
 };
+
+/* Types */
+/**
+ *  The error every Tauri command returns in its `Result` (spec §7.10).
+ *  A localization contract, not a Rust error type — see the module docs
+ *  for the field-by-field rationale and the no-`From` policy.
+ * 
+ *  Invariant for direct constructors (the fields are `pub(crate)` for the
+ *  future command tasks): `message_key` must belong to `code` — its
+ *  [`ErrorCode::message_key`] default, or a deliberate member of the
+ *  code's message family (`E_VALIDATION`). A key from a different code
+ *  would render the wrong localized text with the wrong params; the UI
+ *  trusts the pairing.
+ */
+export type AppError = AppError_Serialize | AppError_Deserialize;
+
+/**
+ *  The error every Tauri command returns in its `Result` (spec §7.10).
+ *  A localization contract, not a Rust error type — see the module docs
+ *  for the field-by-field rationale and the no-`From` policy.
+ * 
+ *  Invariant for direct constructors (the fields are `pub(crate)` for the
+ *  future command tasks): `message_key` must belong to `code` — its
+ *  [`ErrorCode::message_key`] default, or a deliberate member of the
+ *  code's message family (`E_VALIDATION`). A key from a different code
+ *  would render the wrong localized text with the wrong params; the UI
+ *  trusts the pairing.
+ */
+export type AppError_Deserialize = {
+	/**
+	 *  What happened — one of the twenty MVP codes (spec §10), serialized
+	 *  as the code's spec literal.
+	 */
+	code: ErrorCode,
+	/**
+	 *  The i18n key the UI resolves (NFR-006/NFR-018). Defaults to
+	 *  [`ErrorCode::message_key`]; overridden per-instance by codes with
+	 *  message families (e.g. `E_VALIDATION`).
+	 */
+	message_key: string,
+	/**
+	 *  Interpolation values for the localized message (UI-011's
+	 *  "where": path, project, …). Deterministically ordered.
+	 */
+	params: { [key in string]: string },
+	/**
+	 *  Technical details for the collapsed "Details" section (UI-011):
+	 *  the OS code, kind, and message, when the failure came from the
+	 *  OS. `null` when there is nothing technical to attach.
+	 */
+	details?: ErrorDetails_Deserialize | null,
+};
+
+/**
+ *  The error every Tauri command returns in its `Result` (spec §7.10).
+ *  A localization contract, not a Rust error type — see the module docs
+ *  for the field-by-field rationale and the no-`From` policy.
+ * 
+ *  Invariant for direct constructors (the fields are `pub(crate)` for the
+ *  future command tasks): `message_key` must belong to `code` — its
+ *  [`ErrorCode::message_key`] default, or a deliberate member of the
+ *  code's message family (`E_VALIDATION`). A key from a different code
+ *  would render the wrong localized text with the wrong params; the UI
+ *  trusts the pairing.
+ */
+export type AppError_Serialize = {
+	/**
+	 *  What happened — one of the twenty MVP codes (spec §10), serialized
+	 *  as the code's spec literal.
+	 */
+	code: ErrorCode,
+	/**
+	 *  The i18n key the UI resolves (NFR-006/NFR-018). Defaults to
+	 *  [`ErrorCode::message_key`]; overridden per-instance by codes with
+	 *  message families (e.g. `E_VALIDATION`).
+	 */
+	message_key: string,
+	/**
+	 *  Interpolation values for the localized message (UI-011's
+	 *  "where": path, project, …). Deterministically ordered.
+	 */
+	params: { [key in string]: string },
+	/**
+	 *  Technical details for the collapsed "Details" section (UI-011):
+	 *  the OS code, kind, and message, when the failure came from the
+	 *  OS. `null` when there is nothing technical to attach.
+	 */
+	details: ErrorDetails_Serialize | null,
+};
+
+/**
+ *  The closed registry of MVP error codes — the `Code` column of the
+ *  spec §10 table, exactly the twenty codes the T-013 card lists.
+ * 
+ *  Each variant serializes to its spec §10 literal; those strings are
+ *  the wire and log contract (§7.10, §10) and are pinned in
+ *  `src/bindings.ts` by `errors_tests.rs`. The two P1 codes of the §10
+ *  table are deliberately absent — see the module docs for the boundary.
+ */
+export type ErrorCode = 
+/**  A second sync run, or a project edit during a sync. */
+"E_SYNC_RUNNING" | 
+/**  A folder without `.git` is being added as a project. */
+"E_NOT_A_REPO" | 
+/**  The project folder moved, was deleted, or cannot be read. */
+"E_PROJECT_UNAVAILABLE" | 
+/**  No write rights to the folder, or the target file is read-only. */
+"E_NO_WRITE_ACCESS" | 
+/**  The target path is a directory. */
+"E_TARGET_IS_DIR" | 
+/**  The target path is a dangling symlink. */
+"E_TARGET_BROKEN_LINK" | 
+/**  The target path resolves outside the project root. */
+"E_TARGET_OUTSIDE_ROOT" | 
+/**  Scheme B markers are missing, repeated, or out of order. */
+"E_MARKERS_INVALID" | 
+/**  The scheme B target file is not valid UTF-8. */
+"E_NOT_UTF8" | 
+/**  A backup was not created, or failed its verification check. */
+"E_BACKUP_FAILED" | 
+/**  No space left on the backups or the project volume. */
+"E_DISK_FULL" | 
+/**  The target file is locked by another process; retries exhausted. */
+"E_FILE_LOCKED" | 
+/**  Writing the target file failed. */
+"E_WRITE_FAILED" | 
+/**  The post-write hash verification failed. */
+"E_VERIFY_FAILED" | 
+/**  Instruction text contains a scheme B marker line. */
+"E_CONTENT_RESERVED" | 
+/**  A field failed validation (spec table 6.9). */
+"E_VALIDATION" | 
+/**  The database is busy; `busy_timeout` expired. */
+"E_DB_LOCKED" | 
+/**  The database failed `quick_check`; recovery screen required. */
+"E_DB_CORRUPT" | 
+/**  The database was created by a newer app version. */
+"E_DB_TOO_NEW" | 
+/**  The update check or installation failed. */
+"E_UPDATE_FAILED";
+
+/**
+ *  The technical half of an error — what UI-011 collapses into the
+ *  "Details" section: the OS-level facts behind the failure, attached by
+ *  [`AppError::with_os_error`]. Every field is optional on the wire:
+ *  hand-built details (and non-OS failures) may carry any subset.
+ */
+export type ErrorDetails = ErrorDetails_Serialize | ErrorDetails_Deserialize;
+
+/**
+ *  The technical half of an error — what UI-011 collapses into the
+ *  "Details" section: the OS-level facts behind the failure, attached by
+ *  [`AppError::with_os_error`]. Every field is optional on the wire:
+ *  hand-built details (and non-OS failures) may carry any subset.
+ */
+export type ErrorDetails_Deserialize = {
+	/**
+	 *  The OS error code — `std::io::Error::raw_os_error()`: an errno on
+	 *  Unix, `GetLastError()` on Windows. §10 names it as a first-class
+	 *  fact of every error log line, and UI-011 shows it as the "why".
+	 */
+	os_code?: number | null,
+	/**
+	 *  The portable error category — `std::io::ErrorKind`'s Debug name
+	 *  (`"PermissionDenied"`, `"StorageFull"`, …). The fallback that
+	 *  keeps a diagnostic value on platforms and errors that carry no
+	 *  raw OS code (BKP-005: "OS code **or** error type").
+	 */
+	os_kind?: string | null,
+	/**
+	 *  The underlying error's `Display` text (e.g.
+	 *  `"Permission denied (os error 13)"`) — raw diagnostic material
+	 *  for the copyable Details section, never interpolated into the
+	 *  localized message (NFR-006).
+	 */
+	os_message?: string | null,
+};
+
+/**
+ *  The technical half of an error — what UI-011 collapses into the
+ *  "Details" section: the OS-level facts behind the failure, attached by
+ *  [`AppError::with_os_error`]. Every field is optional on the wire:
+ *  hand-built details (and non-OS failures) may carry any subset.
+ */
+export type ErrorDetails_Serialize = {
+	/**
+	 *  The OS error code — `std::io::Error::raw_os_error()`: an errno on
+	 *  Unix, `GetLastError()` on Windows. §10 names it as a first-class
+	 *  fact of every error log line, and UI-011 shows it as the "why".
+	 */
+	os_code: number | null,
+	/**
+	 *  The portable error category — `std::io::ErrorKind`'s Debug name
+	 *  (`"PermissionDenied"`, `"StorageFull"`, …). The fallback that
+	 *  keeps a diagnostic value on platforms and errors that carry no
+	 *  raw OS code (BKP-005: "OS code **or** error type").
+	 */
+	os_kind: string | null,
+	/**
+	 *  The underlying error's `Display` text (e.g.
+	 *  `"Permission denied (os error 13)"`) — raw diagnostic material
+	 *  for the copyable Details section, never interpolated into the
+	 *  localized message (NFR-006).
+	 */
+	os_message: string | null,
+};

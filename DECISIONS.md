@@ -975,6 +975,106 @@ the file log (`max_log_files` unset): spec sets none for the tracing log
 until a task decides otherwise — a conscious omission, not an oversight.
 `cargo-deny` is green for the two new crates.
 
+### D-034 — AppError: the §7.10 wire DTO with a 20-code registry, exported via `Builder::typ` — 2026-11-18
+
+Problem: T-013 turns §7.10's `AppError` (every command returns
+`Result<T, AppError>`) into code, and left open: the field shapes
+(`params` vs `details`, where the OS error code lands); the form and
+ownership of `message_key`; how the type reaches `src/bindings.ts` while
+the only registered command (`greet`) cannot fail; whether `thiserror`
+joins; and how the two P1 codes of the §10 table relate to the enum.
+
+Solution: `src-tauri/src/errors.rs` (pub(crate) — the app shell owns the
+IPC contract; `eunomia-core` stays pure logic with no specta edge).
+Four decisions inside it. (1) `ErrorCode` is a closed 20-variant enum —
+exactly the card's MVP list — with per-variant `#[serde(rename)]`, so
+the wire form IS the spec §10 literal (`"E_SYNC_RUNNING"` …); explicit
+renames keep the contract greppable, and the two P1 codes
+(`E_RESTORE_SOURCE_MISSING`, `E_IMPORT_INVALID`) are deliberately absent
+until their tasks land (documented in the module docs, pinned absent).
+(2) `message_key` is a `String` field, not an enum: one code can reach
+several messages (the `E_VALIDATION` family names the failed field), so
+the key is per-error; `ErrorCode::message_key()` supplies the stable
+default (`errors.<snake_case>`, the UI-020 key style), installed by
+`AppError::new`. The key strings are the frontend contract (NFR-006:
+the UI localizes by key and interpolates params — never backend prose);
+both the defaults and the code literals are pinned by tests with
+hardcoded spec-derived strings. (3) `params` is a `BTreeMap<String,
+String>` — interpolation values (UI-011's "where": path, project),
+string-typed for locale interpolation, ordered for deterministic wire
+form and logs. The string-only value type is a recorded policy, not an
+oversight: UI-020's ICU plurals take the count as an interpolation
+argument and vue-i18n accepts digit strings there, so numeric params
+travel as strings rather than widening the wire type to a JSON value
+union (a weaker TS record, and no MVP message needs one; widening later
+is a coordinated contract change, exactly like renaming a key). The OS
+facts do NOT live there: `details` is a typed
+`ErrorDetails { os_code, os_kind, os_message }` — UI-011's collapsed
+"why" section — attached by `AppError::with_os_error` from
+`raw_os_error()` with `ErrorKind`'s Debug name as the portable fallback
+(BKP-005: "OS code or error type"). §10 makes the OS code a first-class
+fact of every error log line; burying it among interpolation params
+would force the UI to fish diagnostics out of message placeholders.
+`ErrorDetails` is deliberately OS-shaped for the MVP; future technical
+facts of non-OS failures (the expected/actual hash of `E_VERIFY_FAILED`,
+`quick_check` output of `E_DB_CORRUPT`) extend it additively — optional
+fields are null on old producers and ignored by old consumers — and the
+error-UI task must render `details` inside the message block (not only
+behind the collapsed section) where BKP-005 demands the OS code in the
+visible message.
+(4) No `From<std::io::Error>`: which code an OS failure maps to is
+context-dependent (a permission error is `E_NO_WRITE_ACCESS` in
+preflight but `E_BACKUP_FAILED` in the backup phase), so conversion is
+an explicit constructor call at the future command boundaries — and no
+`thiserror`: the type is a serialization DTO, neither `Display` nor
+`std::error::Error`, nothing propagates it with `?` (the crate's
+internal failures keep their own enums, like `ConfigError`/`StorageError`).
+
+Reachability: the specta builder registers the type directly —
+`Builder::typ::<AppError>()`, tauri-specta's documented mechanism for
+types not reachable from a command signature. The alternative (faking
+`Result<String, AppError>` on `greet`) was rejected: it would advertise
+an error path that never occurs, and `greet` keeps its honest `String`
+return until real fallible commands replace it. A side effect recorded
+for consumers: specta-typescript emits each serde struct as an
+`X | X_Serialize | X_Deserialize` alias pair (the sides differ on
+optional fields), so `AppError` appears in bindings.ts as three type
+declarations sharing the doc comment.
+
+Enforcement: `errors_tests.rs` pins the wiring (`.typ::<…>()` exactly
+once in comment-stripped `lib.rs` — without the pin, dropping the
+registration would leave `export_bindings_are_up_to_date` green while it
+silently rewrites the committed bindings without the type; verified by
+mutation) and the committed `src/bindings.ts` (embedded at compile
+time): the `AppError`/`ErrorCode`/`ErrorDetails` declarations with the
+four §7.10 field spellings, all twenty literals present in the
+`ErrorCode` union, exactly twenty `E_*` literals in the union (both
+directions), and the P1 literals absent (over doc-stripped text —
+specta exports Rust doc comments into the bindings, and they legitimately
+contain `;` (the `E_DB_CORRUPT` doc) which would otherwise truncate the
+union, and may legitimately mention codes which must not trip the
+absence pin). Behavior tests in `errors.rs` cover the serde round-trip
+(params/details/null-details), the literal↔variant mapping for all
+twenty codes, the stable default keys, and the card's OS criterion end
+to end (errno 13 → serialized `details.os_code == 13`, kind fallback for
+code-less I/O errors). `ErrorCode::as_str()` gives the producing tasks
+the §10 literal without going through serde, pinned equal to both the
+serde output and the spec table; the default-key mapping is matched
+exhaustively inside the test module, so a new variant fails compilation
+of the suite until the registries are extended (round-1 review
+tightening; the same review also made `export_bindings_are_up_to_date`
+compare the regenerated file against the compile-time-embedded one: the
+first run after a contract change is red and performs the regeneration,
+and CI stays red on a stale committed file). The
+module has no production caller yet — `#[allow(dead_code)]` with the
+tested-today/consumed-later note, the same shape as the `logging.rs`
+SEC-008 facade; error logging itself stays with the producing tasks
+(D-032), and the first fallible-command task adds the `ipc_tests.rs`
+case asserting the rejected invoke payload equals the §7.10 shape (the
+DTO's serde behavior is proven today; the Tauri rejection envelope is
+not, because no command returns it yet). No new dependencies: serde,
+specta, serde_json were already resolved.
+
 ### D-035 — Time library: chrono replaced with jiff 1.x — 2026-11-18
 
 Problem: chrono is RUSTSEC-2026-0543 (unmaintained, all versions affected,
