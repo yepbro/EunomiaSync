@@ -184,12 +184,12 @@ impl Db {
         let mut connection =
             eunomia_store::storage::open_db(&db_path).map_err(|source| DbInitError {
                 path: db_path.clone(),
-                source,
+                source: Box::new(source),
             })?;
         eunomia_store::storage::run_migrations(&mut connection, &backups_dir).map_err(
             |source| DbInitError {
                 path: db_path,
-                source,
+                source: Box::new(source),
             },
         )?;
         Ok(Db {
@@ -380,8 +380,11 @@ pub(crate) struct DbInitError {
     path: PathBuf,
     /// The store-layer failure: open/pragma (`StorageError::Open`),
     /// WAL (`StorageError::JournalMode`) or migration
-    /// (`StorageError::Migration`).
-    source: eunomia_store::storage::StorageError,
+    /// (`StorageError::Migration`). Boxed: `StorageError` grew past
+    /// clippy's `result_large_err` threshold once the settings
+    /// repository (T-028) added its `Settings` variant, and this error
+    /// crosses the `Result` return of [`Db::open`] on every startup.
+    source: Box<eunomia_store::storage::StorageError>,
 }
 
 impl fmt::Display for DbInitError {
