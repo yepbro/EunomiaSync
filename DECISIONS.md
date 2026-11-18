@@ -720,6 +720,7 @@ version enters the graph (cargo-deny green). The on-disk key spelling is
 the spec's literal `log_level` (snake_case); the `LogLevel` enum is
 lowercase-serialized so the five SYS-012 words are the only accepted
 values.
+
 ### D-030 — `open_db` applies the DB-001 pragma set; pragma defaults make three of four mutations unobservable — 2026-11-17
 
 Problem: spec DB-001 requires `journal_mode=WAL`, `foreign_keys=ON`,
