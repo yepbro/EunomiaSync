@@ -22,6 +22,16 @@ yanked = "warn"
 # RUSTSEC-2026-0372, no safe upgrade available) are tolerated until
 # upstream ships a fix.
 unmaintained = "workspace"
+# chrono is RUSTSEC-2026-0543 (unmaintained, no safe upgrade: all versions
+# affected). It is pinned by spec 5.3 and was previously present in
+# Cargo.lock only as an unused optional edge of serde_with — eunomia-store's
+# direct dependency (DECISIONS.md D-031) puts it into the build graph for
+# the first time, which the workspace-only unmaintained rule above fails.
+# Switching to jiff/time is a spec-level decision, not a task-level one;
+# revisit this ignore when the spec's time library changes.
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono is spec-pinned (5.3) with no safe upgrade; this direct edge puts it into the build graph for the first time (previously only an unused optional edge of serde_with); see DECISIONS.md D-031" },
+]
 
 [bans]
 multiple-versions = "warn"

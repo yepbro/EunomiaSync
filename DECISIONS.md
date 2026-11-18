@@ -794,3 +794,72 @@ requirement (DB file `0600`) is not implemented here and needs a
 dedicated task before release.
 
 (D-028 and D-029 are held by the parallel configuration task, T-011.)
+
+### D-031 — UUIDv7 and UTC timestamp helpers: uuid `now_v7` monotonicity, minimal chrono features — 2026-11-18
+
+Problem: DB-002 (spec §6.1) fixes row identifiers as UUIDv7 TEXT and
+timestamps as UTC ISO-8601 strings with milliseconds
+(`2026-11-17T13:03:22.123Z`), and the tech table (§5.3) names `uuid` v7 and
+`chrono` — adding both is a dependency decision (D-012 policy). The card
+(T-015) also demands a monotonicity guarantee that survives
+same-millisecond generation: RFC 9562 orders UUIDv7 across milliseconds
+by construction, but within one millisecond the order depends on the
+generator (a counter per RFC 9562 §6.2, "Monotonicity and Counters" —
+not every library ships one).
+
+Solution: three parts. (1) The helpers live in the new `eunomia-store`
+module `values` — `new_id()` and `now_utc()`, both returning `String`:
+TEXT is the storage contract, and no newtype wrapper is invented before a
+first consumer exists. (2) Monotonicity rides on the `uuid` crate's
+documented contract instead of a hand-rolled counter:
+`Uuid::now_v7()` (uuid 1.29.3) guarantees "all UUIDs generated through
+this method by the same process are guaranteed to be ordered by their
+creation", implemented with a process-wide `Mutex<ContextV7>` shared
+context — a 42-bit counter reseeded with 41 random bits at each new
+millisecond, incremented within the millisecond, with backward clock
+jitter absorbed (the context keeps the maximum observed timestamp and the
+counter keeps running) and counter overflow handled by bumping the
+timestamp (the RFC 9562 §6.2 counter method; verified in the crate
+sources, `src/v7.rs` and `src/timestamp.rs`). The guarantee is per-process
+only; the module docs state that nothing may rely on cross-process
+ordering, and that after a backward clock step an id's embedded time can
+run ahead of the wall clock — the guarantee covers ordering, so an id is
+never a time source. The monotonicity tests are deterministic, not
+timing-dependent. A 1000-generation tight loop completes inside one
+millisecond on any realistic machine, so it pins the same-millisecond
+counter path; a companion test sleeps 2 ms between two generations
+(`thread::sleep` sleeps at least the requested duration, so a
+millisecond boundary necessarily passes) and pins the cross-millisecond
+timestamp-bits path. Both regimes are ordered by the same per-process
+contract. (3) Formatting:
+`Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)` — always
+exactly three fractional digits and always the `Z` suffix (the UTC offset
+is zero by construction); chrono formats `nanos / 1_000_000`, so
+sub-millisecond precision truncates toward zero rather than rounding.
+That truncation edge is documented in the helper's doc comment but not
+pinned by a test — pinning it would require clock injection and a seam
+for it is not invented here (the same honest-boundary reasoning as
+D-030's pragma defaults).
+
+Dependencies: `uuid = "1"` with feature `v7` (rng-backed counter
+reseeding on top of default `std`), and `chrono = "0.4"` with
+`default-features = false, features = ["now"]` — `now` (= `std` +
+`alloc`) covers `Utc::now()` and `to_rfc3339_opts`; the `clock` feature
+(which would pull `iana-time-zone` for local time — that serves the
+app-layer creation marker per spec §5.3), the wasm bindings, and the
+empty legacy `oldtime` feature are not requested. Lockfile facts,
+corrected during the round-1 review: uuid 1.29.3 was already an active
+dependency workspace-wide (via tauri's ecosystem), so that edge adds
+nothing to the build; chrono 0.4.45 sat in Cargo.lock only as an unused
+optional edge of serde_with — nothing compiled it before, so this task
+puts chrono into the build graph for the first time (still no new crate
+_version_ — the same lockfile-reuse pattern as D-029's `toml = "1"`).
+One cargo-deny consequence: chrono carries RUSTSEC-2026-0543
+(unmaintained, no safe upgrade — all versions affected; the advisory
+recommends jiff or `time`). With no previous workspace dependent there
+was nothing being tolerated before; the new direct edge is what trips
+deny.toml's `unmaintained = "workspace"` rule, so deny.toml carries a
+scoped `ignore` for that advisory ID with this entry as its reason.
+Switching the time library is a spec-level decision (§5.3 names chrono),
+not a task-level one; the ignore keeps the gate meaningful for every
+other unmaintained direct dependency.

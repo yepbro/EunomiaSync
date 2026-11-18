@@ -32,6 +32,7 @@ crates/
     src/atomic.rs          #   Atomic writes with retries         (skeleton)
   eunomia-store/           # Database layer (SQLite), no Tauri dependency
     src/storage.rs         #   SQLite storage + migrations   (working)
+    src/values.rs          #   UUIDv7 ids, ISO-8601 UTC times (working)
     migrations/            #   Embedded SQL migration files
 src-tauri/
   src/commands.rs          # Tauri commands (via tauri-specta)  (working)

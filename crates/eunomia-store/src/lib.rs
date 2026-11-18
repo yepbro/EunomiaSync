@@ -6,3 +6,4 @@
 //! tested independently of the UI layer (see DECISIONS.md D-010).
 
 pub mod storage;
+pub mod values;
