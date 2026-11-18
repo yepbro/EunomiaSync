@@ -296,3 +296,23 @@ suite (build/fmt/clippy/test/deny); empty `#[test] fn it_works()` markers
 were rejected as proving nothing. The module boundaries are the crate's
 public contract: implementing tasks fit their code into the declared
 modules, and a boundary change requires its own DECISIONS.md entry.
+
+### D-020 — App identifier set to pro.yepbro.eunomiasync — 2026-11-17
+
+Problem: the scaffold carried `com.yepbro.eunomiasync` in `tauri.conf.json`,
+while spec 5.5, REL-004 and UPD-005 fix the bundle ID as `pro.yepbro.eunomiasync`.
+The identifier is also the last path component of the data directory
+(`app_local_data_dir()` = `<local_data_dir>/<identifier>`), so changing it
+relocates the folder that holds the database, backups, config, and logs.
+
+Solution: the identifier in `src-tauri/tauri.conf.json` is set to
+`pro.yepbro.eunomiasync`, and the `authors` field of `src-tauri/Cargo.toml`
+names the owner (`Den Brooks <denis@yepbro.pro>`). Compatibility: the app is
+pre-release with no existing installations, so the old `com.yepbro.eunomiasync`
+data folder needs no migration; on every OS the data directory ends with
+`pro.yepbro.eunomiasync` per the spec 5.5 table (Windows
+`%LOCALAPPDATA%/pro.yepbro.eunomiasync/`, macOS
+`~/Library/Application Support/pro.yepbro.eunomiasync/`, Linux
+`$XDG_DATA_HOME/pro.yepbro.eunomiasync/`, default `~/.local/share/...`).
+`src-tauri/src/config_tests.rs` pins the identifier — and with it
+`app_local_data_dir()` on all OSes — against the spec value.

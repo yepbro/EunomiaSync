@@ -2,7 +2,7 @@
 name = "eunomia-sync"
 version.workspace = true
 description = "EunomiaSync desktop client — keep AGENTS.md files in sync across projects"
-authors = ["EunomiaSync contributors"]
+authors = ["Den Brooks <denis@yepbro.pro>"]
 edition.workspace = true
 license.workspace = true
 publish = false
