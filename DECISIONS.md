@@ -788,6 +788,12 @@ check) — that decision and the `run_migrations` behavior change belong
 to that task, not to T-014; the documented contract lives in the
 `run_migrations` doc comment.
 
+Addendum (2026-11-18, T-017/D-038): the "wraps every migration in its
+own transaction" claim above holds only when a single migration is
+applied per call — `to_latest` batches ALL pending migrations into one
+transaction (`goto_up`), and D-038's stepping loop is what actually
+guarantees DB-004's per-migration transaction for multi-step hops.
+
 Also recorded: `open_db` creates a new database file with the OS
 default mode (`0644` under a typical umask on Unix), so the SEC-007
 requirement (DB file `0600`) is not implemented here and needs a
@@ -1214,3 +1220,129 @@ which is safe only because the app is pre-release with no installed or
 shared database (D-020); a developer database created from the old stub
 reports `user_version = 1` and would keep the `meta` table, so it has
 to be deleted by hand.
+
+### D-038 — Pre-migration `VACUUM INTO` backups; per-migration transactions require stepping `to_version` — 2026-11-18
+
+Problem: DB-004 (spec §6.1) requires a `VACUUM INTO` copy in
+`db-backups/` before a migration and its own transaction for every
+migration, but `run_migrations` called `Migrations::to_latest` with no
+backup at all. Five decisions were open: what counts as an "existing"
+database, which version `<N>` in the file name refers to, the timestamp
+format (the canonical `now_utc()` contains `:`, which a Windows file name
+cannot), how the crate learns the backup directory (§5.5 puts the
+data-directory layout in the app layer), and — discovered while reading
+the rusqlite_migration 2.7 sources — that `to_latest` does NOT give each
+migration its own transaction: `goto_up` (lib.rs 618–654) wraps the whole
+`current_version..target_version` range in one transaction, so a
+multi-step hop v1→v3 would commit all steps together. D-030's
+"rusqlite_migration 2.7 wraps every migration in its own transaction" is
+true only for one-step calls; this entry supersedes that claim.
+
+Solution: `run_migrations(conn, backup_dir)` — the signature change is
+free: every caller lived in the store crate's tests, and src-tauri had
+none yet. The backup directory is an explicit parameter (the crate knows
+no data directory and creates none, mirroring `open_db`'s no-parent
+policy of D-027/D-030): a run needing a copy with a missing or
+non-directory `backup_dir` fails with the new
+`StorageError::Backup { path, source: BackupError }`
+(`Directory`/`Sqlite`/`Io`) _before_ any migration is applied. The run
+returns the `Vec<PathBuf>` of copies it wrote (empty for fresh and no-op
+runs) so the app layer can log them through the D-032 facade without
+re-listing the directory.
+
+Semantics, decided per the card's guidance:
+
+- _Existing_ = `PRAGMA user_version > 0` **at the start of the run**. A
+  run from version 0 writes no copies at all — including when it applies
+  several migrations — because a database created by this run holds no
+  user state. A crash mid-bootstrap restarts as "existing" at the last
+  committed step and then backs up before the next step: correctness
+  over one noise copy.
+- Per-step: before EACH migration of an upgrade run, one copy named
+  `pre-migration-v<N>-<UTC>.sqlite3` with `N` = the **source** version —
+  the copy preserves exactly that state, which is what UPD-004's rollback
+  pointer and `db_restore_backup` consume. A v1→v3 hop yields
+  `pre-migration-v1-*` and `pre-migration-v2-*`.
+- Each migration is committed in its own transaction by stepping
+  `Migrations::to_version` one version at a time (each call opens its own
+  transaction, `goto_up`); this loop, not a library guarantee, is what
+  satisfies DB-004's per-migration transaction. A failing step rolls back
+  alone and leaves the database at the last committed step with the
+  earlier steps' copies intact.
+- `<UTC>` is `YYYYMMDDTHHMMSSSSSZ` — 19 characters, millisecond
+  resolution, from jiff `Timestamp::now()` formatted
+  `"%Y%m%dT%H%M%S%3fZ"` (jiff's `%3f` prints the fractional seconds
+  without the leading dot; same jiff dependency as `values`, D-035, no
+  new crate). Name collisions — two copies within one millisecond, a
+  backward clock step — get `-1`, `-2`, … before the extension (capped
+  at 1000 attempts), and existing copies are never overwritten, so a
+  recovery copy survives a retry. The future app-layer backup names
+  (ERR-001's `daily-YYYYMMDD.sqlite3`, §7.10's
+  `pre-recovery-<UTC>.sqlite3`) should reuse this stamp format; the
+  helpers stay private until that task lifts them.
+- Crash safety: the copy is staged under `<final>.tmp` and linked into
+  place with `hard_link` (the temporary is removed afterwards) — a
+  rename would silently replace an existing destination on every
+  supported platform, while the link fails on an occupied name, closing
+  the check-then-act window of the name search. The final name thus only
+  ever appears complete. The millisecond stamp makes the next run land
+  on a fresh name, so leftover `.tmp` debris is swept at the start of
+  every upgrade run (`pre-migration-v*.sqlite3.tmp` only — foreign
+  `.tmp` files are not the crate's to delete); the same-name removal
+  inside the write path covers the fixed-name tests. Filesystem
+  mutations (unlink, link) retry the spec §9.5 backoff — a sharing
+  violation or access denied is retried three times with 100/300/900 ms
+  pauses — because an antivirus scanner briefly holding a freshly
+  created file must not abort the run; other errors surface immediately,
+  and once the hard link is in place the temporary's removal is
+  best-effort (the copy is complete; the sweep collects the debris).
+  Deliberately omitted: fsync of the staged file
+  and the backup directory — not portable through `std`, and the
+  producing connection already runs SQLite's own `synchronous=FULL`
+  discipline (D-030); a power-loss window is accepted and the §9.5
+  fsync points belong to the `eunomia-fs` atomic module (D-019) if that
+  boundary ever absorbs backup writes. A retry after a crash between
+  copy and migration simply writes a second, equally valid copy.
+- A database newer than the set still errors
+  (`MigrationDefinitionError::DatabaseTooFarAhead`, reconstructed
+  explicitly because the stepping loop would otherwise treat the database
+  as up to date) — the "update the app" screen (NFR-009/010) stays the
+  app layer's job. One more delta from the replaced `to_latest` call,
+  recorded for honesty: an empty migration set is a successful no-op
+  here, where `to_latest` errored `NoMigrationsDefined`; the embedded
+  set is compile-time non-empty, so the difference is unobservable
+  through `run_migrations`.
+- Retention: pre-migration copies accumulate without a cap (spec caps
+  only the daily copies, ERR-001). Pruning belongs to the app layer's
+  backup-management task (the `db_backups_list` family, §7.10) and must
+  never delete the copy UPD-004 points at; nothing in this crate removes
+  a final copy.
+
+Testing boundary: the embedded set defines a single migration, so no
+upgrade from an old version is reachable through the public API until a
+second migration ships. The stepping/backup driver is therefore a
+private `migrate(conn, &Migrations, backup_dir)` seam; its unit tests
+drive it with synthetic multi-step sets (real SQL, real file databases)
+through the card's acceptance criterion — the copy exists, opens with
+`PRAGMA integrity_check = ok`, and preserves the source version's
+`user_version` and data — plus multi-step, fresh-bootstrap, failing-step
+rollback (and retry-after-failure), collision suffix, stale-`.tmp` sweep,
+§9.5 retry, non-directory backup path, and missing-directory cases. The
+acceptance path opens the database through `open_db`, so the copy is
+produced from the production WAL/`synchronous=FULL` configuration, not
+only from a rollback-journal connection. Integration tests pin the
+public API's observable behavior (fresh run leaves `db-backups/` empty,
+no-op rerun writes nothing, too-new rejected). Mutations verified the
+suite bites: removing the backup (4 tests), batching via `to_latest`
+(2 tests — one of them proving the "v2" copy would silently hold the v3
+state), skipping stale-`.tmp` removal (1 test). Round-1 review
+(deepseek-v4.1-flash) additionally forced the hard-link no-clobber, the
+debris sweep, the §9.5 retries, Windows-safe test teardown (connections
+closed before `remove_dir_all` — SQLite files are not share-deletable
+there), and the WAL-configuration test. Round-2 review (hy4-flash-free)
+tightened the §9.5 backoff to the full three retries (100/300/900 ms,
+four attempts), made the post-link temporary removal genuinely
+best-effort, cleaned up the staged temporary on link failure, and
+flagged the `AlreadyExists` race branch as defensive and deliberately
+untested (nothing else creates files in the directory under the
+serialized-runs assumption).

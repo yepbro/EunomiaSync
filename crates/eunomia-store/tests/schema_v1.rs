@@ -22,7 +22,7 @@
 //! it on every connection — the tests must not lean on the bundled
 //! build's default (DECISIONS.md D-030).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use eunomia_store::storage::run_migrations;
@@ -102,10 +102,13 @@ fn accepts(conn: &Connection, sql: &str, label: &str) {
 }
 
 /// An in-memory database migrated to schema version 1 with foreign-key
-/// enforcement switched on (mirroring `open_db`).
+/// enforcement switched on (mirroring `open_db`). The backup directory
+/// argument is never touched: a fresh in-memory database produces no
+/// backup copy (D-038), and the path deliberately does not exist.
 fn migrated() -> Connection {
     let mut conn = Connection::open_in_memory().unwrap();
-    run_migrations(&mut conn).expect("migrations should apply to an empty database");
+    run_migrations(&mut conn, Path::new("unused-backup-dir"))
+        .expect("migrations should apply to an empty database");
     conn.pragma_update(None, "foreign_keys", true)
         .expect("foreign_keys pragma should be settable");
     conn
@@ -492,11 +495,13 @@ fn schema_v1_applies_to_a_file_backed_database() {
         std::process::id(),
     ));
     std::fs::create_dir_all(&dir).expect("temp directory should be creatable");
+    let backup_dir = dir.join("db-backups");
+    std::fs::create_dir_all(&backup_dir).expect("temp backup directory should be creatable");
     let path = dir.join("eunomiasync.sqlite3");
 
     {
         let mut conn = Connection::open(&path).unwrap();
-        run_migrations(&mut conn)
+        run_migrations(&mut conn, &backup_dir)
             .expect("migrations should apply to an empty file-backed database");
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -508,7 +513,7 @@ fn schema_v1_applies_to_a_file_backed_database() {
     // already at version 1 and re-running migrations is a no-op.
     {
         let mut conn = Connection::open(&path).unwrap();
-        run_migrations(&mut conn).expect("re-running migrations must be a no-op");
+        run_migrations(&mut conn, &backup_dir).expect("re-running migrations must be a no-op");
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();

@@ -174,12 +174,19 @@ reports back, `foreign_keys=ON`, `busy_timeout=5000`,
 open when WAL cannot be used (D-030). Migration files live in
 `crates/eunomia-store/migrations/*.sql`, are embedded with
 `include_str!`, and applied by
-`eunomia_store::storage::run_migrations(&mut Connection)`, which brings
-any database to the latest schema version. Schema version 1 — the eleven
+`eunomia_store::storage::run_migrations(&mut Connection, &Path)`, which
+brings any database to the latest schema version — each migration in its
+own transaction, and, before every migration applied to an existing
+database (`user_version > 0`), a `VACUUM INTO` safety copy
+`pre-migration-v<N>-<UTC>.sqlite3` into the caller-provided backup
+directory (`db-backups/`; D-038). Schema version 1 — the eleven
 §6.2 tables with their full constraint set — lives in
 `migrations/0001_init.sql` (see DECISIONS.md D-036 for the two
 strengthened constraints and the testing contract). Tests run against
-in-memory SQLite and file-backed databases through the public API only.
+in-memory SQLite and file-backed databases through the public API; the
+multi-step upgrade paths, unreachable through the single-migration
+embedded set, go through a private seam with synthetic migration sets
+(D-038).
 
 ## Config
 

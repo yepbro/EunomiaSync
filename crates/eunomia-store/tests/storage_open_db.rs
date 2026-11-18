@@ -18,11 +18,16 @@ fn temp_db_dir(label: &str) -> PathBuf {
         std::process::id(),
     ));
     std::fs::create_dir_all(dir.join("db")).expect("temp directory should be creatable");
+    std::fs::create_dir_all(dir.join("db-backups")).expect("temp directory should be creatable");
     dir
 }
 
 fn db_path(dir: &Path) -> PathBuf {
     dir.join("db").join("eunomiasync.sqlite3")
+}
+
+fn backup_dir(dir: &Path) -> PathBuf {
+    dir.join("db-backups")
 }
 
 /// The spec DB-001 pragma values read back from an open connection.
@@ -180,8 +185,12 @@ fn open_db_then_run_migrations_on_the_same_connection() {
 
     {
         let mut conn = open_db(&path).expect("open_db should succeed");
-        run_migrations(&mut conn)
+        let backups = run_migrations(&mut conn, &backup_dir(&dir))
             .expect("migrations should apply on the pragma-configured connection");
+        assert!(
+            backups.is_empty(),
+            "the fresh database produces no backup copies"
+        );
 
         conn.execute(
             "INSERT INTO settings (key, value, updated_at) VALUES ('schema', '0001', '2026-11-18T10:00:00.000Z')",
@@ -199,7 +208,7 @@ fn open_db_then_run_migrations_on_the_same_connection() {
     // schema stays migrated.
     {
         let mut conn = open_db(&path).expect("reopening the migrated file should succeed");
-        run_migrations(&mut conn)
+        run_migrations(&mut conn, &backup_dir(&dir))
             .expect("re-running migrations on a migrated database must be a no-op");
         assert_db001_pragmas(&read_pragmas(&conn));
     }
