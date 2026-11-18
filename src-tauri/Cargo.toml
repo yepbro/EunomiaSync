@@ -34,6 +34,17 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# File logging (spec §5.3, SYS-011..013, SEC-008; DECISIONS.md D-032).
+# `tracing` 0.1 is already resolved workspace-wide (0.1.44 via tauri), so
+# that line adds no new version to the graph. `tracing-subscriber` is the
+# fmt layer that formats events for the appender writer — `fmt` only, no
+# default features: no ANSI escapes in log files, no `env-filter` (the
+# level comes from config.toml, SYS-012, not from RUST_LOG).
+# `tracing-appender` provides the daily-rotating file writer
+# (logs/eunomiasync.<date>.log, spec §5.5).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+tracing-appender = "0.2"
 # The machine-level config.toml parser (spec §5.8, SYS-013, D-001).
 # The `1` line is already resolved workspace-wide (1.2.1 via tauri), so
 # this adds no new crate version to the graph.

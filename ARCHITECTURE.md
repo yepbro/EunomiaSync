@@ -125,9 +125,10 @@ not created by the layout — it is the config task's job (spec 5.8,
 SYS-011), which only needs the directory to exist first. Logs live in
 `logs/` inside the data directory on every OS: on macOS the Tauri
 `app_log_dir()` default (`~/Library/Logs/…`) is deliberately not used,
-and the upcoming tracing setup must point the appender at
-`<data dir>/logs/` explicitly — that task should also add a text pin so a
-future `app_log_dir()` wiring fails a test instead of passing silently.
+and the logging module (`src-tauri/src/logging.rs`) points the appender
+at `<data dir>/logs/` explicitly; a `config_tests.rs` absence pin
+(comments stripped, live code only) makes a future `app_log_dir()`
+wiring fail a test instead of passing silently (see the Logging section).
 If the layout cannot be created (permissions, an occupied path), the
 startup aborts: the error propagates out of the `setup` hook and tauri
 panics with `Failed to setup app: …`, carrying the path and cause — there
@@ -138,12 +139,15 @@ clean profile, launch the app once and confirm the four subdirectories
 exist under the §5.5 path — Linux
 `~/.local/share/pro.yepbro.eunomiasync/`, macOS
 `~/Library/Application Support/pro.yepbro.eunomiasync/`, Windows
-`%LOCALAPPDATA%\pro.yepbro.eunomiasync\` — and that a second launch adds
-nothing and changes nothing. The same first launch must create
+`%LOCALAPPDATA%\pro.yepbro.eunomiasync\` — that a second launch adds
+nothing and changes nothing, and that the first launch creates
+`logs/eunomiasync.<date>.log` inside the data directory (see the
+Logging section). The same first launch must create
 `config.toml` with the default content (`log_level = "info"`, SYS-011),
 a second launch must leave it untouched, and a deliberately broken
 `config.toml` must not prevent startup: the app starts with defaults and
-prints a warning (SYS-012), with the file's bytes preserved.
+records a warning in the log file (SYS-012), with the file's bytes
+preserved.
 
 ## Storage
 
@@ -177,15 +181,68 @@ unknown keys are ignored with a warning naming the key (manual diff of
 the parsed `toml::Value`'s top-level keys against the `KNOWN_KEYS` list
 — no `serde_ignored` dependency), and only an unreadable/unwritable file
 aborts the launch like the layout step does (DECISIONS.md D-028).
-Warnings come back as a `Vec<String>` from the seam and are printed
-lossily to stderr until the tracing subscriber exists; the config itself
-is published as managed state, and the logging task (T-012) reads it via
+Warnings come back as a `Vec<String>` from the seam (the config runs
+before any log subscriber exists, SYS-011) and are re-emitted into the
+tracing file log after logging initializes; the config itself
+is published as managed state, and the logging step reads it via
 `app.state::<AppConfig>()` to filter the log — applying `log_level` to
-the log output is that task's criterion (DECISIONS.md D-029). The
+the log output (DECISIONS.md D-029). The
 startup wiring is pinned by a `config_tests.rs` text pin (layout →
-config → warnings → `app.manage`); the seam behavior is unit-tested in
+config → `app.manage` → level → logging → guard → warnings); the seam
+behavior is unit-tested in
 `config.rs` over `tempfile` roots. User-managed settings stay in SQLite
 (spec 6.5) and no library data is ever written to the file.
+
+## Logging
+
+The app writes one `tracing` file log per day — `tracing` +
+`tracing-appender` (`Rotation::DAILY`, non-blocking writer) +
+`tracing-subscriber`'s fmt layer, wired in `src-tauri/src/logging.rs`
+(spec §5.3; see DECISIONS.md for the dependency entry). The file lands
+in `<data dir>/logs/eunomiasync.<UTC-date>.log` on every OS (spec §5.5;
+the `app_log_dir()` default is deliberately not used — see the Data
+directory section). The maximum level comes from `config.toml`'s
+`log_level` (SYS-012), applied by initializing the subscriber _after_
+the config is loaded (SYS-011) — `app.state::<AppConfig>()` is the seam
+that hands the level over (D-029). The writer guard is kept alive as
+managed state so the non-blocking writer never shuts down early; tauri
+exits the process without dropping managed state, so what persists log
+lines is the writer thread's per-batch flushing (only lines queued in
+the final moments of the process can be lost).
+
+Failure policy: logging is diagnostics, so a broken log file (read-only
+directory, full disk) never aborts the launch — `logging::init` degrades
+to a stderr subscriber with the same level filter and logs one `error`
+event naming the failing path. Both subscribers are built with
+`log_internal_errors(false)`: the fmt layer's default writer-error
+fallback is an `eprintln!` of its own, which panics on an unusable
+stderr (a Windows GUI release build has none) — and the workspace's
+`panic = "abort"` would turn that into a process abort; a log line that
+cannot be written is dropped instead. This is deliberately weaker than
+the layout/config abort policy (D-027/D-028): those guard data the app
+cannot run without.
+
+SEC-008 is enforced structurally: every tracing event of the app is
+constructed in `logging.rs` from typed parameters (paths, operation
+codes, numeric IDs) — the event macros and `#[instrument]` are banned
+everywhere else by a `config_tests.rs` text pin, and the facade's
+`file_event` primitive (for the upcoming variant/sync/backup tasks) has
+no parameter that could carry instruction text or file content. The
+`logging.rs` tests prove the contract end to end: a file event carries
+the path and the ID while the operation's instruction text stays out of
+the log. One deliberate exception: config warnings may quote the
+offending bytes of `config.toml` itself (D-028 — the machine config is
+user-written diagnostics input, not library content). When the first
+library crate adopts `tracing`, its task must extend this discipline —
+the pin already covers `crates/**` and will force that decision.
+
+Honest testing boundaries: the midnight rollover and the global
+subscriber install are not unit-testable (the date cannot be moved in a
+test; the global default is process-wide and the suite runs in
+parallel) — the dated file name, the per-level filtering and the
+SEC-008 payload are (driven through a real subscriber over `tempfile`
+roots, asserted by reading the real log file back); the rollover and
+the file location on each OS rest on the manual smoke run.
 
 ## Watcher
 

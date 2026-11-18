@@ -19,6 +19,10 @@ pub(crate) mod config;
 // exactly like the app itself.
 pub(crate) mod data_dirs;
 
+// File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
+// every platform, exactly like the app itself.
+pub(crate) mod logging;
+
 // The single-instance handoff handler (SYS-006) is desktop-only, exactly
 // like the plugin whose callback calls it below.
 #[cfg(desktop)]
@@ -60,10 +64,13 @@ pub fn run() {
     // and the missing-window case); the returned outcome is a test seam —
     // there is nothing to branch on here. `_argv`/`_cwd` are deliberately
     // unused: deep links are out of v1 (SEC-004) and no CLI behavior
-    // consumes them yet. Diagnostics are written lossily to stderr by the
-    // handler until the tracing setup task lands (spec §5.3 file logging);
-    // argv/cwd are never logged — they can carry user paths and the
-    // handoff needs none of them.
+    // consumes them yet. Diagnostics go through the logging facade
+    // (`logging.rs`) into the tracing file log; argv/cwd are never
+    // logged — they can carry user paths and the handoff needs none of
+    // them. (The plugin registers before the `setup` hook below runs,
+    // so a handoff arriving in that startup window is emitted before
+    // the subscriber exists and is dropped — no crash, one lost
+    // diagnostic line, accepted.)
     #[cfg(desktop)]
     let tauri_builder =
         tauri_builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -109,9 +116,10 @@ pub fn run() {
             // converges to the full layout even after a partially
             // deleted directory. A failure aborts the launch: without
             // the layout there is no database, no logs and no config to
-            // run with, and no diagnostics channel exists yet (tracing
-            // lands with the logging task), so the error propagates out
-            // of `setup`; tauri then panics in the event-loop `Ready`
+            // run with — and SYS-011 orders the layout *before* the
+            // config and the config *before* logging, so no diagnostics
+            // channel exists at this point; the error propagates out of
+            // `setup`, and tauri then panics in the event-loop `Ready`
             // handler with `Failed to setup app: …`, whose message
             // carries the offending path and cause (DECISIONS.md
             // D-027).
@@ -120,7 +128,7 @@ pub fn run() {
 
             // Machine-level config (spec §5.8, SYS-011…013): read or
             // create `config.toml` from the data directory — before
-            // logging (the tracing task reads `log_level` from here) and
+            // logging (SYS-011: the log level comes from here) and
             // before the database (both spec §5.8; the failure policy is
             // DECISIONS.md D-028, the seam shape D-029). A missing file
             // is created with defaults; unknown keys are ignored with a
@@ -128,15 +136,35 @@ pub fn run() {
             // or an invalid `log_level` — falls back to in-memory
             // defaults with a warning and the file is never rewritten
             // (SYS-012). Only an unreadable/unwritable file aborts the
-            // launch, like the layout above. There is no log subscriber
-            // yet (tracing is the next startup step), so the warnings go
-            // to stderr lossily — a failed write must not abort the
-            // launch (same no-panic policy as `single_instance.rs`).
-            // The config is published as managed state: `app.state::<AppConfig>()`
-            // is the seam the tracing task consumes to filter the log.
+            // launch, like the layout above (still pre-logging, so
+            // still no diagnostics channel to degrade into). The config
+            // is published as managed state first; the logging step
+            // below reads it back through `app.state::<AppConfig>()`.
             let (config, warnings) = config::load_or_create(&data_dir)?;
-            config::emit_warnings(&warnings);
             app.manage(config);
+            let level = app.state::<config::AppConfig>().log_level;
+
+            // File logging (spec §5.3, §5.5, §7.7): initialized after
+            // the config (SYS-011) with the `log_level` it holds, at
+            // `<data dir>/logs/` explicitly — never Tauri's
+            // `app_log_dir()` (macOS would move the logs out of the
+            // data directory; pinned in `config_tests.rs`). `init`
+            // never aborts the launch: logging is diagnostics, so a
+            // broken log file degrades to a stderr subscriber with one
+            // `error` event (module docs in `logging.rs`). The returned
+            // `Logger` owns the non-blocking writer's guard; keeping it
+            // as managed state holds the writer thread for the whole
+            // run (dropping it early would silently stop the file log —
+            // tauri exits the process without dropping managed state,
+            // so the flush-at-exit path belongs to the worker's
+            // per-batch flushing, not to this value's destructor). The
+            // config warnings and the startup line are emitted after
+            // `init`, so they land in the log file.
+            let logs_dir = data_dir.join(data_dirs::LOGS_SUBDIRECTORY);
+            let logger = logging::init(&logs_dir, level);
+            app.manage(logger);
+            config::emit_warnings(&warnings);
+            logging::startup(&data_dir, level);
             Ok(())
         })
         .run(tauri::generate_context!())

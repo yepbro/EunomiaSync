@@ -31,29 +31,25 @@
 //! considers inapplicable. The handler logs what was attempted and what
 //! failed, not what the window manager eventually did.
 //!
-//! Diagnostics go to stderr, written lossily — `eprintln!` would panic on
-//! a broken stderr (e.g. a closed pipe) and on Windows the callback runs
-//! in an `extern "system"` window procedure, where an unwinding panic
-//! aborts the whole process, so a failed write is ignored instead — until
-//! the tracing setup task lands (spec §5.3 file logging). The second
+//! Diagnostics go through the logging facade (`logging.rs`) into the
+//! tracing file log as structured events — the handler cannot panic on
+//! the diagnostics path: tracing events never panic (a writer failure
+//! drops the event), which keeps the no-abort guarantee this module had
+//! with its old lossy stderr writer. That guarantee still matters: on
+//! Windows the callback runs in an `extern "system"` window procedure,
+//! where an unwinding panic aborts the whole process. The second
 //! instance's argv and cwd are never logged: they can carry user paths,
 //! and the handoff event needs no content until a feature consumes them
 //! (deep links are out of v1, SEC-004).
 
-use std::io::Write;
-
 use tauri::{AppHandle, Manager, Runtime};
+
+use crate::logging::{self, RestoreStep};
 
 /// The window a second launch brings back to the front. It exists from app
 /// start (`tauri.conf.json` `app > windows[0]`, UI-001); the tests pin the
 /// lookup by label, not by array position, so the window array may grow.
 const MAIN_WINDOW_LABEL: &str = "main";
-
-/// Writes one diagnostic line to stderr, ignoring write errors — see the
-/// module docs for why a failed write must not panic the first instance.
-fn log(message: &str) {
-    let _ = writeln!(std::io::stderr(), "{message}");
-}
 
 /// What [`focus_main_window`] did. Part of the handler's interface so the
 /// tests can observe which branch ran: the mock runtime makes the window
@@ -89,40 +85,24 @@ pub(crate) enum FocusOutcome {
 /// crash the running first instance.
 pub(crate) fn focus_main_window<R: Runtime>(app: &AppHandle<R>) -> FocusOutcome {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
-        log(&format!(
-            "single-instance: no `{MAIN_WINDOW_LABEL}` window — nothing to focus"
-        ));
+        logging::single_instance_no_main_window();
         return FocusOutcome::NoMainWindow;
     };
 
-    let mut failed = false;
+    let mut failed_steps = 0;
     if let Err(error) = window.show() {
-        failed = true;
-        log(&format!(
-            "single-instance: showing the `{MAIN_WINDOW_LABEL}` window failed: {error}"
-        ));
+        failed_steps += 1;
+        logging::single_instance_step_failed(RestoreStep::Show, &error);
     }
     if let Err(error) = window.unminimize() {
-        failed = true;
-        log(&format!(
-            "single-instance: unminimizing the `{MAIN_WINDOW_LABEL}` window failed: {error}"
-        ));
+        failed_steps += 1;
+        logging::single_instance_step_failed(RestoreStep::Unminimize, &error);
     }
     if let Err(error) = window.set_focus() {
-        failed = true;
-        log(&format!(
-            "single-instance: focusing the `{MAIN_WINDOW_LABEL}` window failed: {error}"
-        ));
+        failed_steps += 1;
+        logging::single_instance_step_failed(RestoreStep::Focus, &error);
     }
-    if failed {
-        log(&format!(
-            "single-instance: second launch handed off; the `{MAIN_WINDOW_LABEL}` window restore sequence failed (see errors above)"
-        ));
-    } else {
-        log(&format!(
-            "single-instance: second launch handed off; `{MAIN_WINDOW_LABEL}` window focused"
-        ));
-    }
+    logging::single_instance_handed_off(failed_steps);
     FocusOutcome::Focused
 }
 

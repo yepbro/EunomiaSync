@@ -28,8 +28,9 @@
 //! inside the data directory on every OS (spec 5.5). On Windows and
 //! Linux that happens to match the Tauri default, but on macOS
 //! `app_log_dir()` would point at `~/Library/Logs/pro.yepbro.eunomiasync/`,
-//! so when the tracing setup task wires file logging (spec §5.3) it must
-//! point the appender at `<data dir>/logs/` explicitly.
+//! so the logging module (`logging.rs`) points the appender at
+//! `<data dir>/logs/` explicitly — pinned against an `app_log_dir()`
+//! regression by a `config_tests.rs` absence pin (spec §5.5).
 //!
 //! [`ensure_data_layout`] is the testable seam; the startup wiring —
 //! resolving `app_local_data_dir()` through the path resolver and
@@ -40,8 +41,11 @@
 //! is covered by the manual smoke runs and the first launch on a clean
 //! system). The failure policy: a layout that cannot be created means no
 //! database, no logs and no config, so there is nothing meaningful to
-//! run — and no diagnostics channel exists yet (tracing lands with the
-//! logging task) — so the error propagates out of `setup`. Tauri wraps
+//! run — and no diagnostics channel exists at that point either: SYS-011
+//! orders the layout *before* the config, and the config *before*
+//! logging, so the tracing subscriber is initialized only after this
+//! step has already succeeded. The error therefore propagates out of
+//! `setup`. Tauri wraps
 //! it in `Error::Setup` and panics in the event-loop `Ready` handler
 //! with `Failed to setup app: error encountered during setup hook: …`
 //! (tauri 2.12.6 `src/app.rs`); the panic message prints the `Display`
@@ -58,7 +62,24 @@ use std::path::{Path, PathBuf};
 ///
 /// Tests must not derive their expectations from this constant: they pin
 /// the literal four names, so a mutated layout fails its own test.
-const SUBDIRECTORIES: &[&str] = &["db", "db-backups", "backups", "logs"];
+const SUBDIRECTORIES: &[&str] = &[
+    DB_SUBDIRECTORY,
+    DB_BACKUPS_SUBDIRECTORY,
+    BACKUPS_SUBDIRECTORY,
+    LOGS_SUBDIRECTORY,
+];
+
+/// `db/` — the SQLite file and its WAL/-shm siblings (DB-001).
+const DB_SUBDIRECTORY: &str = "db";
+/// `db-backups/` — pre-migration copies (DB-004).
+const DB_BACKUPS_SUBDIRECTORY: &str = "db-backups";
+/// `backups/` — project file backups.
+const BACKUPS_SUBDIRECTORY: &str = "backups";
+/// `logs/` — the rotated trace logs (spec §5.5). Exposed for the
+/// logging module, which points its appender at
+/// `<data dir>/<LOGS_SUBDIRECTORY>/eunomiasync.<date>.log` explicitly
+/// instead of Tauri's `app_log_dir()` (see the module docs).
+pub(crate) const LOGS_SUBDIRECTORY: &str = "logs";
 
 /// Why [`ensure_data_layout`] gave up: the path it could not create,
 /// plus the OS cause. The path is kept in the message (not only the

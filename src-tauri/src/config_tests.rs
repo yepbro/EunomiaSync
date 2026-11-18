@@ -71,11 +71,26 @@
 //!
 //! The config startup wiring (SYS-011, §5.8) is pinned the same way: the
 //! `setup` hook must load `config.toml` after the layout (the file lives
-//! in the data directory), print its warnings, and publish the config as
-//! managed state — the seam the tracing task reads `log_level` from.
-//! The seam's own behavior (defaults, unknown keys, broken-file policy)
-//! is unit-tested in `config.rs`; the pin here keeps the wiring from
-//! silently unwiring.
+//! in the data directory), publish the config as managed state, then
+//! initialize the tracing file log (after the config — SYS-011's order —
+//! reading `log_level` back through `app.state::<AppConfig>()`), keep the
+//! writer guard alive as managed state, and only then re-emit the config
+//! warnings so they land in the log file. The seam's own behavior
+//! (defaults, unknown keys, broken-file policy) is unit-tested in
+//! `config.rs`, and the subscriber's behavior in `logging.rs`; the pins
+//! here keep the wiring from silently unwiring.
+//!
+//! The logging security posture (§5.3, SEC-008) is pinned the same way,
+//! with two text scans over the workspace sources. First, every tracing
+//! event of the app is constructed in `logging.rs` alone — the event
+//! macros and `#[instrument]` (whose auto-captured fields would happily
+//! serialize a `content: String` argument into the log) may not appear
+//! anywhere else, so a future task cannot interpolate instruction text
+//! into a message without consciously editing the pin. Second, Tauri's
+//! `app_log_dir()` stays out of the codebase (live code, comments
+//! stripped): the log path must be derived from the data directory
+//! (§5.5), not from the OS-specific default that macOS points at
+//! `~/Library/Logs`.
 
 use serde_json::Value;
 
@@ -311,24 +326,31 @@ fn setup_resolves_the_data_directory_and_creates_its_layout() {
 }
 
 #[test]
-fn setup_loads_config_after_the_layout_and_manages_it() {
+fn setup_loads_config_then_logging_then_warnings() {
     // Arrange & Act: `lib.rs`, compile-time constant, with line and
     // block comments stripped so prose about the config cannot satisfy
     // the pin. SYS-011 orders the config before logging and the
     // database, and the file lives in the data directory (spec §5.5),
     // so the markers pin the full startup order: layout first, then the
-    // config seam, then the warning print, then the managed state. The
-    // `?` is part of the config marker, so wiring that swallows the
-    // error (`let _ = …`, `unwrap_or_default()`, a gated-off call)
-    // fails here too. `app.manage(config)` is the seam the logging task
-    // consumes (`app.state::<AppConfig>()`); dropping it would strand
-    // that task.
+    // config seam, then the managed state, then the level read back
+    // through it, then the logging init from the data directory's
+    // `logs/` subfolder, then the guard-keeping `app.manage(logger)`,
+    // and only then the warning re-emission (after the subscriber
+    // exists, the warnings land in the log file). The `?` is part of
+    // the config marker, so wiring that swallows the error (`let _ =
+    // …`, `unwrap_or_default()`, a gated-off call) fails here too.
+    // Dropping `app.manage(config)` would strand the level read; dropping
+    // `app.manage(logger)` would drop the non-blocking writer guard and
+    // silently stop the file log mid-run.
     let lib = strip_comments(include_str!("lib.rs"));
     let markers = [
         "data_dirs::ensure_data_layout(&data_dir)?",
         "config::load_or_create(&data_dir)?",
-        "config::emit_warnings(&warnings);",
         "app.manage(config);",
+        "app.state::<config::AppConfig>().log_level",
+        "logging::init(&logs_dir, level)",
+        "app.manage(logger);",
+        "config::emit_warnings(&warnings);",
     ];
     let positions: Vec<usize> = markers
         .iter()
@@ -345,17 +367,211 @@ fn setup_loads_config_after_the_layout_and_manages_it() {
         .collect();
 
     // Assert: the config is loaded from the data directory inside
-    // `setup`, after the layout, and published as managed state. Honest
-    // boundary, same as the layout and plugin pins: this proves the
-    // wiring exists and stays wired and ordered, not that the OS file
-    // appeared — the runtime effect is covered by the `config.rs` seam
-    // tests plus a manual first launch on a clean system.
+    // `setup`, after the layout; logging initializes after the config
+    // (SYS-011) from the managed state; the warnings are re-emitted
+    // after both. Honest boundary, same as the layout and plugin pins:
+    // this proves the wiring exists and stays wired and ordered, not
+    // that the OS file appeared — the runtime effect is covered by the
+    // `config.rs`/`logging.rs` seam tests plus a manual first launch on
+    // a clean system.
     for pair in positions.windows(2) {
         assert!(
             pair[0] < pair[1],
-            "lib.rs must load the config after the layout, print its \
-             warnings and manage it, in that order; marker positions: \
-             {positions:?}"
+            "lib.rs must run the startup steps in the SYS-011 order \
+             (layout → config → manage → level → logging → guard → \
+             warnings); marker positions: {positions:?}"
+        );
+    }
+}
+
+/// Recursively collects every `.rs` file under `dir` into `files`.
+///
+/// Shared by the logging pins: both must see sources wherever they land
+/// inside `src-tauri/src` (subdirectories included) and the library
+/// crates — a macro call or an `app_log_dir()` wiring hidden in a new
+/// module of any crate must not escape the pin.
+fn collect_rust_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("reading `{}` must work: {error}", dir.display()))
+    {
+        let path = entry
+            .expect("every directory entry should be readable")
+            .path();
+        if path.is_dir() {
+            collect_rust_files(&path, files);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            files.push(path);
+        }
+    }
+}
+
+/// Every `.rs` source of the workspace the logging pins scan:
+/// `src-tauri/src` (subdirectories included), the `src-tauri` build
+/// script, and the library crates under `crates/`. A macro call or an
+/// `app_log_dir()` wiring in any of them must not escape the pin.
+fn workspace_rust_sources() -> Vec<std::path::PathBuf> {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    collect_rust_files(&manifest_dir.join("src"), &mut files);
+    collect_rust_files(&manifest_dir.join("../crates"), &mut files);
+    // The build script is outside `src/` but compiles into the same
+    // app; a missing file fails the pins' read below, so a rename is a
+    // conscious edit, not a silent narrowing of the scan.
+    files.push(manifest_dir.join("build.rs"));
+    files.sort();
+    files
+}
+
+#[test]
+fn tracing_events_are_constructed_only_in_the_logging_module() {
+    // Arrange & Act: every workspace `.rs` source, scanned raw (comments
+    // included — deliberately conservative, like the devtools and tray
+    // pins: even a comment showing a macro call turns this red and
+    // forces a conscious edit). `logging.rs` is the owner of event
+    // construction (its SEC-008 facade — see that module's docs), and
+    // `*_tests.rs` files never ship: cfg(test) code runs without the
+    // production subscriber and is exempt.
+    let files = workspace_rust_sources();
+    assert!(
+        !files.is_empty(),
+        "the source walker must find the workspace sources"
+    );
+    let macro_needles = [
+        "error!(",
+        "warn!(",
+        "info!(",
+        "debug!(",
+        "trace!(",
+        "event!(",
+        // Substring of span!/info_span!/debug_span!/…_span! — one needle
+        // covers every span macro spelling; spans are banned with events
+        // because a span's fields would carry the same content an event
+        // field could (and `FmtSpan::NONE`, the fmt default, only makes
+        // them *unprinted*, not uncollected).
+        "span!(",
+        "tracing::instrument",
+        "#[instrument",
+    ];
+    for file in &files {
+        // `logging.rs` is exempted by its full in-repo path, not its
+        // bare name: a future `crates/<crate>/src/logging.rs` must NOT
+        // inherit the exemption — the library crates cannot import this
+        // module and need their own SEC-008 discipline when they start
+        // logging (the logging module docs say exactly that).
+        if file.ends_with("src-tauri/src/logging.rs") {
+            continue;
+        }
+        let name = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file names must be UTF-8");
+        if name.ends_with("_tests.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(file).expect("a listed source file must be readable");
+        for needle in macro_needles {
+            assert!(
+                !text.contains(needle),
+                "`{}` must not use `{needle}` directly: every tracing \
+                 event is constructed in `src-tauri/src/logging.rs` from \
+                 typed, SEC-008-safe parameters (paths, codes, IDs — never \
+                 instruction text or file content). Need a new event? Add \
+                 a typed helper there (SEC-008; see the logging module docs)",
+                file.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn app_log_dir_is_never_called() {
+    // Arrange & Act: every workspace `.rs` source with line and block
+    // comments stripped — the honest precision for this pin, in both
+    // directions: `data_dirs.rs` and `logging.rs` legitimately *explain*
+    // the rejection of `app_log_dir()` in their docs (prose, stripped),
+    // while an actual wiring would be live code
+    // (`app.path().app_log_dir()`), which stripping keeps visible. `logging.rs`
+    // itself is scanned — it is exactly where a "convenience" switch to
+    // the Tauri default would land.
+    let files = workspace_rust_sources();
+    for file in &files {
+        let name = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file names must be UTF-8");
+        if name.ends_with("_tests.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(file).expect("a listed source file must be readable");
+        let stripped = strip_comments(&text);
+        assert!(
+            !stripped.contains("app_log_dir"),
+            "`{}` must not call `app_log_dir()`: the file log is written \
+             to `<data dir>/logs/` (spec §5.5) on every OS — on macOS the \
+             Tauri default would move it to `~/Library/Logs/…`, away from \
+             the data directory the spec pins (D-027; the manual \
+             per-OS smoke run checks the file location)",
+            file.display()
+        );
+    }
+}
+
+#[test]
+fn log_internal_errors_stays_off_in_the_shared_subscriber_builder() {
+    // Arrange & Act: `logging.rs`, compile-time constant, with comments
+    // stripped. The fmt layer's writer-error fallback is an `eprintln!`
+    // that panics on an unusable stderr (a Windows GUI release build has
+    // none), and `panic = "abort"` turns that into a process abort —
+    // the no-panic contract is a vendored-source fact that a unit test
+    // cannot reproduce (the test harness keeps stderr writable), so the
+    // flag is pinned textually instead, like the Windows manifest facts.
+    // Exactly once: all three construction sites go through the one
+    // shared `fmt_subscriber`, so a second occurrence means someone
+    // built a subscriber outside the shared path.
+    let logging = strip_comments(include_str!("logging.rs"));
+    assert_eq!(
+        logging.matches(".log_internal_errors(false)").count(),
+        1,
+        "the shared subscriber builder must keep `.log_internal_errors(false)`: \
+         the fmt layer's default writer-error fallback is an `eprintln!` that \
+         panics on an unusable stderr — fatal under `panic = \"abort\"` \
+         exactly in the degraded states this code exists for (D-032)"
+    );
+}
+
+#[test]
+fn config_load_warning_keeps_its_single_caller() {
+    // Arrange & Act: every workspace `.rs` source (raw text). The
+    // `config_load_warning` helper is the facade's one `&str`-carrying
+    // exception (config diagnostics, the D-028 deliberate carve-out);
+    // Rust visibility cannot restrict its callers within the crate, so
+    // the caller set is pinned instead: the definition/test site
+    // (`logging.rs`) and the config seam's `emit_warnings`
+    // (`config.rs`). A new caller anywhere else — e.g. a future task
+    // funneling some other free text through the exception — must
+    // consciously edit this pin and justify itself against SEC-008.
+    // `*_tests.rs` files are exempt: they never ship, and this pin's
+    // own needle lives in one.
+    let files = workspace_rust_sources();
+    for file in &files {
+        let name = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file names must be UTF-8");
+        if name.ends_with("_tests.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(file).expect("a listed source file must be readable");
+        if !text.contains("config_load_warning") {
+            continue;
+        }
+        assert!(
+            file.ends_with("src-tauri/src/logging.rs") || file.ends_with("src-tauri/src/config.rs"),
+            "`{}` must not reference `config_load_warning`: it is the \
+             config-seam-only exception to the typed SEC-008 facade \
+             (D-028/D-032) — new warning kinds get their own typed helper \
+             in `logging.rs`, never free text through this one",
+            file.display()
         );
     }
 }
@@ -981,39 +1197,61 @@ fn app_defines_no_acl_manifest() {
     );
 }
 
-/// Strips `//` line comments and `/* ... */` block comments, cutting
-/// each line at the first `//` and removing everything between `/*` and
-/// the next `*/`, ignoring string literals. Deliberately conservative
-/// for the marker scan below: stripping can only remove text, so it can
-/// never over-detect a marker — the worst case is a string-embedded
-/// comment delimiter hiding a live marker, which fails the pin with its
-/// exactly-once message instead of passing silently.
+/// Strips `//` line comments and `/* ... */` block comments, ignoring
+/// string literals. A `//` line comment always wins over a `/*` on the
+/// same line: prose like `crates/**` inside a doc comment is *not* a
+/// block-comment start (the first version of this helper treated it as
+/// one and silently swallowed the rest of the file). Deliberately
+/// conservative for the marker scans below: stripping can only remove
+/// text, so it can never over-detect a marker — the worst case is a
+/// string-embedded comment delimiter hiding a live marker, which fails
+/// the pin with its exactly-once message instead of passing silently.
 fn strip_comments(source: &str) -> String {
     let mut stripped = String::with_capacity(source.len());
     let mut rest = source;
-    while let Some(block_start) = rest.find("/*") {
-        // Line comments inside the text before the block comment, but
-        // not a `//` line comment containing the `/*` itself — that only
-        // over-strips, which the conservativeness note above covers.
-        stripped.push_str(&strip_line_comments(&rest[..block_start]));
-        match rest[block_start + 2..].find("*/") {
-            Some(block_len) => rest = &rest[block_start + 2 + block_len + 2..],
-            // Unterminated block comment: strip everything that follows.
-            None => return stripped,
+    while !rest.is_empty() {
+        if let Some(line_comment) = rest.find("//") {
+            let before_line_comment = &rest[..line_comment];
+            // A `/*` before the `//` still opens a block comment; one at
+            // or after the `//` is inside the line comment and ignored.
+            match before_line_comment.find("/*") {
+                Some(block_start) => {
+                    stripped.push_str(&before_line_comment[..block_start]);
+                    match rest[block_start + 2..].find("*/") {
+                        Some(block_len) => rest = &rest[block_start + 2 + block_len + 2..],
+                        // Unterminated block comment: strip the rest.
+                        None => return stripped,
+                    }
+                }
+                None => {
+                    stripped.push_str(before_line_comment);
+                    match rest[line_comment..].find('\n') {
+                        Some(newline) => {
+                            stripped.push('\n');
+                            rest = &rest[line_comment + newline + 1..];
+                        }
+                        // Line comment to the end of the file.
+                        None => return stripped,
+                    }
+                }
+            }
+        } else {
+            match rest.find("/*") {
+                Some(block_start) => {
+                    stripped.push_str(&rest[..block_start]);
+                    match rest[block_start + 2..].find("*/") {
+                        Some(block_len) => rest = &rest[block_start + 2 + block_len + 2..],
+                        None => return stripped,
+                    }
+                }
+                None => {
+                    stripped.push_str(rest);
+                    return stripped;
+                }
+            }
         }
     }
-    stripped.push_str(&strip_line_comments(rest));
     stripped
-}
-
-/// Cuts every line at the first `//` (string literals are ignored, so a
-/// `//` inside one truncates its line — see [`strip_comments`]).
-fn strip_line_comments(source: &str) -> String {
-    source
-        .lines()
-        .map(|line| &line[..line.find("//").unwrap_or(line.len())])
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[test]

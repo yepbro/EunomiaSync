@@ -6,9 +6,9 @@
 //! exactly one key today: `log_level` (SYS-012). It is read at startup
 //! before logging and the database are set up, which is why this module
 //! cannot log: warnings come back as a [`Vec<String>`] from the
-//! [`load_or_create`] seam and the caller prints them lossily to stderr
-//! until the tracing subscriber lands (spec §5.3 file logging — the same
-//! temporary channel and no-panic policy as `single_instance.rs`).
+//! [`load_or_create`] seam, and the caller re-emits them through the
+//! logging facade after the tracing subscriber is initialized (SYS-011
+//! order — the warnings then land in the file log; see `logging.rs`).
 //!
 //! Behavior, per SYS-011/SYS-012:
 //!
@@ -34,7 +34,9 @@
 //!   aborts like the layout step does (DECISIONS.md D-027): a data
 //!   directory that cannot hand over its config file is broken in the
 //!   same way as one that cannot hold the database, and no diagnostics
-//!   channel exists yet to degrade into.
+//!   channel exists at that point — SYS-011 orders the config *before*
+//!   logging, so the tracing subscriber is not initialized yet when this
+//!   failure can happen.
 //!
 //! Unknown-key detection is a manual diff of the parsed [`toml::Value`]'s
 //! top-level keys against [`KNOWN_KEYS`], not the `serde_ignored` crate:
@@ -44,18 +46,18 @@
 //! table is not enumerated.
 //!
 //! [`load_or_create`] is the testable seam; the startup wiring — calling
-//! it after `ensure_data_layout`, printing the warnings and publishing
-//! the config with `app.manage` — lives in the `setup` hook in `lib.rs`
+//! it after `ensure_data_layout`, re-emitting the warnings into the
+//! tracing file log after `logging::init`, and publishing the config
+//! with `app.manage` — lives in the `setup` hook in `lib.rs`
 //! and is pinned there by a `config_tests.rs` text pin (the same honesty
 //! boundary as the layout and plugin pins: the pin proves the wiring
 //! exists and stays wired and ordered, the runtime effect is covered by
 //! the seam tests and the manual first launch on a clean system). The
-//! logging task (T-012) reads the config back with
-//! `app.state::<AppConfig>()`; applying `log_level` to the log output is
-//! that task's acceptance criterion, deferred from this one.
+//! logging step reads the config back with
+//! `app.state::<AppConfig>()` and applies `log_level` to the log output
+//! (DECISIONS.md D-029).
 
 use std::fmt;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -107,6 +109,28 @@ pub(crate) enum LogLevel {
     Info,
     Warn,
     Error,
+}
+
+impl LogLevel {
+    /// The SYS-012 spelling of the level — the word as it appears in
+    /// `config.toml` and in log lines (the logging module emits the
+    /// effective level into the startup event, so a log file
+    /// self-documents how verbose it is).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            LogLevel::Trace => "trace",
+            LogLevel::Debug => "debug",
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
+            LogLevel::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// The machine-level app configuration (spec §5.8). Deliberately small:
@@ -276,22 +300,16 @@ fn fallback_with_warning(path: &Path, reason: &str) -> (AppConfig, Vec<String>) 
     )
 }
 
-/// Writes each startup warning to stderr, ignoring write errors: a
-/// broken stderr (a closed pipe) must not take the launch down, the
-/// same no-panic policy as `single_instance.rs`. This is the temporary
-/// diagnostics channel until the tracing subscriber exists (spec §5.3,
-/// the logging task) — the warnings themselves are returned by
-/// [`load_or_create`] precisely so they stay testable on the way.
+/// Re-emits each startup warning into the tracing file log as a `warn`
+/// event through the logging facade (`logging::config_load_warning` —
+/// the SEC-008 event surface, see that module). Called by the `setup`
+/// hook **after** `logging::init`, so the warnings land in the log file
+/// the subscriber of that call writes; the warnings are data from
+/// [`load_or_create`] precisely so they stay testable on the way (the
+/// logging module's tests cover the emission end to end).
 pub(crate) fn emit_warnings(warnings: &[String]) {
-    write_warnings(&mut std::io::stderr(), warnings);
-}
-
-/// The [`emit_warnings`] body over an arbitrary [`Write`] — the testable
-/// form: the no-panic-on-failing-writer guarantee is pinned by feeding
-/// it a writer that always errors.
-fn write_warnings(out: &mut impl Write, warnings: &[String]) {
     for warning in warnings {
-        let _ = writeln!(out, "{warning}");
+        crate::logging::config_load_warning(warning);
     }
 }
 
@@ -307,9 +325,9 @@ mod tests {
     //! [`super::DEFAULT_CONFIG_TOML`] or [`super::CONFIG_FILE_NAME`]:
     //! a mutated default must fail its own test (the same trick as the
     //! `data_dirs.rs` layout tests). The startup wiring around the seam
-    //! (call order after the layout, warning printing, `app.manage`) is
-    //! covered by the `config_tests.rs` text pin and the manual first
-    //! launch on a clean system.
+    //! (call order after the layout, warning re-emission after logging
+    //! init, `app.manage`) is covered by the `config_tests.rs` text pin
+    //! and the manual first launch on a clean system.
 
     use super::*;
     use std::error::Error as _;
@@ -719,29 +737,6 @@ log_level = "info"
         // Assert
         assert_eq!(config, AppConfig::default());
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
-    }
-
-    #[test]
-    fn write_warnings_tolerates_a_failing_writer() {
-        // Arrange: a writer that always fails — the stderr equivalent
-        // of a closed pipe. The no-panic guarantee is the contract; a
-        // panic here would abort a launch that must degrade instead.
-        struct AlwaysFails;
-        impl std::io::Write for AlwaysFails {
-            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "nope"))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "nope"))
-            }
-        }
-
-        // Act & Assert: the call must return normally (any panic fails
-        // this test), errors and all.
-        write_warnings(
-            &mut AlwaysFails,
-            &["config: ignoring unknown key `x`".to_string()],
-        );
     }
 
     #[cfg(unix)]

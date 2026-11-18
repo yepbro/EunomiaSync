@@ -863,3 +863,108 @@ scoped `ignore` for that advisory ID with this entry as its reason.
 Switching the time library is a spec-level decision (§5.3 names chrono),
 not a task-level one; the ignore keeps the gate meaningful for every
 other unmaintained direct dependency.
+### D-032 — File logging: tracing-appender daily rotation in `<data dir>/logs/`; SEC-008 enforced by a logging facade — 2026-11-18
+
+Problem: T-012 turns the spec §5.3 "Logs = `tracing`, `tracing-appender`,
+file rotation" row into a startup step, and several decisions were open:
+which crates enter the graph and with what features; where the file lands
+and how it is named (§5.5 fixes `logs/eunomiasync.<date>.log`, while
+Tauri's `app_log_dir()` would move it to `~/Library/Logs/…` on macOS);
+what happens when the log file cannot be created (the layout and config
+steps abort the launch — D-027/D-028); where the non-blocking writer's
+guard lives; and how SEC-008 ("instruction text and file content never
+go into logs; paths do") can be _enforced_ rather than remembered, given
+that the variant-save and sync features the card's acceptance test names
+do not exist yet.
+
+Solution: `src-tauri/src/logging.rs` owns everything. Dependencies:
+`tracing = "0.1"` reuses the 0.1.44 already resolved via tauri (no new
+version in the graph, same pattern as `toml = "1"` in D-029);
+`tracing-subscriber = { 0.3, default-features = false, features =
+["fmt"] }` — no ANSI escapes in log files and no `env-filter`, because
+SYS-012 pins the level to `config.toml`, not `RUST_LOG`;
+`tracing-appender = "0.2"` (0.2.5) for the rotation. File name: the
+builder API with prefix `eunomiasync` + suffix `log` under
+`Rotation::DAILY` yields exactly `eunomiasync.<YYYY-MM-DD>.log` (the date
+stamp and the rotation boundary are UTC — `tracing-appender` formats
+`now_utc()`); the appender is pointed at `<data dir>/logs/` explicitly,
+never at Tauri's `app_log_dir()` (§5.5), and a `config_tests.rs` absence
+pin over comment-stripped sources keeps that API out of live code.
+Ordering (SYS-011): the config loads first, `logging::init` runs after
+it and reads the level through `app.state::<AppConfig>()` — the seam
+D-029 documented — so applying `log_level` to the log output is behavior
+driven end to end by tests. Failure policy: logging is diagnostics, so
+`init` never aborts the launch — on an appender failure it degrades to a
+stderr fmt subscriber with the same level filter and emits one `error`
+event naming the failing path (deliberately weaker than the
+layout/config abort: those guard data the app cannot run without). The
+non-blocking writer's `WorkerGuard` is returned inside a `Logger` value
+that `setup` stores as managed state: it keeps the writer thread alive
+for the whole run (dropping it early would silently stop the file log —
+see the honest-boundaries paragraph below for why the flush-at-exit
+intuition is wrong). The config warnings
+keep flowing as the `Vec<String>` D-029 introduced (the config still runs
+before any subscriber exists); `config::emit_warnings` re-emits them
+through the facade after `init`, replacing the interim lossy-stderr
+channel, and `single_instance.rs` switched its stderr diagnostics to the
+facade the same way.
+
+SEC-008 enforcement is structural, in three layers. First, every tracing
+event of the app is constructed _in_ `logging.rs`: a `config_tests.rs`
+pin scans `src-tauri/src` and `crates/**` (raw text, comments included —
+conservative like the devtools/tray pins; `logging.rs` itself and
+`*_tests.rs` files are exempt, the latter because cfg(test) code never
+ships without the production subscriber) and fails on `error!(`/`warn!(`
+/`info!(`/`debug!(`/`trace!(`/`event!(`/`tracing::instrument`/
+`#[instrument` anywhere else — so a future task cannot interpolate
+content into a message, and `#[instrument]`'s auto-captured fields (which
+would happily serialize a `content: String` argument) are banned with it.
+Second, the facade's signatures are the vocabulary: paths, closed-vocab
+operation codes, numeric IDs. Third, the card's acceptance criterion
+("at variant save and sync, text stays out of the log") is honestly
+adapted to today's code: those features do not exist, so the facade
+ships their logging primitive now — `file_event(FileOp, &Path,
+Option<u64>)` with `FileOp ∈ {variant_saved, variant_restored, synced,
+backed_up}` — marked `#[allow(dead_code)]` until the first of those
+tasks calls it (tested today, consumed later), and the test drives it
+exactly the way those tasks will: with a realistic instruction text
+living in the same scope, the event carries the path, the ID and the
+operation code while every marker of the text stays out of the file.
+The one deliberate content exception: config warnings may quote the
+offending bytes of `config.toml` itself (D-028's "the warning points at
+the exact bytes that failed") — the machine-level config is
+user-written diagnostics input, not instruction text or library file
+content, which is what SEC-008 protects; the facade documents this.
+
+Honest boundaries, mirrored in `ARCHITECTURE.md` (Logging section): the
+midnight rollover cannot be moved into a unit test — the dated file name
+proves the rotation wiring, the crossing itself rests on the crate plus
+the manual smoke run; the global `set_global_default` install is
+process-wide and thus not installable from the parallel test suite —
+tests drive the identical subscriber via `with_default` over `tempfile`
+roots and read the real file back, and the `setup` wiring is pinned
+textually instead (the pin's markers now cover the full SYS-011 order:
+layout → config → `app.manage` → level read → `logging::init` →
+`app.manage(logger)` → warnings). The round-1 review tightened three
+more edges, recorded here with their rationale: both subscribers set
+`log_internal_errors(false)` (the fmt layer's writer-error fallback is
+an `eprintln!` that panics on an unusable stderr — fatal under
+`panic = "abort"` in a Windows GUI build, i.e. exactly in the degraded
+state the fallback exists for; a failing-writer test pins the no-panic
+contract); the degradation event is `error`, not `warn` (at
+`log_level = "error"` a warn would be filtered by the very filter it
+reports about); and the "guard flushes at exit" intuition is recorded
+as false — tauri's event loop ends in `std::process::exit`, which skips
+destructors, so the managed `Logger` never drops and the worker's
+per-batch flushing is what persists lines (the guard's real job is
+staying alive so the writer never stops early). The macros pin exempts
+`src-tauri/src/logging.rs` by full path (a bare-name exemption would
+silently exempt a future `crates/*/src/logging.rs`, which cannot import
+this module and needs its own discipline), includes the `span!(` family
+(one substring needle covers every `*_span!` spelling) and scans the
+`src-tauri` build script alongside `src/` and `crates/**`. No retention
+limit is configured for
+the file log (`max_log_files` unset): spec sets none for the tracing log
+(LOG-006's limits govern the DB `action_log`), so daily files accumulate
+until a task decides otherwise — a conscious omission, not an oversight.
+`cargo-deny` is green for the two new crates.
