@@ -143,11 +143,18 @@ nothing and changes nothing.
 
 SQLite is accessed with `rusqlite` (feature `bundled`, so no system SQLite
 is required) and schema evolution uses `rusqlite_migration`
-(DECISIONS.md D-002). Migration files live in
-`crates/eunomia-store/migrations/*.sql`, are embedded with `include_str!`,
-and applied by `eunomia_store::storage::run_migrations(&mut Connection)`,
-which brings any database to the latest schema version. Tests run against
-in-memory SQLite and one file-backed database through the public API only.
+(DECISIONS.md D-002). The database file is opened by
+`eunomia_store::storage::open_db(&Path)`, which applies the spec DB-001
+pragma set (`journal_mode=WAL` — verified against the mode SQLite
+reports back, `foreign_keys=ON`, `busy_timeout=5000`,
+`synchronous=FULL`) on every open, never creates parent directories
+(the app-layer data-directory layout, D-027, owns them) and fails the
+open when WAL cannot be used (D-030). Migration files live in
+`crates/eunomia-store/migrations/*.sql`, are embedded with
+`include_str!`, and applied by
+`eunomia_store::storage::run_migrations(&mut Connection)`, which brings
+any database to the latest schema version. Tests run against in-memory
+SQLite and file-backed databases through the public API only.
 
 ## Config
 

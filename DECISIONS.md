@@ -631,3 +631,77 @@ the dependency graph, it is already resolved workspace-wide via
 eunomia-fs. The per-OS "first launch on a clean system" GUI check is
 recorded as pending in ARCHITECTURE.md (Data directory section) until
 the first smoke run.
+
+### D-030 — `open_db` applies the DB-001 pragma set; pragma defaults make three of four mutations unobservable — 2026-11-17
+
+Problem: spec DB-001 requires `journal_mode=WAL`, `foreign_keys=ON`,
+`busy_timeout=5000` and `synchronous=FULL` on every database open, but
+the store crate only had `run_migrations` (which takes an already-opened
+connection). Three details had to be settled: how `busy_timeout` is
+applied (rusqlite offers both the pragma and a method), who creates the
+parent directory of the database file, and how the acceptance test
+("reads the pragmas after opening and sees all four values") relates to
+mutation checking.
+
+Solution: `eunomia_store::storage::open_db(&Path) -> Result<Connection,
+StorageError>` applies the full set on every call, in a deliberate
+order: `busy_timeout` first (so the WAL switch and every later step wait
+on a lock instead of failing immediately), then `journal_mode=WAL`
+(verified against the mode SQLite reports back via
+`pragma_update_and_check` — a file that cannot use WAL, e.g. on a
+network filesystem, fails the open with the new
+`StorageError::JournalMode` instead of silently running without the
+NFR-007 crash-safety guarantees), then `synchronous=FULL`,
+`foreign_keys=ON`. Two more decisions: (1) `busy_timeout` is set via
+`Connection::busy_timeout(Duration)` rather than the pragma — it is
+type-safe (a `Duration`, not a `ToSql` value in a SQL string) and
+programs the same SQLite busy handler the pragma does, so
+`PRAGMA busy_timeout` still reads back 5000; (2) `open_db` never creates
+parent directories — the directory layout is the app layer's job
+(`data_dirs::ensure_data_layout`, D-027), and a missing parent surfaces
+as the new `StorageError::Open` variant, which names the offending path
+(the same contract as `Connection::open` itself, made explicit by a test
+that asserts both the error variant and the path in the message).
+`StorageError` grew the two variants (`Open { path, source }`,
+`JournalMode { path, mode }`); `run_migrations` and its existing
+variants are untouched.
+
+Honest testing boundary, verified empirically against the bundled build
+(rusqlite 0.41.1, libsqlite3-sys 0.39.1 as locked by the workspace): a
+plain `Connection::open` on
+a fresh file already reports `foreign_keys=1` (the bundled SQLite
+compiles with `SQLITE_DEFAULT_FOREIGN_KEYS=1`), `busy_timeout=5000`
+(rusqlite programs it on every open) and `synchronous=2` (the SQLite
+compile-time default; `SQLITE_DEFAULT_WAL_SYNCHRONOUS` equals it, so
+entering WAL does not change the value). Consequently, of the four
+pragma-removal mutations only `journal_mode` is caught by the
+integration test (a fresh file defaults to `journal_mode="delete"`);
+removing `foreign_keys`, `busy_timeout` or `synchronous` keeps the
+suite green because the observable state is identical to the required
+one. The read-back assertions still pin the observable DB-001 contract
+and start failing the moment a library change moves those defaults —
+which is exactly when a missing explicit pragma would silently regress
+the spec. The limitation is documented in the test file itself; no
+implementation-coupled (source-grepping) test was added to fake the
+remaining mutations, per the behavior-not-implementation principle.
+
+Migration interaction, recorded for the first schema-change task:
+`run_migrations` runs on the connection `open_db` returned, i.e. with
+`foreign_keys=ON`, and rusqlite_migration 2.7 wraps every migration in
+its own transaction, where `PRAGMA foreign_keys` is a no-op (its
+documentation tells callers to switch the pragma OFF around the run and
+offers `Migrations::foreign_key_check()` for validation). That is safe
+for `0001_init.sql` (object creation only, no foreign keys), but it
+blocks the standard twelve-step table-rebuild pattern: the first
+rebuild-style migration must decide its own foreign-keys policy (switch
+the pragma OFF around the migration run, optionally with a foreign-key
+check) — that decision and the `run_migrations` behavior change belong
+to that task, not to T-014; the documented contract lives in the
+`run_migrations` doc comment.
+
+Also recorded: `open_db` creates a new database file with the OS
+default mode (`0644` under a typical umask on Unix), so the SEC-007
+requirement (DB file `0600`) is not implemented here and needs a
+dedicated task before release.
+
+(D-028 and D-029 are held by the parallel configuration task, T-011.)
