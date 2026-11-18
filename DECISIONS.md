@@ -1538,3 +1538,31 @@ rewrite, out-of-range, type-mismatched and wrong-variant writes
 rejected with the stored state untouched (including no row created
 where none existed), corrupt stored cells failing `get` and `get_all`
 explicitly, unknown rows ignored, and the DEF-005 pin.
+
+### D-041 — Check chains verify exit codes explicitly; output pipes must not swallow them — 2026-11-18
+
+Problem: the orchestrator's post-merge check chain ran
+`cargo clippy … 2>&1 | tail -1 && …`. In a pipeline the chain's status
+is the LAST command's, so `tail`'s 0 masked clippy's failure: after
+merging T-028 a combination-only `result_large_err` (T-023's
+`DbInitError` wrapping the `StorageError` variant T-028 added — each
+task green on its own base) failed clippy, yet the chain printed a
+false "ALL GREEN" and continued. Any `cmd | tail`/`cmd | grep` shape
+in a `&&` chain has the same hole; grep -c output ("13") can likewise
+read as success while tests fail.
+
+Solution: check chains gate on the real exit code. Either run the
+command bare in the chain, or capture it immediately:
+
+```bash
+cmd > /tmp/opencode/<slug>.log 2>&1; code=$?; echo "exit=$code"
+```
+
+and branch on `$code` (or check `PIPESTATUS[0]` when a pipe is
+unavoidable). Line-count summaries like `grep -c` are informational
+only, never the gate. This applies to the orchestrator's merge
+pipeline (worktree pre-merge checks and post-merge main-tree checks)
+and to executor-subagent briefs, which now carry the same rule. The
+failure that exposed it was fixed by a service commit (boxing
+`StorageError` in `DbInitError`); the false-green itself is what this
+entry prevents from recurring.
