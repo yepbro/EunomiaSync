@@ -863,6 +863,7 @@ scoped `ignore` for that advisory ID with this entry as its reason.
 Switching the time library is a spec-level decision (§5.3 names chrono),
 not a task-level one; the ignore keeps the gate meaningful for every
 other unmaintained direct dependency.
+
 ### D-032 — File logging: tracing-appender daily rotation in `<data dir>/logs/`; SEC-008 enforced by a logging facade — 2026-11-18
 
 Problem: T-012 turns the spec §5.3 "Logs = `tracing`, `tracing-appender`,
