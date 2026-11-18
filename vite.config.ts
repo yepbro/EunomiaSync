@@ -35,4 +35,12 @@ export default defineConfig(() => ({
       ignored: ['**/src-tauri/**'],
     },
   },
+  build: {
+    // The CSP (D-022) sets `img-src 'self'`: images must load from
+    // same-origin files, never from `data:` URIs. Vite's default
+    // `assetsInlineLimit` (4096 bytes) would inline small SVGs into the
+    // JS bundle as data URIs where the CSP blocks them, so every asset
+    // is emitted as a real file instead.
+    assetsInlineLimit: 0,
+  },
 }))

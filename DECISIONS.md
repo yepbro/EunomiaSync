@@ -338,3 +338,75 @@ clamp. Window positioning (`center`) is deliberately not set: OS default
 placement is fine, and centering is not part of the T-005 card.
 `src-tauri/src/config_tests.rs` pins the minimum, the "startup ≥ minimum"
 floor, and locates the window by its label.
+
+### D-022 — CSP: strict static policy, `'self'`/`'none'` sources only — 2026-11-17
+
+Problem: SEC-002 (spec §5.6) requires `default-src 'self'` with external
+scripts, styles, and images blocked, but does not spell out the full CSP
+string. The scaffold shipped `"csp": null`, so every origin was allowed.
+The policy had to stay strict enough to survive later relaxations and
+must not break the Vite production bundle or tauri's own injected code.
+
+Solution: `src-tauri/tauri.conf.json` sets
+`default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self';
+connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri
+'self'; form-action 'self'; frame-src 'none'`.
+No `devCsp` is set (pinned by a test). Verified against the installed
+sources (tauri 2.12.6, tauri-utils 2.10.3, wry 0.57.2), directive by
+directive:
+
+- `default-src 'self'` — the SEC-002 baseline and fallback for every
+  directive not spelled out.
+- `script-src 'self'`, `style-src 'self'` — pinned beyond the fallback so
+  relaxing `default-src` later cannot re-open remote code or styles.
+  tauri appends the nonces/hashes of its own injected scripts and styles
+  to these two directives at serve time (`replace_csp_nonce`, tauri
+  manager; `inject_nonce_token`/inline-script hashes, tauri-codegen), so
+  no `'unsafe-inline'` is needed; the built `dist/index.html` contains no
+  inline scripts or styles (Vite emits `<script src>` + `<link>`), and
+  the Vite production CSS/SFC styles are same-origin files. Desktop dev
+  is unaffected: the config CSP only reaches pages served through the
+  tauri custom protocol, and on desktop `tauri dev` loads the Vite
+  server URL directly (`PROXY_DEV_SERVER = cfg!(all(dev, mobile))`).
+- `img-src 'self'` — SEC-002's "external images are blocked"; this is the
+  CSP-level enforcement for the future Markdown preview (SEC-005). The
+  live runtime check ("an external image in the preview does not load")
+  lands with the preview task; until then the policy guarantees the
+  browser side of it. Because `data:` URIs are not allowed here,
+  `vite.config.ts` sets `build.assetsInlineLimit: 0`: Vite's default
+  would inline assets under 4 KB into `data:` URIs inside the JS bundle
+  (the 496-byte `src/assets/vue.svg` shipped that way), where this
+  directive would block them.
+- `object-src 'none'` — no legitimate `<object>`/`<embed>`/`<applet>`,
+  blocked outright.
+- `base-uri 'self'`, `form-action 'self'` — neither falls back to
+  `default-src`; without them an injected `<base>` could re-root relative
+  URLs to a remote host and forms could post off-origin.
+- `frame-src 'none'` — no embedded browsing contexts, ever (remote
+  content ban; the preview renders sanitized HTML, not iframes).
+
+`connect-src ipc: http://ipc.localhost` — the tauri-internal IPC
+transports, the one deliberate exception to the no-remote-sources rule.
+Tauri's IPC script (tauri 2.12 `scripts/ipc-protocol.js`) fetches
+`ipc://localhost/<command>` (`http://ipc.localhost/<command>` on
+Windows) as its primary transport and only latches the `postMessage`
+fallback after a failure; `fetch` is governed by `connect-src`, so
+without these two sources every `invoke` first fails a CSP-blocked
+fetch round-trip and then settles into the fallback, which answers
+responses through `eval` instead of the response channel
+(`can_use_channel_for_response` in tauri `ipc/protocol.rs`) — a silent,
+slower path for exactly the large payloads (matrix, preview HTML) this
+app plans. Both endpoints are tauri-internal loopback transports, not
+internet hosts; apart from them the webview performs no network
+requests (SEC-004: network belongs to the Rust updater). The first
+revision of this decision wrongly claimed IPC is `postMessage`-based on
+all three desktop engines and shipped without `connect-src`; the
+round-1 review disproved that against `scripts/ipc-protocol.js` and the
+policy was corrected. DevTools are release-off by
+tauri's defaults (the `devtools` cargo feature stays disabled, no window
+sets `devtools: true`) and no deep links are registered (SEC-004);
+`src-tauri/src/config_tests.rs` pins all of it, including absence tests
+for the `devtools` feature, deep-link crates/config, the unset
+`devCsp`, the `dangerous*` security key, a positive pin on the allowed
+IPC `connect-src`, and exact-value pins on the four hardening
+directives so their silent removal fails the suite too.
