@@ -203,7 +203,28 @@ D-037): `Db` — the managed state — holds the **one** connection
 from the data directory right after logging — `Db::open` derives both
 §5.5 paths through the `data_dirs` helpers (`db/eunomiasync.sqlite3`
 and the `db-backups/` the migration run's safety copies go to, D-038)
-and calls `open_db` + `run_migrations` (the store stays the only
+and, as its **first** step, rejects a database newer than the app
+(DB-004/NFR-010): `PRAGMA user_version` is read on a bare connection
+and compared with the store's `latest_schema_version()` — before
+`open_db`, because the DB-001 WAL switch writes to the file and §10's
+`E_DB_TOO_NEW` effect is "The app does not change the database"
+(the T-F11 byte-identity criterion). The rejection is a typed
+`DbInitError::TooNew` whose `app_error()` is the §7.10 wire form of
+`E_DB_TOO_NEW` (path and both schema versions as params); it aborts
+the launch like every other init failure (D-027/D-028 — the
+"update the app" screen is the future recovery/update task's) and is
+logged through the facade (`logging::db_too_new`, §10 code + params)
+before the abort. The gate's read leaves the file byte-identical, no
+`-wal`/`-shm` debris and no safety copies — with the recorded D-040
+exceptions, all of them SQLite's own crash recovery during the read
+(a WAL file with pending frames is checkpointed; a hot rollback
+journal is rolled back), which move bytes while preserving content,
+and an "unknown" verdict (unreadable version) degrading the
+rejection to the post-pragma backstop. A migration-run failure on a
+file that became newer mid-open is classified from the version fact
+the same way (the app layer's mapping of the store's
+`DatabaseTooFarAhead`, D-038). Only
+then do `open_db` + `run_migrations` run (the store stays the only
 SQLite/schema owner). Every
 database command runs through `Db::run`: the operation closure executes
 on `tauri::async_runtime::spawn_blocking` (SYS-001 — blocking SQLite

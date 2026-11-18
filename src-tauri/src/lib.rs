@@ -202,10 +202,30 @@ pub fn run() {
             // D-037). Like the layout and config steps, a failure
             // aborts the launch — without the database there is
             // nothing to run — but unlike them this step runs after
-            // logging is up, so the failure is also observable in the
-            // startup panic path with the database path in the
-            // message (`DbInitError`).
-            let database = db::Db::open(&data_dir)?;
+            // logging is up, so the too-new rejection below is also
+            // observable in the log file (the other failures surface
+            // through the startup panic's `Display` text; logging
+            // those §10 lines belongs to the recovery task, which
+            // owns their screens). A database newer than this app
+            // (DB-004, NFR-010) is the one named §10 situation this
+            // step produces: the seam rejects it before anything touches
+            // the file and hands back the typed `E_DB_TOO_NEW`
+            // `AppError` (`DbInitError::app_error`), which is logged
+            // here through the facade with its §10 code. The launch
+            // still aborts (D-027/D-028: nothing to run without the
+            // database); the "Update the app" screen the §10 table
+            // assigns to `E_DB_TOO_NEW` is the future recovery/update
+            // task's to build — the typed error and this log line are
+            // its contract.
+            let database = match db::Db::open(&data_dir) {
+                Ok(database) => database,
+                Err(error) => {
+                    if let Some(app_error) = error.app_error() {
+                        logging::db_too_new(&app_error);
+                    }
+                    return Err(error.into());
+                }
+            };
             app.manage(database);
             Ok(())
         })

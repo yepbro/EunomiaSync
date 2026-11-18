@@ -36,7 +36,14 @@
 //! unwiring, in the `config_tests.rs` style: the `setup` hook must
 //! open and manage the database after logging, and the executor must
 //! go through `tauri::async_runtime::spawn_blocking`.
+//!
+//! The T-018 gate (DB-004/NFR-010, the "DB newer than the app" half
+//! of the T-F11 failure scenario) is covered by the tests at the
+//! bottom: a newer database — however it was created — is rejected as
+//! the typed `E_DB_TOO_NEW` error and the file stays byte-identical,
+//! while every other open failure keeps its D-027 abort shape.
 
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -591,4 +598,442 @@ fn the_executor_runs_operations_through_spawn_blocking() {
          `tauri::async_runtime::spawn_blocking` exactly once (SYS-001, \
          D-037): blocking SQLite work never runs on the async workers"
     );
+}
+
+// ---- T-018: the DB-004 too-new gate (NFR-010, T-F11's new-DB half) --------
+
+/// The latest schema version this app knows, read through the same
+/// store API the gate compares against — the tests derive their
+/// "newer" fixture versions from it, so they stay correct whenever
+/// the embedded migration set grows.
+fn app_schema_version() -> i64 {
+    eunomia_store::storage::latest_schema_version() as i64
+}
+
+/// Creates a database file "by hand" (the T-F11 wording): a plain
+/// SQLite connection — no DB-001 pragma set, the default rollback
+/// (DELETE) journal mode — with `PRAGMA user_version` set to
+/// `version`. This is the byte-level worst case for the gate: a file
+/// the production `open_db` would *modify* (the WAL switch rewrites
+/// the header), so any ordering that runs the pragmas before the
+/// version check fails the byte-identity assertions below.
+fn hand_made_database(db_path: &Path, version: i64) {
+    let connection =
+        rusqlite::Connection::open(db_path).expect("creating a database file by hand must work");
+    connection
+        .pragma_update(None, "user_version", version)
+        .expect("setting user_version by hand must work");
+}
+
+/// Reads the database file's bytes — the T-F11 assertion compares the
+/// actual bytes, not a proxy (hashes included).
+fn file_bytes(path: &Path) -> Vec<u8> {
+    std::fs::read(path).expect("the database file must be readable")
+}
+
+/// The WAL sidecar sibling paths of `db_path` (`-wal`/`-shm`, the
+/// names SQLite itself creates, spec §5.5).
+fn sidecar_paths(db_path: &Path) -> [PathBuf; 2] {
+    let wal = {
+        let mut name = db_path.as_os_str().to_os_string();
+        name.push("-wal");
+        PathBuf::from(name)
+    };
+    let shm = {
+        let mut name = db_path.as_os_str().to_os_string();
+        name.push("-shm");
+        PathBuf::from(name)
+    };
+    [wal, shm]
+}
+
+/// Asserts the §7.10 wire form of a too-new rejection: the §10
+/// literal `E_DB_TOO_NEW`, its default message key, the params a
+/// "Update the app" screen interpolates — the database path and both
+/// schema versions, the expected values pinned from the fixture, not
+/// read back from the code — and `details: null` (a verdict, not an
+/// OS failure; D-034's optional-details contract).
+fn assert_too_new_wire(app_error: &AppError, db_path: &Path, database_schema_version: i64) {
+    let wire = serde_json::to_value(app_error).expect("the typed error must serialize");
+    assert_eq!(wire["code"], serde_json::json!("E_DB_TOO_NEW"));
+    assert_eq!(wire["message_key"], serde_json::json!("errors.db_too_new"));
+    assert_eq!(
+        wire["params"]["path"],
+        serde_json::json!(db_path.display().to_string()),
+        "the params must carry the rejected database path, got: {wire}"
+    );
+    assert_eq!(
+        wire["params"]["database_schema_version"],
+        serde_json::json!(database_schema_version.to_string()),
+        "the params must carry the file's schema version, got: {wire}"
+    );
+    assert_eq!(
+        wire["params"]["app_schema_version"],
+        serde_json::json!(app_schema_version().to_string()),
+        "the params must carry the app's schema version, got: {wire}"
+    );
+    assert_eq!(
+        wire["details"],
+        serde_json::json!(null),
+        "a too-new rejection carries no OS details, got: {wire}"
+    );
+}
+
+/// Asserts the rejection left the whole `db/` and `db-backups/`
+/// layout exactly as the fixture left it: the one database file, no
+/// sidecars, and no safety copies — broadening the T-F11 "data not
+/// changed" check beyond the main file's bytes.
+fn assert_nothing_else_was_written(root: &Path, db_path: &Path) {
+    let db_entries: Vec<String> =
+        std::fs::read_dir(db_path.parent().expect("the layout creates db/"))
+            .expect("the db directory must be readable")
+            .map(|entry| {
+                entry
+                    .expect("every db entry must be readable")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+    let expected = db_path
+        .file_name()
+        .expect("the database file has a name")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        db_entries,
+        vec![expected],
+        "the rejected open must leave exactly the database file in db/"
+    );
+    let backups = crate::data_dirs::db_backups_dir(root);
+    let backup_entries: Vec<String> = std::fs::read_dir(&backups)
+        .expect("the db-backups directory must be readable")
+        .map(|entry| {
+            entry
+                .expect("every backup entry must be readable")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        backup_entries,
+        Vec::<String>::new(),
+        "the rejected open must write no safety copies"
+    );
+}
+
+#[test]
+fn a_newer_database_is_rejected_as_e_db_too_new_and_left_byte_identical() {
+    // Arrange: the full layout plus a hand-made database one version
+    // ahead (T-F11's "DB newer than the app" half) in rollback
+    // journal mode — the file open_db's WAL switch would rewrite.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    let newer = app_schema_version() + 1;
+    hand_made_database(&db_path, newer);
+    let bytes_before = file_bytes(&db_path);
+
+    // Act: the tested path — the same `Db::open` the `setup` hook
+    // runs.
+    let Err(error) = Db::open(temp.path()) else {
+        panic!("a newer database must be rejected");
+    };
+
+    // Assert: the typed §10/§7.10 rejection, and the §10 effect "The
+    // app does not change the database" verified on the actual bytes
+    // (T-F11: the file is byte-identical), with no WAL sidecars left
+    // next to it — the gate never opened a WAL-capable connection.
+    let app_error = error
+        .app_error()
+        .expect("a too-new rejection must map to the typed AppError");
+    assert_too_new_wire(&app_error, &db_path, newer);
+    assert_eq!(
+        file_bytes(&db_path),
+        bytes_before,
+        "the rejected database file must be byte-identical (T-F11)"
+    );
+    let [wal, shm] = sidecar_paths(&db_path);
+    assert!(
+        !wal.exists() && !shm.exists(),
+        "the rejected open must not leave WAL sidecar files behind"
+    );
+    assert_nothing_else_was_written(temp.path(), &db_path);
+    // The panic-path diagnostic (the abort's `Display` is the console
+    // message until the "Update the app" screen exists): it names the
+    // path and the §10 code literal.
+    let message = error.to_string();
+    assert!(
+        message.contains(&db_path.display().to_string())
+            && message.contains("E_DB_TOO_NEW")
+            && message.contains(&newer.to_string()),
+        "the abort message must name the path, the version and the \
+         code literal, got: {message}"
+    );
+}
+
+#[test]
+fn a_much_newer_database_is_rejected_the_same_way() {
+    // Arrange: a version far ahead — the gate compares, it does not
+    // estimate distance, and a future database several versions newer
+    // behaves exactly like one a single step ahead.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    let much_newer = app_schema_version() + 5;
+    hand_made_database(&db_path, much_newer);
+    let bytes_before = file_bytes(&db_path);
+
+    // Act
+    let Err(error) = Db::open(temp.path()) else {
+        panic!("a much newer database must be rejected");
+    };
+
+    // Assert: the same typed rejection with the file's own version in
+    // the params, and the file untouched.
+    let app_error = error
+        .app_error()
+        .expect("a too-new rejection must map to the typed AppError");
+    assert_too_new_wire(&app_error, &db_path, much_newer);
+    assert_eq!(
+        file_bytes(&db_path),
+        bytes_before,
+        "the rejected database file must be byte-identical (T-F11)"
+    );
+    assert_nothing_else_was_written(temp.path(), &db_path);
+}
+
+#[test]
+fn an_up_to_date_database_opens_normally() {
+    // The gate's boundary: a database at exactly the app's latest
+    // version — the normal state of every existing user's database,
+    // and the shape a `>=` mutation of the gate's comparison would
+    // wrongly reject. It must open (the migration run is a no-op) and
+    // keep its version.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    let backups_dir = crate::data_dirs::db_backups_dir(temp.path());
+    {
+        let mut connection = eunomia_store::storage::open_db(&db_path)
+            .expect("opening a fresh database through the store must work");
+        eunomia_store::storage::run_migrations(&mut connection, &backups_dir)
+            .expect("migrating the fresh database must work");
+    }
+
+    // Act & Assert: the re-open succeeds and is usable — a plain
+    // operation runs on the opened connection, and the version is
+    // still the app's latest.
+    let db = Db::open(temp.path()).expect("an up-to-date database must open");
+    let probed = db.clone();
+    let version = async_runtime::block_on(probed.run(|tx| {
+        tx.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .map_err(sqlite_error_to_app_error)
+    }))
+    .expect("reading user_version through the executor must work");
+    assert_eq!(version, app_schema_version());
+}
+
+#[test]
+fn a_newer_wal_database_is_rejected_and_leaves_no_sidecar_files() {
+    // Arrange: the production shape — a database this app's own store
+    // made: `open_db` (DB-001 pragma set, WAL mode) plus
+    // `run_migrations`, then "aged" newer by bumping `user_version`
+    // the way a newer app version would leave it. The creating
+    // connection's clean close checkpoints the bump into the main
+    // file and removes the sidecars, so the fixture starts settled.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    let backups_dir = crate::data_dirs::db_backups_dir(temp.path());
+    let newer = app_schema_version() + 1;
+    {
+        let mut connection = eunomia_store::storage::open_db(&db_path)
+            .expect("opening a fresh database through the store must work");
+        eunomia_store::storage::run_migrations(&mut connection, &backups_dir)
+            .expect("migrating the fresh database must work");
+        connection
+            .pragma_update(None, "user_version", newer)
+            .expect("bumping user_version must work");
+    }
+    let bytes_before = file_bytes(&db_path);
+
+    // Act
+    let Err(error) = Db::open(temp.path()) else {
+        panic!("a newer WAL database must be rejected");
+    };
+
+    // Assert: the same typed rejection; the main file byte-identical;
+    // and — the sidecar fact of the gate — the bare read the gate
+    // performed on the WAL-mode file left no `-wal`/`-shm` debris
+    // (SQLite creates both for the read and removes them on the clean
+    // drop; recorded in DECISIONS.md with the too-new task).
+    let app_error = error
+        .app_error()
+        .expect("a too-new rejection must map to the typed AppError");
+    assert_too_new_wire(&app_error, &db_path, newer);
+    assert_eq!(
+        file_bytes(&db_path),
+        bytes_before,
+        "the rejected WAL database file must be byte-identical (T-F11)"
+    );
+    let [wal, shm] = sidecar_paths(&db_path);
+    assert!(
+        !wal.exists() && !shm.exists(),
+        "the rejected open must not leave WAL sidecar files behind"
+    );
+    assert_nothing_else_was_written(temp.path(), &db_path);
+}
+
+#[test]
+fn a_non_database_file_keeps_the_generic_abort_and_is_not_touched() {
+    // Arrange: garbage bytes where the database belongs. The corrupt
+    // file keeps its D-037 behavior — the launch aborts as a plain
+    // open/migration failure (the `E_DB_CORRUPT` recovery screen is
+    // the recovery task's), never as the too-new rejection.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    let garbage = b"definitely not a sqlite database, just bytes in the way";
+    std::fs::write(&db_path, garbage).expect("writing the fixture file must work");
+
+    // Act
+    let Err(error) = Db::open(temp.path()) else {
+        panic!("a non-database file must fail the open");
+    };
+
+    // Assert: no typed AppError (the D-027/D-028 abort path), the
+    // message names the database file (the panic prints `Display`),
+    // and the failed open modified nothing.
+    assert!(
+        error.app_error().is_none(),
+        "a corrupt file must not masquerade as a too-new rejection"
+    );
+    assert!(
+        error.to_string().contains(&db_path.display().to_string()),
+        "the abort message must name the database file, got: {error}"
+    );
+    assert!(
+        error.to_string().to_lowercase().contains("not a database"),
+        "the store's corruption reason must stay in the message, got: {error}"
+    );
+    assert_eq!(
+        file_bytes(&db_path),
+        garbage.to_vec(),
+        "the failed open must not modify the file"
+    );
+}
+
+#[test]
+fn a_migration_failure_on_a_now_too_new_file_classifies_as_too_new() {
+    // The D-038 backstop of the gate: `reject_too_new` passed, then
+    // the file became newer under the open (swapped or rewritten
+    // between the two steps) and `run_migrations` failed. The
+    // classification is re-derived from the version fact on the open
+    // connection — any failure with the fact present maps to the
+    // typed rejection; the same failure without it keeps the generic
+    // shape with the store error preserved.
+    use rusqlite::ffi::{Error as SqliteError, SQLITE_IOERR};
+
+    // Arrange: the two connections the classifier sees — one carrying
+    // a too-new version, one within range — and one real store-layer
+    // failure shape.
+    let too_new = rusqlite::Connection::open_in_memory().unwrap();
+    too_new
+        .pragma_update(None, "user_version", app_schema_version() + 1)
+        .unwrap();
+    let within_range = rusqlite::Connection::open_in_memory().unwrap();
+    within_range
+        .pragma_update(None, "user_version", app_schema_version())
+        .unwrap();
+    let db_path = Path::new("/data/db/eunomiasync.sqlite3");
+
+    // Act & Assert: with the too-new fact the failure classifies as
+    // the typed rejection carrying both versions…
+    let classified = crate::db::classify_migration_failure(
+        &too_new,
+        db_path,
+        eunomia_store::storage::StorageError::Sql(rusqlite::Error::SqliteFailure(
+            SqliteError::new(SQLITE_IOERR),
+            None,
+        )),
+    );
+    let crate::db::DbInitError::TooNew {
+        database_schema_version,
+        app_schema_version: latest_in_error,
+        ..
+    } = classified
+    else {
+        panic!("a too-new version fact must classify as TooNew, got: {classified:?}");
+    };
+    assert_eq!(database_schema_version, app_schema_version() + 1);
+    assert_eq!(latest_in_error as i64, app_schema_version());
+
+    // …and without it the same failure keeps the generic shape with
+    // the store error preserved inside.
+    let classified = crate::db::classify_migration_failure(
+        &within_range,
+        db_path,
+        eunomia_store::storage::StorageError::Sql(rusqlite::Error::SqliteFailure(
+            SqliteError::new(SQLITE_IOERR),
+            None,
+        )),
+    );
+    assert!(
+        matches!(
+            classified,
+            crate::db::DbInitError::Open { ref source, .. }
+                if matches!(
+                    **source,
+                    eunomia_store::storage::StorageError::Sql(_)
+                )
+        ),
+        "an in-range version must keep the generic Open shape, got: {classified:?}"
+    );
+}
+
+#[test]
+fn setup_logs_a_too_new_database_through_the_facade_before_aborting() {
+    // Arrange & Act: `lib.rs`, compile-time constant, comments
+    // stripped (the shared helper). The too-new branch of the DB step
+    // must log through the facade (D-032: tracing events live in
+    // `logging.rs` only) before returning the error that aborts the
+    // launch.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    let markers = [
+        "db::Db::open(&data_dir)",
+        "logging::db_too_new(",
+        "return Err(error.into());",
+    ];
+    let positions: Vec<usize> = markers
+        .iter()
+        .map(|marker| {
+            assert_eq!(
+                lib.matches(marker).count(),
+                1,
+                "lib.rs must contain `{marker}` exactly once, live (a \
+                 commented-out or duplicated line must not count)"
+            );
+            lib.find(marker)
+                .expect("the exactly-once check above guarantees one match")
+        })
+        .collect();
+
+    // Assert: open, facade log, abort — in that order. Honest
+    // boundary, same as the other wiring pins: this proves the wiring
+    // exists and stays wired; the seam behavior is covered by the
+    // tests above.
+    for pair in positions.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "lib.rs must log the too-new rejection through the facade \
+             before aborting (DB-004, D-032); marker positions: {positions:?}"
+        );
+    }
 }

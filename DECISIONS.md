@@ -1309,6 +1309,13 @@ the store stays the single declaration point for the build shape
 (bundled SQLite), which its version comment pins against
 rusqlite_migration.
 
+Addendum (2026-11-18, T-018/D-040): the "corrupt/too-new abort" half
+of this entry's startup paragraph is narrowed by D-040 — a database
+newer than the app is now rejected by a typed gate before `open_db`
+(`DbInitError::TooNew` → the `E_DB_TOO_NEW` AppError, logged through
+the facade, launch still aborted); a corrupt file keeps the plain
+open/migration abort described here until the recovery task lands.
+
 greet: removed entirely — command, registration, mock-IPC tests
 (`ipc_tests.rs`), the demo form in `App.vue`, and the regenerated
 `src/bindings.ts` (which now carries only types; tauri-specta emits no
@@ -1538,6 +1545,135 @@ rewrite, out-of-range, type-mismatched and wrong-variant writes
 rejected with the stored state untouched (including no row created
 where none existed), corrupt stored cells failing `get` and `get_all`
 explicitly, unknown rows ignored, and the DEF-005 pin.
+
+### D-040 — E_DB_TOO_NEW: the too-new gate runs before the DB-001 pragma set; typed at the seam, screen deferred — 2026-11-18
+
+Problem: DB-004/NFR-010/T-F11 (the "DB newer than the app" half)
+require that a database with `PRAGMA user_version` above what the app
+knows is not opened: `E_DB_TOO_NEW`, §10 effect "The app does not
+change the database", user action "Update the app". The store half was
+done (D-038: `run_migrations` rejects with `DatabaseTooFarAhead`), but
+at the app layer `Db::open` ran `open_db` + `run_migrations` and every
+failure — too-new included — aborted the launch as an anonymous
+`DbInitError` (D-037's recorded gap). Two subtleties drove the design:
+`open_db` applies the DB-001 pragma set _before_ `run_migrations`
+could reject anything, and the `journal_mode=WAL` switch **writes to
+the file** (it rewrites the header of a rollback-journal database —
+bytes 18/19 — and creates `-wal`/`-shm` siblings), so a gate that runs
+after `open_db` would already have modified the very file §10 says the
+app must not change; and the byte-identity criterion has to hold for a
+database created _outside_ the app (T-F11 creates one by hand), which
+arrives in the default DELETE journal mode.
+
+Solution: the gate is the first step of `Db::open`, before `open_db`.
+It opens a bare `rusqlite::Connection` (no pragmas — reading one
+pragma writes nothing, no journal is created; src-tauri owning
+`Connection` directly is D-037's shape) and reads `PRAGMA
+user_version`, comparing it with the store's new
+`latest_schema_version()` — the one, additive store change this task
+makes in T-028's zone (three lines plus an invariant test): the number
+must come from the store or the app would own schema knowledge twice,
+and hardcoding it in src-tauri would drift at the first migration.
+Every failure of the pre-check read is deliberately treated as
+"version unknown — proceed": a missing file (a bare open creates the
+same 0-byte file `open_db` would), a missing parent, a corrupt file or
+a lock all have their canonical failure one step later (D-030's
+`StorageError::Open` names the path; a corrupt file keeps its D-037
+abort — it must not masquerade as too-new). Only a definitive
+`version > latest` produces the rejection.
+
+The rejection is typed at the seam: `DbInitError` became an enum with
+a `TooNew { path, database_schema_version, app_schema_version }`
+variant (everything else keeps the old `Open` shape and Display
+unchanged) and an `app_error()` method that builds the §7.10 wire form
+of `E_DB_TOO_NEW` — default message key `errors.db_too_new`, params
+`path`/`database_schema_version`/`app_schema_version` (strings, per
+D-034's string-typed params), `details: null` (a verdict, not an OS
+failure — the facts travel in params). `run_migrations` failures are
+classified by `classify_migration_failure`, which re-reads
+`user_version` on the open connection and maps the too-new **fact** to
+`TooNew` — that is the app-layer mapping of D-038's
+`DatabaseTooFarAhead`, expressed without a src-tauri dependency on
+`rusqlite_migration` (the store stays its only consumer); after the
+gate passed, that branch can only fire when the file changed under the
+open (swapped/rewritten between the two steps — accepted TOCTOU: the
+single-instance lock leaves only external actors, and `open_db` may
+already have touched a swapped-in file before the backstop rejects).
+
+Startup behavior: the abort policy is UNCHANGED (D-027/D-028 — without
+the database there is nothing to run); what changed is honesty of the
+failure. The `setup` hook calls `app_error()` and, for the too-new
+rejection, logs it through the facade before returning the error:
+`logging::db_too_new(&AppError)` emits one `error`-level event
+(`code="E_DB_TOO_NEW"`, the params as its payload, target
+`eunomia::db`) — error level because the launch aborts on the verdict
+and the line must survive `log_level = "error"` (same reasoning as
+D-032's degradation event); logging is up by then, unlike the
+layout/config steps (SYS-011). The §10 "Update the app" screen is the
+future recovery/update task's to build — the typed error, params and
+log line are its contract; until it exists the panic's `Display` text
+(names the path, both versions and the code literal) is the console
+diagnostic. D-037's "corrupt/too-new abort" phrasing is thereby
+narrowed: too-new is typed and logged, corrupt keeps the plain abort
+until the recovery task.
+
+Byte-level facts, verified empirically and pinned by tests: a
+rollback-journal (hand-made) database gains nothing from the gate's
+read — byte-identical, no sidecars (this is exactly why the gate must
+precede `open_db`; the mutation "gate after open_db" fails the
+byte-identity test on the WAL header rewrite). For a database already
+in WAL mode (the shape a real newer app leaves), SQLite creates the
+`-shm` and possibly `-wal` siblings for the bare read and removes them
+on the clean drop — main file byte-identical, no debris (asserted;
+the tests also pin that `db/` holds exactly the one file and
+`db-backups/` stays empty). The gate connection carries the DB-001
+`busy_timeout` (the same 5000 ms `open_db` applies; the constant lives
+in the store and is duplicated here for that one call — a momentary
+writer lock must yield a verdict, not defer the decision past the
+pragma set). Accepted boundaries, both SQLite's own crash recovery
+running during the read — bytes move, logical content does not, and
+learning the version without opening the file would mean
+re-implementing SQLite's WAL/journal formats: (a) a WAL file with
+_pending frames_ (a newer app killed before checkpointing) is
+checkpointed by the clean drop; (b) a _hot rollback journal_ (a newer
+app killed mid-write in DELETE mode) is rolled back, consuming the
+`-journal`. Deliberately untested: simulating either requires
+leaking an open connection (`std::mem::forget`) to keep frames/journal
+pending, and a leaked handle breaks the Windows test teardown rule the
+store suite pinned (connections closed before `remove_dir_all`) — the
+facts are SQLite's documented close-time recovery, and the settled
+states on both sides are asserted. One more recorded degradation: a
+version that cannot be read even after the busy timeout (a lock that
+outlasts it, a transient I/O error) yields "unknown → proceed", and
+what happens next depends on the lock: if it clears within
+`open_db`'s own 5 s timeout, the pragmas are applied (on a
+rollback-mode file the header rewrite already happened) and the
+rejection arrives from the backstop; if it persists, `open_db` itself
+fails and the launch aborts with the generic `Open` error — correct,
+just not the typed verdict. With the timeout, either branch needs an
+external writer holding the file across a startup in progress.
+
+Testing: the T-F11 new-DB half through the real `Db::open` seam —
+hand-made DELETE-mode file at latest+1 and latest+5 (wire form pinned:
+code/message_key/all three params/`details: null`; file bytes asserted
+equal; `db/` holds exactly the one file, `db-backups/` stays empty;
+the abort `Display` names the path, version and code literal), the
+WAL-mode production-shaped variant (made via the store's own
+`open_db`+`run_migrations`, version bumped; bytes equal, no sidecar
+debris, nothing else written), the boundary case — an up-to-date
+database (version == latest, every existing user's normal state)
+opens normally, which a `>=` mutation of the gate's comparison would
+reject — a garbage file keeping the generic abort (`app_error()` None,
+path in `Display`, bytes untouched), the backstop classifier in both
+directions (too-new fact → `TooNew`, in-range → `Open` with the store
+error preserved), the facade line (code literal, path, versions, §10
+action; survives `log_level = "error"`), a lib.rs wiring pin (facade
+log before the abort return), and the store invariant
+(`latest_schema_version()` == `user_version` after a full run).
+Mutations verified the suite bites: removing the gate fails the two
+DELETE-mode tests (and only them — the WAL variant legitimately passes
+through the backstop, which is that path's own proof); moving the gate
+after `open_db` fails the byte-identity assertion exactly.
 
 ### D-041 — Check chains verify exit codes explicitly; output pipes must not swallow them — 2026-11-18
 

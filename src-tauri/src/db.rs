@@ -9,9 +9,12 @@
 //!   [`std::sync::Mutex`], opened through `eunomia_store::storage::open_db`
 //!   (the DB-001 pragma set, D-030) and migrated with the store's
 //!   `run_migrations`, safety copies into the layout's `db-backups/`
-//!   included (D-038) — the app shell never touches SQLite flags
-//!   itself, and the store crate stays the only schema owner
-//!   (D-010/D-017).
+//!   included (D-038) — but only after a DB-004 gate rejects a
+//!   database newer than this app as the very first step, before
+//!   anything can touch the file (NFR-010, `E_DB_TOO_NEW`). The app
+//!   shell applies no SQLite flags or pragmas itself (the gate's bare
+//!   connection only reads), and the store crate stays the only
+//!   schema owner (D-010/D-017).
 //! - [`Db::run`] is the executor every future database command goes
 //!   through: it moves the operation onto the blocking thread pool
 //!   with [`tauri::async_runtime::spawn_blocking`] (SYS-001), locks
@@ -145,16 +148,37 @@ pub(crate) struct Db {
 
 impl Db {
     /// Opens the database file and migrates it to the latest schema
-    /// version — the startup seam. `eunomia_store::storage::open_db`
-    /// applies the DB-001 pragma set (WAL, `synchronous=FULL`,
-    /// `foreign_keys=ON`, `busy_timeout=5000`; D-030) and creates the
-    /// file when missing, but never the parent directory: the caller
-    /// (the `setup` hook) must have created the data-directory layout
-    /// first — both halves of it, because `run_migrations` needs the
-    /// existing `db-backups/` for its safety copies before it applies
-    /// anything (D-038). Both paths are derived here from the one
-    /// `data_dir` root through the `data_dirs` helpers, so the file
-    /// and its backups cannot drift apart at a call site.
+    /// version — the startup seam. As the **first** step, the DB-004
+    /// gate ([`reject_too_new`]) rejects a database newer than this
+    /// app: `PRAGMA user_version` is read on a bare connection, and a
+    /// version above the store's `latest_schema_version` fails with
+    /// [`DbInitError::TooNew`] — the typed `E_DB_TOO_NEW` §10
+    /// situation (NFR-010) — before `open_db` runs, because the
+    /// DB-001 pragma set *writes* to the file (the `journal_mode=WAL`
+    /// switch rewrites the header of a rollback-journal database), and
+    /// §10's `E_DB_TOO_NEW` effect is "The app does not change the
+    /// database" (T-F11: the file stays byte-identical). Only then
+    /// does `eunomia_store::storage::open_db` apply the pragma set
+    /// (D-030) — it creates the file when missing, but never the
+    /// parent directory: the caller (the `setup` hook) must have
+    /// created the data-directory layout first — both halves of it,
+    /// because `run_migrations` needs the existing `db-backups/` for
+    /// its safety copies before it applies anything (D-038). Both
+    /// paths are derived here from the one `data_dir` root through
+    /// the `data_dirs` helpers, so the file and its backups cannot
+    /// drift apart at a call site.
+    ///
+    /// Sidecar files of the rejected open, recorded for T-F11: the
+    /// gate's bare connection only *reads*, which writes nothing — a
+    /// rollback-journal (default-mode) database gains no `-wal`/`-shm`
+    /// siblings at all, and for a database already in WAL mode SQLite
+    /// creates both siblings for the read and removes them again when
+    /// the connection drops (the tests below assert the end state:
+    /// main file byte-identical, no sidecar debris). A WAL file with
+    /// *pending frames* (a newer app killed before checkpointing) is
+    /// checkpointed by that same clean drop — content-preserving
+    /// SQLite recovery; DECISIONS.md records why that boundary is
+    /// accepted.
     ///
     /// The `Vec<PathBuf>` of pre-migration copies the migration run
     /// returns (empty for fresh and no-op runs, D-038) is deliberately
@@ -165,31 +189,39 @@ impl Db {
     ///
     /// # Errors
     ///
-    /// Returns [`DbInitError`] when the file cannot be opened or
-    /// configured, WAL cannot be enabled, a safety copy cannot be
-    /// written, or a migration fails. A startup failure here aborts
-    /// the launch: without the database there is nothing to run — the
-    /// same policy as the layout and config steps (D-027/D-028) — and
-    /// unlike them this step runs after logging is up. Named §10
-    /// situations this includes: a corrupt file aborts the launch as
-    /// an open/migration failure — the recovery screen that
-    /// `E_DB_CORRUPT` demands (§10) is the recovery task's
-    /// (`db_verify`/`db_restore_backup`/`db_recreate`), and a database
-    /// newer than the app already errors in the store (D-038) — the
-    /// §10 `E_DB_TOO_NEW` "update the app" screen is still the app
-    /// layer's to build.
+    /// Returns [`DbInitError::TooNew`] when the database was created
+    /// by a newer app version (its typed wire form is
+    /// [`DbInitError::app_error`]), and [`DbInitError::Open`] when the
+    /// file cannot be opened or configured, WAL cannot be enabled, a
+    /// safety copy cannot be written, or a migration fails. A startup
+    /// failure of either kind aborts the launch: without the database
+    /// there is nothing to run — the same policy as the layout and
+    /// config steps (D-027/D-028) — and unlike them this step runs
+    /// after logging is up, so the too-new rejection is also logged
+    /// through the facade with its §10 code (`logging::db_too_new`,
+    /// wired in the `setup` hook). The §10 screens both errors
+    /// describe — "Update the app" for `E_DB_TOO_NEW`, recovery for
+    /// `E_DB_CORRUPT` — are the future recovery/update task's to
+    /// build; the typed error on this seam is their contract, and a
+    /// corrupt file keeps aborting as a plain open/migration failure
+    /// until then (`db_verify`/`db_restore_backup`/`db_recreate`).
     pub(crate) fn open(data_dir: &Path) -> Result<Self, DbInitError> {
         let db_path = crate::data_dirs::db_file_path(data_dir);
         let backups_dir = crate::data_dirs::db_backups_dir(data_dir);
+        // DB-004 order: the too-new gate runs before `open_db`, so a
+        // newer database is rejected before the pragma set can touch
+        // the file (see the method docs).
+        reject_too_new(&db_path)?;
         let mut connection =
-            eunomia_store::storage::open_db(&db_path).map_err(|source| DbInitError {
+            eunomia_store::storage::open_db(&db_path).map_err(|source| DbInitError::Open {
                 path: db_path.clone(),
                 source: Box::new(source),
             })?;
         eunomia_store::storage::run_migrations(&mut connection, &backups_dir).map_err(
-            |source| DbInitError {
-                path: db_path,
-                source: Box::new(source),
+            |source| {
+                // The backstop for a file that became newer *during* the
+                // open (see `classify_migration_failure`).
+                classify_migration_failure(&connection, &db_path, source)
             },
         )?;
         Ok(Db {
@@ -251,6 +283,106 @@ impl Db {
             // the task was cancelled at runtime shutdown).
             Err(join_error) => Err(join_failure_to_app_error(join_error)),
         }
+    }
+}
+
+/// Reads `PRAGMA user_version` (DB-004) from a **bare** connection at
+/// `db_path` — no DB-001 pragma set, no configuration. Reading a
+/// pragma executes no write of the app's own: a rollback-journal
+/// database gains no `-journal` or sidecars from it (a WAL-mode
+/// database gets its `-shm`/`-wal` for the read and loses them on the
+/// clean drop — see [`Db::open`]). The connection does carry the
+/// DB-001 `busy_timeout` (5000 ms, the same value `open_db` applies):
+/// with the default zero timeout a momentary writer lock would fail
+/// the read here, defer to `open_db` — which then writes to the very
+/// file this gate exists to protect — and leave the rejection to the
+/// post-pragma backstop; waiting for the verdict keeps the gate the
+/// deciding step.
+///
+/// Every failure is still deliberately reported as `None` (version
+/// unknown): this read exists only to answer "is the database
+/// *definitely* newer than this app?", and every other state — the
+/// file does not exist yet (a bare `Connection::open` creates a 0-byte
+/// one, exactly what `open_db` would create a moment later), the
+/// parent directory is missing, the bytes are not a database, a lock
+/// that outlasts the timeout — has its canonical failure mode one step
+/// later, in `open_db` or `run_migrations` (D-030's `StorageError::Open`
+/// names the path; a corrupt file keeps its D-037 abort). Claiming
+/// "too new" for a version that could not be read would misclassify
+/// those cases and bypass their errors; D-040 records that an
+/// "unknown" verdict degrades the byte-identity guarantee to the
+/// backstop, which runs after the pragmas.
+fn schema_version_of(db_path: &Path) -> Option<i64> {
+    let connection = Connection::open(db_path).ok()?;
+    // Same 5000 ms as `open_db`'s DB-001 set (the constant lives in
+    // the store); the value is duplicated here deliberately — one
+    // number is the cost of the gate deciding before the pragma set.
+    let _ = connection.busy_timeout(std::time::Duration::from_millis(5000));
+    connection
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+        .ok()
+}
+
+/// The DB-004/NFR-010 gate: a database whose `PRAGMA user_version`
+/// exceeds the schema versions this app knows — the store's
+/// `latest_schema_version`, the number of embedded migrations — is not
+/// opened at all.
+///
+/// This check is the *first* step of [`Db::open`], before
+/// `open_db`: the DB-001 pragma set writes to the file (the
+/// `journal_mode=WAL` switch rewrites the header of a rollback-journal
+/// database), and §10's `E_DB_TOO_NEW` effect is "The app does not
+/// change the database" — the T-F11 byte-identity criterion. The gate
+/// itself opens a bare connection and reads one pragma (see
+/// [`schema_version_of`]); src-tauri owning `Connection` directly is
+/// the D-037 shape, and the schema knowledge (what "latest" is) stays
+/// in the store.
+fn reject_too_new(db_path: &Path) -> Result<(), DbInitError> {
+    let app_schema_version = eunomia_store::storage::latest_schema_version();
+    if let Some(database_schema_version) = schema_version_of(db_path)
+        && database_schema_version > app_schema_version as i64
+    {
+        return Err(DbInitError::TooNew {
+            path: db_path.to_owned(),
+            database_schema_version,
+            app_schema_version,
+        });
+    }
+    Ok(())
+}
+
+/// Classifies a `run_migrations` failure for [`Db::open`]: the
+/// D-038 backstop of the too-new gate. The store's migration run
+/// itself rejects a database newer than its set
+/// (`DatabaseTooFarAhead`), which — once [`reject_too_new`] has
+/// passed — can only mean the file changed under the open (a too-new
+/// file swapped or rewritten between the two steps). The verdict is
+/// re-derived from the version *fact* on the open connection rather
+/// than matched from the store's error enum: src-tauri does not
+/// depend on `rusqlite_migration` (the store is its only consumer),
+/// and the fact is all the classification needs. Any other failure —
+/// and a version that still reads within range — keeps the generic
+/// [`DbInitError::Open`] shape and with it the D-027 abort path.
+pub(crate) fn classify_migration_failure(
+    connection: &Connection,
+    db_path: &Path,
+    source: eunomia_store::storage::StorageError,
+) -> DbInitError {
+    let app_schema_version = eunomia_store::storage::latest_schema_version();
+    let too_new = connection
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+        .ok()
+        .filter(|version| *version > app_schema_version as i64);
+    match too_new {
+        Some(database_schema_version) => DbInitError::TooNew {
+            path: db_path.to_owned(),
+            database_schema_version,
+            app_schema_version,
+        },
+        None => DbInitError::Open {
+            path: db_path.to_owned(),
+            source: Box::new(source),
+        },
     }
 }
 
@@ -367,39 +499,124 @@ pub(crate) fn sqlite_error_to_app_error(error: rusqlite::Error) -> AppError {
     app_error
 }
 
-/// Why the database could not be opened or migrated at startup: the
-/// file it happened at, plus the store-layer cause. Kept as data (the
-/// same shape as `DataLayoutError`/`ConfigError`) because the
-/// `Display` text is what the startup failure surfaces — tauri panics
-/// in the event-loop `Ready` handler with `Failed to setup app: …`,
-/// which prints the `Display` form, so the path must be in the
-/// message itself (D-027's reasoning, applied here too).
+/// Why the database could not be opened or migrated at startup. Kept
+/// as data (the same shape as `DataLayoutError`/`ConfigError`) because
+/// the `Display` text is what the startup failure surfaces — tauri
+/// panics in the event-loop `Ready` handler with `Failed to setup
+/// app: …`, which prints the `Display` form, so the path must be in
+/// the message itself (D-027's reasoning, applied here too).
+///
+/// One variant is a named §10 user situation rather than an anonymous
+/// infrastructure failure: [`DbInitError::TooNew`] (DB-004/NFR-010) —
+/// a database created by a newer app version, which the app must not
+/// change and the user answers with "Update the app". Its typed
+/// §7.10/§10 wire form is [`DbInitError::app_error`]; every other
+/// failure stays an open/migration error that aborts the launch
+/// (D-027/D-028 — the corrupt-file recovery screen is the recovery
+/// task's).
 #[derive(Debug)]
-pub(crate) struct DbInitError {
-    /// The database file whose open or migration failed.
-    path: PathBuf,
-    /// The store-layer failure: open/pragma (`StorageError::Open`),
-    /// WAL (`StorageError::JournalMode`) or migration
-    /// (`StorageError::Migration`). Boxed: `StorageError` grew past
-    /// clippy's `result_large_err` threshold once the settings
-    /// repository (T-028) added its `Settings` variant, and this error
-    /// crosses the `Result` return of [`Db::open`] on every startup.
-    source: Box<eunomia_store::storage::StorageError>,
+pub(crate) enum DbInitError {
+    /// The file could not be opened, configured or migrated — every
+    /// failure except the too-new gate: open/pragma
+    /// (`StorageError::Open`), WAL (`StorageError::JournalMode`),
+    /// safety copy (`StorageError::Backup`), migration
+    /// (`StorageError::Migration`).
+    Open {
+        /// The database file whose open or migration failed.
+        path: PathBuf,
+        /// The store-layer failure. Boxed: `StorageError` grew past
+        /// clippy's `result_large_err` threshold once the settings
+        /// repository (T-028) added its `Settings` variant, and this
+        /// error crosses the `Result` return of [`Db::open`] on every
+        /// startup.
+        source: Box<eunomia_store::storage::StorageError>,
+    },
+    /// The database was created by a newer app version: `PRAGMA
+    /// user_version` exceeds what this binary's embedded migration set
+    /// knows (DB-004). Detected as the first step of [`Db::open`],
+    /// before anything touches the file, so the file is left
+    /// byte-identical (§10 `E_DB_TOO_NEW`, T-F11).
+    TooNew {
+        /// The rejected database file.
+        path: PathBuf,
+        /// The schema version the file carries (`PRAGMA user_version`).
+        database_schema_version: i64,
+        /// The latest schema version this app knows.
+        app_schema_version: usize,
+    },
+}
+
+impl DbInitError {
+    /// The typed §7.10/§10 form when the failure is a named user
+    /// situation: a too-new database maps to `E_DB_TOO_NEW` (DB-004,
+    /// NFR-010) with the database path and both schema versions as
+    /// interpolation params — the contract the "Update the app"
+    /// screen (§10's user action; the future recovery/update task)
+    /// renders. `None` for every other init failure: their effect is
+    /// the D-027/D-028 abort, and inventing a code for them is the
+    /// registry gap D-037 records.
+    pub(crate) fn app_error(&self) -> Option<AppError> {
+        let DbInitError::TooNew {
+            path,
+            database_schema_version,
+            app_schema_version,
+        } = self
+        else {
+            return None;
+        };
+        let mut error = AppError::new(ErrorCode::DbTooNew);
+        error
+            .params
+            .insert("path".to_owned(), path.display().to_string());
+        error.params.insert(
+            "database_schema_version".to_owned(),
+            database_schema_version.to_string(),
+        );
+        error.params.insert(
+            "app_schema_version".to_owned(),
+            app_schema_version.to_string(),
+        );
+        Some(error)
+    }
 }
 
 impl fmt::Display for DbInitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "failed to open or migrate the database at {}: {}",
-            self.path.display(),
-            self.source
-        )
+        match self {
+            DbInitError::Open { path, source } => {
+                write!(
+                    f,
+                    "failed to open or migrate the database at {}: {}",
+                    path.display(),
+                    source
+                )
+            }
+            DbInitError::TooNew {
+                path,
+                database_schema_version,
+                app_schema_version,
+            } => {
+                write!(
+                    f,
+                    "the database at {} has schema version \
+                     {database_schema_version}, newer than this app supports \
+                     ({app_schema_version}); the app does not change the \
+                     database — update the app (E_DB_TOO_NEW)",
+                    path.display()
+                )
+            }
+        }
     }
 }
 
 impl std::error::Error for DbInitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
+        match self {
+            DbInitError::Open { source, .. } => Some(source),
+            // A verdict, not a wrapper: the version facts are the
+            // whole failure, already in the message and the typed
+            // `AppError`.
+            DbInitError::TooNew { .. } => None,
+        }
     }
 }

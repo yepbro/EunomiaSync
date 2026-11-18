@@ -41,6 +41,22 @@ fn migrations() -> Migrations<'static> {
     Migrations::new(MIGRATIONS.iter().map(|sql| M::up(sql)).collect())
 }
 
+/// The schema version of a fully migrated database (spec DB-004): the
+/// number of migrations in the embedded set, which is the
+/// `PRAGMA user_version` value [`run_migrations`] leaves behind
+/// (versions are the 1-based positions in [`MIGRATIONS`], applied in
+/// order by `Migrations::to_version`).
+///
+/// The app layer reads this to reject a database *newer* than the app
+/// before opening it with the DB-001 pragma set ([`open_db`]): the WAL
+/// switch writes to the file, and a too-new database must not be
+/// touched at all (spec §10 `E_DB_TOO_NEW`: "The app does not change
+/// the database"). Schema knowledge stays in this crate — the number
+/// travels, the set does not.
+pub fn latest_schema_version() -> usize {
+    MIGRATIONS.len()
+}
+
 /// The busy handler timeout applied by [`open_db`] (spec DB-001).
 ///
 /// Set through [`Connection::busy_timeout`], which programs the same SQLite
@@ -678,6 +694,20 @@ mod tests {
             "expected StorageError::Migration, got: {err:?}"
         );
         assert_eq!(user_version(&conn), 2, "the version must be untouched");
+    }
+
+    #[test]
+    fn latest_schema_version_matches_a_fully_migrated_database() {
+        // The public version number must equal the `user_version` a
+        // successful run leaves behind — the fact the app layer's
+        // too-new gate compares against (spec DB-004).
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn, Path::new(UNUSED_BACKUP_DIR)).unwrap();
+        assert_eq!(
+            user_version(&conn) as usize,
+            latest_schema_version(),
+            "latest_schema_version must be the version of a fully migrated database"
+        );
     }
 
     #[test]

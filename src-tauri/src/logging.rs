@@ -105,6 +105,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
 use crate::config::LogLevel;
+use crate::errors::AppError;
 
 /// The log file name before the date stamp (spec §5.5:
 /// `logs/eunomiasync.<date>.log`). The suffix is [`LOG_FILE_SUFFIX`];
@@ -295,6 +296,26 @@ pub(crate) fn startup(data_dir: &Path, level: LogLevel) {
 /// gets its own typed helper, never free text through here.
 pub(crate) fn config_load_warning(message: &str) {
     tracing::warn!(target: "eunomia::config", "{message}");
+}
+
+/// The startup database open rejected the file as created by a newer
+/// app version (spec DB-004, NFR-010): §10's `E_DB_TOO_NEW` row —
+/// "The app does not change the database", user action "Update the
+/// app". Logged at `error` on purpose: the launch aborts on this
+/// verdict, so the line must stay visible at `log_level = "error"`
+/// (the same reasoning as the degradation event in [`init`]).
+///
+/// The payload is the error's own §7.10 vocabulary — the code literal
+/// and its interpolation params (the database path and both schema
+/// versions), values already curated by the error contract; nothing
+/// free-text enters the log (SEC-008).
+pub(crate) fn db_too_new(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::db",
+        code = error.code.as_str(),
+        params = ?error.params,
+        "database newer than the app; the app does not change the database — update the app"
+    );
 }
 
 /// A file operation on a project's library file — the SEC-008 core
@@ -700,6 +721,73 @@ mod tests {
             "the config warning must land in the file log with its path, \
              got: {log}"
         );
+    }
+
+    #[test]
+    fn a_too_new_database_logs_its_code_path_and_versions() {
+        // Arrange: the §10 shape of the rejection — the `E_DB_TOO_NEW`
+        // code with the database path and both schema versions as its
+        // interpolation params (the payload `DbInitError::app_error`
+        // builds; the param values themselves are pinned by the db
+        // suite, this test pins what the facade does with them).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+        let mut error = AppError::new(crate::errors::ErrorCode::DbTooNew);
+        error.params.insert(
+            "path".to_owned(),
+            temp.path()
+                .join("db")
+                .join("eunomiasync.sqlite3")
+                .display()
+                .to_string(),
+        );
+        error
+            .params
+            .insert("database_schema_version".to_owned(), "2".to_owned());
+        error
+            .params
+            .insert("app_schema_version".to_owned(), "1".to_owned());
+
+        // Act: the `setup` hook's call for this §10 situation.
+        tracing::subscriber::with_default(subscriber, || {
+            db_too_new(&error);
+        });
+        drop(guard);
+
+        // Assert: the line carries the code literal (§10: "every
+        // error is written to the log with its code … path …"), the
+        // path and both versions from the params, and the §10 user
+        // action.
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("code=\"E_DB_TOO_NEW\""),
+            "the log line must carry the §10 code literal, got: {log}"
+        );
+        assert!(
+            log.contains("eunomiasync.sqlite3") && log.contains("database_schema_version"),
+            "the log line must carry the path and the schema versions, \
+             got: {log}"
+        );
+        assert!(
+            log.contains("update the app"),
+            "the log line must name the §10 user action, got: {log}"
+        );
+
+        // And the verdict survives the strictest level: the launch
+        // aborts on it, so `log_level = "error"` must not filter it.
+        let (temp_strict, root_strict) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root_strict, LogLevel::Error)
+            .expect("building the subscriber must work");
+        tracing::subscriber::with_default(subscriber, || {
+            db_too_new(&error);
+        });
+        drop(guard);
+        assert!(
+            read_log_file(&root_strict).contains("code=\"E_DB_TOO_NEW\""),
+            "the abort verdict must survive log_level = \"error\""
+        );
+        drop(temp_strict);
     }
 
     #[test]
