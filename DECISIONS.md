@@ -410,3 +410,65 @@ for the `devtools` feature, deep-link crates/config, the unset
 `devCsp`, the `dangerous*` security key, a positive pin on the allowed
 IPC `connect-src`, and exact-value pins on the four hardening
 directives so their silent removal fails the suite too.
+
+### D-023 — The updater registers from a disabled `plugins.updater` stub — 2026-11-17
+
+Problem: T-007 wires `tauri-plugin-updater` before the release task exists,
+so there are no real endpoints or signing key yet. The plugin cannot simply
+be registered without configuration: tauri hands every plugin the value of
+its `plugins.<name>` section and passes `Value::Null` when the section is
+absent (tauri 2.12.6 `plugin.rs`, `initialize` → `unwrap_or_default()`), and
+the updater's `Config` rejects that at plugin initialization — its custom
+`Deserialize` requires the `pubkey` field (no `#[serde(default)]`) and a
+`Null` value is not a map at all — so the whole app fails to start
+(tauri-plugin-updater 2.14.1 `config.rs`; proven end-to-end by
+`updater_plugin_refuses_to_initialize_without_a_config_section` on the mock
+runtime). A stub with a fake endpoint was rejected: a release build shipped
+by mistake would then probe a dead host on every check instead of failing
+fast in Rust.
+
+Solution: `tauri.conf.json` carries `"plugins": { "updater": { "pubkey": "",
+"endpoints": [] } }` — the minimal value that deserializes, with the
+updater effectively disabled. With it the plugin initializes, manages its
+state, and every later `updater()` fails fast with `EmptyEndpoints` until
+the release task sets the real key and feed — the failure stays inside the
+upcoming `update_check` command instead of at app startup.
+`config_tests.rs` pins both halves: the stub must deserialize into the real
+`Config` with empty endpoints/pubkey and every `dangerous*` transport
+escape off, and an absent section must keep failing plugin initialization.
+Inline comments are impossible in `tauri.conf.json`, so the rationale lives
+here and in the `lib.rs` registration comment.
+
+### D-024 — The main-window capability grants the webview nothing — 2026-11-17
+
+Problem: with the scaffold's `permissions: ["core:default", "opener:default"]`
+the webview could call the whole `core:default` bundle — event, path, and
+window/webview state APIs (including `core:webview:allow-internal-toggle-
+devtools`), plus the opener plugin — while SEC-001 (§5.6) says the updater,
+dialog, and opener plugins are invoked from Rust only and application
+commands are not capability-gated. Which permissions, if any, the webview
+honestly needs had to be decided on facts.
+
+Solution: `capabilities/default.json` grants `permissions: []` — the empty
+set — because the frontend's entire Tauri surface today is `invoke` of
+application commands (`src/bindings.ts`, imports `@tauri-apps/api/core`
+only). In tauri 2.12.6 the ACL check applies to `plugin:`-prefixed
+invocations, to apps that define their own ACL manifest
+(`has_app_manifest()`, set by custom permissions), or to non-local origins
+(`webview/mod.rs`, the invoke path) — none of which hold here, so
+application commands keep working with an empty grant, verified against the
+installed source. `config_tests.rs` pins the whole invariant, not one file:
+the capability file set itself is pinned to exactly `default.json` — the
+same recursive, multi-format discovery tauri-build performs
+(`capabilities/**/*`, `json`/`toml`/`json5`, referenced or not — so a
+second capability file at any depth in any accepted format cannot slip
+in) — and that one file must grant nothing; inline capabilities under
+`app > security > capabilities` must stay unset or empty, and the app must
+keep defining no ACL manifest of its own (`permissions/` directory and
+`build.rs` `app_manifest` both pinned) — with one, every application
+command would become capability-gated while the grant is empty, and the
+IPC surface would die at runtime with all other tests green. Any future
+need (e.g. `core:event:allow-listen` for the SYS-003 progress events) is
+added consciously, together with a `config_tests.rs` pin, when the
+consuming task lands; the plugin JS packages are banned from `package.json`
+by a sibling test.

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for the main window. SEC-001: the webview invokes only application commands (not capability-gated); Tauri plugins run in Rust exclusively. Plugin and core-plugin commands (opener, dialog, updater, fs, shell, event, path, window, ...) are deliberately granted nothing — extend this list consciously, with a matching config_tests.rs pin, only when the frontend actually needs a specific API.",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:default"]
+  "permissions": []
 }

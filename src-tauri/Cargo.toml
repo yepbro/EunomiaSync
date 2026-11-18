@@ -20,7 +20,18 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 eunomia-store = { path = "../crates/eunomia-store" }
 tauri = { version = "2", features = [] }
+# The full allowed Tauri plugin set (spec §5.3). All four plugins are
+# invoked from Rust only (SEC-001): the webview gets neither their JS
+# packages nor their permissions (see capabilities/default.json). No
+# other plugin crates are wired — any additional `tauri-plugin-*` line
+# (or a workspace-alias indirection) turns a config_tests.rs pin red.
+# The remaining D-28 exclusions are non-plugin decisions and are not
+# guarded by that pin. `single-instance` must stay the FIRST registered
+# plugin in `lib.rs` (plugin requirement).
+tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Typed IPC bindings (src/bindings.ts is generated at debug build time).

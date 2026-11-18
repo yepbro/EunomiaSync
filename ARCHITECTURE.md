@@ -71,6 +71,33 @@ Rust commands are registered through `tauri-specta`:
 **Rule: no raw `invoke()` calls in the frontend.** Always use the generated
 `commands` (see DECISIONS.md D-003).
 
+## Plugins
+
+Four Tauri plugins are wired in `src-tauri/src/lib.rs` (spec §5.3): dialog,
+updater, single-instance, and opener. SEC-001 keeps every one of them on
+the Rust side:
+
+- The webview gets no plugin JavaScript packages (`package.json` carries
+  only `@tauri-apps/api`, pinned by a `config_tests.rs` test) and the
+  capability grants it no permissions at all (`permissions: []`,
+  DECISIONS.md D-024) — application commands are not capability-gated, so
+  this leaves the UI exactly its typed command surface.
+- `dialog`, `opener`, and `updater` are invoked from Rust behind the app
+  commands (`dialog_pick_folder`, `app_open_data_folder`, `update_*`,
+  planned separately); no `fs` or `shell` plugin is registered or granted
+  (`tauri-plugin-fs` reaches the binary only as an unregistered
+  transitive dependency of `dialog`, never initialized as a plugin), the
+  tray and autostart are out of v1 (D-28), and there are no deep links
+  (SEC-004).
+- `single-instance` (SYS-006) is registered first — the plugin requires
+  it — and is desktop-only (`#[cfg(desktop)]`). Its callback is a
+  placeholder that logs; focusing the first window is a follow-up task.
+
+The updater registers from a disabled `plugins.updater` stub
+(`pubkey: ""`, no endpoints) because the plugin refuses to initialize
+without the section (DECISIONS.md D-023); it stays network-inert until the
+release task sets the real key and feed.
+
 ## Storage
 
 SQLite is accessed with `rusqlite` (feature `bundled`, so no system SQLite
@@ -101,8 +128,11 @@ surface as a clear, actionable error message.
 
 ## Updater
 
-Auto-updates are planned via `tauri-plugin-updater` (DECISIONS.md D-005).
-**Planned** — signing keys and the update endpoint are separate tasks. The
+Auto-updates use `tauri-plugin-updater`, wired in `src-tauri/src/lib.rs`
+(DECISIONS.md D-005, D-023). Signing keys and the update endpoint are
+separate (release) tasks; until they land the plugin stays registered but
+unconfigured — every update check fails fast in Rust with
+`EmptyEndpoints`, and the webview has no path to the release feed. The
 updater is part of the MVP scope (spec 7.9).
 
 ## Testing strategy

@@ -37,6 +37,20 @@
 //! disabled and no window declaration forces `devtools: true`), and no
 //! deep-link plugin is wired up anywhere (SEC-004). The tests below keep
 //! each of those facts from silently regressing.
+//!
+//! The plugin surface (SEC-001, §5.6) is pinned the same way: exactly the
+//! four spec §5.3 plugins are wired (`dialog`, `updater`,
+//! `single-instance`, `opener`), every one of them is invoked from Rust
+//! only — the frontend depends on no plugin JavaScript package and the
+//! capability grants the webview no permissions at all — and
+//! `single-instance` stays the first registered plugin (plugin
+//! requirement), while the app keeps defining no ACL manifest of its own
+//! (the precondition that leaves application commands ungated). The
+//! updater registers from a deliberately disabled
+//! `plugins.updater` stub in `tauri.conf.json`: the plugin refuses to
+//! initialize without the section (its config has a required `pubkey`
+//! field), and the tests pin both halves of that fact — the stub must
+//! exist and stay empty, and a section-less app must fail to build.
 
 use serde_json::Value;
 
@@ -104,11 +118,12 @@ fn window_field(window: &Value, spellings: &[&str]) -> u64 {
 /// or in `[features]`, and a deep-link crate could be added under a
 /// target-specific dependency table — the section-scoped scan those
 /// tests used first would have missed both. Accepted residual gaps of an
-/// absence pin over file text: the workspace-root manifest and
-/// `--features` flags on the command line or in CI live outside this
-/// file. If the manifest is ever renamed or moved, this panics with a
-/// clear compile/test error, so the pins are consciously updated instead
-/// of silently checking nothing.
+/// absence pin over file text: `--features` flags on the command line or
+/// in CI live outside this file (the workspace-root manifest — the other
+/// gap the plugin-set and tray pins once had — is scanned alongside this
+/// manifest by [`manifest_texts`]). If the manifest is ever renamed or
+/// moved, this panics with a clear compile/test error, so the pins are
+/// consciously updated instead of silently checking nothing.
 fn crate_manifest() -> &'static str {
     include_str!("../Cargo.toml")
 }
@@ -539,8 +554,9 @@ fn no_deep_link_plugin_is_registered() {
     );
 
     // ... or a plugin configuration entry. Matching on the key substring
-    // keeps the check open to tauri's future plugins (e.g. the planned
-    // updater) while still catching a deep-link config block.
+    // keeps the check open to plugins added later (the updater is the
+    // only `plugins` entry today and passes), while still catching a
+    // deep-link config block.
     if let Some(plugins) = config["plugins"].as_object() {
         for key in plugins.keys() {
             assert!(
@@ -550,6 +566,428 @@ fn no_deep_link_plugin_is_registered() {
             );
         }
     }
+}
+
+/// The exact set of Tauri plugins this app may wire (spec §5.3
+/// technologies table): folder picking, updates, second-launch detection,
+/// and "open the data folder" — every one invoked from Rust only
+/// (SEC-001). `fs` and `shell` are banned outright by SEC-001.
+const ALLOWED_PLUGIN_CRATES: &[&str] = &["dialog", "opener", "single-instance", "updater"];
+
+/// Extracts every `tauri-plugin-<name>` crate name mentioned in the
+/// manifest texts — the same conservative whole-file scan the devtools
+/// and deep-link pins use, so a plugin crate hiding in a target-specific
+/// dependency table (or a comment) is caught too. Both the `src-tauri`
+/// and the workspace-root manifest are scanned: a plugin could otherwise
+/// hide behind a `[workspace.dependencies]` alias
+/// (`dialog = { workspace = true }`) that never spells the crate name in
+/// `src-tauri/Cargo.toml`.
+fn plugin_crate_names(manifest: &str) -> Vec<String> {
+    let mut rest = manifest;
+    let mut names = Vec::new();
+    while let Some(start) = rest.find("tauri-plugin-") {
+        let after = &rest[start + "tauri-plugin-".len()..];
+        let token: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        let name = token.trim_end_matches('-');
+        if !name.is_empty() {
+            names.push(name.to_string());
+        }
+        rest = after;
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Concatenates the `src-tauri` and workspace-root manifests for the
+/// pins that must see a plugin (or an enabling feature) whichever of the
+/// two files declares it.
+fn manifest_texts() -> String {
+    format!(
+        "{}\n{}",
+        include_str!("../Cargo.toml"),
+        include_str!("../../Cargo.toml")
+    )
+}
+
+#[test]
+fn manifest_pins_the_exact_tauri_plugin_set() {
+    // Arrange & Act: the `src-tauri` and workspace-root manifests,
+    // compile-time constants.
+    let manifest = manifest_texts();
+    let names = plugin_crate_names(&manifest);
+    let allowed: Vec<String> = ALLOWED_PLUGIN_CRATES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    // Assert: SEC-001 / §5.3 — exactly these four plugins and nothing
+    // else, in any section of either manifest.
+    assert_eq!(
+        names, allowed,
+        "the manifests must wire exactly {allowed:?} (spec §5.3): the \
+         `fs` and `shell` plugins are banned outright (SEC-001) and no \
+         other plugin crate is allowed"
+    );
+}
+
+#[test]
+fn manifest_enables_no_tray_support() {
+    // Arrange & Act: the `src-tauri` and workspace-root manifests,
+    // compile-time constants.
+    let manifest = manifest_texts();
+
+    // Assert: D-28 keeps the system tray out of v1. Tray support is not a
+    // plugin crate — it is the `tray-icon` feature of the tauri crate
+    // itself — so the exact-plugin-set pin cannot catch it; the bare-word
+    // scan (deliberately matching comments too, like the devtools pin)
+    // does.
+    assert!(
+        !manifest.contains("tray"),
+        "the manifests must not enable tray support in any spelling \
+         (tauri crate feature or plugin crate): the tray is out of v1 \
+         (D-28)"
+    );
+}
+
+/// Parses the workspace-root `package.json`, embedded at compile time.
+fn frontend_manifest() -> Value {
+    serde_json::from_str(include_str!("../../package.json"))
+        .expect("package.json should be valid JSON")
+}
+
+/// Collects the `@tauri-apps/*` package names from one manifest section.
+fn tauri_npm_packages(section: &Value) -> Vec<String> {
+    section
+        .as_object()
+        .expect("the package.json section should be an object")
+        .keys()
+        .filter(|name| name.starts_with("@tauri-apps/"))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn frontend_manifest_has_no_tauri_plugin_js_packages() {
+    // Arrange & Act: the real `package.json` the frontend installs from.
+    let manifest = frontend_manifest();
+    let dependencies = tauri_npm_packages(&manifest["dependencies"]);
+    let dev_dependencies = tauri_npm_packages(&manifest["devDependencies"]);
+
+    // Assert: SEC-001 keeps every plugin on the Rust side, so the
+    // frontend depends on the typed IPC core alone (`src/bindings.ts`
+    // imports only `@tauri-apps/api/core`); the CLI stays a dev tool. An
+    // `@tauri-apps/plugin-*` package here would put a plugin's JS API
+    // back within the webview's reach — under any dependency section,
+    // so the optional/peer sections must not exist at all.
+    assert!(
+        manifest["optionalDependencies"].is_null() && manifest["peerDependencies"].is_null(),
+        "package.json must not carry optionalDependencies or \
+         peerDependencies sections: they would escape the exact \
+         dependencies/devDependencies pins below"
+    );
+    assert_eq!(
+        dependencies,
+        ["@tauri-apps/api"],
+        "dependencies must carry exactly @tauri-apps/api among the \
+         @tauri-apps/* packages: plugin JS packages are banned (SEC-001 — \
+         plugins are invoked from Rust)"
+    );
+    assert_eq!(
+        dev_dependencies,
+        ["@tauri-apps/cli"],
+        "devDependencies must carry exactly @tauri-apps/cli among the \
+         @tauri-apps/* packages"
+    );
+}
+
+/// Recursively lists every capability file tauri would load from
+/// `src-tauri/capabilities/`, as paths relative to that directory.
+/// `tauri-build` discovers `capabilities/**/*` — a recursive glob — and
+/// loads every `json`/`toml`/`json5` file it matches, referenced from
+/// `tauri.conf.json` or not, so the pin below must see exactly that set
+/// (a second file, in any accepted format at any depth, would otherwise
+/// grant permissions outside every pin). Schema files under a
+/// `schemas/` subfolder are not special-cased: tauri ignores them, but
+/// this repo has none, and adding one is a conscious edit.
+fn capability_files() -> Vec<String> {
+    const CAPABILITY_FILE_EXTENSIONS: &[&str] = &["json", "toml", "json5"];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+    let mut files = Vec::new();
+    fn walk(dir: &std::path::Path, root: &std::path::Path, files: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("the capabilities directory should exist") {
+            let path = entry
+                .expect("every capabilities entry should be readable")
+                .path();
+            if path.is_dir() {
+                walk(&path, root, files);
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| CAPABILITY_FILE_EXTENSIONS.contains(&ext))
+            {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("walked paths are inside the capabilities root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                files.push(relative);
+            }
+        }
+    }
+    walk(&root, &root, &mut files);
+    files.sort();
+    files
+}
+
+#[test]
+fn capability_grants_the_webview_no_permissions_at_all() {
+    // Arrange & Act: the real capability set tauri would load. The file
+    // set itself is pinned to exactly one file — a second capability
+    // file (any accepted extension, at any depth) cannot appear
+    // unnoticed — and inline capabilities, which `tauri.conf.json` can
+    // also carry under `app > security > capabilities` (tauri-utils
+    // `CapabilityEntry`), are checked separately.
+    let files = capability_files();
+    let config = tauri_conf();
+    assert_eq!(
+        files,
+        ["default.json"],
+        "src-tauri/capabilities/ must contain exactly the pinned \
+         `default.json` (any other json/toml/json5 file, at any depth, \
+         would be loaded into the ACL and grant permissions outside \
+         D-024)"
+    );
+
+    // Assert: SEC-001 / D-024 — the webview talks only to application
+    // commands, and application commands are not capability-gated, so the
+    // honest grant is the empty set. Anything listed in the capability
+    // (`opener:`, `dialog:`, `fs:`, `shell:`, or even a `core:*` default
+    // set) hands a native API back to the webview; extend consciously —
+    // together with this pin and D-024 — only when the frontend actually
+    // needs one.
+    let raw = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json"),
+    )
+    .expect("capabilities/default.json should be readable");
+    let capability: Value =
+        serde_json::from_str(&raw).expect("capabilities/default.json should be valid JSON");
+    let permissions = capability["permissions"]
+        .as_array()
+        .expect("capabilities/default.json should list `permissions` as an array");
+    assert!(
+        permissions.is_empty(),
+        "capabilities/default.json must grant nothing to the webview \
+         (SEC-001: plugins are invoked from Rust; application commands \
+         are not gated), found: {permissions:?}"
+    );
+
+    // Assert: no inline capability may slip past the file pins. A
+    // non-empty inline array is a grant made outside D-024; a string
+    // entry would merely reference a capability file, which the exact
+    // file-set pin above already covers.
+    let inline = config["app"]["security"]["capabilities"].as_array();
+    assert!(
+        inline.map(|entries| entries.is_empty()).unwrap_or(true),
+        "app > security > capabilities must stay unset or empty: inline \
+         capabilities would grant permissions outside the pinned \
+         capability files (SEC-001 / D-024)"
+    );
+}
+
+#[test]
+fn app_defines_no_acl_manifest() {
+    // Arrange & Act: the two places an application ACL manifest could
+    // come from — a custom `permissions/` directory picked up by
+    // tauri-build, and an explicit `app_manifest` in `build.rs`.
+    let permissions_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("permissions");
+    let build_script = include_str!("../build.rs");
+
+    // Assert: the empty capability (D-024) only leaves application
+    // commands callable while the app defines no ACL manifest of its own.
+    // With one, tauri-build inserts `__app-acl__`, `has_app_acl` flips
+    // true, and the invoke path starts gating every application command
+    // the empty capability does not grant — the whole IPC surface would
+    // die at runtime while every other test stays green. Granting app
+    // commands consciously (permissions directory plus capability
+    // entries) must update this test and D-024 together.
+    assert!(
+        !permissions_dir.exists(),
+        "src-tauri/permissions/ must not exist: defining an app ACL \
+         manifest would capability-gate every application command while \
+         the capability grants nothing (D-024)"
+    );
+    assert!(
+        !build_script.contains("app_manifest"),
+        "build.rs must not declare an app ACL manifest \
+         (tauri_build::Attributes::app_manifest): it would \
+         capability-gate every application command the empty capability \
+         does not grant (D-024)"
+    );
+}
+
+/// Strips `//` line comments and `/* ... */` block comments, cutting
+/// each line at the first `//` and removing everything between `/*` and
+/// the next `*/`, ignoring string literals. Deliberately conservative
+/// for the marker scan below: stripping can only remove text, so it can
+/// never over-detect a marker — the worst case is a string-embedded
+/// comment delimiter hiding a live marker, which fails the pin with its
+/// exactly-once message instead of passing silently.
+fn strip_comments(source: &str) -> String {
+    let mut stripped = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(block_start) = rest.find("/*") {
+        // Line comments inside the text before the block comment, but
+        // not a `//` line comment containing the `/*` itself — that only
+        // over-strips, which the conservativeness note above covers.
+        stripped.push_str(&strip_line_comments(&rest[..block_start]));
+        match rest[block_start + 2..].find("*/") {
+            Some(block_len) => rest = &rest[block_start + 2 + block_len + 2..],
+            // Unterminated block comment: strip everything that follows.
+            None => return stripped,
+        }
+    }
+    stripped.push_str(&strip_line_comments(rest));
+    stripped
+}
+
+/// Cuts every line at the first `//` (string literals are ignored, so a
+/// `//` inside one truncates its line — see [`strip_comments`]).
+fn strip_line_comments(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| &line[..line.find("//").unwrap_or(line.len())])
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn single_instance_plugin_registers_before_the_others() {
+    // Arrange & Act: `lib.rs`, compile-time constant, with line and
+    // block comments stripped so prose mentioning a registration cannot
+    // satisfy the pin. The markers are the registration expressions, and
+    // the required registration order is single-instance first, then the
+    // remaining three.
+    let lib = strip_comments(include_str!("lib.rs"));
+    let markers = [
+        "tauri_plugin_single_instance::init(",
+        "tauri_plugin_dialog::init()",
+        "tauri_plugin_updater::Builder::new()",
+        "tauri_plugin_opener::init()",
+    ];
+    let positions: Vec<usize> = markers
+        .iter()
+        .map(|marker| {
+            assert_eq!(
+                lib.matches(marker).count(),
+                1,
+                "lib.rs must register `{marker}` exactly once, live (a \
+                 commented-out or duplicated registration must not count)"
+            );
+            lib.find(marker)
+                .expect("the exactly-once check above guarantees one match")
+        })
+        .collect();
+
+    // Assert: the single-instance plugin documents that it must be
+    // registered before every other plugin; the remaining three are
+    // pinned ascending as well, so removing or reordering any
+    // registration turns this red.
+    for pair in positions.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "lib.rs must register `single-instance` first and every later \
+             plugin after its predecessor (single-instance plugin \
+             requirement); marker positions: {positions:?}"
+        );
+    }
+}
+
+#[test]
+fn updater_config_section_is_a_disabled_stub_that_deserializes() {
+    // Arrange & Act: the real `plugins.updater` value from
+    // `tauri.conf.json`, deserialized with the actual config type the
+    // plugin initializes from.
+    let config = tauri_conf();
+    let stub = config["plugins"]["updater"].clone();
+
+    // Assert (negative control): tauri feeds a plugin `Value::Null` when
+    // its config section is absent, and the updater refuses that — the
+    // companion `updater_plugin_refuses_to_initialize_without_a_config_
+    // section` test proves it end-to-end. If a future plugin version
+    // starts accepting an absent section, this assertion fails and the
+    // stub becomes removable: decide consciously, then.
+    assert!(
+        serde_json::from_value::<tauri_plugin_updater::Config>(serde_json::Value::Null).is_err(),
+        "the updater config must keep rejecting an absent `plugins.updater` \
+         section; once it accepts one, the tauri.conf.json stub is dead \
+         weight and should be removed"
+    );
+
+    // Assert: the stub deserializes into the real plugin config with the
+    // updater effectively disabled — no endpoints, no public key, no
+    // dangerous transport relaxation. The release task fills the key and
+    // endpoints; the escapes must stay off.
+    let parsed: tauri_plugin_updater::Config = serde_json::from_value(stub).expect(
+        "`plugins.updater` must deserialize into the plugin config: \
+         without a valid section the app fails to start (the plugin \
+         config has a required `pubkey` field)",
+    );
+    assert!(
+        parsed.endpoints.is_empty(),
+        "`plugins.updater` must carry no endpoints until the release task \
+         sets the real update feed"
+    );
+    assert!(
+        parsed.pubkey.is_empty(),
+        "`plugins.updater` must carry no public key until the release \
+         task generates one"
+    );
+    assert!(
+        !parsed.dangerous_insecure_transport_protocol
+            && !parsed.dangerous_accept_invalid_certs
+            && !parsed.dangerous_accept_invalid_hostnames,
+        "`plugins.updater` must keep every `dangerous*` transport escape \
+         off"
+    );
+    assert!(
+        !parsed.allow_downgrades && !parsed.require_signed_version,
+        "`plugins.updater` must keep `allowDowngrades` off (it removes the \
+         only guard against installing an older validly signed release) \
+         and `requireSignedVersion` at its default while the stub is \
+         inert: both are release-task signing-policy decisions that must \
+         be made consciously, not stub edits"
+    );
+}
+
+#[test]
+fn updater_plugin_refuses_to_initialize_without_a_config_section() {
+    // Arrange: the mock runtime (the same `tauri::test` harness the IPC
+    // tests use) with a context that carries no `plugins.updater`
+    // section — what tauri would hand the plugin if the stub were
+    // deleted from tauri.conf.json.
+    let result = tauri::test::mock_builder()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()));
+
+    // Assert: plugin initialization (and with it app startup) fails, and
+    // the failure is attributable to the updater plugin config — proving
+    // the stub in tauri.conf.json is required, not decoration.
+    let error = match result {
+        Ok(_) => panic!(
+            "the updater plugin must refuse to initialize without a \
+             `plugins.updater` section"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("updater"),
+        "the failure should be attributable to the updater plugin config, \
+         got: {error}"
+    );
 }
 
 #[test]
