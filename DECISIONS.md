@@ -518,3 +518,68 @@ mock dispatchers make the window operations no-ops, so the inter-process
 mechanism (instance lock, second-process exit, callback dispatch) and the
 real focus effects are process/OS-level facts covered by manual smoke
 runs and the CI build matrix, not by unit tests.
+
+### D-026 — Windows manifest embedded via `WindowsAttributes::app_manifest`, default reproduced — 2026-11-17
+
+Problem: NFR-023 (P0) requires long path support to be turned on through
+the Windows manifest, and SEC-012/NFR-011 (P0) requires the app to run
+with user rights without asking for elevation; the scaffold's `build.rs`
+called plain `tauri_build::build()`, so the binary carried whatever
+tauri-build embeds by default. Before writing any code the tauri-build
+2.7.5 sources were read to settle the key question — replace or merge:
+`WindowsAttributes::app_manifest` REPLACES the default manifest
+wholesale (`self.app_manifest = Some(...)`, tauri-build 2.7.5
+`src/lib.rs`), and the vendored default
+(`windows-app-manifest.xml`) carries exactly one entry — the
+Common-Controls v6 dependency (`Microsoft.Windows.Common-Controls`,
+`publicKeyToken=6595b64144ccf1df`), which the tauri-build docs flag as
+required for dialog APIs. There is no merge mode, and nothing else
+(dpiAware et al.) lives in the default — DPI is handled by Tauri at
+runtime, not by its manifest.
+
+Solution: a dedicated file `src-tauri/windows/app.manifest` (ASCII-only,
+one element per line, no XML declaration — tauri-winres embeds it
+line-by-line as quoted RC strings, so the embedded bytes start with a
+space and the declaration, which must be the first bytes of the document,
+would risk rejection by the Windows manifest parser; tauri-build's own
+default manifest ships without one too) reproduces the Common-Controls
+dependency verbatim (the dialog plugin is wired, T-007) and adds the two
+T-009 settings: `<requestedExecutionLevel
+level="asInvoker" uiAccess="false" />` (SEC-012/NFR-011 — an explicit
+level also disables the Windows "installer detection" heuristic) and
+`<ws2016:longPathAware>true</ws2016:longPathAware>` inside the SMI/2016
+settings namespace (NFR-023). `build.rs` wires it with
+`WindowsAttributes::new().app_manifest(include_str!(...))` and
+`tauri_build::try_build(Attributes::new().windows_attributes(...))`,
+plus `cargo:rerun-if-changed=windows/app.manifest`: tauri-build emits
+narrower rerun directives (config files, capabilities, resources — the
+icon watch lives behind the `codegen` feature this crate does not
+enable) that do not cover the manifest file, and `include_str!` is
+opaque to Cargo, so without the directive manifest edits would never
+rebuild the binary. Config pin notes: `config_tests.rs` previously
+banned the substring `app_manifest` in `build.rs` (D-024 — it guards
+against an app ACL manifest, i.e. `Attributes::app_manifest` with the
+`AppManifest` struct); the Windows manifest legitimately uses the same
+method name on an unrelated type, so that pin is narrowed to what D-024
+actually means — no `AppManifest` naming plus exactly one
+`.app_manifest(` call (the Windows one) — while the `permissions/`
+directory check stays untouched. Honest testing boundary: on Linux the
+build script compiles and runs, but tauri-build's Windows-resource
+branch never executes (gated on the target triple at runtime), so the
+Linux suite can only pin manifest text and build.rs wiring
+(mutation-checked tests do exactly that). No automated check validates
+the embedded result anywhere: `rc.exe` embeds the manifest as opaque
+bytes without parsing the XML, and the CI `build` job on Windows
+(`tauri build --debug --no-bundle`) only proves compile+link — it never
+runs the binary — so the two runtime criteria — >260-char project paths
+accepted, no UAC prompt — rest on the manual Windows smoke run; its
+two-step procedure (project beyond 260 characters with
+`LongPathsEnabled=1`; no UAC prompt plus `sigcheck64 -m`/`mt.exe`
+extraction of the embedded manifest) is written down in
+ARCHITECTURE.md, Platform notes. A CI step doing that extraction
+automatically would close the gap; it is consciously deferred — CI
+workflow changes belong to a release/CI task, not a manifest task.
+One environment caveat is accepted, not engineered around:
+`longPathAware` is the app-side half only — the OS must also have the
+`LongPathsEnabled` policy on (off by default on Windows 10/11; spec §15
+tests long paths per platform), which no manifest can switch by itself.

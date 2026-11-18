@@ -51,6 +51,23 @@
 //! initialize without the section (its config has a required `pubkey`
 //! field), and the tests pin both halves of that fact — the stub must
 //! exist and stay empty, and a section-less app must fail to build.
+//!
+//! The Windows application manifest (NFR-023, SEC-012/NFR-011) is pinned
+//! the same way, with an explicit honesty boundary: on Linux the build
+//! script compiles and runs, but tauri-build's Windows-resource branch
+//! never executes (it is gated on the target triple at runtime), so what
+//! is verifiable here is the manifest text and its wiring in `build.rs`.
+//! No automated check validates the embedded result: `rc.exe` embeds the
+//! manifest as opaque bytes without parsing the XML, and the CI `build`
+//! matrix job on Windows (`tauri build --debug --no-bundle`) only proves
+//! the manifest compiles and links — it never runs the binary. The two
+//! runtime criteria — long paths accepted, no UAC prompt — are manual
+//! Windows smoke facts with a written procedure (ARCHITECTURE.md,
+//! Platform notes). `WindowsAttributes::app_manifest` replaces
+//! tauri-build's default manifest wholesale (the default carries only
+//! the Common-Controls v6 dependency), so the pins cover both halves:
+//! the reproduced dependency (needed by the dialog plugin) and the
+//! added `longPathAware`/`asInvoker` settings.
 
 use serde_json::Value;
 
@@ -126,6 +143,24 @@ fn window_field(window: &Value, spellings: &[&str]) -> u64 {
 /// consciously updated instead of silently checking nothing.
 fn crate_manifest() -> &'static str {
     include_str!("../Cargo.toml")
+}
+
+/// Returns the Windows application manifest, embedded at compile time
+/// with `include_str!` from the same file `build.rs` wires in. A moved
+/// or renamed file fails this compile (and the build script's own
+/// `include_str!`), so the pins below are consciously updated instead of
+/// silently checking nothing — the same policy as [`crate_manifest`].
+///
+/// The pins over this text carry a residual gap, accepted like the other
+/// file-text pins: they cannot prove that the manifest actually reached
+/// the PE binary or that Windows accepts it — `rc.exe` embeds the file as
+/// opaque bytes without validating the XML, the Windows CI build job only
+/// proves compile+link (it never runs the binary), so the runtime facts
+/// (embedded content, long paths accepted, no UAC prompt) rest on the
+/// manual Windows smoke run described in ARCHITECTURE.md (see the module
+/// docs).
+fn windows_app_manifest() -> &'static str {
+    include_str!("../windows/app.manifest")
 }
 
 /// The only source expressions the static CSP may use, outside the
@@ -802,7 +837,12 @@ fn capability_grants_the_webview_no_permissions_at_all() {
 fn app_defines_no_acl_manifest() {
     // Arrange & Act: the two places an application ACL manifest could
     // come from — a custom `permissions/` directory picked up by
-    // tauri-build, and an explicit `app_manifest` in `build.rs`.
+    // tauri-build, and an explicit `Attributes::app_manifest` call in
+    // `build.rs`. The Windows application manifest (T-009/NFR-023)
+    // legitimately uses `WindowsAttributes::app_manifest` — the same
+    // method name on an unrelated type — so the build-script pin below
+    // distinguishes the two APIs instead of banning the bare substring
+    // it once banned.
     let permissions_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("permissions");
     let build_script = include_str!("../build.rs");
 
@@ -820,12 +860,18 @@ fn app_defines_no_acl_manifest() {
          manifest would capability-gate every application command while \
          the capability grants nothing (D-024)"
     );
+    // The ACL form needs an `AppManifest` value, and every spelling that
+    // provides one names the struct (`AppManifest::new()`, `use
+    // tauri_build::AppManifest`, ...). The one inference-based spelling
+    // that would not (`.app_manifest(Default::default())`) is caught by
+    // `build_script_wires_the_windows_manifest`, which requires exactly
+    // one `.app_manifest(` call — the Windows one.
     assert!(
-        !build_script.contains("app_manifest"),
+        !build_script.contains("AppManifest"),
         "build.rs must not declare an app ACL manifest \
-         (tauri_build::Attributes::app_manifest): it would \
-         capability-gate every application command the empty capability \
-         does not grant (D-024)"
+         (tauri_build::Attributes::app_manifest with the AppManifest \
+         struct): it would capability-gate every application command the \
+         empty capability does not grant (D-024)"
     );
 }
 
@@ -1000,5 +1046,212 @@ fn cargo_package_authors_are_den_brooks() {
     assert_eq!(
         authors, "Den Brooks <denis@yepbro.pro>",
         "the crate authors must match REL-004"
+    );
+}
+
+#[test]
+fn windows_manifest_keeps_the_common_controls_dependency() {
+    // Arrange & Act: the manifest `build.rs` embeds, compile-time text.
+    let manifest = windows_app_manifest();
+
+    // Assert: `WindowsAttributes::app_manifest` replaces tauri-build's
+    // default manifest wholesale, and that default carries exactly one
+    // entry — the Common-Controls v6 dependency the tauri-build docs
+    // require for dialog APIs (tauri-plugin-dialog is wired in
+    // `lib.rs`, T-007) — so the custom manifest must reproduce it
+    // verbatim. The whole `assemblyIdentity` is pinned attribute by
+    // attribute: `processorArchitecture="*"` in particular is what
+    // keeps the dependency valid on both Windows x64 and arm64
+    // (NFR-001), and a drift there would break the dialog plugin on one
+    // architecture with every other test green.
+    let identity = [
+        "type=\"win32\"",
+        "name=\"Microsoft.Windows.Common-Controls\"",
+        "version=\"6.0.0.0\"",
+        "processorArchitecture=\"*\"",
+        "publicKeyToken=\"6595b64144ccf1df\"",
+        "language=\"*\"",
+    ];
+    for attribute in identity {
+        assert!(
+            manifest.contains(attribute),
+            "the custom Windows manifest must reproduce tauri-build's \
+             default Common-Controls v6 dependency verbatim; `{attribute}` \
+             is missing: the dialog plugin needs the dependency and the \
+             custom manifest replaces the default wholesale"
+        );
+    }
+}
+
+#[test]
+fn windows_manifest_has_the_required_structure() {
+    // Arrange & Act: the manifest `build.rs` embeds, compile-time text.
+    let manifest = windows_app_manifest();
+
+    // Assert: the pins are textual, so the document-level facts must be
+    // pinned too: no XML declaration (tauri-winres' RC embedding puts a
+    // space before the first line's content, and the declaration must be
+    // the very first bytes of the document — the file deliberately ships
+    // without one, like tauri-build's own default), at most a leading
+    // comment before the asm.v1 root with `manifestVersion="1.0"`, and
+    // the nesting order of the two settings blocks — a
+    // `<ws2016:longPathAware>` or `<requestedExecutionLevel>` moved
+    // outside its parent silently disables NFR-023 / SEC-012 while every
+    // substring pin stays green.
+    assert!(
+        !manifest.contains("<?xml"),
+        "the Windows manifest must not carry an XML declaration: the \
+         RC embedding prepends a space and the declaration is required \
+         to be the first bytes of the document"
+    );
+    let first_content = manifest
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .expect("the manifest should not be empty");
+    assert!(
+        first_content.starts_with("<!--") || first_content.starts_with("<assembly"),
+        "the Windows manifest must start with (at most) a comment and \
+         then the assembly root, got: {first_content}"
+    );
+    assert!(
+        manifest.contains("manifestVersion=\"1.0\""),
+        "the Windows manifest must declare manifestVersion=\"1.0\""
+    );
+    let position = |marker: &str| {
+        manifest
+            .find(marker)
+            .unwrap_or_else(|| panic!("the manifest must contain {marker}"))
+    };
+    let root = position("<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\"");
+    assert!(
+        root < position("<dependency")
+            && root < position("<trustInfo")
+            && root < position("<application"),
+        "the asm.v1 assembly root must precede every other element: \
+         anything else first means the manifest structure was broken"
+    );
+    assert!(
+        position("<trustInfo") < position("<requestedPrivileges")
+            && position("<requestedPrivileges") < position("<requestedExecutionLevel"),
+        "requestedExecutionLevel must stay nested inside \
+         trustInfo/security/requestedPrivileges: moved out, the \
+         no-elevation requirement (SEC-012 / NFR-011) silently stops \
+         holding"
+    );
+    assert!(
+        position("<application") < position("<windowsSettings")
+            && position("<windowsSettings") < position("<ws2016:longPathAware"),
+        "longPathAware must stay nested inside \
+         application/windowsSettings: moved out, the long-path setting \
+         (NFR-023) silently stops applying"
+    );
+}
+
+#[test]
+fn windows_manifest_never_requests_elevation() {
+    // Arrange & Act: the manifest `build.rs` embeds, compile-time text.
+    let manifest = windows_app_manifest();
+
+    // Assert: SEC-012 / NFR-011 — the app runs with user rights and does
+    // not ask for elevation. Exactly one `requestedExecutionLevel` must
+    // exist, pinned as the whole element so a changed `level` or
+    // `uiAccess` value fails the test; every elevated or
+    // elevation-adjacent spelling is banned outright.
+    assert_eq!(
+        manifest.matches("<requestedExecutionLevel").count(),
+        1,
+        "the Windows manifest must declare exactly one \
+         requestedExecutionLevel: a second one could override or \
+         duplicate the execution-level declaration (SEC-012 / NFR-011)"
+    );
+    assert!(
+        manifest.contains("<requestedExecutionLevel level=\"asInvoker\" uiAccess=\"false\" />"),
+        "the Windows manifest must declare requestedExecutionLevel \
+         level=\"asInvoker\" uiAccess=\"false\" so the app never asks \
+         for UAC elevation (SEC-012 / NFR-011)"
+    );
+    for banned in [
+        "requireAdministrator",
+        "highestAvailable",
+        "uiAccess=\"true\"",
+        "autoElevate",
+    ] {
+        assert!(
+            !manifest.contains(banned),
+            "the Windows manifest must not request or enable elevation \
+             (`{banned}` found): the app runs with user rights \
+             (SEC-012 / NFR-011)"
+        );
+    }
+}
+
+#[test]
+fn windows_manifest_enables_long_path_support() {
+    // Arrange & Act: the manifest `build.rs` embeds, compile-time text.
+    let manifest = windows_app_manifest();
+
+    // Assert: NFR-023 — long path support is turned on through the
+    // manifest. `longPathAware` is only recognized inside the SMI/2016
+    // settings namespace, so the pin covers the namespace binding and
+    // the flag itself. Honest limit of this pin and the manifest flag:
+    // the OS side must also have the LongPathsEnabled policy on (an
+    // environment fact, off by default on Windows 10/11; spec §15 tests
+    // long paths on Windows), and the flag's runtime effect is verified
+    // only by the manual smoke run (the CI build matrix compiles and
+    // links the manifest but never runs the binary), not by these pins.
+    assert!(
+        manifest.contains("http://schemas.microsoft.com/SMI/2016/WindowsSettings"),
+        "the Windows manifest must bind the SMI/2016 settings \
+         namespace: longPathAware is only recognized inside it \
+         (NFR-023)"
+    );
+    assert!(
+        manifest.contains("<ws2016:longPathAware>true</ws2016:longPathAware>"),
+        "the Windows manifest must enable longPathAware so project \
+         paths longer than 260 characters are accepted (NFR-023); \
+         flipping it to false, removing it or renaming the element \
+         must fail here"
+    );
+}
+
+#[test]
+fn build_script_wires_the_windows_manifest() {
+    // Arrange & Act: `build.rs`, compile-time text.
+    let build_script = include_str!("../build.rs");
+
+    // Assert: the manifest must actually be embedded — the
+    // `WindowsAttributes` wiring, reading the file by its exact path
+    // (a moved or renamed file fails `windows_app_manifest` at compile
+    // time, so the two `include_str!`s together keep path and file in
+    // sync) — and edits to the file must re-run the build script:
+    // tauri-build emits its own narrower rerun-if-changed set (config
+    // files, resources, icons) that does not cover the manifest, and
+    // `include_str!` is opaque to Cargo, so a missing directive would
+    // mean a silently stale manifest.
+    assert!(
+        build_script.contains("windows_attributes("),
+        "build.rs must pass WindowsAttributes to tauri_build: without \
+         the wiring the custom manifest is never embedded (NFR-023, \
+         SEC-012)"
+    );
+    assert!(
+        build_script.contains("include_str!(\"windows/app.manifest\")"),
+        "build.rs must embed the manifest from windows/app.manifest \
+         verbatim (NFR-023, SEC-012)"
+    );
+    assert!(
+        build_script.contains("cargo:rerun-if-changed=windows/app.manifest"),
+        "build.rs must emit cargo:rerun-if-changed for the manifest \
+         file: tauri-build's rerun set does not cover it, and without \
+         the directive manifest edits would not rebuild the binary"
+    );
+    assert_eq!(
+        build_script.matches(".app_manifest(").count(),
+        1,
+        "build.rs must contain exactly one .app_manifest( call — the \
+         Windows application manifest; a missing call drops the \
+         NFR-023/SEC-012 settings, a second call would be the banned \
+         ACL manifest (D-024)"
     );
 }

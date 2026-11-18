@@ -167,7 +167,23 @@ GitHub Actions workflow (`.github/workflows/ci.yml`) runs five jobs:
 
 - **Linux:** requires `webkit2gtk-4.1` and other GTK packages
   (see `CONTRIBUTING.md`); the watcher must handle `inotify` watch limits.
-- **Windows:** renders through WebView2 (bundled with Windows 10+).
+- **Windows:** renders through WebView2 (bundled with Windows 10+). The
+  application manifest (`src-tauri/windows/app.manifest`, embedded by
+  `src-tauri/build.rs` via `WindowsAttributes::app_manifest`) declares
+  `longPathAware` (NFR-023) and `requestedExecutionLevel="asInvoker"`
+  (SEC-012/NFR-011); long paths additionally require the OS
+  `LongPathsEnabled` policy, which the manifest flag alone cannot turn on.
+  The custom manifest replaces tauri-build's default wholesale, so it also
+  reproduces the default's Common-Controls v6 dependency (needed by the
+  dialog plugin). Automated coverage stops at compile+link: `rc.exe`
+  embeds the manifest as opaque bytes (no XML validation), and the CI
+  build job never runs the binary — the two runtime criteria are verified
+  by a manual smoke run: (1) with `LongPathsEnabled=1`, add a project
+  whose path exceeds 260 characters and confirm load and save succeed
+  (and note the expected failure with the policy off); (2) confirm no UAC
+  prompt on launch and that the embedded manifest reports `asInvoker` and
+  `longPathAware` (`sigcheck64 -m <exe>` or
+  `mt.exe -inputresource:<exe>;#1 -out:manifest.xml`).
 - **macOS:** requires the Xcode Command Line Tools for the Rust/TKG build.
 
 ## Pending decisions

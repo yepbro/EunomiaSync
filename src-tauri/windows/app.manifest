@@ -1,0 +1,64 @@
+<!--
+  Windows application manifest for EunomiaSync (NFR-023, SEC-012/NFR-011).
+
+  No XML declaration on purpose: tauri-winres 0.3.7 embeds this file line
+  by line as quoted RC strings (`" <line> "`), so the embedded bytes start
+  with a space; XML requires the declaration to be the very first bytes,
+  and the Windows manifest parser may reject it. The declaration carries
+  no information here (pure ASCII is well-formed UTF-8), and tauri-build's
+  own default manifest ships without one - a leading space before the
+  `assembly` root element is harmless.
+
+  Embedded into the executable by `src-tauri/build.rs` via
+  `WindowsAttributes::app_manifest` (tauri-build 2.7.5). That API REPLACES
+  tauri-build's default manifest wholesale - the default
+  (`windows-app-manifest.xml` inside the tauri-build crate) carries only the
+  Common-Controls v6 dependency - so the dependency below is reproduced from
+  it verbatim: the dialog plugin (tauri-plugin-dialog, wired in `lib.rs`)
+  needs Common Controls v6 for its native dialogs.
+
+  Keep this file ASCII-only and one element per line: tauri-winres embeds it
+  through the Windows resource compiler by writing each line as a separate
+  quoted RC string, and the RC toolchain is codepage-sensitive (tauri-build's
+  own default manifest follows the same convention).
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+
+  <!-- SEC-012 / NFR-011: the app runs with user rights and never asks for
+       elevation. An explicit requestedExecutionLevel also disables the
+       Windows "installer detection" heuristic, which could otherwise
+       prompt for elevation based on the executable name alone. -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <!-- NFR-023: long path support is turned on through the manifest. This
+       flag is the app-side half only: the OS must also have the
+       LongPathsEnabled policy set (HKLM\...\FileSystem\LongPathsEnabled,
+       off by default on Windows 10/11; see spec 15 for the platform test
+       matrix). Verifying the real behavior (paths beyond 260 characters
+       accepted, no UAC prompt) is a manual Windows smoke run: rc.exe
+       embeds this file as opaque bytes without validating the XML, and
+       the CI build job only proves the manifest compiled and linked. -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings xmlns:ws2016="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+      <ws2016:longPathAware>true</ws2016:longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>
