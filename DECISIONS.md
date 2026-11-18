@@ -472,3 +472,49 @@ need (e.g. `core:event:allow-listen` for the SYS-003 progress events) is
 added consciously, together with a `config_tests.rs` pin, when the
 consuming task lands; the plugin JS packages are banned from `package.json`
 by a sibling test.
+
+### D-025 — The single-instance callback restores then focuses the `main` window — 2026-11-17
+
+Problem: T-007 left the `single-instance` callback as a logging
+placeholder, so a second launch correctly died but the first instance's
+window stayed wherever the user left it — spec SYS-006 (P0) requires the
+window of the first instance to be brought to the front. The obvious
+`set_focus()`-only handler is wrong on every desktop platform: tao gates
+`set_focus` on visibility and the not-minimized state (tao 0.37.2,
+`platform_impl/windows/window.rs`, `platform_impl/linux/window.rs`,
+`platform_impl/macos/window.rs`), so a hidden or minimized window would
+simply stay hidden/minimized and SYS-006 would silently not hold.
+
+Solution: the callback hands off to `single_instance::focus_main_window`
+(`src-tauri/src/single_instance.rs`), which resolves the window by the
+label `main` (created from `tauri.conf.json` from app start, UI-001) and
+runs show → unminimize → set_focus in that order; each restore step is
+harmless when the window is already in the requested state, so the
+sequence is safe to run unconditionally. On macOS `set_focus` additionally
+activates the whole application (`makeKeyAndOrderFront` +
+`activateIgnoringOtherApps`), which is the platform-correct reading of
+"brought to the front". Two platform nuances are accepted, not engineered
+around: on Linux the window manager reports the deiconified state
+asynchronously, so a `set_focus` racing the `unminimize` result can be
+dropped by tao (most window managers activate a window the app itself
+deiconifies; the manual Linux smoke run covers the minimized case), and
+an `Ok` from the sequence is not a guarantee the OS applied focus — the
+handler logs what was attempted and what failed, not what the window
+manager eventually did. A missing window (label absent — with tauri's
+defaults closing the last window exits the process, so this arises on
+shutdown races or, with a future tray icon, in a windowless running
+instance) is logged and returns `NoMainWindow` — no panic: the callback
+runs inside the healthy first instance, and a window-state failure must
+not crash it, so individual operation errors are logged and skipped as
+well, and diagnostics go to stderr lossily (`eprintln!` would panic on a
+broken stderr, and on Windows the callback runs in an `extern "system"`
+window procedure where a panic aborts the process). Unit tests run on the
+tauri mock runtime and pin the handler's own seam — window selection by
+label in both directions (the tests create windows from the literals
+`"main"` and `"preview"`, never from the constant, so a mutated lookup
+cannot satisfy its own test, and a lookup that picks any existing window
+fails the non-main-window test) and the no-panic missing-window case; the
+mock dispatchers make the window operations no-ops, so the inter-process
+mechanism (instance lock, second-process exit, callback dispatch) and the
+real focus effects are process/OS-level facts covered by manual smoke
+runs and the CI build matrix, not by unit tests.

@@ -10,6 +10,11 @@ use tauri_specta::{Builder, collect_commands};
 
 pub mod commands;
 
+// The single-instance handoff handler (SYS-006) is desktop-only, exactly
+// like the plugin whose callback calls it below.
+#[cfg(desktop)]
+pub(crate) mod single_instance;
+
 /// Constructs the tauri-specta builder with all commands and events
 /// registered. Shared by the app entry point and the binding export test.
 pub fn specta_builder() -> Builder<tauri::Wry> {
@@ -38,17 +43,22 @@ pub fn run() {
     let tauri_builder = tauri::Builder::default();
 
     // `single-instance` (SYS-006: a second launch must not start a second
-    // process) — the plugin REQUIRES being registered before every other
-    // plugin, so it is wired first. Desktop-only: the crate is compiled
-    // out on mobile, hence the cfg. The callback is a T-007 placeholder
-    // that only logs; focusing the first instance's main window is T-008.
-    // `eprintln!` stands in until the tracing setup task lands (spec §5.3
-    // file logging); argv/cwd are deliberately not logged — they can
-    // carry user paths and the event needs no content until T-008.
+    // process — the window of the first one is brought to the front) — the
+    // plugin REQUIRES being registered before every other plugin, so it is
+    // wired first. Desktop-only: the crate is compiled out on mobile, hence
+    // the cfg. The callback hands off to the `single_instance::focus_main_window`
+    // handler (that module documents the show/unminimize/set_focus order
+    // and the missing-window case); the returned outcome is a test seam —
+    // there is nothing to branch on here. `_argv`/`_cwd` are deliberately
+    // unused: deep links are out of v1 (SEC-004) and no CLI behavior
+    // consumes them yet. Diagnostics are written lossily to stderr by the
+    // handler until the tracing setup task lands (spec §5.3 file logging);
+    // argv/cwd are never logged — they can carry user paths and the
+    // handoff needs none of them.
     #[cfg(desktop)]
     let tauri_builder =
-        tauri_builder.plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {
-            eprintln!("single-instance: second launch handed off and ignored");
+        tauri_builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            single_instance::focus_main_window(app);
         }));
 
     // `dialog` (SEC-001, SEC-003): the native folder picker runs in Rust

@@ -90,8 +90,14 @@ the Rust side:
   tray and autostart are out of v1 (D-28), and there are no deep links
   (SEC-004).
 - `single-instance` (SYS-006) is registered first — the plugin requires
-  it — and is desktop-only (`#[cfg(desktop)]`). Its callback is a
-  placeholder that logs; focusing the first window is a follow-up task.
+  it — and is desktop-only (`#[cfg(desktop)]`). Its callback runs inside
+  the first instance and restores the `main` window (show if hidden,
+  unminimize if minimized) before focusing it; a closed window is logged
+  and skipped, never a panic (DECISIONS.md D-025). The inter-process
+  mechanism itself (instance lock, second process exiting before any app
+  setup, callback dispatch) is a process-level facility and is covered by
+  manual smoke runs and the CI build matrix; the handler's window
+  selection and missing-window case are unit-tested on the mock runtime.
 
 The updater registers from a disabled `plugins.updater` stub
 (`pubkey: ""`, no endpoints) because the plugin refuses to initialize
