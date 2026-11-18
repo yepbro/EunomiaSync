@@ -173,6 +173,16 @@ startup aborts: the error propagates out of the `setup` hook and tauri
 panics with `Failed to setup app: …`, carrying the path and cause — there
 is no meaningful run without it (DECISIONS.md D-027).
 
+On Unix the same layout step enforces spec §13 SEC-007's directory
+modes: `backups/` and `db-backups/` are held at exactly `0700`,
+re-asserted at every startup (not only set at creation), so an
+existing directory with wider bits — restored from a copy, loosened by
+a tool — converges back on the next run; a chmod failure aborts the
+launch like a creation failure. The other layout directories (`db/`,
+`logs/`, the root) keep the OS defaults: SEC-007 names the backups
+folders and the DB file only. On Windows nothing is chmod'ed — the
+rights are inherited from the user profile (SEC-007).
+
 Manual check, pending until the first GUI smoke run on each OS: on a
 clean profile, launch the app once and confirm the four subdirectories
 exist under the §5.5 path — Linux
@@ -181,7 +191,15 @@ exist under the §5.5 path — Linux
 `%LOCALAPPDATA%\pro.yepbro.eunomiasync\` — that a second launch adds
 nothing and changes nothing, and that the first launch creates
 `logs/eunomiasync.<date>.log` inside the data directory (see the
-Logging section). The first launch also writes the day's ERR-001 copy
+Logging section). On Linux and macOS also confirm the SEC-007 modes
+with `stat`: `backups/` and `db-backups/` at `0700`, and — while the
+app is running, so the sidecars exist — `db/eunomiasync.sqlite3`, its
+`-wal`/`-shm` siblings and the day's `db-backups/daily-*.sqlite3` at
+`0600` (or owner-only for the siblings). On Windows there is nothing
+to check: the rights are inherited from the user profile (SEC-007).
+CI does not execute this assertion on macOS (its leg only builds), so
+the manual run is the macOS half of the criterion. The first launch
+also writes the day's ERR-001 copy
 `db-backups/daily-YYYYMMDD.sqlite3` (see the Storage section), and
 pays one full-copy `VACUUM INTO` of I/O doing it — not a hang; a
 second launch the same day must leave the copy untouched. The same
@@ -202,7 +220,15 @@ pragma set (`journal_mode=WAL` — verified against the mode SQLite
 reports back, `foreign_keys=ON`, `busy_timeout=5000`,
 `synchronous=FULL`) on every open, never creates parent directories
 (the app-layer data-directory layout, D-027, owns them) and fails the
-open when WAL cannot be used (D-030). Migration files live in
+open when WAL cannot be used (D-030). On Unix the same open sets the
+file to owner-only `0600` (spec §13 SEC-007) — immediately after
+creation and again on every open, so both a fresh file and a drifted
+one (restored with wider bits) converge, and the WAL/-shm siblings
+SQLite creates on the WAL switch inherit the mode; every backup copy
+is `0600` from the staged temporary onward (one enforcement point both
+copy schemes share). On Windows the profile's inherited rights stand.
+A mode that cannot be set fails the open (the copy path reports it as
+a backup-write failure). Migration files live in
 `crates/eunomia-store/migrations/*.sql`, are embedded with
 `include_str!`, and applied by
 `eunomia_store::storage::run_migrations(&mut Connection, &Path)`, which

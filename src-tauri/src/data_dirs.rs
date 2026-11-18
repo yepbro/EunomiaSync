@@ -13,24 +13,31 @@
 //! reason it is missing: a clean first run, a previous run that crashed
 //! halfway through the creation loop, or a user who deleted part of the
 //! tree (spec 5.5 tip: deleted data means a fresh, empty app).
-//! [`std::fs::create_dir_all`] is the whole mechanism: it no-ops on
-//! existing directories, creates missing ancestors, and fails only when
-//! a path is truly uncreatable (a regular file occupies it, no
-//! permission), which makes the operation idempotent by construction —
-//! running it at every startup converges to the full layout instead of
-//! depending on what a previous run left behind.
+//! [`std::fs::create_dir_all`] is the whole creation mechanism: it
+//! no-ops on existing directories, creates missing ancestors, and
+//! fails only when a path is truly uncreatable (a regular file
+//! occupies it, no permission), which makes the operation idempotent
+//! by construction — running it at every startup converges to the
+//! full layout instead of depending on what a previous run left
+//! behind. On top of the creation, the same run enforces SEC-007's
+//! directory modes on the two backup directories (see the paragraph
+//! below): two unconditional chmods, re-asserted at every startup,
+//! which can fail like a creation step can.
 //!
-//! Two things are deliberately *not* done here. `config.toml` is not
+//! Three things are deliberately *not* done here. `config.toml` is not
 //! created: SYS-011 has it read (and created with defaults when missing)
 //! before logging and the database are set up, which is the config
-//! task's job — it only needs this layout to exist first. And no log
+//! task's job — it only needs this layout to exist first. No log
 //! path is derived from Tauri's `app_log_dir()`: logs live in `logs/`
 //! inside the data directory on every OS (spec 5.5). On Windows and
 //! Linux that happens to match the Tauri default, but on macOS
 //! `app_log_dir()` would point at `~/Library/Logs/pro.yepbro.eunomiasync/`,
 //! so the logging module (`logging.rs`) points the appender at
 //! `<data dir>/logs/` explicitly — pinned against an `app_log_dir()`
-//! regression by a `config_tests.rs` absence pin (spec §5.5).
+//! regression by a `config_tests.rs` absence pin (spec §5.5). And the
+//! database file's `0600` is not enforced here either: the store
+//! creates the file, so the store sets its mode at the open (see the
+//! SEC-007 paragraph below).
 //!
 //! [`ensure_data_layout`] is the testable seam; the startup wiring —
 //! resolving `app_local_data_dir()` through the path resolver and
@@ -51,6 +58,22 @@
 //! (tauri 2.12.6 `src/app.rs`); the panic message prints the `Display`
 //! form of that chain, so the offending path and the OS cause reach the
 //! console (DECISIONS.md D-027).
+//!
+//! SEC-007 (spec §13) sharpens the layout's two backup directories on
+//! Unix: `backups/` and `db-backups/` are held at `0700` — no group or
+//! other access — and the mode is *re-asserted* at every startup, not
+//! only set at creation, so a pre-existing directory with wider bits
+//! (restored from a copy, loosened by a tool) converges back on the
+//! next run (the same idempotency as the creation itself). The exact
+//! mode is written, not a umask-filtered `mkdir` mode, and a chmod
+//! failure aborts the launch like a creation failure: a backups
+//! directory that cannot be closed off fails the requirement it exists
+//! for. The other layout directories (`db/`, `logs/`, the root) keep
+//! the OS defaults — SEC-007 names the backups folders and the DB file
+//! only. On Windows nothing is chmod'ed: the rights are inherited from
+//! the user profile (SEC-007). The store's own `0600` enforcement —
+//! the database file and every copy of it — is recorded together with
+//! this layer split in DECISIONS.md D-048.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -110,16 +133,17 @@ pub(crate) fn db_backups_dir(root: &Path) -> PathBuf {
     root.join(DB_BACKUPS_SUBDIRECTORY)
 }
 
-/// Why [`ensure_data_layout`] gave up: the path it could not create,
-/// plus the OS cause. The path is kept in the message (not only the
-/// chain) because the startup failure surfaces as tauri's
+/// Why [`ensure_data_layout`] gave up: the path it could not create or
+/// secure, plus the OS cause. The path is kept in the message (not only
+/// the chain) because the startup failure surfaces as tauri's
 /// `Failed to setup app: …` panic, which prints the `Display` form of
 /// the error chain — a bare "Permission denied" without the path would
 /// send the user looking at the wrong thing.
 #[derive(Debug)]
 pub(crate) struct DataLayoutError {
     /// The directory `create_dir_all` was asked for when it failed —
-    /// the root itself or one of the four layout subdirectories.
+    /// the root itself or one of the four layout subdirectories — or
+    /// the backups directory whose SEC-007 mode could not be set.
     path: PathBuf,
     source: std::io::Error,
 }
@@ -128,7 +152,7 @@ impl fmt::Display for DataLayoutError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "failed to create the `{}` directory: {}",
+            "failed to create or secure the `{}` directory: {}",
             self.path.display(),
             self.source
         )
@@ -148,7 +172,11 @@ impl std::error::Error for DataLayoutError {
 /// Safe to run at every startup: existing directories are left alone
 /// and a partially deleted or half-created layout is completed, so the
 /// end state is the same however many times this runs and wherever a
-/// previous run stopped. Returns the first failure as
+/// previous run stopped. On Unix the two backup directories are
+/// additionally held at `0700` (SEC-007) — the mode is re-asserted on
+/// every run, so a directory that already exists with wider bits
+/// converges to `0700` too, not just a freshly created one (see
+/// [`secure_backups_dir`]). Returns the first failure as
 /// [`DataLayoutError`] — the app has no meaningful startup without the
 /// layout (no database, no logs, no config), so callers abort the
 /// launch instead of degrading silently.
@@ -157,13 +185,21 @@ impl std::error::Error for DataLayoutError {
 ///
 /// Fails when `root` or any subdirectory cannot be created — the path
 /// is occupied by a regular file, an ancestor is not a directory, or
-/// the OS denies the write. The error carries the offending path and
-/// the underlying [`std::io::Error`].
+/// the OS denies the write — or when a backup directory's `0700` mode
+/// cannot be set. The error carries the offending path and the
+/// underlying [`std::io::Error`].
 pub(crate) fn ensure_data_layout(root: &Path) -> Result<(), DataLayoutError> {
     create_dir(root)?;
     for name in SUBDIRECTORIES {
         create_dir(&root.join(name))?;
     }
+    // SEC-007: both backup directories are owner-only (`0700`) on
+    // Unix. Unconditional, so the run converges the mode on existing
+    // directories as well — creation alone would leave a
+    // umask-filtered mode in place for anything this run did not
+    // create.
+    secure_backups_dir(&root.join(BACKUPS_SUBDIRECTORY))?;
+    secure_backups_dir(&root.join(DB_BACKUPS_SUBDIRECTORY))?;
     Ok(())
 }
 
@@ -173,6 +209,31 @@ fn create_dir(path: &Path) -> Result<(), DataLayoutError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Enforces SEC-007's `0700` on one backups directory: no group or
+/// other access, exact mode — a chmod, not a `DirBuilder` mode, so
+/// neither a pre-existing directory nor the process umask can leave
+/// wider bits in place. The copies inside (DB copies in `db-backups/`,
+/// project file backups in `backups/`) are the user's data, which is
+/// what the directory mode shields at rest.
+#[cfg(unix)]
+fn secure_backups_dir(path: &Path) -> Result<(), DataLayoutError> {
+    use std::os::unix::fs::PermissionsExt;
+    const BACKUPS_DIR_MODE: u32 = 0o700;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(BACKUPS_DIR_MODE)).map_err(
+        |source| DataLayoutError {
+            path: path.to_path_buf(),
+            source,
+        },
+    )
+}
+
+/// The non-Unix half of [`secure_backups_dir`]: SEC-007 inherits the
+/// user profile's rights on Windows, so nothing is chmod'ed.
+#[cfg(not(unix))]
+fn secure_backups_dir(_path: &Path) -> Result<(), DataLayoutError> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -337,6 +398,98 @@ mod tests {
         assert!(
             error.source().is_some(),
             "the OS cause must stay reachable through the error chain"
+        );
+    }
+
+    // ---- SEC-007 directory modes (Unix only) --------------------------------
+    //
+    // Spec §13 SEC-007: the backups folders are `0700`. Both of them:
+    // `backups/` (project file backups) and `db-backups/` (the DB
+    // copies, D-046's assignment to this requirement). Windows inherits
+    // the profile's rights, so these tests — and the enforcement — are
+    // Unix-gated; the app-layer end-to-end mode test lives in
+    // `db_tests.rs`.
+
+    /// Reads a directory's permission bits masked to the standard
+    /// `0o777`.
+    #[cfg(unix)]
+    fn dir_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .unwrap_or_else(|err| panic!("stat of {} must work: {err}", path.display()))
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_backup_directories_are_owner_only_after_the_first_run() {
+        // Arrange: a clean system — the data directory does not exist.
+        let (_temp, root) = nonexistent_root();
+
+        // Act: the first startup.
+        ensure_data_layout(&root).expect("the layout must be created in a temp directory");
+
+        // Assert: both backups directories are exactly `0700` — the
+        // exact mode, so a umask-filtered `0755` default fails as
+        // loudly as a dropped enforcement. The literal names, like the
+        // layout pins above (never `super::BACKUPS_SUBDIRECTORY`).
+        assert_eq!(
+            dir_mode(&root.join("backups")),
+            0o700,
+            "`backups/` must be owner-only (SEC-007)"
+        );
+        assert_eq!(
+            dir_mode(&root.join("db-backups")),
+            0o700,
+            "`db-backups/` must be owner-only (SEC-007)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_loosened_backups_directory_converges_back_on_the_next_run() {
+        // Arrange: a completed layout, then one backups directory
+        // loosened to the OS default — the state a restore from a
+        // copy or a tool with its own mode policy leaves behind.
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, root) = nonexistent_root();
+        ensure_data_layout(&root).expect("the first run must succeed");
+        fs::set_permissions(root.join("db-backups"), fs::Permissions::from_mode(0o755))
+            .expect("loosening a temp directory's mode must work");
+
+        // Act: the next startup runs the same seam again.
+        ensure_data_layout(&root).expect("the rerun must succeed");
+
+        // Assert: converged back to `0700` — the mode is a property
+        // the layout enforces, not a birth right of the first run.
+        assert_eq!(
+            dir_mode(&root.join("db-backups")),
+            0o700,
+            "a loosened backups directory must be re-tightened (SEC-007)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rerun_leaves_the_backup_directories_at_the_required_mode() {
+        // The idempotency half of the enforcement: the second run of
+        // an already-correct layout changes nothing about the modes.
+        let (_temp, root) = nonexistent_root();
+        ensure_data_layout(&root).expect("the first run must succeed");
+
+        ensure_data_layout(&root).expect("the second run must succeed");
+
+        assert_eq!(
+            dir_mode(&root.join("backups")),
+            0o700,
+            "`backups/` stays owner-only across reruns (SEC-007)"
+        );
+        assert_eq!(
+            dir_mode(&root.join("db-backups")),
+            0o700,
+            "`db-backups/` stays owner-only across reruns (SEC-007)"
         );
     }
 

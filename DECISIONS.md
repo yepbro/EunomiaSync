@@ -797,7 +797,8 @@ guarantees DB-004's per-migration transaction for multi-step hops.
 Also recorded: `open_db` creates a new database file with the OS
 default mode (`0644` under a typical umask on Unix), so the SEC-007
 requirement (DB file `0600`) is not implemented here and needs a
-dedicated task before release.
+dedicated task before release. (Done by T-022/D-048: the mode is now
+set at the open, before the pragma chain.)
 
 (D-028 and D-029 are held by the parallel configuration task, T-011.)
 
@@ -2302,3 +2303,127 @@ eighth-copy and no-op tests; disabling the same-day existence check
 fails the no-op test (the rerun test stays green through the
 hard-link no-clobber — the double enforcement working as designed);
 widening the name pattern fails the pattern unit test.
+
+### D-048 — SEC-007 modes: both backups dirs 0700, DB file and every copy 0600; the layer that creates the artifact enforces its mode, re-asserted on every run — 2026-11-18
+
+Problem: spec §13 SEC-007 ("Rights: backups folder `0700`, DB file
+`0600` on Unix. On Windows, the user profile rights are inherited")
+left four questions open. Which folders "backups" means — the layout
+has two backup directories, `backups/` and `db-backups/`; which layer
+sets the DB file's mode (the file is created by SQLite inside
+`open_db`, D-030); what an already-existing path with wrong modes
+costs (D-027's layout creation is deliberately a no-op on existing
+directories); and what the spec's silence means for the WAL/-shm
+siblings and the backup copies (D-046 parked exactly this at the
+SEC-007 task's door: the `db-backups/` mode and "every copy's mode
+together").
+
+Solution, four decisions:
+
+- _Objects covered_: both backup directories (`backups/` for project
+  file backups, `db-backups/` for the DB copies — D-046's assignment;
+  the copies are the same sensitive data as the database, and the
+  card's narrow "backups/" reading is satisfied alongside it), the
+  database file, every backup copy (pre-migration and daily — one
+  enforcement point at the shared staging step covers both schemes),
+  and the WAL/-shm siblings. The siblings are not in the spec's text;
+  they are covered by its spirit (they hold un-checkpointed committed
+  database frames) through ordering rather than chmod: `open_db` sets
+  the main file `0600` _before_ the `journal_mode=WAL` switch, and
+  SQLite (≥ 3.22, bundled build verified empirically by a pinned test)
+  creates the siblings with the main file's mode — so no per-sibling
+  chmod exists on the creation path to drift or race. A sibling that
+  _pre-dates_ the open (a crash leftover, a restored data directory)
+  sees no creation-time copy — SQLite reuses it at whatever mode it
+  carries — so the open ends with a best-effort re-tighten of
+  `-wal`/`-shm` when they exist (round-1 review finding, reproduced
+  empirically: a loosened `-wal` stayed `0644` for a whole session
+  before the fix); best-effort because it is extra coverage on top of
+  the creation-time guarantee, and an exotic filesystem refusing a
+  repair must not fail the open over it. `db/`, `logs/` and the
+  data-dir root deliberately keep the OS defaults: SEC-007 names the
+  backups folders and the DB file only (their contents are protected
+  by the file modes inside `db/`, and the logs by SEC-008's own
+  rules), and widening the requirement beyond the spec is a spec
+  change, not a task decision.
+- _Layer: whoever creates the artifact enforces its mode_. The
+  directories belong to the app layer, so `ensure_data_layout` (src-tauri)
+  chmods both backups dirs to `0700` — a plain `set_permissions`, not a
+  `DirBuilder` mode, because the exact bits are required and `mkdir`
+  modes are umask-filtered. The database file belongs to the store, so
+  `open_db` sets `0600` right after `Connection::open`, before the
+  pragma chain (the ordering that covers the siblings); every consumer
+  of the store gets the guarantee, the same reasoning that put the
+  DB-001 pragma set inside `open_db` (D-030). The copies belong to the
+  store's staging step, so `stage_and_link_copy` sets the `.tmp` to
+  `0600` after `VACUUM INTO` and _before_ the `hard_link` — the link
+  shares the inode, so the published name and even a crash-left `.tmp`
+  never carry wider bits. Error shapes follow the same split: a failed
+  chmod of the DB file is the new `StorageError::Permissions` (an open
+  failure — the launch aborts, D-027's policy, because continuing
+  would leave the data world-readable); a failed chmod around a copy
+  is `BackupError::Io` inside `StorageError::Backup` (a backup-write
+  failure, keeping D-038/D-046's per-scheme abort/degrade policies
+  untouched); a failed directory chmod is the existing
+  `DataLayoutError` with its Display generalized to "failed to create
+  or secure". One addition from the round-1 review: the staging
+  chmod's own failure branch removes the staged `.tmp` best-effort
+  like every other failure path of the staging function — a chmod
+  failure must not leave a umask-mode full copy of the database under
+  the staging name. That one branch is deliberately unpinned by a
+  test (round-2 review, recorded): a chmod of a file the test process
+  itself just owned cannot be made to fail portably — permission bits
+  do not stop the owner, and root bypasses them — and an injection
+  seam exists for nothing else, so the pin would test the seam, not
+  the behavior.
+- _Existing paths converge, they are not skipped_: every enforcement
+  point re-asserts its mode on every run — the backups dirs at every
+  startup, the DB file at every open, copies at every write. A
+  directory restored at `0755` or a file copied in at `0644` converges
+  back on the next run (the idempotency principle over D-027's
+  "existing directories are left alone", which is about _creation_,
+  not modes; the layout doc contract now says both). One deliberate
+  exception: a same-day daily copy that already exists is _not_
+  re-chmod'ed — D-046's no-op contract ("writes nothing, changes
+  nothing, the copy is never opened") wins over convergence; the
+  directory's `0700` already shields such a copy at rest, and no
+  released binary has ever written a wider-mode copy.
+- _Windows inherits_: all enforcement is `#[cfg(unix)]` with trivial
+  no-op `#[cfg(not(unix))]` halves (macOS is Unix and takes the same
+  path); nothing is chmod'ed on Windows, where SEC-007 assigns the
+  rights to the user profile. The no-op halves are compile-checked by
+  CI's Windows leg (REL-001), not by the Linux test run.
+
+Honest boundary recorded: the bare gate connections in `Db::open`
+(`reject_too_new`, `reject_corrupt`) can create a 0-byte database file
+at the OS default mode microseconds before `open_db` tightens it (the
+window contains an empty file, never data); a first-run window exists
+between `VACUUM INTO` and the staging chmod where a `.tmp` still has
+the umask default — bounded to the staging name, swept by the next
+run, and invisible under the already-`0700` directory; and the mode
+step is skipped for the two non-file spellings of the path —
+`":memory:"` (the store's own WAL-verification fixture) and an empty
+path (SQLite's private temporary) — where no file exists to protect.
+
+Testing: the store suite pins its own artifacts (fresh file `0600`,
+loosened `0644` repaired on re-open, pre-migration and daily copies
+`0600`, the WAL/-shm siblings owner-only under an open connection, a
+loosened pre-existing `-wal` re-tightened by the next open — the
+round-1 fix's own pin, with the first connection held open so the
+sibling is genuinely reused, not recreated); the `data_dirs` suite
+pins the directories (`0700` exact after the first run, a loosened
+`0755` converged on the rerun, stable across reruns); `db_tests.rs`
+carries the card's acceptance criterion — the real first-run seam
+(`ensure_data_layout` + `Db::open` + the daily copy, the setup hook's
+order) leaves every required mode exactly, and a second startup
+re-tightens loosened modes. Mutations verified the suite bites:
+disabling each of the three enforcement points fails its own test
+(dirs `0755`, file/copies `0644`). Honest coverage boundary, noted by
+the round-1 review: CI runs `cargo test --workspace` on Linux only
+(the macOS and Windows legs build but do not test), so the mode
+assertions execute on Linux and the macOS half of the card's
+"Linux/macOS" criterion rides on the per-OS manual smoke checklist in
+ARCHITECTURE.md; the Windows no-op halves are compile-checked there.
+
+(The D-047 number is not used by this entry: it was issued inside
+another task's window and belongs to that task's record.)

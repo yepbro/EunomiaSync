@@ -21,6 +21,18 @@
 //! one copy per UTC day and keeps the last 7, reusing the
 //! pre-migration copy mechanics (staging, publication, retries — see
 //! [`run_migrations`] and DECISIONS.md D-038).
+//!
+//! Every file this crate creates is owner-only on Unix (spec §13
+//! SEC-007): the database file is set to `0600` in [`open_db`] before
+//! the pragma chain — so no data is written through looser modes — and
+//! each backup copy in [`stage_and_link_copy`] is `0600` before the
+//! link publishes it under its final name (the copies hold the same
+//! data as the database, so they share its sensitivity; DECISIONS.md
+//! D-048). On non-Unix platforms nothing is chmod'ed: the rights are
+//! inherited from the user profile (SEC-007). The backup
+//! *directory's* `0700` is the app layer's to enforce — directories
+//! belong to the data-directory layout (DECISIONS.md D-027), which
+//! this crate never creates.
 
 use std::fmt;
 use std::io;
@@ -132,6 +144,19 @@ pub enum StorageError {
         /// The validation or decoding failure.
         source: SettingsError,
     },
+    /// Setting the required owner-only permissions on the database
+    /// file failed (spec §13 SEC-007, Unix): without them the data
+    /// would sit readable by other local users, so the open fails
+    /// instead of continuing with looser modes. The staged backup
+    /// copies report the same failure as [`StorageError::Backup`]
+    /// with [`BackupError::Io`] — a failed copy is not a failed
+    /// open — so this variant is only produced by [`open_db`].
+    Permissions {
+        /// The file whose mode could not be set.
+        path: PathBuf,
+        /// The filesystem error.
+        source: io::Error,
+    },
 }
 
 /// The step of a backup write that failed (pre-migration or daily).
@@ -223,6 +248,13 @@ impl fmt::Display for StorageError {
             StorageError::Settings { key, source } => {
                 write!(f, "invalid setting {key}: {source}")
             }
+            StorageError::Permissions { path, source } => {
+                write!(
+                    f,
+                    "failed to set owner-only permissions (0600) on {}: {source}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -236,6 +268,7 @@ impl std::error::Error for StorageError {
             StorageError::JournalMode { .. } => None,
             StorageError::Backup { source, .. } => Some(source),
             StorageError::Settings { source, .. } => Some(source),
+            StorageError::Permissions { source, .. } => Some(source),
         }
     }
 }
@@ -267,12 +300,83 @@ fn open_failed(path: &Path, source: rusqlite::Error) -> StorageError {
     }
 }
 
+/// Sets owner-only permissions (`0600`) on `path` — SEC-007's Unix
+/// requirement for the database file and every backup copy of it (the
+/// copies hold the same data, so they share the file's sensitivity).
+/// The mode is a plain overwrite, not masked by the process umask, and
+/// is re-applied on every call: a file that drifted — restored from a
+/// copy, moved in with wider bits — converges back the next time its
+/// owner opens or rewrites it. On non-Unix platforms (Windows) the
+/// rights are inherited from the user profile (SEC-007) and this is
+/// deliberately a no-op.
+///
+/// Returns the raw [`io::Error`] so each call site maps it into its own
+/// error shape: [`StorageError::Permissions`] on the open path,
+/// [`BackupError::Io`] around a staged copy.
+#[cfg(unix)]
+fn set_owner_only_mode(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    const OWNER_ONLY_FILE: u32 = 0o600;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(OWNER_ONLY_FILE))
+}
+
+/// The non-Unix half of [`set_owner_only_mode`]: SEC-007 inherits the
+/// user profile's rights on Windows, so nothing is chmod'ed.
+#[cfg(not(unix))]
+fn set_owner_only_mode(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Whether `path` addresses a database SQLite keeps in a real file —
+/// the SEC-007 mode step applies to those only. The two non-file
+/// spellings of [`open_db`]'s path: `":memory:"` (an in-memory
+/// database, the WAL-verification guard's own test fixture) and an
+/// empty path (SQLite's private on-disk temporary, deleted on close).
+fn is_file_backed(path: &Path) -> bool {
+    !path.as_os_str().is_empty() && path != Path::new(":memory:")
+}
+
+/// Best-effort [`set_owner_only_mode`] on one of the database file's
+/// sidecars (`suffix` is `"-wal"` or `"-shm"`), repairing a sidecar
+/// that pre-dates this open and was therefore created without the
+/// creation-time mode copy (a crash leftover, a restored data
+/// directory). Errors — including the sidecar not existing — are
+/// deliberately ignored: this is extra coverage on top of the main
+/// file's mode, not a load-bearing guarantee (see [`open_db`]). On
+/// non-Unix platforms (Windows) the profile's rights stand and this is
+/// a no-op.
+#[cfg(unix)]
+fn repair_sidecar_mode(db_path: &Path, suffix: &str) {
+    let mut name = db_path.as_os_str().to_os_string();
+    name.push(suffix);
+    let _ = set_owner_only_mode(Path::new(&name));
+}
+
+/// The non-Unix half of [`repair_sidecar_mode`] (see there).
+#[cfg(not(unix))]
+fn repair_sidecar_mode(_db_path: &Path, _suffix: &str) {}
+
 /// Opens the SQLite database file at `path` with the required pragma set.
 ///
 /// The file is created when it does not exist yet, but parent directories
 /// are never created: the app layer owns the data-directory layout (see
 /// DECISIONS.md D-027) and must create `db/` before calling this function.
 /// A missing parent surfaces as [`StorageError::Open`] naming the path.
+///
+/// On Unix the file is set to owner-only permissions (`0600`, spec §13
+/// SEC-007) immediately after the open — before the pragma chain below —
+/// for two reasons: the WAL/-shm siblings SQLite creates on the
+/// `journal_mode=WAL` switch copy the main file's mode, so they are
+/// covered by construction, and a re-open repairs drift (a file restored
+/// or copied with wider bits converges back, D-030's recorded gap). A
+/// file whose mode cannot be set fails the open as
+/// [`StorageError::Permissions`]: continuing would leave the data
+/// readable by other local users. Siblings that *pre-date* the open are
+/// not created here and see no mode copy; a best-effort pass at the end
+/// of the pragma chain re-tightens them when they exist. In-memory
+/// databases (`:memory:`) and SQLite's private temporaries (an empty
+/// path) have no file and skip the step. On Windows the profile's
+/// inherited rights stand (SEC-007).
 ///
 /// The spec DB-001 pragma set is applied on every call, in this order:
 ///
@@ -293,10 +397,26 @@ fn open_failed(path: &Path, source: rusqlite::Error) -> StorageError {
 /// # Errors
 ///
 /// Returns [`StorageError::Open`] when the file cannot be opened or a
-/// pragma fails, and [`StorageError::JournalMode`] when SQLite reports a
-/// journal mode other than `wal` after the update attempt.
+/// pragma fails, [`StorageError::Permissions`] when its mode cannot be
+/// set to owner-only (SEC-007, Unix), and [`StorageError::JournalMode`]
+/// when SQLite reports a journal mode other than `wal` after the
+/// update attempt.
 pub fn open_db(path: &Path) -> Result<Connection, StorageError> {
     let conn = Connection::open(path).map_err(|source| open_failed(path, source))?;
+
+    // SEC-007: owner-only database file, set at the open and before the
+    // pragma chain — the `journal_mode=WAL` switch below makes SQLite
+    // create the `-wal`/`-shm` siblings, and they copy this file's
+    // mode, so ordering here covers them too (see the method docs).
+    // In-memory databases (`:memory:`) and SQLite's private temporary
+    // databases (an empty path) have no file to protect, so the mode
+    // step — and its failure — does not apply to them.
+    if is_file_backed(path) {
+        set_owner_only_mode(path).map_err(|source| StorageError::Permissions {
+            path: path.to_owned(),
+            source,
+        })?;
+    }
 
     conn.busy_timeout(BUSY_TIMEOUT)
         .map_err(|source| open_failed(path, source))?;
@@ -315,6 +435,18 @@ pub fn open_db(path: &Path) -> Result<Connection, StorageError> {
         .map_err(|source| open_failed(path, source))?;
     conn.pragma_update(None, "foreign_keys", true)
         .map_err(|source| open_failed(path, source))?;
+
+    // SEC-007, drift repair for sidecars that pre-date this open:
+    // SQLite copies the main file's mode only when it *creates* the
+    // `-wal`/`-shm` files, so a leftover from a crash or a restored
+    // data directory is reused at whatever mode it carries — and a
+    // `-wal` holds committed database frames. Best-effort on purpose:
+    // the steady state is already guaranteed by the creation-time copy
+    // above and the main file's mode, and a repair that cannot happen
+    // (an exotic filesystem, the sidecar gone again) must not fail the
+    // open over coverage the primary path already provides.
+    repair_sidecar_mode(path, "-wal");
+    repair_sidecar_mode(path, "-shm");
 
     Ok(conn)
 }
@@ -631,13 +763,16 @@ enum CopyPublication {
 /// sibling (a leftover `.tmp` at that exact name can only be stale
 /// debris of a crashed earlier run — the callers serialize their runs
 /// — and is removed first, `VACUUM INTO` refusing an existing file);
-/// the finished temporary is then linked under the final name, which
-/// fails rather than replaces an occupied destination, so the final
-/// name only ever appears complete and an existing copy is never
-/// overwritten. Filesystem mutations retry the spec §9.5 backoff (see
-/// [`retry_transient_hold`]); once the link is in place the temporary's
-/// removal is best-effort — the copy is complete, a file some scanner
-/// keeps holding must not fail it, and the sweep collects the leftover.
+/// the finished temporary is set to owner-only permissions (`0600`,
+/// SEC-007, Unix) *before* the link, so the published copy — and even
+/// a crash-left `.tmp` — never carries wider bits; the link under the
+/// final name then fails rather than replaces an occupied destination,
+/// so the final name only ever appears complete and an existing copy
+/// is never overwritten. Filesystem mutations retry the spec §9.5
+/// backoff (see [`retry_transient_hold`]); once the link is in place
+/// the temporary's removal is best-effort — the copy is complete, a
+/// file some scanner keeps holding must not fail it, and the sweep
+/// collects the leftover.
 fn stage_and_link_copy(
     conn: &Connection,
     final_path: &Path,
@@ -670,6 +805,23 @@ fn stage_and_link_copy(
             source: BackupError::Sqlite(err),
         });
     }
+    // SEC-007: the copy holds the database's data, so it is owner-only
+    // (`0600`) from the moment it exists — set on the staged temporary
+    // *before* the link publishes it (the link shares the inode, so the
+    // published copy carries this mode), so even a crash-left `.tmp`
+    // never exposes wider bits. Failure is a backup-write failure, not
+    // an open failure, hence `BackupError::Io` rather than
+    // `StorageError::Permissions`; the staged temporary is removed
+    // best-effort like every other failure path of this function, so
+    // a chmod-rejecting filesystem does not leave a umask-mode copy of
+    // the database behind.
+    set_owner_only_mode(&tmp_path).map_err(|source| {
+        let _ = std::fs::remove_file(&tmp_path);
+        StorageError::Backup {
+            path: final_path.to_owned(),
+            source: BackupError::Io(source),
+        }
+    })?;
     match retry_transient_hold(|| std::fs::hard_link(&tmp_path, final_path)) {
         Ok(()) => {}
         // A file appeared under the name in the window between the
@@ -2399,6 +2551,216 @@ mod tests {
         assert!(
             daily_names(&backup_dir).is_empty(),
             "no copy and no debris survive the failure"
+        );
+
+        // Windows: close the handle before removing the directory.
+        drop(writer);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- owner-only permissions (spec §13 SEC-007, Unix) --------------------
+    //
+    // The card's acceptance criterion is a Linux/macOS test of the modes
+    // after the first run; the app-layer end-to-end version of it lives
+    // in `db_tests.rs`. Here the store's own artifacts are pinned at
+    // their producing seams: the database file at `open_db`, every
+    // backup copy at the shared staging step, and the WAL siblings
+    // through the mode inheritance the `open_db` ordering builds on.
+
+    /// Reads a path's permission bits masked to the standard `0o777` —
+    /// what a mode assertion compares, without the file-type noise the
+    /// raw `st_mode` carries.
+    #[cfg(unix)]
+    fn file_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .unwrap_or_else(|err| panic!("stat of {} must work: {err}", path.display()))
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_db_creates_the_database_file_owner_only() {
+        // SEC-007: the database file is `0600` on Unix — exact mode,
+        // not merely owner-writable, so the assertion catches a
+        // umask-dependent `0644` default as well as a dropped chmod.
+        let dir = temp_dir("mode-fresh");
+        let db_path = dir.join("db.sqlite3");
+
+        let conn = open_db(&db_path).expect("a fresh database must open");
+
+        assert_eq!(
+            file_mode(&db_path),
+            0o600,
+            "the database file must be owner-only (SEC-007)"
+        );
+
+        // Windows: close the handle before removing the directory.
+        drop(conn);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_db_repairs_a_loosened_database_file_mode() {
+        // The mode is re-asserted on every open (the convergence
+        // policy): a file that drifted — here loosened by hand to the
+        // OS default — converges back on the next open, not only on
+        // the first creation.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("mode-repair");
+        let db_path = dir.join("db.sqlite3");
+        drop(open_db(&db_path).unwrap());
+        fs::set_permissions(&db_path, fs::Permissions::from_mode(0o644))
+            .expect("loosening the mode must work");
+
+        drop(open_db(&db_path).expect("the re-open must succeed"));
+
+        assert_eq!(
+            file_mode(&db_path),
+            0o600,
+            "a re-open must repair a loosened mode (SEC-007)"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_wal_siblings_of_an_open_database_are_owner_only() {
+        // The `-wal`/`-shm` siblings hold the same data as the database
+        // (un-checkpointed committed frames included), so SEC-007's
+        // spirit covers them even though the spec names only the file.
+        // The mechanism is `open_db`'s ordering: the file is `0600`
+        // *before* the WAL switch, and SQLite copies the main file's
+        // mode when it creates the siblings — this test pins that
+        // empirically; an exact `0600` is not demanded because the
+        // owner bits are SQLite's choice, only the absence of group
+        // and other access is ours.
+        let dir = temp_dir("mode-sidecars");
+        let db_path = dir.join("db.sqlite3");
+
+        let conn = open_db(&db_path).expect("a fresh database must open");
+        // A write forces real WAL frames, so both siblings exist while
+        // the connection is open (a clean close would checkpoint and
+        // delete them).
+        conn.execute("CREATE TABLE probe (x TEXT)", [])
+            .expect("the probe write must work");
+
+        for sibling in ["db.sqlite3-wal", "db.sqlite3-shm"] {
+            let path = dir.join(sibling);
+            assert!(
+                path.is_file(),
+                "`{sibling}` must exist under an open WAL connection"
+            );
+            assert_eq!(
+                file_mode(&path) & 0o077,
+                0,
+                "`{sibling}` must not be accessible by group or other (SEC-007)"
+            );
+        }
+
+        // Windows: close the handle before removing the directory.
+        drop(conn);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_loosened_pre_existing_wal_sibling_is_repaired_on_the_next_open() {
+        // The mode copy covers siblings SQLite *creates*; one that
+        // already exists (a crash leftover, a restored directory —
+        // here loosened by hand while the first connection keeps it
+        // alive) is reused untouched, so `open_db` repairs it
+        // best-effort: the second open must converge it back even
+        // though nothing recreates it.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("mode-sidecar-repair");
+        let db_path = dir.join("db.sqlite3");
+        let writer = open_db(&db_path).expect("the first open must work");
+        writer
+            .execute("CREATE TABLE probe (x TEXT)", [])
+            .expect("the probe write must work");
+        let wal = dir.join("db.sqlite3-wal");
+        assert!(wal.is_file(), "the WAL sibling must exist");
+        fs::set_permissions(&wal, fs::Permissions::from_mode(0o644))
+            .expect("loosening the WAL mode must work");
+
+        // A second connection while the first stays open: the sibling
+        // exists, so no creation-time mode copy applies.
+        drop(open_db(&db_path).expect("the second open must succeed"));
+
+        assert_eq!(
+            file_mode(&wal) & 0o077,
+            0,
+            "a pre-existing loosened `-wal` must be re-tightened on the \
+             next open (SEC-007)"
+        );
+
+        // Windows: close the handles before removing the directory.
+        drop(writer);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pre_migration_copy_is_owner_only() {
+        // The copy is a full image of the database's data (DB-004), so
+        // it shares the file's SEC-007 mode; the producing seam is the
+        // staging step both copy schemes go through.
+        let dir = temp_dir("mode-premigration");
+        let db_path = dir.join("db.sqlite3");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+
+        let set_v1 = set_of(&["CREATE TABLE marker (value TEXT NOT NULL)"]);
+        {
+            let mut conn = Connection::open(&db_path).unwrap();
+            migrate(&mut conn, &set_v1, &backup_dir).unwrap();
+        }
+        let set_v2 = set_of(&[
+            "CREATE TABLE marker (value TEXT NOT NULL)",
+            "ALTER TABLE marker ADD COLUMN added_by_v2 TEXT",
+        ]);
+        let backups = {
+            let mut conn = open_db(&db_path).unwrap();
+            migrate(&mut conn, &set_v2, &backup_dir).expect("the upgrade run should succeed")
+        };
+
+        assert_eq!(backups.len(), 1, "one pending step, one copy");
+        assert_eq!(
+            file_mode(&backups[0]),
+            0o600,
+            "the pre-migration copy must be owner-only (SEC-007)"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daily_copy_is_owner_only() {
+        // Same data, same mode (ERR-001's copies share the staging
+        // step with the pre-migration ones, so one mechanism covers
+        // both schemes).
+        let dir = temp_dir("mode-daily");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+        let (_db_path, writer) = database_with_marker(&dir);
+
+        let outcome = daily_backup(&writer, &backup_dir, ts("2026-11-18T10:00:00.000Z"))
+            .expect("the daily copy should be written");
+        let DailyBackupOutcome::Written(backup) = outcome else {
+            panic!("a day without a copy must be Written, got {outcome:?}");
+        };
+
+        assert_eq!(
+            file_mode(&backup),
+            0o600,
+            "the daily copy must be owner-only (SEC-007)"
         );
 
         // Windows: close the handle before removing the directory.

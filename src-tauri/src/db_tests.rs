@@ -2020,3 +2020,137 @@ fn setup_runs_the_daily_backup_after_open_and_before_managing() {
          `return` between the call and `app.manage` (D-046), got: {step}"
     );
 }
+
+// ---- SEC-007 modes after the real first run (Unix only) -------------------
+//
+// The T-022 acceptance criterion: a Linux/macOS test checks the modes
+// after the first run. The "first run" here is the real startup seam —
+// `ensure_data_layout` + `Db::open` + the ERR-001 daily copy, the same
+// steps the `setup` hook runs — over a temp root, so the assertions
+// cover the two enforcement layers together: the app layer's directory
+// modes and the store's file modes. Windows inherits the profile's
+// rights (SEC-007), so both the tests and the enforcement are
+// Unix-gated.
+
+/// Reads a path's permission bits masked to the standard `0o777`.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .unwrap_or_else(|err| panic!("stat of {} must work: {err}", path.display()))
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+#[cfg(unix)]
+#[test]
+fn the_first_startup_leaves_the_sec007_modes() {
+    // Arrange: a clean system — nothing exists under the root.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    let root = temp.path().to_path_buf();
+
+    // Act: the startup steps, in the `setup` hook's order — the
+    // layout, the database, the day's copy.
+    crate::data_dirs::ensure_data_layout(&root)
+        .expect("creating the data-directory layout in a temp directory must work");
+    let db = Db::open(&root).expect("opening a fresh database in a temp directory must work");
+    db.ensure_daily_backup(jiff::Timestamp::now())
+        .expect("the day's copy must be written");
+
+    // Assert: the exact SEC-007 modes — the two backups directories
+    // `0700`, the database file `0600`, the day's copy `0600` (a copy
+    // of the database's data, D-046), and the WAL/-shm siblings
+    // owner-only (they carry un-checkpointed database frames; the
+    // owner bits are SQLite's choice, the absence of group/other
+    // access is the requirement).
+    assert_eq!(
+        mode_of(&root.join("backups")),
+        0o700,
+        "`backups/` (SEC-007)"
+    );
+    assert_eq!(
+        mode_of(&root.join("db-backups")),
+        0o700,
+        "`db-backups/` (SEC-007)"
+    );
+    let db_file = root.join("db").join("eunomiasync.sqlite3");
+    assert_eq!(mode_of(&db_file), 0o600, "the database file (SEC-007)");
+    for sibling in ["eunomiasync.sqlite3-wal", "eunomiasync.sqlite3-shm"] {
+        let path = root.join("db").join(sibling);
+        assert!(
+            path.is_file(),
+            "`{sibling}` must exist under the open WAL connection"
+        );
+        assert_eq!(
+            mode_of(&path) & 0o077,
+            0,
+            "`{sibling}` must not be accessible by group or other (SEC-007)"
+        );
+    }
+    let daily: Vec<_> = std::fs::read_dir(root.join("db-backups"))
+        .expect("db-backups/ must be readable")
+        .map(|entry| entry.expect("every entry must be readable").path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("daily-"))
+        })
+        .collect();
+    assert_eq!(daily.len(), 1, "exactly one daily copy exists: {daily:?}");
+    assert_eq!(
+        mode_of(&daily[0]),
+        0o600,
+        "the daily copy holds the database's data (SEC-007, D-046)"
+    );
+
+    // The connection stays open for the sibling assertions above; the
+    // temp directory needs the handles released (the Windows rule,
+    // harmless on the Unix this test runs under).
+    drop(db);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_second_startup_keeps_the_sec007_modes_and_repairs_drift() {
+    // The idempotency half of the criterion: running the startup seams
+    // again must leave the modes exactly as required — including when
+    // the previous run's modes drifted in between (here loosened by
+    // hand, standing in for a restore or a tool with its own mode
+    // policy), which is what the re-assertion exists for.
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    let root = temp.path().to_path_buf();
+    crate::data_dirs::ensure_data_layout(&root).expect("the first layout run must work");
+    drop(Db::open(&root).expect("the first open must work"));
+
+    // Loosen both kinds of objects the requirement covers.
+    std::fs::set_permissions(
+        root.join("db-backups"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .expect("loosening the directory mode must work");
+    std::fs::set_permissions(
+        root.join("db").join("eunomiasync.sqlite3"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .expect("loosening the file mode must work");
+
+    // Act: the next startup — the same seams, the same order.
+    crate::data_dirs::ensure_data_layout(&root).expect("the second layout run must work");
+    let db = Db::open(&root).expect("the second open must work");
+
+    // Assert: converged back, exactly the required modes.
+    assert_eq!(
+        mode_of(&root.join("db-backups")),
+        0o700,
+        "the loosened backups directory must be re-tightened (SEC-007)"
+    );
+    assert_eq!(
+        mode_of(&root.join("db").join("eunomiasync.sqlite3")),
+        0o600,
+        "the loosened database file must be re-tightened (SEC-007)"
+    );
+
+    drop(db);
+}
