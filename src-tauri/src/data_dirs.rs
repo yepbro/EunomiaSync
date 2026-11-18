@@ -81,6 +81,32 @@ const BACKUPS_SUBDIRECTORY: &str = "backups";
 /// instead of Tauri's `app_log_dir()` (see the module docs).
 pub(crate) const LOGS_SUBDIRECTORY: &str = "logs";
 
+/// The SQLite database file name (spec §5.5 structure block:
+/// `db/eunomiasync.sqlite3` plus its `-wal`/`-shm` siblings, which
+/// SQLite creates and names itself). One file, one connection for the
+/// whole app (SYS-002).
+const DB_FILE_NAME: &str = "eunomiasync.sqlite3";
+
+/// Returns the database file path inside the layout:
+/// `<data dir>/db/eunomiasync.sqlite3` (spec §5.5). The `db/` directory
+/// must already exist — [`ensure_data_layout`] creates it, and
+/// `eunomia_store::storage::open_db` deliberately does not create
+/// parent directories (DECISIONS.md D-030).
+pub(crate) fn db_file_path(root: &Path) -> PathBuf {
+    root.join(DB_SUBDIRECTORY).join(DB_FILE_NAME)
+}
+
+/// Returns the pre-migration backup directory inside the layout:
+/// `<data dir>/db-backups` (spec §5.5) — where `run_migrations`
+/// writes its `VACUUM INTO` safety copies (DB-004, DECISIONS.md
+/// D-038). Like the database file's parent, the directory must
+/// already exist: the store creates no directories, and an upgrade
+/// run that needs a copy fails before applying anything when it is
+/// missing (the layout step creates it).
+pub(crate) fn db_backups_dir(root: &Path) -> PathBuf {
+    root.join(DB_BACKUPS_SUBDIRECTORY)
+}
+
 /// Why [`ensure_data_layout`] gave up: the path it could not create,
 /// plus the OS cause. The path is kept in the message (not only the
 /// chain) because the startup failure surfaces as tauri's
@@ -308,6 +334,45 @@ mod tests {
         assert!(
             error.source().is_some(),
             "the OS cause must stay reachable through the error chain"
+        );
+    }
+
+    #[test]
+    fn the_database_file_path_is_the_spec_five_five_name() {
+        // Arrange & Act: the path the DB executor opens, built from a
+        // root whose name does not collide with the expected segments
+        // (so a wrongly joined path cannot satisfy the pin by accident).
+        let root = Path::new("/data");
+        let path = db_file_path(root);
+
+        // Assert: the spec §5.5 structure block pins
+        // `db/eunomiasync.sqlite3` — as a literal, never derived from
+        // the module's own constants (the same mutation honesty as the
+        // layout pins above). The `-wal`/`-shm` siblings are SQLite's
+        // business, not part of the name this function returns.
+        assert_eq!(
+            path,
+            Path::new("/data/db/eunomiasync.sqlite3"),
+            "the database file must live at `db/eunomiasync.sqlite3` \
+             inside the data directory (spec §5.5)"
+        );
+    }
+
+    #[test]
+    fn the_backup_directory_is_the_spec_five_five_name() {
+        // Arrange & Act: the directory the DB executor hands to
+        // `run_migrations` for its pre-migration safety copies
+        // (DB-004, D-038), from the same non-colliding root.
+        let root = Path::new("/data");
+        let dir = db_backups_dir(root);
+
+        // Assert: the spec §5.5 structure block pins `db-backups/` —
+        // literal, like the database file pin beside it.
+        assert_eq!(
+            dir,
+            Path::new("/data/db-backups"),
+            "the pre-migration backups must live in `db-backups/` \
+             inside the data directory (spec §5.5, D-038)"
         );
     }
 }

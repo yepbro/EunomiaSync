@@ -19,6 +19,14 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 eunomia-store = { path = "../crates/eunomia-store" }
+# The DB executor (db.rs, D-037) owns rusqlite types directly — the
+# connection behind the mutex and the transaction it hands to
+# operations. Not a new crate in the graph: rusqlite 0.41 is already
+# built through eunomia-store (this adds an edge, not a version), and
+# no features are restated here — the store stays the single
+# declaration point for the build shape (bundled SQLite), which the
+# version comment in its manifest pins against rusqlite_migration.
+rusqlite = "0.41"
 tauri = { version = "2", features = [] }
 # The full allowed Tauri plugin set (spec §5.3). All four plugins are
 # invoked from Rust only (SEC-001): the webview gets neither their JS
@@ -56,7 +64,9 @@ specta-typescript = "0.0.15"
 tauri-specta = { version = "=2.0.0-rc.29", features = ["typescript"] }
 
 [dev-dependencies]
-# The `test` feature enables the mock runtime used by the IPC tests.
+# The `test` feature enables the mock runtime used by the updater and
+# single-instance tests (and formerly the greet IPC tests, removed
+# with D-037).
 tauri = { version = "2", features = ["test"] }
 # Ephemeral roots for the data_dirs layout tests. Not a new crate in the
 # dependency graph: `tempfile` 3 is already resolved workspace-wide via

@@ -9,8 +9,6 @@ use specta_typescript::Typescript;
 use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
 
-pub mod commands;
-
 // The IPC error contract (spec §7.10, §10): AppError and the MVP
 // error-code registry, exported to the frontend through the specta
 // builder below.
@@ -23,6 +21,10 @@ pub(crate) mod config;
 // The data directory layout (spec §5.5) is needed on every platform,
 // exactly like the app itself.
 pub(crate) mod data_dirs;
+
+// The application database state and the one-transaction command
+// executor (SYS-001/SYS-002, NFR-008; DECISIONS.md D-037).
+pub(crate) mod db;
 
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
@@ -37,15 +39,22 @@ pub(crate) mod single_instance;
 /// registered. Shared by the app entry point and the binding export test.
 pub fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
-        .commands(collect_commands![commands::greet,])
+        // No commands are registered yet: the demo command that
+        // shipped with the template was removed with D-037, and every
+        // command name is fixed by spec §7.10/D-009 — the first real
+        // command task (dialog, settings, …) lists its commands here
+        // and adds the `commands` module back.
+        .commands(collect_commands![])
         // `AppError` (§7.10: every command returns `Result<T, AppError>`)
-        // is registered directly instead of through a command signature:
-        // the one existing command (`greet`) cannot fail, and faking
-        // `Result<String, AppError>` on it would advertise an error path
-        // that never occurs. `typ` is tauri-specta's documented mechanism
-        // for types not reachable from commands or events; the type (and
-        // its `ErrorCode`/`ErrorDetails` dependencies) reaches
-        // `src/bindings.ts` through it, pinned by `errors_tests.rs`.
+        // is registered directly instead of through a command
+        // signature: no registered command exists yet (see above), and
+        // the first real commands return `Result<T, AppError>` through
+        // the DB executor (`db::Db::run`), which keeps the type
+        // reachable on its own. `typ` is tauri-specta's documented
+        // mechanism for types not reachable from commands or events;
+        // the type (and its `ErrorCode`/`ErrorDetails` dependencies)
+        // reaches `src/bindings.ts` through it, pinned by
+        // `errors_tests.rs`.
         .typ::<errors::AppError>()
 }
 
@@ -64,7 +73,7 @@ pub fn run() {
     // Rust only — the webview gets neither their JavaScript packages nor
     // any `opener:`/`dialog:`/`updater:` permission, so their commands are
     // unreachable from the UI. `capabilities/default.json` stays
-    // plugin-free and only application commands (`greet`, later
+    // plugin-free and only application commands (later
     // `dialog_pick_folder`, `app_open_data_folder`, `update_*`) cross the
     // IPC boundary. `config_tests.rs` pins the exact plugin set and the
     // registration order below.
@@ -180,6 +189,24 @@ pub fn run() {
             app.manage(logger);
             config::emit_warnings(&warnings);
             logging::startup(&data_dir, level);
+
+            // The database (SYS-002): one SQLite connection for the
+            // whole app, opened from the data directory (the §5.5
+            // paths — `db/eunomiasync.sqlite3` and the `db-backups/`
+            // the migration run's safety copies go to — are derived
+            // inside `db::Db::open`) with the DB-001 pragma set and
+            // migrated to the latest schema, then published as
+            // managed state. Every database command goes through its
+            // `run` executor — one operation, one transaction, off
+            // the async runtime (SYS-001, NFR-008; DECISIONS.md
+            // D-037). Like the layout and config steps, a failure
+            // aborts the launch — without the database there is
+            // nothing to run — but unlike them this step runs after
+            // logging is up, so the failure is also observable in the
+            // startup panic path with the database path in the
+            // message (`DbInitError`).
+            let database = db::Db::open(&data_dir)?;
+            app.manage(database);
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -190,10 +217,10 @@ pub fn run() {
 mod config_tests;
 
 #[cfg(test)]
-mod errors_tests;
+mod db_tests;
 
 #[cfg(test)]
-mod ipc_tests;
+mod errors_tests;
 
 #[cfg(test)]
 mod tests {

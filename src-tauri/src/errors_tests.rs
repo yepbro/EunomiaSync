@@ -2,7 +2,8 @@
 //!
 //! `AppError` reaches `src/bindings.ts` through the tauri-specta
 //! builder's `typ` registration in `lib.rs` — not through a command
-//! signature (`greet` cannot fail; see the `errors.rs` module docs).
+//! signature (no registered command exists yet; see the `errors.rs`
+//! module docs).
 //! These pins hold that export to the task's acceptance criteria:
 //!
 //! - the committed `src/bindings.ts` (embedded at compile time, like

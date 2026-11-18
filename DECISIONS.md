@@ -1221,6 +1221,115 @@ shared database (D-020); a developer database created from the old stub
 reports `user_version = 1` and would keep the `meta` table, so it has
 to be deleted by hand.
 
+### D-037 — DB executor: one connection behind a std Mutex, one deferred transaction per operation, spawn_blocking; greet removed — 2026-11-18
+
+Problem: T-023 turns SYS-001/SYS-002/NFR-008 into the shared command
+infrastructure: the app needs managed state with the one SQLite
+connection, a helper that runs each operation inside exactly one
+transaction off the async runtime and maps failures into the §7.10
+`AppError`, and the template's `greet` demo command removed. Open
+questions: which mutex, `spawn_blocking` vs `block_in_place`, where
+the transaction boundary sits and what the operation sees, how SQLite
+failures map onto the closed twenty-code registry (no generic
+"infrastructure failed" code exists), what a poisoned mutex means for
+the one connection, and whether a carrier command is needed to prove
+the executor.
+
+Solution: `src-tauri/src/db.rs`. (1) `Db` holds
+`Arc<std::sync::Mutex<Connection>>` — the `std` mutex, not
+`tokio::sync::Mutex`: the guard is locked and released inside the
+blocking closure and never crosses an `.await`, and the `std` guard
+being `!Send` makes holding it across a suspension unrepresentable,
+while the async mutex would invite exactly that (an operation parked on
+the runtime holding the only connection). (2) `Db::run` moves the
+operation onto `tauri::async_runtime::spawn_blocking` — SYS-001's own
+word; `block_in_place` was rejected because it panics on
+current-thread runtimes and converts a worker instead of using the
+blocking pool. (3) The boundary is `BEGIN DEFERRED` (via
+`unchecked_transaction` — `&self`, so it works through the guard) …
+`COMMIT`; the operation receives `&Transaction`, so every statement
+joins the one transaction by default and a nested `BEGIN` is rejected
+by SQLite at runtime (a deliberate `execute_batch("COMMIT")` escape
+stays reachable through the Deref to `Connection` — the type prevents
+accidents, not sabotage, and the executor's final `COMMIT` would then
+fail); on `Err` the `Transaction` drop sends the `ROLLBACK`. Deferred begin keeps
+`busy_timeout` meaningful: a write collision waits instead of failing
+instantly (the §10 `E_DB_LOCKED` situation is "busy_timeout expired";
+the retry cycle around it is T-025). (4) The base classifier
+`sqlite_error_to_app_error` (shared with future command tasks, which
+keep D-034's contextual refinement): busy/locked→`E_DB_LOCKED`,
+corrupt/not-a-db→`E_DB_CORRUPT`, full→`E_DISK_FULL`,
+readonly/perm/cannot-open→`E_NO_WRITE_ACCESS`,
+constraint→`E_VALIDATION`; everything else falls back to `E_DB_LOCKED`
+with the true reason preserved in `details.os_message`. The fallback is
+a recorded registry gap, not a fit: `E_DB_CORRUPT` (the plausible
+alternative) forces the destructive recovery screen on what may be a
+transient I/O failure, while "operation rejected, retry" is the least
+harmful effect the twenty codes offer; revisit when §10 grows a
+generic code (with T-025). The round-1 review tightened the
+diagnostics: `details.os_kind` carries the exact rusqlite category
+(`SystemIoFailure` no longer collapses into an "other" label) and
+`os_message` appends the numeric result code — rusqlite's `Display`
+prints only SQLite's message text, which would lose
+`SQLITE_CONSTRAINT_UNIQUE` vs `_FOREIGNKEY`. (5) Poisoning: an
+operation panic unwinds through the `Transaction` drop first — the
+rollback runs before the guard poisons — so the executor recovers the
+guard with `into_inner` _and clears the poison_, and the next
+operation starts from a clean connection; the panic itself surfaces
+through the same fallback as an `AppError` whose `details` carry the
+panic payload's own text (a cancelled task is reported as cancelled,
+not panicked); release builds abort on panic before this path exists.
+(6) Startup: the `setup` hook opens `Db` from the data directory
+after logging — both §5.5 paths are derived inside `Db::open` through
+the new `data_dirs::db_file_path`/`db_backups_dir` helpers, so the
+file and its backup directory cannot drift apart at a call site — the
+SYS-011 order pin in `config_tests.rs` still ends at
+`config::emit_warnings`, and a new pin in `db_tests.rs` continues the
+chain (logging::startup → `Db::open` → `app.manage(database)`) — and
+a failure aborts the launch like the layout/config steps
+(D-027/D-028), but with logging already up. Named §10 situations
+recorded honestly: a corrupt file aborts as an open/migration failure
+until the recovery task lands
+(`db_verify`/`db_restore_backup`/`db_recreate`); a database newer
+than the app already errors in the store (D-038), but the §10
+`E_DB_TOO_NEW` "update the app" screen is still the app layer's to
+build. Pre-migration safety copies are the store's, taken inside
+`run_migrations(conn, backup_dir)` (D-038); the returned list of
+copies is dropped here until the startup-log task consumes it through
+the facade — and the ERR-001 _daily_ backup remains its own open
+task, untouched by this change. The executor does not log: §10's
+error log line needs the project/path context only the producing
+command has (SEC-008 facade vocabulary, D-032).
+
+Dependencies: src-tauri gains a direct `rusqlite = "0.41"` edge — not
+a new crate or version in the graph (already built via eunomia-store;
+Cargo.lock only records the new edge): the executor owns
+`Connection`/`Transaction` types directly. No features are restated:
+the store stays the single declaration point for the build shape
+(bundled SQLite), which its version comment pins against
+rusqlite_migration.
+
+greet: removed entirely — command, registration, mock-IPC tests
+(`ipc_tests.rs`), the demo form in `App.vue`, and the regenerated
+`src/bindings.ts` (which now carries only types; tauri-specta emits no
+`commands` object for an empty command set). No carrier command was
+added: §7.10/D-009 fix every name, none belongs to this task (the
+`db_*` names are the recovery-screen task's, `settings_*` the settings
+task's), and both acceptance criteria are operation-level facts — so
+they are proven by `db_tests.rs` against real database files (the
+D-034/D-032 tested-today/consumed-later shape): a mid-operation error
+(own and SQLite-classified) rolls back every change; concurrent
+operations serialize on the connection without deadlocking or
+half-interleaving (the one-connection half of SYS-002 is structural —
+`Connection` is `!Sync`, so sharing it without the mutex does not
+compile); while twice
+the worker count of long operations are in flight, an async round-trip
+probe between spawned tasks completes in a fraction of their duration
+— inline work on the workers would park every worker inside the
+sleep and blow the budget; a panicking operation commits nothing and
+leaves the connection usable. Two wiring pins keep the mechanism
+(spawn_blocking) and the startup order from silently unwiring.
+
 ### D-038 — Pre-migration `VACUUM INTO` backups; per-migration transactions require stepping `to_version` — 2026-11-18
 
 Problem: DB-004 (spec §6.1) requires a `VACUUM INTO` copy in

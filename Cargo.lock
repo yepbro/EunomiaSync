@@ -1069,6 +1069,7 @@ name = "eunomia-sync"
 version = "0.1.0"
 dependencies = [
  "eunomia-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "specta",

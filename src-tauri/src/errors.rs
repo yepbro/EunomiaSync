@@ -69,11 +69,11 @@
 //! vocabulary. Until the first fallible command exists, the module has
 //! no production caller: it is registered with the tauri-specta builder
 //! (`Builder::typ`, the documented mechanism for types not reachable
-//! from a command signature — `greet` cannot fail, and faking
-//! `Result<String, AppError>` on it would advertise an error path that
-//! never occurs), exported to `src/bindings.ts`, and exercised by the
-//! tests below — the same tested-today/consumed-later shape as the
-//! `logging.rs` SEC-008 facade.
+//! from a command signature — no registered command exists yet, and
+//! the first real ones return `Result<T, AppError>` through the DB
+//! executor, `db::Db::run`), exported to `src/bindings.ts`, and
+//! exercised by the tests below — the same tested-today/consumed-
+//! later shape as the `logging.rs` SEC-008 facade.
 
 use std::collections::BTreeMap;
 
