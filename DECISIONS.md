@@ -1702,3 +1702,97 @@ and to executor-subagent briefs, which now carry the same rule. The
 failure that exposed it was fixed by a service commit (boxing
 `StorageError` in `DbInitError`); the false-green itself is what this
 entry prevents from recurring.
+### D-042 — Domain types and the ALG-001 build snapshot in eunomia-core — 2026-11-18
+
+Problem: T-033 turns the spec vocabulary (§2) and the snapshot contract
+(ALG-001) into the first real modules of `eunomia-core`, and left open:
+the snapshot's exact composition (flat DB-shaped collections vs a
+resolved per-project tree), where ordering lives, how identifiers are
+typed without the `uuid` crate, whether the snapshot validates its own
+graph, which fields are deliberately absent, and how the crate's serde
+allow-list entry (D-017) is put to use without inventing wire formats.
+
+Solution: four flat modules — `project` (ProjectId; Scheme A/B/C;
+BaseName with `stem()` for scheme C; ExtraFilePosition; ExtraFile;
+ProjectWriteSettings), `library` (ItemId, VariantId; HeadingLevel as a
+closed H2–H6 enum with `TryFrom<u8>` for the integer column;
+InstructionState active/hidden; Variant; Heading; Instruction with its
+variants; LibraryItem), `assignment` (Assignment), `snapshot`
+(SnapshotProject, SnapshotError, BuildSnapshot).
+
+Composition follows ALG-001's own decomposition rather than a
+per-project resolved tree: active projects in `sort_order` order, ALL
+library items in `position` order (hidden instructions and headings
+included — ALG-020 consults `state`, and D-11 keeps hidden
+assignments), the ACTIVE variants nested under their instruction
+(matching §2's hierarchical "Instruction — one or more variants"
+definition; the DB's flat `instruction_variants` table folds into it at
+the store boundary), and the assignments of the active projects as a
+flat list (DB-014: archived projects keep assignments, so the assembly
+must scope them — the flat `Assignment` keeps `project_id` and remains
+usable outside the snapshot). Ordering is carried by collection order
+only: DB-005/DB-011 make positions a gapless 1..=N row, so the vector
+preserves the position order (`index + 1` is the position) and no
+numeric field is stored to drift out of sync.
+Per-project resolution (instruction→variant maps) is the builder's
+(T-035) internal step, not snapshot state.
+
+`BuildSnapshot::new(projects, items, assignments)` validates the whole
+graph once and keeps the fields private behind slice accessors, so a
+constructed snapshot is immutable and every assignment provably
+resolves: unknown project, unknown item, assignment to a heading,
+variant not among the instruction's active variants (DB-012 shape),
+duplicate (project, instruction) pair (D-02), duplicate ids, and —
+mirroring DB-010's wording — an active instruction with no variants
+(hidden instructions are not held to it). The schema enforces most of
+these facts for a healthy database; the checks exist because the
+snapshot is assembled by hand-written queries, and a wrong filter or
+join there (e.g. an archived project's assignment reaching the
+snapshot, or an assignment pointing at a variant the active-variant
+query filtered out of its instruction — the DB-012 shape) must fail at
+sync start with a named `SnapshotError` (thiserror) instead of
+surfacing as a wrong write. What the checks cannot re-cover is the
+active-variant filter itself: `Variant` deliberately carries no state,
+so whether soft-deleted variants were excluded is the store query's own
+guarantee. This
+is what lets the builder be a total function with no lookup-miss
+branches.
+
+Deliberately absent: `is_main` on Variant (nothing in the build reads
+it; DB-010's exactly-one-main invariant is store-checked — carrying it
+would invite representing a state core cannot enforce), any `Default`
+impl (the §6.5 default values have one owner, the settings repository,
+D-039), UI-only project attributes (label, color), and housekeeping
+columns (timestamps, last-synced hash — the snapshot is a build input,
+not a project listing; `root`, `name` and `settings` stay because the
+DB-020 hash, sync summaries and the D-25 confirmation list consume
+them). `PathBuf` in SnapshotProject is a value, not fs access.
+
+Serde: the vocabulary types derive Serialize/Deserialize with the
+canonical literals pinned (`"A"`/`"AGENTS.md"`/`"start"`/`"end"`/
+`"active"`/`"hidden"`, heading level as the schema integer 2–6 under
+its §6.2 column key `heading_level`, the
+`{"enabled":…,"position":…}` §6.5 JSON shape with unknown members
+denied (`deny_unknown_fields`), the `"instruction"`/
+`"heading"` kind word, identifiers as plain strings) — unit-tested in
+both directions, case-sensitive rejections included. The aggregates
+(BuildSnapshot, SnapshotProject) carry NO serde derives: a Deserialize
+impl would bypass `new()`'s validation, and both types have no wire
+consumer. Identifier newtypes are opaque (`String` inside, no UUIDv7
+validation): generation and validation are the store's (D-031), and
+`uuid` is outside the crate's allow-list (D-017) — the newtypes' value
+is that project/item/variant ids cannot be mixed at call sites.
+A dev-only `serde_json = "1"` (1.0.154, already resolved workspace-wide)
+pins the literals in tests; the runtime allow-list stays
+serde/sha2/thiserror, with serde and thiserror now actually used and
+sha2 still idle until the build-hash task.
+
+Recorded duplication: `eunomia_store::settings` already carries its own
+Scheme/BaseName/Position/ExtraFile enums (D-039, written before core
+had a home for them). Core's types are now the canonical vocabulary;
+swapping the store's settings (and adding the store→core edge per
+D-017's first-consumer rule) belongs to the next task that touches the
+store's settings module, not to T-033. First consumers of the snapshot:
+T-034 (ALG-002 normalization over the carried variant texts) and T-035
+(the builder); variant texts ride the snapshot raw — normalization is a
+build-pipeline step, not a snapshot mutation.

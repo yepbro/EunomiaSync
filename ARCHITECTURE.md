@@ -21,6 +21,10 @@ planned responsibilities only, see DECISIONS.md D-019).
 ```text
 crates/
   eunomia-core/            # Core library, no Tauri dependency, no I/O
+    src/project.rs         #   Project write vocabulary: scheme, base name, extra files (working)
+    src/library.rs         #   Library items: instructions, headings, variants (working)
+    src/assignment.rs      #   The project ↔ instruction ↔ variant link (working)
+    src/snapshot.rs        #   Immutable build snapshot, ALG-001 (working)
     markdown               #   Markdown processing           (planned)
     diff                   #   Text diffing                  (planned)
     sync                   #   AGENTS.md sync engine         (planned)
@@ -47,7 +51,15 @@ src/                      # Frontend
 `eunomia-core` is deliberately independent of Tauri so that markdown,
 diff, sync, and watch logic can be tested without a UI layer (see
 DECISIONS.md D-006); it is also free of database dependencies, so the
-"core = pure logic, no I/O" rule holds at the dependency level. SQLite
+"core = pure logic, no I/O" rule holds at the dependency level. The
+domain vocabulary now lives here (T-033, DECISIONS.md D-042): the
+project write settings (scheme A/B/C, base name, extra files), the
+library model (instructions, headings, variants), assignments, and the
+immutable `BuildSnapshot` of spec ALG-001 — assembled by the store
+layer in one read transaction, validated by core's
+`BuildSnapshot::new`, and handed to the build as a plain value
+(ordering carried by collection order; every assignment resolves inside
+the value, so the builder is a total function). SQLite
 storage lives in `eunomia-store` (see DECISIONS.md D-010), which is free
 of Tauri dependencies for the same reason. File-system work — repository
 scan, path normalization and validation, backup copies, atomic writes —
