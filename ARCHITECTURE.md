@@ -328,7 +328,22 @@ the next operation proceeds. `db_tests.rs` proves the acceptance
 behavior against real database files: mid-operation failures roll back
 everything, concurrent operations serialize on the connection, long
 operations leave the async runtime responsive, and a panicking
-operation neither commits nor poisons.
+operation neither commits nor poisons. A busy/locked failure
+(`busy_timeout` expired under another connection's lock) is retried
+by the executor itself — §10 `E_DB_LOCKED`'s "up to 3 automatic
+retries": the whole operation re-runs in a fresh transaction (the
+failed attempt rolled back, so the retry is a fresh run — the
+operation signature is `FnMut` for exactly that), pausing §9.5's
+100/300/900 ms ladder on the blocking thread between attempts and
+dropping the connection lock for the pause; after the third retry the
+failure surfaces as the `E_DB_LOCKED` §7.10 wire value. Only
+SQLite's busy/locked class enters the cycle — the operation's own
+errors, constraint violations and the recorded fallback (which also
+lands on `E_DB_LOCKED`) surface on their first attempt, their
+`details.os_kind` keeping the producers separable — and each retry is
+logged through the facade (`logging::db_busy_retry`, a numeric-only
+`warn`; the one thing the executor logs itself, because a retry is
+invisible to every other layer).
 
 The same `db-backups/` also holds the daily startup copies (spec §10
 ERR-001, DECISIONS.md D-046): after the database is open and

@@ -1322,6 +1322,15 @@ a damaged database now fails the typed `quick_check` gate
 (`DbInitError::Corrupt` → the `E_DB_CORRUPT` AppError, logged through
 the facade, launch still aborted); see D-045.
 
+Addendum (2026-11-18, T-025/D-050): the retry cycle this entry
+deferred ("the retry cycle around it is T-025") has landed — busy /
+locked attempts now replay up to three times before `E_DB_LOCKED`
+reaches the wire, and the recorded fallback's claim on the same code
+is re-examined; see D-050 for both halves. This entry's "the executor
+does not log" rule gained one deliberate exception with it: the
+executor logs the retry attempts themselves (`logging::db_busy_retry`,
+a numeric-only warn) because no other layer can see them — see D-050.
+
 greet: removed entirely — command, registration, mock-IPC tests
 (`ipc_tests.rs`), the demo form in `App.vue`, and the regenerated
 `src/bindings.ts` (which now carries only types; tauri-specta emits no
@@ -2639,3 +2648,144 @@ linked — the screen picks from names, and the restore's own gates
 re-verify); and the recovery commands do not exist for the
 too-new/migration aborts — those keep the abort until their own
 screen tasks.
+
+### D-050 — Busy-retry cycle in `Db::run`: three replays in fresh transactions, §9.5 pauses, the fallback re-examined — 2026-11-18
+
+Problem: T-025 turns §10's `E_DB_LOCKED` row ("busy_timeout expired …
+up to 3 automatic retries") into behavior. Open questions: which layer
+owns the cycle; what exactly is "the operation" that gets retried,
+given the executor hands the operation a `&Transaction` and the
+transaction is per-attempt; how the executor recognizes a busy
+failure that surfaced _inside_ the operation body, where only the
+classified `AppError` is visible; which backoff; how an acceptance
+test holds a real lock without sleeping through 4 × 5 s of the DB-001
+`busy_timeout`; and — recorded in D-037 as this task's business —
+what happens to the gap-fallback ("everything else → `E_DB_LOCKED`")
+now that the code's meaning grows "we retried three times".
+
+Solution, in `src-tauri/src/db.rs`:
+
+- _Layer — the executor itself._ The cycle lives inside `Db::run`'s
+  `spawn_blocking` closure: the transaction boundary, the busy
+  classification and the replay are all executor facts, and every
+  future command through `run` inherits the §10 policy without
+  per-command retry code. One attempt is the whole D-037 executor
+  factored into `attempt_once` (lock → `BEGIN DEFERRED` → operation →
+  `COMMIT`), returning a tri-state: `Success` / `Busy` (SQLite's
+  busy/locked class — a retry candidate) / `Failed` (everything
+  else, surfaced on the first attempt). The mutex guard is local to
+  `attempt_once`, so the connection is free during every pause and
+  each attempt re-locks.
+- _The operation is `FnMut`, not `FnOnce._ A retry re-runs the whole
+  body in a fresh transaction. That is safe because the failed
+  attempt rolled back completely (the rollback is the transaction
+  drop D-037 already documents), so the retry is a fresh run over
+  whatever is committed when it starts — another operation may commit
+  during a pause, which is precisely the contention the cycle exists
+  for. The transaction is the idempotency mechanism for everything
+  the body does through it; the body must read its inputs inside the
+  transaction (never cache them across attempts), and a body with
+  side effects outside the transaction must make them idempotent
+  itself (§9.5 staging being the house pattern). The signature change
+  compiled without touching a single existing closure.
+- _Policy._ Up to `BUSY_RETRY_COUNT = 3` automatic retries after the
+  original attempt (so at most 4 invocations — §10's "up to 3
+  automatic retries" counts retries, not attempts), pausing
+  `BUSY_RETRY_PAUSES_MS = [100, 300, 900]` between them: §9.5's own
+  ladder, already the codebase's backoff (the store's
+  `retry_transient_hold` for file-copy retries) — the same pattern,
+  both citing §9.5; the literal is duplicated deliberately (the
+  store's copy is function-local and not visible here, like the
+  5000 ms value `schema_version_of` duplicates). The sleep is `std::thread::sleep`
+  inside the blocking closure: the whole cycle already runs on
+  tauri's blocking pool, and no async worker is ever parked (the
+  existing responsive-runtime test keeps proving that end to end).
+- _What retries — the class, not the code._ Only rusqlite's
+  `DatabaseBusy`/`DatabaseLocked` primary categories (the extended
+  codes — `SQLITE_BUSY_SNAPSHOT`, `SQLITE_LOCKED_SHAREDCACHE`, … —
+  fold into them; shared cache is not enabled here, but the class is
+  covered uniformly). Two detection edges: the executor's own
+  `BEGIN`/`COMMIT` see the raw rusqlite error; a statement inside
+  the body sees only the classified `AppError`, so the busy kinds are
+  matched on `details.os_kind` against the same `Debug` names the
+  classifier wrote — both strings derived from the rusqlite enum at
+  runtime, so a variant rename moves producer and matcher together.
+  Everything else — the operation's own `E_VALIDATION`, constraint
+  violations, the fallback `E_DB_LOCKED` of an I/O failure, an error
+  with no details — returns on its first attempt without pausing.
+  The wire form of the verdict is unchanged §7.10 shape: the §10
+  literal, the default `errors.db_locked` key, the SQLite facts in
+  `details`, and **no params** — UI-011's params are "where" values
+  (a path, a project); the busy situation has none, and the attempt
+  count belongs to the log lines, not the interpolation contract.
+- _Observability._ Each retry emits one `warn` through a new facade
+  function, `logging::db_busy_retry(attempt, pause_ms)` — numeric
+  payload only (SEC-008). This is the executor's single deliberate
+  exception to D-037's "the executor does not log": a retry is
+  invisible to every other layer (a successful replay never becomes
+  an error; the exhausted verdict is the producing command's own §10
+  line), so nobody else could log it. The call site is pinned by a
+  wiring test in the `config_tests.rs` style.
+- _The D-037 fallback, re-examined and kept._ With the cycle landed,
+  `E_DB_LOCKED` from a genuine busy now additionally means "retried
+  three times, still busy" — which a fallback producer (an I/O
+  failure, a panic) did not do, so the fallback lies slightly more
+  than before. It stays anyway: of the twenty codes its §10 effect
+  ("operation rejected", user action "Retry") remains the least
+  harmful for an unclassifiable failure — `E_DB_CORRUPT` forces the
+  destructive recovery screen, `E_DISK_FULL`/`E_NO_WRITE_ACCESS`
+  prescribe unrelated user actions, and no generic
+  infrastructure-failed code exists (the recorded gap). Two
+  mitigations bound the lie: fallback errors never enter the retry
+  cycle (only the busy/locked class does — pinned by a test that
+  counts one invocation for an I/O-class failure classified onto
+  `E_DB_LOCKED`), and `details.os_kind` separates the producers on
+  the wire (`DatabaseBusy` = genuinely busy and retried;
+  `SystemIoFailure`/`OperationPanicked`/… = fallback). Revisit when
+  the registry grows a fitting code, as before.
+- _Test seam for `busy_timeout`._ The acceptance tests hold a real
+  external lock (`BEGIN EXCLUSIVE` on a second rusqlite connection —
+  in WAL mode the immediate write lock a competing writer needs) and
+  let every attempt wait out the timeout, so at the DB-001 production
+  value one test would sleep 4 × 5 s of timeouts plus §9.5 pauses.
+  `Db::set_busy_timeout_for_tests(Duration)` — a `#[cfg(test)]`
+  method — replaces the connection's busy timeout with the test
+  value (25 ms). DB-001 is untouched in production: the method does
+  not exist outside `cfg(test)`, and `open_db` still programs 5000 ms
+  on every open. Determinism comes from the lock, not from timing:
+  every attempt deterministically collides while the holder lives,
+  and the release-between-attempts test synchronizes through channels
+  (the body reports its busy failure and waits for the release before
+  returning it, so the retry starts against a genuinely free lock —
+  correctness never depends on the 100 ms pause being long enough).
+  The busy tests were run three times in a row for stability
+  (~1.4 s each). Accepted production cost, recorded with the seam: a
+  lock that outlasts everything makes one `Db::run` occupy the
+  executor for up to ~21 s (four 5 s DB-001 timeouts plus 1.3 s of
+  §9.5 pauses), during which other operations queue on the connection
+  mutex (the guard is held per attempt, freed for every pause —
+  pinned by a dedicated test); the values are spec-mandated
+  (DB-001/§9.5/§10), not tuned here. The cycle is also not
+  cancellable: dropping the caller's future does not stop the
+  `spawn_blocking` run, whose retries (and a possible commit) run to
+  completion — a pre-existing property of one attempt, widened to
+  the worst case; recorded in `Db::run`'s docs for the future
+  command tasks.
+
+The acceptance behavior is pinned in `db_tests.rs`: exactly four
+invocations then the `E_DB_LOCKED` wire verdict with
+`os_kind = DatabaseBusy` and a wall-clock floor of the summed §9.5
+pauses (a no-pause loop cannot undercut it; no upper bound to stay
+flake-free on loaded machines); nothing of the failed attempts
+committed and the same connection serves the next operation once the
+lock is gone; the synchronized-release test commits on the first
+retry; an operation's own error, a real constraint violation and the
+fallback `E_DB_LOCKED` all run exactly once; both busy discriminators
+are driven directly on synthesized primary and extended result codes
+(the acceptance tests cannot reach the `BEGIN`/`COMMIT` edges or the
+`DatabaseLocked` member); the connection lock's freedom during the
+pauses has its own synchronized test (a queued operation provably
+runs mid-cycle while the retried operation is still in flight); and
+the facade test pins the warn payload. No new dependencies (no
+async-sleep crate, no retry framework — the loop is 30 lines over
+std).

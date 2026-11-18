@@ -68,6 +68,33 @@
 //! mid-operation-failure test below proves against a real database
 //! file.
 //!
+//! # Busy retries (§10 `E_DB_LOCKED`, §9.5 backoff)
+//!
+//! When `busy_timeout` (DB-001, set by `open_db`) expires under a
+//! lock another connection holds, SQLite reports `SQLITE_BUSY` (or
+//! `SQLITE_LOCKED`); §10's `E_DB_LOCKED` row prescribes "up to 3
+//! automatic retries" before the operation is rejected on the wire.
+//! The executor owns that cycle — see [`Db::run`]. Each retry re-runs
+//! the **whole** operation in a **new** transaction: the failed
+//! attempt rolled back completely (the paragraph above), so the retry
+//! is a fresh run over whatever is committed when it starts — another
+//! operation may have committed during the pause, which is precisely
+//! the contention the cycle exists for. That is the idempotency
+//! contract the `FnMut` operation signature now encodes: a retried
+//! closure must be callable again, everything it does through the
+//! `&Transaction` is undone by the rollback before the next call, and
+//! the body must read its inputs inside the transaction (never cache
+//! them across attempts). The pauses between attempts are
+//! spec §9.5's 100/300/900 ms ladder — the same backoff the store's
+//! file-copy retries use; the ladder is duplicated deliberately (the
+//! store's copy is function-local and not visible here, the same
+//! wording `schema_version_of` uses for the 5000 ms value) — and the
+//! sleep runs inside the blocking closure (`std::thread::sleep` on
+//! the blocking pool, never an async sleep parked on a worker).
+//! Only the busy/locked class is retried; every other failure —
+//! including the recorded fallback that also lands on `E_DB_LOCKED`
+//! — surfaces on its first attempt.
+//!
 //! # Poisoning
 //!
 //! If an operation panics, the unwinding drops the open
@@ -88,25 +115,33 @@
 //! operation: which code a failure deserves is a command-level
 //! decision, and the classifier's verdict can be refined there.
 //!
-//! Honest registry gap, recorded in DECISIONS.md D-037: the §10 MVP
-//! registry has no generic "database infrastructure failed" code.
-//! Busy/locked (`E_DB_LOCKED`), corrupt/not-a-database
-//! (`E_DB_CORRUPT`), disk full (`E_DISK_FULL`), read-only/permission
-//! (`E_NO_WRITE_ACCESS`) and constraint violations (`E_VALIDATION`)
-//! map to their spec situations; everything else — storage-layer I/O
-//! errors, a panicked operation — surfaces as `E_DB_LOCKED` with the
-//! true reason preserved in `details.os_message`. That fallback is
-//! the least harmful of the twenty codes: its §10 effect ("operation
-//! rejected, retry") is what a user can actually do with an
-//! unclassifiable storage failure, while the plausible alternative
-//! would lie harder (`E_DB_CORRUPT` forces the recovery screen).
-//! The gap is revisited when the registry grows a fitting code (with
-//! the T-025 retry cycle).
+//! Honest registry gap, recorded in DECISIONS.md D-037 and revised by
+//! the T-025 entry: the §10 MVP registry has no generic "database
+//! infrastructure failed" code. Busy/locked (`E_DB_LOCKED`),
+//! corrupt/not-a-database (`E_DB_CORRUPT`), disk full
+//! (`E_DISK_FULL`), read-only/permission (`E_NO_WRITE_ACCESS`) and
+//! constraint violations (`E_VALIDATION`) map to their spec
+//! situations; everything else — storage-layer I/O errors, a panicked
+//! operation — surfaces as `E_DB_LOCKED` with the true reason
+//! preserved in `details.os_message`. Since the retry cycle landed,
+//! `E_DB_LOCKED` from a genuine busy means "retried three times,
+//! still busy" — which a fallback producer did not do. The fallback
+//! nevertheless stays (of the twenty codes its "operation rejected,
+//! retry" effect remains the least harmful lie; the revision and its
+//! mitigations are recorded in DECISIONS.md): fallback errors never
+//! enter the retry cycle (only the busy/locked class does), and
+//! `details.os_kind` separates the producers on the wire
+//! (`DatabaseBusy` from a real busy, `SystemIoFailure`/… from the
+//! fallback). The gap is revisited when the registry grows a fitting
+//! code.
 //!
-//! This module does not log: §10's "every error is written to the
-//! log" belongs to the producing command tasks, which know the
-//! project/path context the log line must carry (SEC-008's facade
-//! vocabulary, D-032); the executor has none of it.
+//! This module logs exactly one kind of event itself: the §10/§9.5
+//! retry attempts ([`crate::logging::db_busy_retry`], a `warn` per
+//! attempt) — invisible to every other layer, so nobody else could
+//! log them; SEC-008 keeps their payload numeric. §10's "every error
+//! is written to the log" belongs to the producing command tasks,
+//! which know the project/path context the log line must carry
+//! (SEC-008's facade vocabulary, D-032); the executor has none of it.
 //!
 //! # Tested today, consumed later
 //!
@@ -121,6 +156,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use jiff::Timestamp;
 use rusqlite::{Connection, Transaction};
@@ -133,6 +169,25 @@ use rusqlite::ErrorCode as SqliteCode;
 
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use eunomia_store::storage::{DailyBackupOutcome, StorageError};
+
+/// How many automatic retries a busy/locked failure earns (§10
+/// `E_DB_LOCKED`: "Operation rejected; up to 3 automatic retries").
+/// The original attempt is not a retry: an operation runs at most
+/// `1 + BUSY_RETRY_COUNT` times.
+const BUSY_RETRY_COUNT: usize = 3;
+
+/// The pauses between the original attempt and the retries, in order
+/// (§9.5's backoff ladder — the same 100/300/900 ms the store's
+/// `retry_transient_hold` uses for §9.5 file-write retries; the
+/// ladder is duplicated deliberately, like the 5000 ms value in
+/// `schema_version_of` — the store's copy is function-local and not
+/// visible here). Indexed by the retry number: after
+/// the original attempt fails, pause 100 ms; after retry 1, 300 ms;
+/// after retry 2, 900 ms; retry 3's failure is the verdict. The
+/// array length and [`BUSY_RETRY_COUNT`] are the same number by
+/// construction — the loop reads the pause for its retry from here
+/// and treats a missing entry as "retries exhausted".
+const BUSY_RETRY_PAUSES_MS: [u64; BUSY_RETRY_COUNT] = [100, 300, 900];
 
 /// The application database state (SYS-002): the one SQLite
 /// connection behind a mutex, published as managed state by the
@@ -315,6 +370,47 @@ impl Db {
     /// two `run` calls may sit on the blocking pool concurrently, but
     /// their transactions never interleave on the connection.
     ///
+    /// # Busy retries (§10 `E_DB_LOCKED`)
+    ///
+    /// When an attempt fails with SQLite's busy/locked class —
+    /// `busy_timeout` (DB-001) expired under a lock another
+    /// connection holds — the executor retries the whole operation up
+    /// to [`BUSY_RETRY_COUNT`] more times, each in a fresh
+    /// transaction, pausing [`BUSY_RETRY_PAUSES_MS`] between attempts
+    /// (spec §9.5's ladder); after the last retry the failure
+    /// surfaces as the `E_DB_LOCKED` §10 wire value the classifier
+    /// builds. Only that class is retried, however the operation
+    /// reports it: the executor sees the raw rusqlite error of its own
+    /// `BEGIN`/`COMMIT` edges, and — for a statement inside the
+    /// operation body — the `details.os_kind` the shared classifier
+    /// recorded (`"DatabaseBusy"`/`"DatabaseLocked"`; see
+    /// [`app_error_is_busy_locked`]). Everything else, including the
+    /// recorded fallback that also lands on `E_DB_LOCKED` (an I/O
+    /// failure, a bug-shaped rusqlite error), surfaces on the first
+    /// attempt without pausing or re-running anything.
+    ///
+    /// The operation therefore runs as `FnMut`: a retry re-invokes it.
+    /// Because the failed attempt rolled back completely, the retry is
+    /// a fresh run — not a resume — over whatever is committed when it
+    /// starts (another operation may have committed during the pause,
+    /// the very contention the cycle exists for). For everything the
+    /// body does through the `&Transaction` the transaction itself is
+    /// the idempotency mechanism: a replay either re-derives its result
+    /// on the new state or fails cleanly on it. The body must read its
+    /// inputs inside the transaction (never cache them across
+    /// attempts), and a body with side effects *outside* the
+    /// transaction must make them idempotent itself (§9.5-staged
+    /// writes being the house pattern).
+    ///
+    /// The cycle is not cancellable: dropping the future the caller
+    /// awaits does not stop the underlying `spawn_blocking` run — its
+    /// retries (and, on an eventual success, its commit) run to
+    /// completion, which a dropped command future may observe only
+    /// later. A command task must not assume a cancelled call left
+    /// the database untouched (this predates the retries — one
+    /// attempt could already outlive its future — the cycle only
+    /// widens the window to the §9.5 worst case).
+    ///
     /// A panic inside the operation does not poison anything the next
     /// operation would notice: the unwinding rolls the transaction
     /// back, the executor recovers the mutex guard (see the module
@@ -325,7 +421,7 @@ impl Db {
     #[allow(dead_code)] // consumed by the first database command task; tested today
     pub(crate) async fn run<T, F>(&self, operation: F) -> Result<T, AppError>
     where
-        F: FnOnce(&Transaction<'_>) -> Result<T, AppError> + Send + 'static,
+        F: FnMut(&Transaction<'_>) -> Result<T, AppError> + Send + 'static,
         T: Send + 'static,
     {
         // Clone the handle before entering the closure: the closure
@@ -333,19 +429,37 @@ impl Db {
         // not borrow it from the managed state.
         let connection = Arc::clone(&self.connection);
         let joined = async_runtime::spawn_blocking(move || {
-            let guard = lock_recovering_poison(&connection);
-            let transaction = guard
-                .unchecked_transaction()
-                .map_err(sqlite_error_to_app_error)?;
-            match operation(&transaction) {
-                // A failed commit also drops the transaction (rusqlite
-                // sends the ROLLBACK), so nothing half-applied stays
-                // behind on that path either.
-                Ok(value) => transaction
-                    .commit()
-                    .map_err(sqlite_error_to_app_error)
-                    .map(|()| value),
-                Err(error) => Err(error),
+            let mut operation = operation;
+            // 0-based: attempt 0 is the original run; retries are
+            // attempts 1..=BUSY_RETRY_COUNT. The pauses and the
+            // logging are indexed by the retry number, so the ladder
+            // reads exactly as §9.5 prescribes it.
+            let mut attempt = 0;
+            loop {
+                // The guard is dropped inside `attempt_once` before
+                // this returns — the connection is free during the
+                // pause, and the next attempt re-locks it.
+                match attempt_once(&connection, &mut operation) {
+                    AttemptOutcome::Success(value) => return Ok(value),
+                    AttemptOutcome::Failed(error) => return Err(error),
+                    AttemptOutcome::Busy(error) => {
+                        let Some(pause_ms) = BUSY_RETRY_PAUSES_MS.get(attempt) else {
+                            // §10's "up to 3 automatic retries" is
+                            // exhausted: the last failure is the
+                            // verdict, already in its §7.10 form.
+                            return Err(error);
+                        };
+                        crate::logging::db_busy_retry(attempt + 1, *pause_ms);
+                        // A blocking sleep, on the blocking pool —
+                        // the whole closure already runs there, and an
+                        // async sleep would park this task while its
+                        // operation future (the `.await`ed join below)
+                        // holds nothing; §9.5's ladder is wall-clock
+                        // pauses either way.
+                        std::thread::sleep(Duration::from_millis(*pause_ms));
+                        attempt += 1;
+                    }
+                }
             }
         })
         .await;
@@ -356,6 +470,139 @@ impl Db {
             // the task was cancelled at runtime shutdown).
             Err(join_error) => Err(join_failure_to_app_error(join_error)),
         }
+    }
+}
+
+/// One attempt of [`Db::run`]'s retry loop: lock, one deferred
+/// transaction, the operation, commit — the whole D-037 executor,
+/// factored out so the loop around it stays readable. The mutex guard
+/// is a local, so it drops when this returns — before any retry
+/// pause, keeping the connection free while the executor sleeps.
+///
+/// Busy/locked failures are separated from everything else at every
+/// edge they can reach: the executor's own `BEGIN`/`COMMIT` (raw
+/// rusqlite errors, checked before classification) and a statement
+/// inside the operation body (already classified by the operation —
+/// see [`app_error_is_busy_locked`] for how the busy class survives
+/// that trip). A failed attempt has fully rolled back by the time
+/// this returns (the `Transaction` drop sends the `ROLLBACK`, and a
+/// failed `commit` drops it the same way), which is what makes the
+/// caller's retry a fresh run rather than a resume.
+fn attempt_once<T, F>(connection: &Mutex<Connection>, operation: &mut F) -> AttemptOutcome<T>
+where
+    F: FnMut(&Transaction<'_>) -> Result<T, AppError>,
+{
+    let guard = lock_recovering_poison(connection);
+    let transaction = match guard.unchecked_transaction() {
+        Ok(transaction) => transaction,
+        // `BEGIN DEFERRED` takes no lock, so busy here is unlikely —
+        // but the edge exists, and the loop treats it like any other.
+        Err(error) if rusqlite_error_is_busy_locked(&error) => {
+            return AttemptOutcome::Busy(sqlite_error_to_app_error(error));
+        }
+        Err(error) => return AttemptOutcome::Failed(sqlite_error_to_app_error(error)),
+    };
+    match operation(&transaction) {
+        Ok(value) => match transaction.commit() {
+            // A failed commit also drops the transaction (rusqlite
+            // sends the ROLLBACK), so nothing half-applied stays
+            // behind on that path either.
+            Ok(()) => AttemptOutcome::Success(value),
+            Err(error) if rusqlite_error_is_busy_locked(&error) => {
+                AttemptOutcome::Busy(sqlite_error_to_app_error(error))
+            }
+            Err(error) => AttemptOutcome::Failed(sqlite_error_to_app_error(error)),
+        },
+        Err(error) if app_error_is_busy_locked(&error) => AttemptOutcome::Busy(error),
+        Err(error) => AttemptOutcome::Failed(error),
+    }
+}
+
+/// The tri-state result of one [`Db::run`] attempt: success, a
+/// busy/locked failure the retry loop may replay, or any other
+/// failure that surfaces as-is. Keeping "busy" distinct from "failed
+/// with code `E_DB_LOCKED`" is the point of the type — the recorded
+/// fallback also produces `E_DB_LOCKED`, and replaying it would add
+/// §9.5 pauses to failures that are not transient locks.
+enum AttemptOutcome<T> {
+    /// The operation committed; carry its value.
+    Success(T),
+    /// The attempt failed with SQLite's busy/locked class — a retry
+    /// candidate, carrying the `E_DB_LOCKED` wire value of the
+    /// failure (returned verbatim when the retries are exhausted).
+    Busy(AppError),
+    /// Any other failure, surfaced on the first attempt.
+    Failed(AppError),
+}
+
+/// Whether a raw rusqlite failure is SQLite's busy/locked class —
+/// the only failures §10's `E_DB_LOCKED` row prescribes retries for.
+/// rusqlite reports the *primary* result code in `code`
+/// (`SQLITE_BUSY`/`SQLITE_LOCKED`); the extended forms
+/// (`SQLITE_BUSY_SNAPSHOT`, `SQLITE_LOCKED_SHAREDCACHE`, …) fold into
+/// these two, and both are transient by SQLite's own contract. The
+/// shared-cache variant cannot occur in this app (`open_db` never
+/// enables shared cache), but covering the class rather than one
+/// member costs nothing and stays correct if that ever changes.
+/// `pub(crate)`: exercised directly by the discriminator test in
+/// `db_tests.rs` — the busy acceptance tests only ever drive the
+/// body-path edge (`BEGIN DEFERRED` takes no lock, and a busy
+/// `COMMIT` cannot be staged deterministically), so without a direct
+/// test this predicate's members and negatives would have no coverage.
+pub(crate) fn rusqlite_error_is_busy_locked(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(sqlite_error, _)
+            if matches!(
+                sqlite_error.code,
+                SqliteCode::DatabaseBusy | SqliteCode::DatabaseLocked
+            )
+    )
+}
+
+/// Whether an operation's own `AppError` came from SQLite's
+/// busy/locked class — the body's half of the retry detection. The
+/// operation classifies its statement failures through the shared
+/// [`sqlite_error_to_app_error`], which records the exact rusqlite
+/// category in `details.os_kind`; the busy kinds are matched by the
+/// same `Debug` names the classifier writes (derived from the enum,
+/// not spelled here, so rusqlite renaming a variant moves both sides
+/// together). Anything else an operation can return — its own
+/// `E_VALIDATION`, the fallback `E_DB_LOCKED` of an unclassifiable
+/// failure (`os_kind` `"SystemIoFailure"`, …) or a hand-built error
+/// with no details at all — is not busy and never retries.
+/// `pub(crate)` for the same reason as
+/// [`rusqlite_error_is_busy_locked`]: the body-path half is covered
+/// end to end by the acceptance tests, but its `DatabaseLocked`
+/// member and its negatives are not reachable through them, so the
+/// suite drives this discriminator directly too.
+pub(crate) fn app_error_is_busy_locked(error: &AppError) -> bool {
+    let busy_kind = format!("{:?}", SqliteCode::DatabaseBusy);
+    let locked_kind = format!("{:?}", SqliteCode::DatabaseLocked);
+    error
+        .details
+        .as_ref()
+        .and_then(|details| details.os_kind.as_deref())
+        .is_some_and(|kind| kind == busy_kind || kind == locked_kind)
+}
+
+#[cfg(test)]
+impl Db {
+    /// Test seam for the busy-retry cycle: replaces the connection's
+    /// DB-001 `busy_timeout` (5000 ms, set by `open_db`) with a test
+    /// value. The acceptance tests hold a real external lock and wait
+    /// for the timeout to expire on every attempt — at the production
+    /// value one test would sleep through 4 × 5 s of timeout plus the
+    /// §9.5 pauses; a few-millisecond timeout keeps the busy path
+    /// deterministic *and* fast. DB-001 is untouched in production:
+    /// the method exists only under `cfg(test)` and no production
+    /// caller can reach it. Call before the operations under test
+    /// (like any operation, this takes the connection lock).
+    pub(crate) fn set_busy_timeout_for_tests(&self, timeout: Duration) {
+        let connection = lock_recovering_poison(&self.connection);
+        connection
+            .busy_timeout(timeout)
+            .expect("the test busy timeout must be settable");
     }
 }
 

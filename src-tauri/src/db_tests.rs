@@ -53,6 +53,16 @@
 //! the layout's `db-backups/` — same-day idempotency, the 7-copy
 //! retention, and the degrade-never-abort failure policy (a failed
 //! copy is an error the caller logs while the database stays usable).
+//!
+//! The T-025 busy-retry cycle (§10 `E_DB_LOCKED`, §9.5 backoff)
+//! follows it: a second, external connection holding the write lock
+//! deterministically drives the executor through its retries — three
+//! replays then the `E_DB_LOCKED` rejection, a release between
+//! attempts letting the operation commit on a retry, and the cycle's
+//! selectivity (an operation's own errors, constraint violations and
+//! the recorded fallback never replay). The busy timeout is shrunk
+//! through the test seam (`TEST_BUSY_TIMEOUT`); DB-001's production
+//! value is untouched.
 
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -2021,6 +2031,473 @@ fn setup_runs_the_daily_backup_after_open_and_before_managing() {
         !step.contains('?') && !step.contains("return"),
         "the daily backup step must degrade, never abort: no `?` or \
          `return` between the call and `app.manage` (D-046), got: {step}"
+    );
+}
+
+// ---- T-025: the §10 busy-retry cycle (E_DB_LOCKED, §9.5 backoff) --------------
+
+/// The busy timeout the retry tests run with, installed through the
+/// [`Db::set_busy_timeout_for_tests`] seam: at the DB-001 production
+/// value (5000 ms) every busy attempt would wait the full five
+/// seconds, and the three-retry test would sleep through 4 × 5 s of
+/// timeout on top of the §9.5 pauses; a few milliseconds keep the
+/// busy path deterministic (the external lock is held regardless) and
+/// fast. Production never calls the seam — DB-001 is untouched.
+const TEST_BUSY_TIMEOUT: Duration = Duration::from_millis(25);
+
+/// Opens a **second, external connection** to the probe database (the
+/// way another process would hold the file) and takes the write lock:
+/// `BEGIN EXCLUSIVE` — in WAL mode the same immediate write lock a
+/// competing writer needs. Held until the returned connection is
+/// dropped, so every write attempt through the executor deterministically
+/// waits out its busy timeout and fails with `SQLITE_BUSY`.
+fn exclusive_write_holder(db_path: &Path) -> rusqlite::Connection {
+    let connection =
+        rusqlite::Connection::open(db_path).expect("opening the external connection must work");
+    connection
+        .execute_batch("BEGIN EXCLUSIVE")
+        .expect("taking the exclusive write lock must work");
+    connection
+}
+
+/// The sum of §9.5's pauses — the wall-clock floor a three-retry run
+/// can never undercut (`thread::sleep` guarantees at least the asked
+/// duration), asserting the backoff happened at all without an
+/// upper-bound flake on a loaded machine.
+const BUSY_RETRY_PAUSES_TOTAL: Duration = Duration::from_millis(100 + 300 + 900);
+
+#[test]
+fn a_busy_database_is_retried_three_times_then_rejected_as_e_db_locked() {
+    // The card's acceptance criterion: a second connection holds the
+    // lock; the operation through `Db::run` is retried exactly three
+    // times, then surfaces `E_DB_LOCKED` (§10's row: "busy_timeout
+    // expired … up to 3 automatic retries"). The attempts are counted
+    // where they are observable — the operation body itself, once per
+    // attempt, in a fresh transaction each time.
+    let (temp, db) = probe_db();
+    db.set_busy_timeout_for_tests(TEST_BUSY_TIMEOUT);
+    let holder = exclusive_write_holder(&crate::data_dirs::db_file_path(temp.path()));
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counting = db.clone();
+    let seen_by_operation = std::sync::Arc::clone(&attempts);
+
+    let started = Instant::now();
+    let error = async_runtime::block_on(counting.run(move |tx| {
+        seen_by_operation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tx.execute("INSERT INTO probe (name) VALUES ('never-committed')", [])
+            .map_err(sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect_err("a lock held across every retry must end in the rejection");
+    let elapsed = started.elapsed();
+    // The lock must be gone before the recovery assertions below.
+    drop(holder);
+
+    // Exactly four invocations: the original attempt plus three
+    // automatic retries — not five, not three: §10's "up to 3
+    // automatic retries", observed on the body that was re-run.
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        4,
+        "the executor must run the operation once plus exactly three \
+         retries (§10 E_DB_LOCKED)"
+    );
+
+    // The rejection is the classifier's §7.10 wire form: the §10
+    // literal, its default message key, the real SQLite category in
+    // details — and no interpolation params: UI-011's params are
+    // "where" values (a path, a project); the busy situation has
+    // none, the diagnostics live in details.
+    let wire = serde_json::to_value(&error).expect("the rejection must serialize");
+    assert_eq!(wire["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(wire["message_key"], serde_json::json!("errors.db_locked"));
+    assert_eq!(wire["params"], serde_json::json!({}));
+    assert_eq!(
+        wire["details"]["os_kind"],
+        serde_json::json!("DatabaseBusy"),
+        "the verdict must carry the real SQLite busy category, got: {wire}"
+    );
+
+    // The §9.5 backoff was paid: the pauses alone floor the run at
+    // 100+300+900 ms (a retry loop without pauses would finish in
+    // milliseconds of busy timeouts).
+    assert!(
+        elapsed >= BUSY_RETRY_PAUSES_TOTAL,
+        "three retries must pause §9.5's 100/300/900 ms between attempts \
+         (took {elapsed:?})"
+    );
+
+    // Nothing of the failed attempts survived (every attempt rolled
+    // back), and the very same connection serves the next operation
+    // once the lock is gone — the rejection is transient by design.
+    assert_eq!(probe_count(&db), 0);
+    let writer = db.clone();
+    async_runtime::block_on(writer.run(|tx| {
+        tx.execute("INSERT INTO probe (name) VALUES ('after-the-lock')", [])
+            .map_err(sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("the connection must serve the next operation after the lock");
+    assert_eq!(names_in_probe(&db), vec!["after-the-lock".to_owned()]);
+}
+
+#[test]
+fn a_lock_released_between_retries_lets_the_operation_commit() {
+    // The recovery half of the retry cycle: the lock does not last,
+    // and the operation succeeds on a retry. The release is
+    // synchronized, not timed — the operation body reports its failed
+    // attempt and *waits* for the test thread to drop the holder
+    // before returning the busy error, so the retry starts only after
+    // the release fully completed; the run's correctness never
+    // depends on the 100 ms pause being long enough for anything.
+    let (temp, db) = probe_db();
+    db.set_busy_timeout_for_tests(TEST_BUSY_TIMEOUT);
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    let holder = exclusive_write_holder(&db_path);
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+    let (failure_sender, failure_receiver) = std::sync::mpsc::channel::<()>();
+    let (release_sender, release_receiver) = std::sync::mpsc::channel::<()>();
+    let running = db.clone();
+    let seen_by_operation = std::sync::Arc::clone(&attempts);
+    let task = async_runtime::spawn(async move {
+        running
+            .run(move |tx| {
+                seen_by_operation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Err(error) = tx.execute("INSERT INTO probe (name) VALUES ('late')", []) {
+                    // Report the busy failure, then hold this attempt
+                    // open until the test thread has dropped the
+                    // holder — the retry that follows runs against a
+                    // genuinely free lock, not a racing release.
+                    let classified = sqlite_error_to_app_error(error);
+                    let _ = failure_sender.send(());
+                    release_receiver
+                        .recv_timeout(Duration::from_secs(30))
+                        .expect("the test thread must release the lock");
+                    return Err(classified);
+                }
+                Ok(())
+            })
+            .await
+    });
+
+    // The first attempt failed busy (recv: deterministic — the holder
+    // is up). Anchor the pause measurement before the release: the
+    // 100 ms pause starts once the body returns, which the send below
+    // unblocks — measuring from here keeps the anchor ahead of the
+    // event it bounds. Then release the lock, let the retry run.
+    let started = Instant::now();
+    failure_receiver
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the first attempt must reach its busy failure");
+    drop(holder);
+    release_sender
+        .send(())
+        .expect("the operation must still be waiting for the release");
+
+    async_runtime::block_on(task)
+        .expect("the run future must not panic")
+        .expect("the retry must commit once the lock is gone");
+
+    // Attempt two committed: exactly two invocations (the failed one
+    // plus the successful retry), the row durable, and the §9.5 pause
+    // paid in between (at least the first 100 ms rung).
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the operation must succeed on its first retry"
+    );
+    assert_eq!(names_in_probe(&db), vec!["late".to_owned()]);
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "the retry must follow §9.5's first pause"
+    );
+}
+
+#[test]
+fn non_busy_failures_are_not_retried() {
+    // The retry cycle's selectivity: only SQLite's busy/locked class
+    // replays. An operation's own error (the validation shape every
+    // command produces) and a real constraint violation both surface
+    // on their first attempt — one invocation each, no pauses, no
+    // replays. Replaying a validation failure would re-run an
+    // operation whose rejection is deterministic.
+    let (_temp, db) = probe_db();
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+    let own_error_attempts = std::sync::Arc::clone(&attempts);
+    let failing = db.clone();
+    attempts.store(0, std::sync::atomic::Ordering::SeqCst);
+    let error = async_runtime::block_on(failing.run::<(), _>(move |tx| {
+        own_error_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tx.execute("INSERT INTO probe (name) VALUES ('doomed')", [])
+            .map_err(sqlite_error_to_app_error)?;
+        Err(AppError::new(crate::errors::ErrorCode::Validation))
+    }))
+    .expect_err("the operation's own error must surface");
+    assert_eq!(error.code, crate::errors::ErrorCode::Validation);
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "an operation's own error must not be retried"
+    );
+
+    let constraint_attempts = std::sync::Arc::clone(&attempts);
+    let seeding = db.clone();
+    async_runtime::block_on(seeding.run(|tx| {
+        tx.execute("INSERT INTO probe (name) VALUES ('committed')", [])
+            .map_err(sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("seeding the committed row must work");
+    attempts.store(0, std::sync::atomic::Ordering::SeqCst);
+    let violating = db.clone();
+    let error = async_runtime::block_on(violating.run(move |tx| {
+        constraint_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tx.execute("INSERT INTO probe (name) VALUES ('committed')", [])
+            .map_err(sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect_err("the constraint violation must surface");
+    let wire = serde_json::to_value(&error).expect("the error must serialize");
+    assert_eq!(wire["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(
+        wire["details"]["os_kind"],
+        serde_json::json!("ConstraintViolation")
+    );
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a constraint violation must not be retried"
+    );
+}
+
+#[test]
+fn the_fallback_e_db_locked_is_not_retried() {
+    // The gap-fallback revision pin (D-037, revised by the T-025
+    // entry): an unclassifiable storage failure — here an I/O-class
+    // rusqlite error classified through the shared base classifier —
+    // lands on `E_DB_LOCKED` *without* entering the retry cycle. The
+    // discriminator is the busy/locked class, not the wire code; a
+    // fallback producer that replayed would charge §9.5 pauses and
+    // re-run an operation for a failure that is not transient, while
+    // its `os_kind` (`SystemIoFailure`) keeps the two producers
+    // separable on the wire and in the §10 log line.
+    use rusqlite::ffi::{Error as SqliteError, SQLITE_IOERR};
+
+    let (_temp, db) = probe_db();
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let seen_by_operation = std::sync::Arc::clone(&attempts);
+    let failing = db.clone();
+
+    let error = async_runtime::block_on(failing.run::<(), _>(move |_tx| {
+        seen_by_operation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(sqlite_error_to_app_error(rusqlite::Error::SqliteFailure(
+            SqliteError::new(SQLITE_IOERR),
+            None,
+        )))
+    }))
+    .expect_err("the fallback error must surface");
+
+    assert_eq!(
+        error.code,
+        crate::errors::ErrorCode::DbLocked,
+        "the recorded fallback keeps its E_DB_LOCKED carrier (D-037, \
+         revised with the T-025 entry)"
+    );
+    let wire = serde_json::to_value(&error).expect("the error must serialize");
+    assert_eq!(
+        wire["details"]["os_kind"],
+        serde_json::json!("SystemIoFailure")
+    );
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the fallback E_DB_LOCKED must not be retried: only SQLite's \
+         busy/locked class enters the cycle"
+    );
+}
+
+#[test]
+fn the_busy_discriminators_match_only_the_busy_locked_class() {
+    // The retry loop's two selectors, driven directly on synthesized
+    // result codes — the acceptance tests only ever exercise the
+    // body-path `DatabaseBusy` edge (`BEGIN DEFERRED` takes no lock,
+    // and a busy `COMMIT` cannot be staged deterministically), so
+    // without this test the raw-error half and the `DatabaseLocked`
+    // members would have no coverage at all. The extended codes fold
+    // into the primary class (rusqlite masks `& 0xff`), which is the
+    // documented claim this pins.
+    use rusqlite::ffi::{
+        Error as SqliteError, SQLITE_BUSY, SQLITE_BUSY_SNAPSHOT, SQLITE_IOERR, SQLITE_LOCKED,
+        SQLITE_LOCKED_SHAREDCACHE,
+    };
+
+    let busy_family = [
+        SqliteError::new(SQLITE_BUSY),
+        SqliteError::new(SQLITE_BUSY_SNAPSHOT),
+        SqliteError::new(SQLITE_LOCKED),
+        SqliteError::new(SQLITE_LOCKED_SHAREDCACHE),
+    ];
+    for sqlite_error in busy_family {
+        let rusqlite_error = rusqlite::Error::SqliteFailure(sqlite_error, None);
+        assert!(
+            crate::db::rusqlite_error_is_busy_locked(&rusqlite_error),
+            "the raw-error discriminator must match {:?} (sqlite result \
+             code {})",
+            sqlite_error.code,
+            sqlite_error.extended_code
+        );
+        // The same error through the shared classifier must trip the
+        // AppError half — the busy tags survive classification.
+        let classified =
+            sqlite_error_to_app_error(rusqlite::Error::SqliteFailure(sqlite_error, None));
+        assert!(
+            crate::db::app_error_is_busy_locked(&classified),
+            "the classified-error discriminator must match the busy \
+             class (os_kind = {:?})",
+            classified.details.and_then(|details| details.os_kind)
+        );
+    }
+
+    // And the negatives: an I/O failure is the recorded fallback's
+    // producer — classified onto E_DB_LOCKED yet never a retry
+    // candidate — and an error with no details (a hand-built one) is
+    // not busy either.
+    let io_error = rusqlite::Error::SqliteFailure(SqliteError::new(SQLITE_IOERR), None);
+    assert!(
+        !crate::db::rusqlite_error_is_busy_locked(&io_error)
+            && !crate::db::app_error_is_busy_locked(&sqlite_error_to_app_error(io_error)),
+        "an I/O failure is not busy — the fallback E_DB_LOCKED must \
+         never enter the retry cycle"
+    );
+    assert!(
+        !crate::db::app_error_is_busy_locked(&AppError::new(crate::errors::ErrorCode::DbLocked)),
+        "a hand-built error with no details must not look busy"
+    );
+}
+
+#[test]
+fn the_connection_lock_is_free_during_retry_pauses() {
+    // The "guard dropped before the pause" property (ARCHITECTURE.md,
+    // D-050): while a busy operation is between attempts, the one
+    // connection must serve other operations — otherwise every
+    // retried operation would serialize the whole app behind its
+    // §9.5 pauses. Pinned deterministically: the retried operation
+    // reports its busy failure and holds its attempt open until the
+    // test acks; a read operation is queued on the connection before
+    // that ack, and the read provably acquires the lock (and runs,
+    // WAL readers being unaffected by the external write lock) while
+    // the retried run is still mid-cycle — the run's result channel
+    // is still empty at that moment, because the run cannot progress
+    // past its next attempt's lock while the read holds its own.
+    let (temp, db) = probe_db();
+    db.set_busy_timeout_for_tests(TEST_BUSY_TIMEOUT);
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    let holder = exclusive_write_holder(&db_path);
+
+    let (attempt_failed, attempt_failed_rx) = std::sync::mpsc::channel::<()>();
+    let (release_attempt, release_attempt_rx) = std::sync::mpsc::channel::<()>();
+    let (read_started, read_started_rx) = std::sync::mpsc::channel::<()>();
+    let (release_read, release_read_rx) = std::sync::mpsc::channel::<()>();
+    let (run_finished, run_finished_rx) = std::sync::mpsc::channel::<()>();
+
+    let busy = db.clone();
+    let busy_task = async_runtime::spawn(async move {
+        let finished = run_finished;
+        let outcome = busy
+            .run(move |tx| {
+                if let Err(error) = tx.execute("INSERT INTO probe (name) VALUES ('pausing')", []) {
+                    let classified = sqlite_error_to_app_error(error);
+                    let _ = attempt_failed.send(());
+                    release_attempt_rx
+                        .recv_timeout(Duration::from_secs(30))
+                        .expect("the test thread must let the attempt return");
+                    return Err(classified);
+                }
+                Ok(())
+            })
+            .await;
+        let _ = finished.send(());
+        outcome
+    });
+    // Wait for attempt 1's busy failure, then queue the read on the
+    // connection (behind the still-held guard of attempt 1).
+    attempt_failed_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the busy attempt must reach its failure");
+    let reading = db.clone();
+    let read_started_sender = read_started;
+    let read_task = async_runtime::spawn(async move {
+        reading
+            .run(move |tx| {
+                tx.query_row("SELECT COUNT(*) FROM probe", [], |row| row.get::<_, i64>(0))
+                    .map_err(sqlite_error_to_app_error)?;
+                let _ = read_started_sender.send(());
+                release_read_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("the test thread must let the read return");
+                Ok(())
+            })
+            .await
+    });
+
+    // Let attempt 1 return: the executor logs, then sleeps §9.5's
+    // first pause with the guard released — the queued read must now
+    // acquire the connection and run its statement.
+    release_attempt
+        .send(())
+        .expect("the busy attempt must still be waiting");
+    read_started_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the read must run during the retried operation's pause");
+    // The retried run is provably still in flight: its next attempt
+    // needs the connection, which the waiting read holds (and the
+    // run's own completion signal has not fired).
+    assert!(
+        run_finished_rx.try_recv().is_err(),
+        "the retried operation must still be mid-cycle while the read \
+         runs — the connection lock is free during the pauses"
+    );
+
+    // Endgame: free the external lock, let the read return, and the
+    // retried run's next attempt commits against the free database.
+    // Honest residual, documented for the record: the read is spawned
+    // before the release but nothing proves it reached `Mutex::lock`
+    // by then — correctness of the *acquire* still leans on §9.5's
+    // 100 ms pause being enough for a pre-spawned task to take the
+    // free mutex (the provable part is the ordering: once the read
+    // runs, the retried operation demonstrably has not finished). If
+    // a pathological scheduler ever starves the read past all three
+    // pauses, the failure is loud — a 30 s channel timeout — never a
+    // silent wrong-pass.
+    drop(holder);
+    release_read
+        .send(())
+        .expect("the read must still be waiting");
+    async_runtime::block_on(busy_task)
+        .expect("the retried run future must not panic")
+        .expect("the retried run must commit once the lock is gone");
+    async_runtime::block_on(read_task)
+        .expect("the read future must not panic")
+        .expect("the read must have committed");
+    assert_eq!(names_in_probe(&db), vec!["pausing".to_owned()]);
+}
+
+#[test]
+fn busy_retries_are_logged_through_the_facade() {
+    // Wiring pin (the `config_tests.rs` style): the retry loop's only
+    // observable side effect besides the replay itself is the facade
+    // warn line — the call must exist in `db.rs`, exactly once, live
+    // (a commented-out or duplicated line must not count), keeping
+    // the executor's retries visible in the file log (D-032: tracing
+    // events live in `logging.rs` only).
+    let db_module = crate::config_tests::strip_comments(include_str!("db.rs"));
+    assert_eq!(
+        db_module.matches("logging::db_busy_retry(").count(),
+        1,
+        "db.rs must log every busy retry through the facade, exactly \
+         one live call site (§10 observability, D-032)"
     );
 }
 

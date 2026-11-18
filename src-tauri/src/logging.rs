@@ -401,6 +401,28 @@ pub(crate) fn db_backup_daily_failed(error: &eunomia_store::storage::StorageErro
     );
 }
 
+/// A database operation hit SQLite's busy/locked state, its
+/// `busy_timeout` expired, and the `Db::run` executor is replaying
+/// the whole operation in a fresh transaction (spec §10 `E_DB_LOCKED`
+/// row: "up to 3 automatic retries"; the pause is §9.5's backoff
+/// ladder, shared with the store's file-retry helper). `warn`, one
+/// line per retry: the retry is invisible to every other layer (a
+/// successful replay never becomes an error), so the executor is the
+/// only possible producer — the deliberate one exception to "the
+/// executor does not log" (D-037), recorded with the retry task. The
+/// payload is numeric only (SEC-008): the 1-based retry number and
+/// the pause that follows; no paths, no content — the executor has no
+/// project context, and the final verdict (after the last retry
+/// fails) is the producing command's own §10 error line.
+pub(crate) fn db_busy_retry(attempt: usize, pause_ms: u64) {
+    tracing::warn!(
+        target: "eunomia::db",
+        attempt,
+        pause_ms,
+        "database busy; retrying the operation after the pause"
+    );
+}
+
 /// A recovery operation preserved the damaged database (T-024, §10's
 /// recovery screen): renamed — never deleted — from the database path
 /// to `db-backups/pre-recovery-<UTC>.sqlite3`. `info` with both paths:
@@ -1100,6 +1122,47 @@ mod tests {
             "the abort verdict must survive log_level = \"error\""
         );
         drop(temp_strict);
+    }
+
+    #[test]
+    fn a_busy_retry_logs_its_attempt_and_pause_and_nothing_else() {
+        // Arrange & Act: the executor's retry call, driven through a
+        // real subscriber the way `Db::run` emits it — once per retry,
+        // with the 1-based retry number and the §9.5 pause it is about
+        // to take.
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+
+        tracing::subscriber::with_default(subscriber, || {
+            db_busy_retry(1, 100);
+            db_busy_retry(3, 900);
+        });
+        drop(guard);
+
+        // Assert: a warn line per retry carrying both numeric fields —
+        // the whole payload is the SEC-008-safe vocabulary (no paths,
+        // no content; the executor has no project context to
+        // interpolate).
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("WARN"),
+            "a busy retry must log at warn, got: {log}"
+        );
+        assert!(
+            log.contains("attempt=1") && log.contains("pause_ms=100"),
+            "the first retry line must carry the 1-based attempt and \
+             its §9.5 pause, got: {log}"
+        );
+        assert!(
+            log.contains("attempt=3") && log.contains("pause_ms=900"),
+            "the third retry line must carry its attempt and pause, got: {log}"
+        );
+        assert!(
+            log.contains("database busy"),
+            "the line must name the situation, got: {log}"
+        );
+        drop(temp);
     }
 
     #[test]

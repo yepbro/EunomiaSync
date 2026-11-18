@@ -229,10 +229,21 @@ pub(crate) struct ErrorDetails {
     /// Unix, `GetLastError()` on Windows. §10 names it as a first-class
     /// fact of every error log line, and UI-011 shows it as the "why".
     pub(crate) os_code: Option<i32>,
-    /// The portable error category — `std::io::ErrorKind`'s Debug name
-    /// (`"PermissionDenied"`, `"StorageFull"`, …). The fallback that
-    /// keeps a diagnostic value on platforms and errors that carry no
-    /// raw OS code (BKP-005: "OS code **or** error type").
+    /// The portable error category — a machine tag, not only
+    /// `std::io::ErrorKind`'s Debug name. Three producer families
+    /// write it: `with_os_error`/`from_io_error` record
+    /// `ErrorKind`'s Debug name (`"PermissionDenied"`,
+    /// `"StorageFull"`, …); the shared SQLite base classifier
+    /// (`db::sqlite_error_to_app_error`) records rusqlite `ErrorCode`'s
+    /// Debug name (`"DatabaseBusy"`, `"SystemIoFailure"`, …) — and
+    /// those tags are load-bearing: `Db::run`'s busy-retry cycle
+    /// reads exactly `"DatabaseBusy"`/`"DatabaseLocked"` from this
+    /// field to decide what to replay (D-050), so a producer must not
+    /// "tidy" them into io-kinds; and command code attaches its own
+    /// named labels where no OS fact exists (`"OpenerError"`, …).
+    /// The fallback that keeps a diagnostic value on platforms and
+    /// errors that carry no raw OS code (BKP-005: "OS code **or**
+    /// error type").
     pub(crate) os_kind: Option<String>,
     /// The underlying error's `Display` text (e.g.
     /// `"Permission denied (os error 13)"`) — raw diagnostic material
