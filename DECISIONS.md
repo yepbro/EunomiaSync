@@ -864,6 +864,11 @@ Switching the time library is a spec-level decision (§5.3 names chrono),
 not a task-level one; the ignore keeps the gate meaningful for every
 other unmaintained direct dependency.
 
+Addendum (2026-11-18, T-239): the ignore above turned out to be
+temporary — chrono was replaced with jiff per D-035, the direct
+dependency (and with it the deny.toml ignore and its comment block) is
+gone; see D-035 for the lockfile detail.
+
 ### D-032 — File logging: tracing-appender daily rotation in `<data dir>/logs/`; SEC-008 enforced by a logging facade — 2026-11-18
 
 Problem: T-012 turns the spec §5.3 "Logs = `tracing`, `tracing-appender`,
@@ -969,3 +974,72 @@ the file log (`max_log_files` unset): spec sets none for the tracing log
 (LOG-006's limits govern the DB `action_log`), so daily files accumulate
 until a task decides otherwise — a conscious omission, not an oversight.
 `cargo-deny` is green for the two new crates.
+
+### D-035 — Time library: chrono replaced with jiff 1.x — 2026-11-18
+
+Problem: chrono is RUSTSEC-2026-0543 (unmaintained, all versions affected,
+no safe upgrade; the advisory names jiff and `time` as the recommended
+replacements). D-031 had introduced it as a direct `eunomia-store`
+dependency under a scoped deny.toml ignore and declared the library switch
+a spec-level decision; T-239 executes that switch (spec §5.3 pinned chrono
+plus iana-time-zone, so the tech-table row changes too).
+
+Solution: `jiff = { version = "1", default-features = false,
+features = ["std"] }`, chosen over `time` on facts checked 2026-11-18:
+
+- Maintenance: jiff 1.0.0 was published 2026-11-15 and 1.0.1 on 2026-11-18,
+  ten releases in the first eighteen days of November (BurntSushi, 288M
+  downloads); `time` 0.3.55 was published 2026-08-01 — no release in the
+  3.5 months since. Both lines are alive; jiff is the demonstrably more
+  active one at the moment of the choice.
+- Advisories: jiff has no RUSTSEC entry (no `crates/jiff/` in the advisory
+  database). `time` has two: RUSTSEC-2020-0071 (patched in 0.2.23, 0.3.x
+  unaffected) and RUSTSEC-2026-0009 (stack-exhaustion DoS, affects
+  0.3.6–0.3.46, patched in 0.3.47 — the lock-resolved 0.3.55 is past that
+  patch). For jiff — the crate actually in the graph — the verification is
+  the green `cargo deny check` with no ignores left in deny.toml. Both
+  libraries are the two replacements the chrono advisory itself
+  recommends.
+- DB-002 format: `Timestamp::now().strftime("%Y-%m-%dT%H:%M:%S%.3fZ")`
+  formats in UTC with always exactly three fractional digits and the `Z`
+  suffix; jiff documents that a precision setting truncates
+  ("When using a precision setting, truncation is used" — `fmt::strtime`
+  module docs, verified in the 1.0.1 sources), preserving the truncation
+  semantics D-031 documented for chrono's `SecondsFormat::Millis`. The
+  values contract is unchanged; of its five tests only the parse inside
+  `now_utc_returns_the_current_time` moved from
+  `chrono::DateTime::parse_from_rfc3339` to `Timestamp`'s RFC 3339
+  `FromStr` — the checked behavior (RFC 3339 round-trip, millisecond
+  resolution, ±1 s window) is the same.
+- Time zones (spec §5.3's iana-time-zone perspective): jiff has native
+  IANA time zone support (TZif parsing and system-zone detection via the
+  `tz-system`/`tzdb-*` features), so the creation-marker need the spec
+  attributed to `iana-time-zone` is covered by jiff alone and the
+  separate crate leaves the tech table. `time` has no IANA support (UTC
+  offsets only) and would have kept the extra-crate dependency.
+- Features and graph: `features = ["std"]` compiles exactly two crates —
+  jiff and jiff-core, pure Rust, no proc-macros (jiff's
+  portable-atomic(-util) dependencies are gated on
+  `not(target_has_atomic = "ptr")` targets and do not build on the
+  project's desktop targets). A `time` equivalent for the same fixed
+  format needs std, formatting and macros, compiling `time`,
+  `time-core`, the `time-macros` proc-macro, `deranged`, `num-conv` and
+  `powerfmt`.
+  jiff's tz features stay off until the creation-marker task needs them
+  (minimal features now; that task turns on what it uses).
+- Line choice: jiff 1.0 over the already lock-resolved 0.2.46. 0.2 is the
+  legacy line — its last feature release shipped simultaneously with
+  1.0.0 — and pinning a new permanent dependency to a superseded line
+  would schedule a repeat of this very migration. The cost is three new
+  Cargo.lock entries (jiff 1.0.1, jiff-core 1.0.1, jiff-static 1.0.1, the
+  last an unused optional edge that never compiles), all
+  Unlicense OR MIT, license-checked by the same green deny run.
+
+Lockfile facts: removing the direct dependency removes chrono from the
+build graph (`cargo tree -i chrono` matches nothing) but not from
+Cargo.lock — chrono 0.4.45 remains as serde_with's unused optional edge,
+the exact pre-D-031 status quo: resolved, never compiled. With no
+workspace member depending on chrono, deny.toml's
+`unmaintained = "workspace"` rule no longer fires, so the
+RUSTSEC-2026-0543 ignore and its comment block are deleted rather than
+left as a dead exception; `cargo deny check` passes with zero ignores.

@@ -13,10 +13,11 @@
 //! ASCII, `0`–`9` precede `a`–`f` exactly as their nibble values do), so an
 //! `ORDER BY` on an id column preserves creation order.
 //!
-//! The `uuid` and `chrono` dependencies behind this module were added per
-//! DECISIONS.md D-031.
+//! The `uuid` dependency was added per DECISIONS.md D-031; the time
+//! dependency behind [`now_utc`] is `jiff`, which replaced chrono per
+//! DECISIONS.md D-035 (chrono is RUSTSEC-2026-0543, unmaintained).
 
-use chrono::{SecondsFormat, Utc};
+use jiff::Timestamp;
 use uuid::Uuid;
 
 /// Generates a new row identifier (spec DB-002).
@@ -46,9 +47,12 @@ pub fn new_id() -> String {
 /// The format is fixed: `YYYY-MM-DDTHH:MM:SS.sssZ` — UTC, always exactly
 /// three fractional digits and the `Z` suffix, for example
 /// `2026-11-17T13:03:22.123Z`. Sub-millisecond precision is truncated
-/// (not rounded): [`SecondsFormat::Millis`] formats `nanos / 1_000_000`.
+/// (not rounded): the `%.3f` directive of [`Timestamp::strftime`] is
+/// documented to truncate toward zero (DECISIONS.md D-035).
 pub fn now_utc() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    Timestamp::now()
+        .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -95,9 +99,9 @@ mod tests {
 
     #[test]
     fn now_utc_returns_the_current_time() {
-        let before = Utc::now();
+        let before = Timestamp::now();
         let value = now_utc();
-        let after = Utc::now();
+        let after = Timestamp::now();
 
         // Millisecond resolution on both sides: the helper truncates the
         // sub-millisecond digits, so the parsed instant is compared at the
@@ -105,13 +109,11 @@ mod tests {
         // millisecond never exceeds the value's). The ±1 s window absorbs a
         // system clock step between the reads; it still pins the value to
         // "now", not to any other point in time.
-        let parsed = chrono::DateTime::parse_from_rfc3339(&value)
-            .expect("timestamp parses as RFC 3339")
-            .with_timezone(&Utc);
+        let parsed: Timestamp = value.parse().expect("timestamp parses as RFC 3339");
         const TOLERANCE_MS: i64 = 1_000;
         assert!(
-            parsed.timestamp_millis() >= before.timestamp_millis() - TOLERANCE_MS
-                && parsed.timestamp_millis() <= after.timestamp_millis() + TOLERANCE_MS,
+            parsed.as_millisecond() >= before.as_millisecond() - TOLERANCE_MS
+                && parsed.as_millisecond() <= after.as_millisecond() + TOLERANCE_MS,
             "timestamp {value} is not around {before}..{after}"
         );
     }

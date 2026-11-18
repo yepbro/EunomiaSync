@@ -19,14 +19,9 @@ rusqlite_migration = "2.7"
 # this adds no new crate version to the graph.
 uuid = { version = "1", features = ["v7"] }
 # UTC wall clock for ISO-8601 timestamps (spec DB-002, §5.3; DECISIONS.md
-# D-031, including the RUSTSEC-2026-0543 unmaintained advisory and the
-# scoped deny.toml ignore behind this direct dependency). Minimal feature
-# set: `now` (= `std` + `alloc`) covers `Utc::now()` and `to_rfc3339_opts`;
-# `clock` (which would pull `iana-time-zone` for local time — that belongs
-# to the app layer per spec §5.3), the wasm bindings, and the empty legacy
-# `oldtime` feature are not requested. Version note: 0.4.45 was already
-# pinned in Cargo.lock as an unused optional edge of serde_with — nothing
-# compiled it before this dependency, which puts chrono into the build
-# graph for the first time (no new crate version; the advisory handling
-# is recorded in D-031).
-chrono = { version = "0.4", default-features = false, features = ["now"] }
+# D-031 for the helpers' contract, D-035 for the chrono → jiff migration).
+# Minimal feature set: `std` covers `Timestamp::now()` and `strftime`
+# formatting; the IANA tz features (`tz-system`, `tzdb-*`) are deliberately
+# off until the creation-marker task needs local time — jiff then covers
+# that natively, without the separate iana-time-zone crate (D-035).
+jiff = { version = "1", default-features = false, features = ["std"] }
