@@ -583,3 +583,51 @@ One environment caveat is accepted, not engineered around:
 `longPathAware` is the app-side half only — the OS must also have the
 `LongPathsEnabled` policy on (off by default on Windows 10/11; spec §15
 tests long paths per platform), which no manifest can switch by itself.
+
+### D-027 — Data directory layout created at every startup; failure aborts the launch — 2026-11-17
+
+Problem: spec §5.5 requires `db/`, `db-backups/`, `backups/` and `logs/`
+under `app_local_data_dir()`, and the creation runs at every startup —
+it has to survive restarts, crashes halfway through the creation loop and
+users deleting part of the tree — while it also had to be decided what
+happens when the directories cannot be created at all (permissions, a
+regular file occupying the path).
+
+Solution: one idempotent seam, `data_dirs::ensure_data_layout(root)` in
+`src-tauri/src/data_dirs.rs` — `std::fs::create_dir_all` for the root and
+each of the four subdirectories. Existing directories are a no-op and
+missing ones are created, so every startup converges to the full layout
+regardless of what a previous run left behind (spec 5.5 tip: deleted data
+is simply recreated as the fresh, empty state). `config.toml` is
+deliberately not part of the layout step: SYS-011 assigns it to the
+config task, which runs after the directory exists. When creation fails,
+the error propagates out of the `setup` hook and tauri panics in the
+event-loop `Ready` handler with `Failed to setup app: error encountered
+during setup hook: …` — the panic prints the `Display` chain, so the
+offending path and OS cause reach the console: without the layout there
+is no database, no logs and no config to run with, and no diagnostics
+channel exists yet (tracing lands with the logging task), so a clear
+startup failure beats degrading silently. The seam lives in src-tauri
+rather than eunomia-fs for now: it is app-startup orchestration with a
+single call site and src-tauri has no eunomia-fs edge yet — move it when
+the first second consumer (backup or DB tasks) appears. Logs stay in
+`logs/` inside the data directory on every OS — the macOS Tauri
+`app_log_dir()` default (`~/Library/Logs/…`) must not be used; the
+tracing task will point the appender at `<data dir>/logs/` explicitly
+and should pin that choice against a future `app_log_dir()` regression
+(spec §5.5). Testing: five seam tests over `tempfile` roots with missing
+nested ancestors, mirroring the clean-system state (first run creates
+everything; the root holds exactly the four directories and nothing
+else; a rerun is a no-op and leaves the exact set; a partially deleted
+layout is completed; an uncreatable path fails and names the full path),
+mutation-checked (a dropped or extra directory, a swallowed error,
+non-recursive creation over the nested root, an unwired or
+error-swallowing `setup` call — each caught by its test), plus a
+`config_tests.rs` text pin for the `setup` wiring whose markers include
+the `?` of both fallible steps, so a swallowed wiring error fails the
+pin too (same honesty boundary as the plugin-registration pin).
+`tempfile` joins as a dev-only dependency of src-tauri — no new crate in
+the dependency graph, it is already resolved workspace-wide via
+eunomia-fs. The per-OS "first launch on a clean system" GUI check is
+recorded as pending in ARCHITECTURE.md (Data directory section) until
+the first smoke run.

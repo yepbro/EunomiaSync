@@ -43,3 +43,7 @@ tauri-specta = { version = "=2.0.0-rc.29", features = ["typescript"] }
 [dev-dependencies]
 # The `test` feature enables the mock runtime used by the IPC tests.
 tauri = { version = "2", features = ["test"] }
+# Ephemeral roots for the data_dirs layout tests. Not a new crate in the
+# dependency graph: `tempfile` 3 is already resolved workspace-wide via
+# eunomia-fs; this only adds a dev-only edge for src-tauri.
+tempfile = "3"

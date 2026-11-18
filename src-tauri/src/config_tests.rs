@@ -255,6 +255,54 @@ fn data_directory_override_is_not_set() {
 }
 
 #[test]
+fn setup_resolves_the_data_directory_and_creates_its_layout() {
+    // Arrange & Act: `lib.rs`, compile-time constant, with line and
+    // block comments stripped so prose about the data directory cannot
+    // satisfy the pin. The markers are the `setup` closure itself, the
+    // propagating path resolution, and the propagating layout call: the
+    // `?` is part of each marker, so wiring that swallows the error
+    // (`let _ = …`, `unwrap_or_default()`, a gated-off call) fails here
+    // too, not only at the seam's own tests. The order is the one
+    // startup needs (spec §5.5: the directory exists before the app's
+    // own `config.toml` and database code runs).
+    let lib = strip_comments(include_str!("lib.rs"));
+    let markers = [
+        ".setup(move |app|",
+        "app.path().app_local_data_dir()?",
+        "data_dirs::ensure_data_layout(&data_dir)?",
+    ];
+    let positions: Vec<usize> = markers
+        .iter()
+        .map(|marker| {
+            assert_eq!(
+                lib.matches(marker).count(),
+                1,
+                "lib.rs must contain `{marker}` exactly once, live (a \
+                 commented-out or duplicated line must not count)"
+            );
+            lib.find(marker)
+                .expect("the exactly-once check above guarantees one match")
+        })
+        .collect();
+
+    // Assert: the layout must be created inside `setup`, from the
+    // resolved data directory, with both fallible steps propagated
+    // (`?`). Honest boundary, same as the plugin-registration pin: this
+    // proves the wiring exists and stays wired, not that the OS
+    // directories appeared — the runtime effect is covered by the
+    // `data_dirs.rs` seam tests plus a manual first launch on a clean
+    // system.
+    for pair in positions.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "lib.rs must resolve `app_local_data_dir()` inside `setup` \
+             and create the spec §5.5 layout from it, in that order; \
+             marker positions: {positions:?}"
+        );
+    }
+}
+
+#[test]
 fn main_window_minimum_size_is_960_by_600() {
     // Arrange & Act: the real configuration file the app is built from.
     let config = tauri_conf();

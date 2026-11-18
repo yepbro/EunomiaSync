@@ -6,9 +6,14 @@
 //! without a Rust toolchain.
 
 use specta_typescript::Typescript;
+use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
 
 pub mod commands;
+
+// The data directory layout (spec §5.5) is needed on every platform,
+// exactly like the app itself.
+pub(crate) mod data_dirs;
 
 // The single-instance handoff handler (SYS-006) is desktop-only, exactly
 // like the plugin whose callback calls it below.
@@ -67,7 +72,7 @@ pub fn run() {
     // registered-project-only. The webview has no `dialog:` permission.
     let tauri_builder = tauri_builder.plugin(tauri_plugin_dialog::init());
 
-    // `updater` (D-005/D-027, SEC-001: network belongs to Rust): update
+    // `updater` (D-005/D-023, SEC-001: network belongs to Rust): update
     // check and install run in Rust behind the `update_check` /
     // `update_install` app commands (upcoming tasks); the webview never
     // contacts the release feed. The plugin refuses to initialize without
@@ -87,6 +92,27 @@ pub fn run() {
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
+
+            // Data directory (spec §5.5): resolve `app_local_data_dir()`
+            // and create the layout (`db/`, `db-backups/`, `backups/`,
+            // `logs/`) before any of the app's own code reads or writes
+            // the directory — `config.toml` (SYS-011, the config task),
+            // the database and the logs all live inside. (Tauri builds
+            // the config-declared windows before this hook runs and
+            // their WebView data sits under this root on Windows and
+            // Linux, so the webview layer may create the root first —
+            // irrelevant here: creation is idempotent.) Creation
+            // converges to the full layout even after a partially
+            // deleted directory. A failure aborts the launch: without
+            // the layout there is no database, no logs and no config to
+            // run with, and no diagnostics channel exists yet (tracing
+            // lands with the logging task), so the error propagates out
+            // of `setup`; tauri then panics in the event-loop `Ready`
+            // handler with `Failed to setup app: …`, whose message
+            // carries the offending path and cause (DECISIONS.md
+            // D-027).
+            let data_dir = app.path().app_local_data_dir()?;
+            data_dirs::ensure_data_layout(&data_dir)?;
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -104,6 +104,41 @@ The updater registers from a disabled `plugins.updater` stub
 without the section (DECISIONS.md D-023); it stays network-inert until the
 release task sets the real key and feed.
 
+## Data directory
+
+The data directory is the Tauri default `app_local_data_dir()` —
+`local_data_dir/pro.yepbro.eunomiasync` (spec §5.5). At startup, before
+any of the app's own code touches the directory, `src-tauri/src/data_dirs.rs`
+(`ensure_data_layout`) creates the root and its four subdirectories —
+`db/`, `db-backups/`, `backups/`, `logs/` — idempotently, so a first run,
+a restart and a partially deleted layout all converge to the same
+structure. (Tauri builds the config-declared windows before the `setup`
+hook runs, and their WebView data sits under this root on Windows and
+Linux, so the webview layer may create the root first; the layout step is
+idempotent, so that is harmless.) The per-OS path table is pinned by
+`config_tests.rs` (bundle identifier plus the unset
+`appDirectoriesOverride`), and the `setup` wiring — including that both
+fallible steps propagate with `?` — by a text pin there. `config.toml` is
+not created by the layout — it is the config task's job (spec 5.8,
+SYS-011), which only needs the directory to exist first. Logs live in
+`logs/` inside the data directory on every OS: on macOS the Tauri
+`app_log_dir()` default (`~/Library/Logs/…`) is deliberately not used,
+and the upcoming tracing setup must point the appender at
+`<data dir>/logs/` explicitly — that task should also add a text pin so a
+future `app_log_dir()` wiring fails a test instead of passing silently.
+If the layout cannot be created (permissions, an occupied path), the
+startup aborts: the error propagates out of the `setup` hook and tauri
+panics with `Failed to setup app: …`, carrying the path and cause — there
+is no meaningful run without it (DECISIONS.md D-027).
+
+Manual check, pending until the first GUI smoke run on each OS: on a
+clean profile, launch the app once and confirm the four subdirectories
+exist under the §5.5 path — Linux
+`~/.local/share/pro.yepbro.eunomiasync/`, macOS
+`~/Library/Application Support/pro.yepbro.eunomiasync/`, Windows
+`%LOCALAPPDATA%\pro.yepbro.eunomiasync\` — and that a second launch adds
+nothing and changes nothing.
+
 ## Storage
 
 SQLite is accessed with `rusqlite` (feature `bundled`, so no system SQLite
