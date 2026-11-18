@@ -202,26 +202,41 @@ pub fn run() {
             // D-037). Like the layout and config steps, a failure
             // aborts the launch — without the database there is
             // nothing to run — but unlike them this step runs after
-            // logging is up, so the too-new rejection below is also
+            // logging is up, so its two typed §10 situations are also
             // observable in the log file (the other failures surface
             // through the startup panic's `Display` text; logging
             // those §10 lines belongs to the recovery task, which
             // owns their screens). A database newer than this app
-            // (DB-004, NFR-010) is the one named §10 situation this
-            // step produces: the seam rejects it before anything touches
-            // the file and hands back the typed `E_DB_TOO_NEW`
-            // `AppError` (`DbInitError::app_error`), which is logged
-            // here through the facade with its §10 code. The launch
-            // still aborts (D-027/D-028: nothing to run without the
-            // database); the "Update the app" screen the §10 table
-            // assigns to `E_DB_TOO_NEW` is the future recovery/update
-            // task's to build — the typed error and this log line are
-            // its contract.
+            // (DB-004, NFR-010) is one of them: the seam rejects it
+            // before anything touches the file and hands back the
+            // typed `E_DB_TOO_NEW` `AppError`
+            // (`DbInitError::app_error`), logged here through the
+            // facade with its §10 code. A migration step that failed
+            // and was rolled back (UPD-004) is the other: the error
+            // names the pre-migration copy, and the typed
+            // `E_UPDATE_FAILED` form is logged through its own facade
+            // event before the abort. A migration failure *without* a
+            // copy (the run created the database) deliberately gets no
+            // facade line: not the UPD-004 situation, it keeps the
+            // D-027 anonymous-abort treatment — the panic `Display` is
+            // its report, and its §10 line belongs to the recovery
+            // task like every generic init failure's (D-043). The
+            // launch still aborts either way (D-027/D-028: nothing to
+            // run without the database); the screens the §10/UPD-004
+            // rows assign to these situations are the future
+            // recovery/update task's to build — the typed errors and
+            // these log lines are its contract.
             let database = match db::Db::open(&data_dir) {
                 Ok(database) => database,
                 Err(error) => {
-                    if let Some(app_error) = error.app_error() {
-                        logging::db_too_new(&app_error);
+                    match (&error, error.app_error()) {
+                        (db::DbInitError::TooNew { .. }, Some(app_error)) => {
+                            logging::db_too_new(&app_error);
+                        }
+                        (db::DbInitError::Migration { .. }, Some(app_error)) => {
+                            logging::db_migration_failed(&app_error);
+                        }
+                        _ => {}
                     }
                     return Err(error.into());
                 }

@@ -318,6 +318,28 @@ pub(crate) fn db_too_new(error: &AppError) {
     );
 }
 
+/// The startup database migration failed and was rolled back (spec
+/// UPD-004): the database is unchanged, the user must install the
+/// previous app version, and the pre-migration copy of the unchanged
+/// state is the recovery pointer. Logged at `error` on purpose: the
+/// launch aborts on this verdict, so the line must stay visible at
+/// `log_level = "error"` (the same reasoning as [`db_too_new`]).
+///
+/// The payload is the error's own §7.10 vocabulary — the code literal
+/// and its interpolation params (the database path and the copy
+/// path), values already curated by the error contract; nothing
+/// free-text enters the log (SEC-008).
+pub(crate) fn db_migration_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::db",
+        code = error.code.as_str(),
+        params = ?error.params,
+        "database migration failed and was rolled back; the database is \
+         unchanged — install the previous app version; a copy of the \
+         unchanged state is in db-backups/"
+    );
+}
+
 /// A file operation on a project's library file — the SEC-008 core
 /// event. The upcoming variant, sync and backup tasks log through this
 /// helper: it takes the operation code, the file's path and the numeric
@@ -785,6 +807,77 @@ mod tests {
         drop(guard);
         assert!(
             read_log_file(&root_strict).contains("code=\"E_DB_TOO_NEW\""),
+            "the abort verdict must survive log_level = \"error\""
+        );
+        drop(temp_strict);
+    }
+
+    #[test]
+    fn a_rolled_back_migration_logs_its_code_paths_and_copy() {
+        // Arrange: the §7.10 shape of the UPD-004 rejection — the
+        // `E_UPDATE_FAILED` code with the migration-specific message
+        // key and the database and copy paths as its interpolation
+        // params (the payload `DbInitError::app_error` builds; the
+        // param values themselves are pinned by the db suite, this
+        // test pins what the facade does with them).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+        let mut error = AppError::new(crate::errors::ErrorCode::UpdateFailed);
+        error.message_key = "errors.update_migration_failed".to_owned();
+        error.params.insert(
+            "path".to_owned(),
+            temp.path()
+                .join("db")
+                .join("eunomiasync.sqlite3")
+                .display()
+                .to_string(),
+        );
+        error.params.insert(
+            "backup_path".to_owned(),
+            temp.path()
+                .join("db-backups")
+                .join("pre-migration-v1-20261118T101500123Z.sqlite3")
+                .display()
+                .to_string(),
+        );
+
+        // Act: the `setup` hook's call for this situation.
+        tracing::subscriber::with_default(subscriber, || {
+            db_migration_failed(&error);
+        });
+        drop(guard);
+
+        // Assert: the line carries the code literal (§10: "every error
+        // is written to the log with its code … path …"), both paths
+        // from the params, and the UPD-004 user action.
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("code=\"E_UPDATE_FAILED\""),
+            "the log line must carry the code literal, got: {log}"
+        );
+        assert!(
+            log.contains("eunomiasync.sqlite3")
+                && log.contains("pre-migration-v1-")
+                && log.contains("backup_path"),
+            "the log line must carry the database and copy paths, got: {log}"
+        );
+        assert!(
+            log.contains("install the previous app version"),
+            "the log line must name the UPD-004 user action, got: {log}"
+        );
+
+        // And the verdict survives the strictest level: the launch
+        // aborts on it, so `log_level = "error"` must not filter it.
+        let (temp_strict, root_strict) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root_strict, LogLevel::Error)
+            .expect("building the subscriber must work");
+        tracing::subscriber::with_default(subscriber, || {
+            db_migration_failed(&error);
+        });
+        drop(guard);
+        assert!(
+            read_log_file(&root_strict).contains("code=\"E_UPDATE_FAILED\""),
             "the abort verdict must survive log_level = \"error\""
         );
         drop(temp_strict);

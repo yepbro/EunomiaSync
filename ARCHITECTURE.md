@@ -235,9 +235,18 @@ and an "unknown" verdict (unreadable version) degrading the
 rejection to the post-pragma backstop. A migration-run failure on a
 file that became newer mid-open is classified from the version fact
 the same way (the app layer's mapping of the store's
-`DatabaseTooFarAhead`, D-038). Only
-then do `open_db` + `run_migrations` run (the store stays the only
-SQLite/schema owner). Every
+`DatabaseTooFarAhead`, D-038). Only then do `open_db` +
+`run_migrations` run (the store stays the only SQLite/schema owner).
+A migration step that fails is rolled back by its own transaction;
+the failure surfaces as the typed `DbInitError::Migration` (UPD-004,
+D-043): the store's error carries the pre-migration copy of the
+unchanged state, the abort `Display` names that copy and the
+"install the previous app version" instruction, the wire form
+(`app_error()`) is `E_UPDATE_FAILED` with the
+`errors.update_migration_failed` key and both paths as params, and
+the `setup` hook logs it through `logging::db_migration_failed`
+before the abort — a failure on a database the run itself created
+has no copy and keeps the generic abort. Every
 database command runs through `Db::run`: the operation closure executes
 on `tauri::async_runtime::spawn_blocking` (SYS-001 — blocking SQLite
 work never touches the async workers), inside exactly one deferred

@@ -11,7 +11,10 @@
 //! [`run_migrations`] writes a safety copy of the current state into a
 //! caller-provided backup directory with SQLite's `VACUUM INTO` (spec
 //! DB-004, UPD-004), and each migration is committed in its own
-//! transaction.
+//! transaction. A migration that fails is rolled back alone and the
+//! failure carries the path of the copy that preserves the state the
+//! database is still at — the app layer's "install the previous
+//! version" pointer (spec UPD-004).
 
 use std::fmt;
 use std::io;
@@ -67,8 +70,21 @@ const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 /// Errors that can occur while opening or migrating the database.
 #[derive(Debug)]
 pub enum StorageError {
-    /// A migration failed to apply.
-    Migration(rusqlite_migration::Error),
+    /// A migration failed to apply. The failed step's own transaction
+    /// was rolled back, so the database keeps the schema and data of
+    /// its last committed step. `backup` is the pre-migration copy of
+    /// exactly that state — the copy written immediately before the
+    /// failed step, spec UPD-004's pointer for the app layer's
+    /// "install the previous version" message — or `None` when the run
+    /// wrote no copy: a fresh bootstrap (the database was created by
+    /// this run) or a rejection before any step ran.
+    Migration {
+        /// The failed migration step.
+        source: rusqlite_migration::Error,
+        /// The copy of the state the database is still at, when the
+        /// run wrote one.
+        backup: Option<PathBuf>,
+    },
     /// A SQL statement failed.
     Sql(rusqlite::Error),
     /// Opening the database file or applying its configuration failed.
@@ -154,7 +170,28 @@ impl std::error::Error for BackupError {
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StorageError::Migration(err) => write!(f, "database migration failed: {err}"),
+            StorageError::Migration { source, backup } => {
+                // Wording true for every producer of this variant: a
+                // failed step contributes nothing (its transaction
+                // rolled back), and no committed step is lost — the
+                // database keeps the state of its last committed
+                // migration, whatever version that is.
+                write!(
+                    f,
+                    "database migration failed: {source}; the database \
+                     keeps the state of its last committed migration"
+                )?;
+                match backup {
+                    Some(path) => {
+                        write!(
+                            f,
+                            "; the pre-migration copy of that state is at {}",
+                            path.display()
+                        )
+                    }
+                    None => Ok(()),
+                }
+            }
             StorageError::Sql(err) => write!(f, "database error: {err}"),
             StorageError::Open { path, source } => {
                 write!(
@@ -185,7 +222,7 @@ impl fmt::Display for StorageError {
 impl std::error::Error for StorageError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            StorageError::Migration(err) => Some(err),
+            StorageError::Migration { source, .. } => Some(source),
             StorageError::Sql(err) => Some(err),
             StorageError::Open { source, .. } => Some(source),
             StorageError::JournalMode { .. } => None,
@@ -197,7 +234,14 @@ impl std::error::Error for StorageError {
 
 impl From<rusqlite_migration::Error> for StorageError {
     fn from(err: rusqlite_migration::Error) -> Self {
-        StorageError::Migration(err)
+        // This conversion serves the version reads (`current_version`,
+        // `pending_migrations`) and the too-new rejection: no migration
+        // step ran, so there is no copy to point at. The stepping loop
+        // attaches the copy itself when a step actually fails.
+        StorageError::Migration {
+            source: err,
+            backup: None,
+        }
     }
 }
 
@@ -275,7 +319,9 @@ pub fn open_db(path: &Path) -> Result<Connection, StorageError> {
 /// through `Migrations::to_version`, because `Migrations::to_latest`
 /// would batch all pending migrations into a single transaction
 /// (rusqlite_migration 2.7, `goto_up`). A migration that fails is rolled
-/// back and the database stays at the last committed step.
+/// back and the database stays at the last committed step; the returned
+/// [`StorageError::Migration`] carries the pre-migration copy of that
+/// state, when the run wrote one (spec UPD-004).
 ///
 /// # Pre-migration backup
 ///
@@ -326,8 +372,12 @@ pub fn open_db(path: &Path) -> Result<Connection, StorageError> {
 /// # Errors
 ///
 /// Returns [`StorageError::Migration`] when the schema version cannot be
-/// read, the database is too far ahead, or a migration fails;
-/// [`StorageError::Backup`] when a safety copy cannot be written.
+/// read, the database is too far ahead, or a migration fails — the
+/// variant's `backup` names the copy of the unchanged state when the
+/// failed step had one written (an existing database; spec UPD-004) and
+/// is `None` otherwise; [`StorageError::Backup`] when a safety copy
+/// cannot be written, which fails the run before the migration of that
+/// step is applied, so nothing changed.
 pub fn run_migrations(
     conn: &mut Connection,
     backup_dir: &Path,
@@ -362,11 +412,13 @@ fn migrate(
     if pending < 0 {
         // Preserve `Migrations::to_latest`'s verdict on a database newer
         // than the set instead of silently declaring it up to date.
-        return Err(StorageError::Migration(
-            rusqlite_migration::Error::MigrationDefinition(
+        return Err(StorageError::Migration {
+            source: rusqlite_migration::Error::MigrationDefinition(
                 rusqlite_migration::MigrationDefinitionError::DatabaseTooFarAhead,
             ),
-        ));
+            // No migration step ran, so no copy was written.
+            backup: None,
+        });
     }
     let latest = start + pending as usize;
 
@@ -394,7 +446,18 @@ fn migrate(
             let stamp = utc_stamp(Timestamp::now());
             backups.push(vacuum_into_backup(conn, backup_dir, current, &stamp)?);
         }
-        set.to_version(conn, target)?;
+        if let Err(source) = set.to_version(conn, target) {
+            // The failed step rolled back alone (its own transaction,
+            // DB-004): the database keeps the state of its last
+            // committed step, which is exactly what the copy written
+            // just before this step preserves — `backups.last()`, the
+            // pointer spec UPD-004 has the app layer show the user.
+            // A run that started from version 0 wrote no copies.
+            return Err(StorageError::Migration {
+                source,
+                backup: backups.last().cloned(),
+            });
+        }
         current = target;
     }
     Ok(backups)
@@ -690,8 +753,8 @@ mod tests {
         let err = run_migrations(&mut conn, Path::new(UNUSED_BACKUP_DIR))
             .expect_err("a too-new database must be rejected");
         assert!(
-            matches!(err, StorageError::Migration(_)),
-            "expected StorageError::Migration, got: {err:?}"
+            matches!(err, StorageError::Migration { backup: None, .. }),
+            "expected StorageError::Migration without a copy (no step ran), got: {err:?}"
         );
         assert_eq!(user_version(&conn), 2, "the version must be untouched");
     }
@@ -922,18 +985,20 @@ mod tests {
             migrate(&mut conn, &set_v1, &backup_dir).unwrap();
         }
 
-        // Step 2 applies; step 3 is broken and must roll back alone.
+        // Step 2 applies; step 3 is broken — with partial work first,
+        // so only its rollback explains what is absent afterwards —
+        // and must roll back alone.
         let set_v3 = set_of(&[
             "CREATE TABLE t1 (x TEXT)",
             "CREATE TABLE t2 (x TEXT)",
-            "THIS IS NOT SQL",
+            "CREATE TABLE t3_probe (x TEXT); THIS IS NOT SQL",
         ]);
         let err = {
             let mut conn = Connection::open(&db_path).unwrap();
             migrate(&mut conn, &set_v3, &backup_dir).expect_err("the broken step must fail the run")
         };
         assert!(
-            matches!(err, StorageError::Migration(_)),
+            matches!(err, StorageError::Migration { .. }),
             "expected StorageError::Migration, got: {err:?}"
         );
 
@@ -958,6 +1023,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!((t1, t2), (1, 1), "both committed steps' objects exist");
+        let t3_probe: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 't3_probe'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            t3_probe, 0,
+            "the failed step's partial work must be rolled back"
+        );
         drop(conn);
 
         // The copies for the steps that ran (and the attempted one) are
@@ -983,6 +1059,326 @@ mod tests {
             !names.iter().any(|name| name.ends_with(".tmp")),
             "no temporary files survive: {names:?}"
         );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Reads the full schema of `conn` as comparable rows — the
+    /// "schema unchanged" proof compares the complete `sqlite_master`
+    /// inventory (object type, name, root page, DDL), not a proxy.
+    /// `sql` is `COALESCE`d: internal auto-index rows carry NULL.
+    fn schema_dump(conn: &Connection) -> Vec<(String, String, i64, String)> {
+        let mut statement = conn
+            .prepare(
+                "SELECT type, name, rootpage, COALESCE(sql, '') \
+                 FROM sqlite_master ORDER BY type, name",
+            )
+            .expect("sqlite_master must be readable");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .expect("sqlite_master rows must be readable");
+        rows.map(|row| row.expect("every sqlite_master row must decode"))
+            .collect()
+    }
+
+    /// Reads the `marker` table's rows in rowid order — the test
+    /// fixture's user data.
+    fn marker_rows(conn: &Connection) -> Vec<String> {
+        let mut statement = conn
+            .prepare("SELECT value FROM marker ORDER BY rowid")
+            .expect("the marker table must be readable");
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("marker rows must be readable");
+        rows.map(|row| row.expect("every marker row must decode"))
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_migration_changes_neither_schema_nor_data_and_names_the_copy() {
+        // The T-019 acceptance criterion, on the private seam (the
+        // embedded set has a single working migration, so an
+        // intentionally broken one exists only here): a migration that
+        // fails must leave the database exactly as it was and the
+        // error must carry the path to the copy of that state
+        // (spec UPD-004).
+        let dir = temp_dir("failed-migration");
+        let db_path = dir.join("db.sqlite3");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+
+        // A version-1 database with data, produced by the first step alone.
+        let set_v1 = set_of(&["CREATE TABLE marker (value TEXT NOT NULL)"]);
+        {
+            let mut conn = Connection::open(&db_path).unwrap();
+            migrate(&mut conn, &set_v1, &backup_dir).unwrap();
+            conn.execute("INSERT INTO marker (value) VALUES ('user data')", [])
+                .unwrap();
+        }
+
+        // The state the broken migration must preserve, read from the
+        // settled file (not from the connection that wrote it).
+        let (schema_before, data_before) = {
+            let conn = Connection::open(&db_path).unwrap();
+            (schema_dump(&conn), marker_rows(&conn))
+        };
+
+        // The one pending step is intentionally broken — and it does
+        // real work before dying (a table with a row), so only the
+        // rollback can explain the state afterwards: without the
+        // per-step transaction the `probe` table would survive the
+        // failure. The run goes through `open_db`, the production
+        // WAL/synchronous=FULL configuration (same shape as the
+        // upgrade acceptance test).
+        let broken = set_of(&[
+            "CREATE TABLE marker (value TEXT NOT NULL)",
+            "CREATE TABLE probe (x TEXT); INSERT INTO probe VALUES ('partial work'); THIS IS NOT SQL",
+        ]);
+        let err = {
+            let mut conn = open_db(&db_path).unwrap();
+            migrate(&mut conn, &broken, &backup_dir)
+                .expect_err("the broken migration must fail the run")
+        };
+        let StorageError::Migration { backup, .. } = &err else {
+            panic!("expected StorageError::Migration, got: {err:?}");
+        };
+
+        // (a) Schema, data and version are unchanged. The explicit
+        // `probe` check names what the schema comparison proves: the
+        // failed step's partial work is gone — the rollback, not an
+        // inert statement, is what preserved the state.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            assert_eq!(
+                schema_dump(&conn),
+                schema_before,
+                "the failed migration must not change the schema"
+            );
+            assert!(
+                !schema_dump(&conn)
+                    .iter()
+                    .any(|(kind, name, _, _)| kind == "table" && name == "probe"),
+                "the failed step's partial work must be rolled back"
+            );
+            assert_eq!(
+                marker_rows(&conn),
+                data_before,
+                "the failed migration must not change the data"
+            );
+            assert_eq!(user_version(&conn), 1, "the version must be unchanged");
+        }
+
+        // (b) The error names the copy of that state (UPD-004), the
+        // copy exists, is valid and preserves exactly the state.
+        let backup = backup
+            .as_ref()
+            .expect("an existing database gets a copy before the step");
+        assert!(
+            backup.starts_with(&backup_dir),
+            "the copy must live in the backup directory: {}",
+            backup.display()
+        );
+        assert!(
+            backup.is_file(),
+            "the copy must exist: {}",
+            backup.display()
+        );
+        let copy = Connection::open(backup).unwrap();
+        let integrity: String = copy
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        assert_eq!(user_version(&copy), 1, "the copy is the version-1 state");
+        assert_eq!(
+            marker_rows(&copy),
+            data_before,
+            "the copy preserves the user data"
+        );
+        drop(copy);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_migration_error_names_the_copy_of_the_failed_steps_own_state() {
+        // A three-step run whose last step breaks: steps 2 and 3 each
+        // wrote their pre-step copy, and the error must point at the
+        // copy of the state the *failed* step started from (version 2,
+        // what the database still is after the rollback) — not the
+        // run's first copy (version 1).
+        let dir = temp_dir("which-copy");
+        let db_path = dir.join("db.sqlite3");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+
+        let set_v1 = set_of(&["CREATE TABLE t1 (x TEXT)"]);
+        {
+            let mut conn = Connection::open(&db_path).unwrap();
+            migrate(&mut conn, &set_v1, &backup_dir).unwrap();
+        }
+
+        // The last step is broken and does partial work first — its
+        // rollback is what the assertions below stand on.
+        let broken = set_of(&[
+            "CREATE TABLE t1 (x TEXT)",
+            "CREATE TABLE t2 (x TEXT)",
+            "CREATE TABLE probe (x TEXT); THIS IS NOT SQL",
+        ]);
+        let err = {
+            let mut conn = Connection::open(&db_path).unwrap();
+            migrate(&mut conn, &broken, &backup_dir)
+                .expect_err("the broken last step must fail the run")
+        };
+        let StorageError::Migration {
+            backup: Some(backup),
+            ..
+        } = err
+        else {
+            panic!("the failing step must carry its pre-step copy: {err:?}");
+        };
+        let name = backup.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("pre-migration-v2-"),
+            "the copy of the failed step's source state: {name}"
+        );
+
+        let copy = Connection::open(&backup).unwrap();
+        assert_eq!(
+            user_version(&copy),
+            2,
+            "the named copy holds the state the database is still at"
+        );
+        drop(copy);
+
+        let conn = Connection::open(&db_path).unwrap();
+        assert_eq!(user_version(&conn), 2, "the database stayed at version 2");
+        let probe: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'probe'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(probe, 0, "the failed step's partial work is rolled back");
+        drop(conn);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failing_first_migration_of_a_fresh_database_reports_no_copy() {
+        // A fresh bootstrap holds no user state and writes no copies;
+        // the failure must say so honestly (`backup: None`) instead of
+        // naming a nonexistent path — the app layer's UPD-004 message
+        // degrades the same way for this shape.
+        let dir = temp_dir("fresh-fail");
+        let db_path = dir.join("db.sqlite3");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+
+        // The broken bootstrap step does partial work before dying;
+        // nothing of it may survive.
+        let broken = set_of(&["CREATE TABLE probe (x TEXT); THIS IS NOT SQL"]);
+        let err = {
+            let mut conn = Connection::open(&db_path).unwrap();
+            migrate(&mut conn, &broken, &backup_dir)
+                .expect_err("the broken bootstrap migration must fail")
+        };
+        match err {
+            StorageError::Migration { backup, .. } => {
+                assert!(
+                    backup.is_none(),
+                    "a fresh run has no copy to name: {backup:?}"
+                );
+            }
+            other => panic!("expected StorageError::Migration, got: {other:?}"),
+        }
+
+        let conn = Connection::open(&db_path).unwrap();
+        assert_eq!(user_version(&conn), 0, "nothing was applied");
+        let probe: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'probe'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(probe, 0, "the failed step's partial work is rolled back");
+        drop(conn);
+        let entries = fs::read_dir(&backup_dir).unwrap().count();
+        assert_eq!(entries, 0, "no copies and no debris: {entries} entries");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Skips the test unless the process may fail on permission bits:
+    /// root (uid 0) bypasses them, so a chmod-based fixture proves
+    /// nothing there (the same gate as the config suite). The temp
+    /// directory was created by this process, so its owner uid is the
+    /// effective uid.
+    #[cfg(unix)]
+    fn running_as_root_is_untestable(temp: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(temp)
+            .expect("the temp directory must be statable")
+            .uid()
+            == 0
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_backup_directory_surfaces_as_a_backup_error() {
+        // The pre-step copy failing must abort the run as
+        // `StorageError::Backup` (D-038: never silently continue, and
+        // no migration of that step runs) — the failure keeps its own
+        // shape instead of degrading into a migration error.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("unwritable-backups");
+        if running_as_root_is_untestable(&dir) {
+            fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let db_path = dir.join("db.sqlite3");
+        let backup_dir = dir.join("db-backups");
+        fs::create_dir(&backup_dir).unwrap();
+
+        let set_v1 = set_of(&["CREATE TABLE t1 (x TEXT)"]);
+        {
+            let mut conn = Connection::open(&db_path).unwrap();
+            migrate(&mut conn, &set_v1, Path::new(UNUSED_BACKUP_DIR)).unwrap();
+        }
+
+        // No write rights in the backup directory: the `VACUUM INTO`
+        // of the pre-step copy cannot create its staging file.
+        fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o555))
+            .expect("removing write rights must work");
+        let set_v2 = set_of(&["CREATE TABLE t1 (x TEXT)", "CREATE TABLE t2 (x TEXT)"]);
+        let result = {
+            let mut conn = Connection::open(&db_path).unwrap();
+            migrate(&mut conn, &set_v2, &backup_dir)
+        };
+        // Restore the rights even when the assertion below panics, so
+        // the teardown can remove the directory.
+        fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o755))
+            .expect("restoring write rights must work");
+        let err = result.expect_err("the unwritable backup directory must fail the run");
+        assert!(
+            matches!(err, StorageError::Backup { .. }),
+            "a failed copy write must surface as StorageError::Backup, got: {err:?}"
+        );
+
+        // No migration was applied by the failed run.
+        let conn = Connection::open(&db_path).unwrap();
+        assert_eq!(user_version(&conn), 1, "no migration was applied");
+        drop(conn);
 
         fs::remove_dir_all(&dir).unwrap();
     }

@@ -1037,3 +1037,304 @@ fn setup_logs_a_too_new_database_through_the_facade_before_aborting() {
         );
     }
 }
+
+// ---- T-019: the UPD-004 rolled-back migration --------------------------------
+
+/// A database file whose first embedded migration must fail on it: a
+/// valid SQLite database (it survives `open_db` and the too-new gate)
+/// that already contains a `settings` table, which
+/// `migrations/0001_init.sql` creates — the step dies on "table
+/// settings already exists". This is the intentionally broken
+/// migration reachable through the real seams; the store suite proves
+/// the broken-step-in-an-upgrade-run shape on its private driver.
+fn conflicting_settings_database(db_path: &Path) {
+    let connection =
+        rusqlite::Connection::open(db_path).expect("creating the fixture database must work");
+    connection
+        .execute(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)",
+            [],
+        )
+        .expect("creating the conflicting table must work");
+    connection
+        .execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES ('k', 'v', '2026-11-18T10:00:00.000Z')",
+            [],
+        )
+        .expect("seeding the fixture row must work");
+}
+
+/// Reads the full schema of the fixture as comparable rows — the
+/// "database unchanged" proof compares the complete `sqlite_master`
+/// inventory, not a proxy. `sql` is `COALESCE`d: internal auto-index
+/// rows carry NULL.
+fn settings_schema(connection: &rusqlite::Connection) -> Vec<(String, String, String)> {
+    let mut statement = connection
+        .prepare("SELECT type, name, COALESCE(sql, '') FROM sqlite_master ORDER BY type, name")
+        .expect("sqlite_master must be readable");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .expect("sqlite_master rows must be readable");
+    rows.map(|row| row.expect("every sqlite_master row must decode"))
+        .collect()
+}
+
+#[test]
+fn a_failing_bootstrap_migration_aborts_with_the_unchanged_database() {
+    // The honest-degradation half of UPD-004 at the real seam: the
+    // migration fails on a database this run created (a fresh
+    // bootstrap — `user_version = 0`, no copies exist), so the typed
+    // error must say the database is unchanged and that no copy was
+    // written, without inventing a pointer, and must keep the generic
+    // abort (no wire form: this is not the "install the previous
+    // version" situation).
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    conflicting_settings_database(&db_path);
+    let (schema_before, row_before) = {
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let row: String = connection
+            .query_row("SELECT value FROM settings", [], |row| row.get(0))
+            .unwrap();
+        (settings_schema(&connection), row)
+    };
+
+    // Act
+    let error = match Db::open(temp.path()) {
+        Ok(_) => panic!("the conflicting table must fail the migration"),
+        Err(error) => error,
+    };
+
+    // Assert: the typed Migration error without a copy, honest about
+    // there being none, and the generic abort (no wire form).
+    let crate::db::DbInitError::Migration { backup: None, .. } = error else {
+        panic!("a failed migration must classify as Migration, got: {error:?}");
+    };
+    assert!(
+        error.app_error().is_none(),
+        "a fresh bootstrap failure has no UPD-004 wire form"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(&db_path.display().to_string()),
+        "the abort message must name the database file, got: {message}"
+    );
+    assert!(
+        message.contains("keeps the state of its last committed migration"),
+        "the abort message must state the kept state, got: {message}"
+    );
+    assert!(
+        message.contains("no pre-migration copy"),
+        "the abort message must be honest about the missing copy, got: {message}"
+    );
+
+    // The database itself is unchanged: schema, data and version.
+    {
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(
+            settings_schema(&connection),
+            schema_before,
+            "the failed migration must not change the schema"
+        );
+        let row: String = connection
+            .query_row("SELECT value FROM settings", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            row, row_before,
+            "the failed migration must not change the data"
+        );
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 0, "no migration step was applied");
+    }
+
+    // A fresh run writes no copies: the backup directory stays empty.
+    let backups = crate::data_dirs::db_backups_dir(temp.path());
+    let backup_entries = std::fs::read_dir(&backups)
+        .expect("the db-backups directory must be readable")
+        .count();
+    assert_eq!(backup_entries, 0, "no copies, no debris");
+}
+
+#[test]
+fn a_migration_failure_with_a_copy_names_it_in_display_and_wire_form() {
+    // The UPD-004 situation proper: a migration failed on an existing
+    // database, the store's error carries the copy of the unchanged
+    // state, and the app layer must surface it everywhere the user (or
+    // the future screen task) looks — the abort `Display` text, and
+    // the typed §7.10 wire form.
+    //
+    // Honest boundary: src-tauri does not depend on
+    // `rusqlite_migration`, so the fixture cannot synthesize the
+    // store's variant; it obtains a real one by driving the store (the
+    // conflicting-table fixture above) and re-shapes its `backup`
+    // field to the under-test case. This pins the path *plumbing* on a
+    // real store error; the copy file's validity (VACUUM INTO,
+    // integrity, exact state) is the store suite's proof, unreachable
+    // through `Db::open` until a second embedded migration exists.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db_path = crate::data_dirs::db_file_path(temp.path());
+    let backups_dir = crate::data_dirs::db_backups_dir(temp.path());
+    conflicting_settings_database(&db_path);
+    let real_error = {
+        let mut connection = eunomia_store::storage::open_db(&db_path)
+            .expect("opening the fixture database must work");
+        eunomia_store::storage::run_migrations(&mut connection, &backups_dir)
+            .expect_err("the conflicting table must fail the migration")
+    };
+    let eunomia_store::storage::StorageError::Migration {
+        source,
+        backup: None,
+    } = real_error
+    else {
+        panic!("the store must report a migration failure");
+    };
+    // A stand-in file at the real path shape the store hands over —
+    // this test pins the plumbing; the copy's content and validity are
+    // the store suite's proof.
+    let backup_path = backups_dir.join("pre-migration-v1-20261118T101500123Z.sqlite3");
+    std::fs::write(&backup_path, b"fixture stand-in for the pre-migration copy")
+        .expect("writing the fixture copy must work");
+    let store_error = eunomia_store::storage::StorageError::Migration {
+        source,
+        backup: Some(backup_path.clone()),
+    };
+
+    // Act: the classifier — a connection within range (the database is
+    // at the failed step's source state, not newer than the app).
+    let within_range = rusqlite::Connection::open_in_memory().unwrap();
+    within_range
+        .pragma_update(None, "user_version", app_schema_version())
+        .unwrap();
+    let error = crate::db::classify_migration_failure(&within_range, &db_path, store_error);
+
+    // Assert: the typed variant preserves everything.
+    let crate::db::DbInitError::Migration {
+        path,
+        backup: Some(backup),
+        ..
+    } = &error
+    else {
+        panic!("a migration failure must classify as Migration, got: {error:?}");
+    };
+    assert_eq!(path, &db_path);
+    assert_eq!(backup, &backup_path, "the copy pointer must survive");
+
+    // The abort Display (the panic prints it) names the copy and the
+    // UPD-004 user action.
+    let message = error.to_string();
+    assert!(
+        message.contains("install the previous app version"),
+        "the abort message must carry the UPD-004 instruction, got: {message}"
+    );
+    assert!(
+        message.contains(&backup_path.display().to_string()),
+        "the abort message must name the copy, got: {message}"
+    );
+
+    // The wire form the future screen renders: E_UPDATE_FAILED with
+    // the migration-specific message key and both paths as params —
+    // pinned as literals, never read back from the code.
+    let app_error = error
+        .app_error()
+        .expect("a migration failure with a copy must have the wire form");
+    let wire = serde_json::to_value(&app_error).expect("the typed error must serialize");
+    assert_eq!(wire["code"], serde_json::json!("E_UPDATE_FAILED"));
+    assert_eq!(
+        wire["message_key"],
+        serde_json::json!("errors.update_migration_failed")
+    );
+    assert_eq!(
+        wire["params"]["path"],
+        serde_json::json!(db_path.display().to_string()),
+        "the params must carry the database path, got: {wire}"
+    );
+    assert_eq!(
+        wire["params"]["backup_path"],
+        serde_json::json!(backup_path.display().to_string()),
+        "the params must carry the copy path, got: {wire}"
+    );
+    assert_eq!(
+        wire["details"],
+        serde_json::json!(null),
+        "a rolled-back migration carries no OS details, got: {wire}"
+    );
+}
+
+#[test]
+fn a_backup_failure_keeps_the_generic_open_abort() {
+    // A failed safety-copy write is not a migration failure (UPD-004
+    // speaks of a migration that ran and was rolled back): it keeps
+    // D-038's own `StorageError::Backup` shape and the generic abort,
+    // proven at the store seam by its own suite — this pins the app
+    // layer's half, that such an error does not masquerade as the
+    // typed Migration rejection.
+    let within_range = rusqlite::Connection::open_in_memory().unwrap();
+    within_range
+        .pragma_update(None, "user_version", app_schema_version())
+        .unwrap();
+    let classified = crate::db::classify_migration_failure(
+        &within_range,
+        Path::new("/data/db/eunomiasync.sqlite3"),
+        eunomia_store::storage::StorageError::Backup {
+            path: PathBuf::from("/data/db-backups"),
+            source: eunomia_store::storage::BackupError::Directory,
+        },
+    );
+    assert!(
+        matches!(classified, crate::db::DbInitError::Open { .. }),
+        "a backup failure must keep the generic Open abort, got: {classified:?}"
+    );
+    assert!(
+        classified.app_error().is_none(),
+        "a backup failure has no wire form of its own"
+    );
+}
+
+#[test]
+fn setup_logs_a_rolled_back_migration_through_the_facade_before_aborting() {
+    // Arrange & Act: `lib.rs`, compile-time constant, comments
+    // stripped (the shared helper). The migration branch of the DB
+    // step must log through its own facade event before returning the
+    // error that aborts the launch (UPD-004; the same wiring shape as
+    // the too-new pin above).
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    let markers = [
+        "db::Db::open(&data_dir)",
+        "logging::db_migration_failed(",
+        "return Err(error.into());",
+    ];
+    let positions: Vec<usize> = markers
+        .iter()
+        .map(|marker| {
+            assert_eq!(
+                lib.matches(marker).count(),
+                1,
+                "lib.rs must contain `{marker}` exactly once, live (a \
+                 commented-out or duplicated line must not count)"
+            );
+            lib.find(marker)
+                .expect("the exactly-once check above guarantees one match")
+        })
+        .collect();
+
+    // Assert: open, facade log, abort — in that order.
+    for pair in positions.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "lib.rs must log the rolled-back migration through the facade \
+             before aborting (UPD-004, D-032); marker positions: {positions:?}"
+        );
+    }
+}

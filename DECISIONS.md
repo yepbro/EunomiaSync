@@ -1463,6 +1463,14 @@ flagged the `AlreadyExists` race branch as defensive and deliberately
 untested (nothing else creates files in the directory under the
 serialized-runs assumption).
 
+Addendum (2026-11-18, T-019/D-043): the `StorageError::Migration`
+variant this entry introduced is now a struct variant
+`{ source, backup: Option<PathBuf> }` — a failing step attaches the
+copy written immediately before it (the state the rollback leaves
+the database at, UPD-004's pointer); the semantics recorded above
+are unchanged, only the error grew a field. A failed copy write
+keeps this entry's `StorageError::Backup` shape.
+
 ### D-039 — Settings repository: typed §6.5 keys, one JSON validation path, corrupt cells error instead of defaulting — 2026-11-18
 
 Problem: T-028 turns the §6.5 `settings` table into a repository. Open
@@ -1675,6 +1683,14 @@ DELETE-mode tests (and only them — the WAL variant legitimately passes
 through the backstop, which is that path's own proof); moving the gate
 after `open_db` fails the byte-identity assertion exactly.
 
+Addendum (2026-11-18, T-019/D-043): "`None` for every other init
+failure" and "everything else keeps the old `Open` shape" are narrowed
+by D-043 — a migration step that failed and was rolled back now has
+its own typed `DbInitError::Migration` (UPD-004) whose `app_error()`
+is the `E_UPDATE_FAILED` wire form when the run wrote a copy; the
+abort policy this entry records is unchanged, and failures without a
+copy still return `None`.
+
 ### D-041 — Check chains verify exit codes explicitly; output pipes must not swallow them — 2026-11-18
 
 Problem: the orchestrator's post-merge check chain ran
@@ -1797,3 +1813,128 @@ store's settings module, not to T-033. First consumers of the snapshot:
 T-034 (ALG-002 normalization over the carried variant texts) and T-035
 (the builder); variant texts ride the snapshot raw — normalization is a
 build-pipeline step, not a snapshot mutation.
+
+### D-043 — UPD-004: a failed migration is typed with its rollback copy; the wire carrier is E_UPDATE_FAILED (a recorded registry gap) — 2026-11-18
+
+Problem: T-019 turns UPD-004 ("If the new version could not run a
+migration, the app does not change the database and says that the
+previous version must be installed, pointing to the
+`db-backups/pre-migration-*` copy") into behavior. The rollback half
+was already D-038's (per-step transactions, `to_version` stepping,
+`a_failing_step_rolls_back_only_itself`), but the failure carried no
+copy path: `StorageError::Migration(rusqlite_migration::Error)` had
+nowhere for one, and at the app layer every `run_migrations` failure
+collapsed into the anonymous `DbInitError::Open`. Open questions:
+which copy the error points at; how the path travels store →
+src-tauri without giving src-tauri a `rusqlite_migration` edge
+(D-040); and which of the twenty §10 codes (registry fixed by
+T-013/D-034) carries the situation — §10 has no migration-failure
+row at all.
+
+Solution: three pieces.
+
+(1) Store: `StorageError::Migration` became a struct variant
+`{ source, backup: Option<PathBuf> }`. The stepping loop attaches
+`backups.last()` when a step fails — the copy written immediately
+before the failed step, i.e. of the exact state the rollback leaves
+the database at (the failed step's source version; for a v1→v3 run
+failing at step 3 that is `pre-migration-v2-*`, not the run's first
+copy). `backup` is `None` when no copy exists: a fresh bootstrap
+(start version 0 — no user state), the version-read failures (the
+`From` conversion, which serves `current_version`/`pending_migrations`)
+and the too-new rejection (no step ran). A failed copy _write_ keeps
+being `StorageError::Backup` — D-038's own shape; it is not the
+UPD-004 situation (no migration ran), and it already carries the
+attempted path and cause, so it does not degrade into silence or
+into the new variant (pinned by a unix-gated read-only-directory
+test, skipped as root like the config suite's).
+
+(2) src-tauri: `classify_migration_failure` maps a
+`StorageError::Migration` (with the too-new _fact_ still winning
+first — the D-040 backstop) to the new `DbInitError::Migration
+{ path, source, backup }`. `Display` (the text the startup panic
+prints) states, in the copy-carrying arm, the rollback and the
+UPD-004 instruction "install the previous app version" plus the copy
+path (printed once: the arm renders the underlying migration
+failure, `source.source()`, because the store error's own `Display`
+already carries the path); both arms claim only the one fact true
+for every producer of the variant — "the database keeps the state of
+its last committed migration" (for a multi-step run that may be an
+earlier step of the same run; for a run that created the database,
+nothing) — and without a copy the text says exactly that ("no
+pre-migration copy was written") instead of inventing a pointer,
+claiming who created the file, or asserting a rollback for the
+version-read failures where no step ever ran (round-2 review). `app_error()` returns the typed
+wire form only when a copy exists: code `E_UPDATE_FAILED`, message
+key `errors.update_migration_failed` (a deliberate member of the
+update family, per D-034's per-instance keys), params `path` +
+`backup_path`, `details: null` (a verdict, like `TooNew`; the store
+reason stays in `Display`). A migration failure _without_ a copy
+returns `None`: not the UPD-004 situation, the generic D-027 abort —
+and by the same policy it gets no facade log line (the panic
+`Display` is its report; its §10 line belongs to the recovery task
+like every generic init failure's).
+
+Why `E_UPDATE_FAILED`: §10 (fixed by T-013) has no
+migration-failure code, and the plausible carriers lie about the
+facts in their §10 rows — `E_DB_CORRUPT` (the database is not
+damaged; the row's effect steers the user toward the destructive
+"start with empty database" recovery, exactly the misclassification
+D-037 recorded rejecting), `E_DB_TOO_NEW` (no version skew exists;
+its action points the app version the wrong way) and `E_DB_LOCKED`
+(not busy; retrying the same binary fails deterministically).
+`E_UPDATE_FAILED` is the least-harmful carrier: UPD-004 is the
+Updates section's own rollback rule, its §10 effect "Update not
+installed; work continues" matches the remedy (stay on/return to the
+previous version), and its action "Retry later" is the complementary
+one (re-update once a fixed version ships). The UI localizes by
+`message_key` (NFR-006), so the user sees the UPD-004 text, not the
+§10 row's prose. This is a recorded registry gap in D-037's shape,
+to revisit when §10 grows a migration-specific code. The `setup`
+hook logs the typed form through the new `logging::db_migration_failed`
+facade event (error level — the launch aborts on the verdict, the
+same reasoning as `db_too_new`) before the abort; the abort policy
+itself is unchanged (D-027/D-028).
+
+(3) Proof, matching the card's criterion ("a test with an
+intentionally broken migration: schema and data unchanged, the error
+contains the copy path"). Store, on the private `migrate` seam with
+real SQL and file databases (the D-038 boundary: the embedded set
+has one working migration, so a broken step exists only there): the
+broken single pending step on an existing database — it deliberately
+does real work first (`CREATE TABLE probe …; INSERT …; THIS IS NOT
+SQL`), so only the rollback can explain the state afterwards, not an
+inert statement — leaves `sqlite_master` (type/name/rootpage/DDL,
+auto-index NULLs coalesced) and the table data and `user_version`
+equal to the pre-run snapshot, and the error's copy exists, passes
+`integrity_check` and holds that state; a multi-step run's error
+names the _failed step's_ copy; a fresh bootstrap failure reports
+`backup: None` with an empty backup directory. src-tauri, through
+the real `Db::open` seam: a hand-made database whose `settings`
+table collides with migration 1 (the only intentionally broken
+migration reachable through the public API — a fresh-bootstrap
+failure, `backup: None`) aborts with the honest `Display` and an
+unchanged schema/data/version; the copy-carrying shape is proven on
+`classify_migration_failure` with a real store error (src-tauri
+cannot synthesize `rusqlite_migration::Error` without a dependency
+edge, so the fixture drives the store on the colliding database and
+re-shapes the `backup` field — that pins the path plumbing and the
+wire form; the copy file's own validity is the store suite's proof,
+unreachable through `Db::open` until a second embedded migration
+exists) and pins the wire form (code, key, both params,
+`details: null`) plus the `Display` contents; a backup failure keeps
+the generic `Open` abort; facade and `lib.rs` wiring pins mirror the
+too-new ones. Mutations verified the suite bites: dropping the copy
+from the store error fails both store acceptance tests; dropping the
+copy/instruction from `Display` and the key override from
+`app_error()` each fail their src-tauri test. Round-1 review
+(deepseek-v4.1-flash) forced the partial-work broken steps, the
+universally-true `Display` wording, the single copy-path printing
+and these recorded policies; round-2 review (hy4-flash-free) removed
+the last false claim (the None arm no longer says "was rolled back"
+— version-read failures never opened a transaction) and restored the
+`ARCHITECTURE.md` step-order sentence.
+
+No new dependencies. Boundaries unchanged: the store knows no
+`AppError` (D-017), src-tauri still depends on `rusqlite_migration`
+not at all (D-040).

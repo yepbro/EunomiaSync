@@ -191,20 +191,26 @@ impl Db {
     ///
     /// Returns [`DbInitError::TooNew`] when the database was created
     /// by a newer app version (its typed wire form is
-    /// [`DbInitError::app_error`]), and [`DbInitError::Open`] when the
-    /// file cannot be opened or configured, WAL cannot be enabled, a
-    /// safety copy cannot be written, or a migration fails. A startup
-    /// failure of either kind aborts the launch: without the database
+    /// [`DbInitError::app_error`]), [`DbInitError::Migration`] when a
+    /// migration step fails — the step's transaction was rolled back,
+    /// the database keeps its schema and data, and the error carries
+    /// the copy of that state plus the "install the previous app
+    /// version" instruction (spec UPD-004) — and [`DbInitError::Open`]
+    /// when the file cannot be opened or configured, WAL cannot be
+    /// enabled, or a safety copy cannot be written. A startup failure
+    /// of any of these kinds aborts the launch: without the database
     /// there is nothing to run — the same policy as the layout and
     /// config steps (D-027/D-028) — and unlike them this step runs
-    /// after logging is up, so the too-new rejection is also logged
-    /// through the facade with its §10 code (`logging::db_too_new`,
-    /// wired in the `setup` hook). The §10 screens both errors
-    /// describe — "Update the app" for `E_DB_TOO_NEW`, recovery for
-    /// `E_DB_CORRUPT` — are the future recovery/update task's to
-    /// build; the typed error on this seam is their contract, and a
-    /// corrupt file keeps aborting as a plain open/migration failure
-    /// until then (`db_verify`/`db_restore_backup`/`db_recreate`).
+    /// after logging is up, so the two typed §10 situations (too-new,
+    /// rolled-back migration) are also logged through the facade with
+    /// their §10 codes (`logging::db_too_new`,
+    /// `logging::db_migration_failed`, wired in the `setup` hook). The
+    /// §10 screens both errors describe — "Update the app" for
+    /// `E_DB_TOO_NEW`, recovery for `E_DB_CORRUPT` — are the future
+    /// recovery/update task's to build; the typed error on this seam
+    /// is their contract, and a corrupt file keeps aborting as a plain
+    /// open/migration failure until then
+    /// (`db_verify`/`db_restore_backup`/`db_recreate`).
     pub(crate) fn open(data_dir: &Path) -> Result<Self, DbInitError> {
         let db_path = crate::data_dirs::db_file_path(data_dir);
         let backups_dir = crate::data_dirs::db_backups_dir(data_dir);
@@ -352,17 +358,21 @@ fn reject_too_new(db_path: &Path) -> Result<(), DbInitError> {
 }
 
 /// Classifies a `run_migrations` failure for [`Db::open`]: the
-/// D-038 backstop of the too-new gate. The store's migration run
-/// itself rejects a database newer than its set
-/// (`DatabaseTooFarAhead`), which — once [`reject_too_new`] has
-/// passed — can only mean the file changed under the open (a too-new
-/// file swapped or rewritten between the two steps). The verdict is
-/// re-derived from the version *fact* on the open connection rather
-/// than matched from the store's error enum: src-tauri does not
-/// depend on `rusqlite_migration` (the store is its only consumer),
-/// and the fact is all the classification needs. Any other failure —
-/// and a version that still reads within range — keeps the generic
-/// [`DbInitError::Open`] shape and with it the D-027 abort path.
+/// D-038 backstop of the too-new gate, and the UPD-004 mapping of a
+/// failed migration. The store's migration run itself rejects a
+/// database newer than its set (`DatabaseTooFarAhead`), which — once
+/// [`reject_too_new`] has passed — can only mean the file changed under
+/// the open (a too-new file swapped or rewritten between the two
+/// steps). The verdict is re-derived from the version *fact* on the
+/// open connection rather than matched from the store's error enum:
+/// src-tauri does not depend on `rusqlite_migration` (the store is its
+/// only consumer), and the fact is all the classification needs. A
+/// failed migration step otherwise becomes the typed
+/// [`DbInitError::Migration`] with the store error and the copy of the
+/// unchanged state preserved. Any other failure — and a version that
+/// still reads within range on a non-migration error — keeps the
+/// generic [`DbInitError::Open`] shape and with it the D-027 abort
+/// path.
 pub(crate) fn classify_migration_failure(
     connection: &Connection,
     db_path: &Path,
@@ -373,15 +383,31 @@ pub(crate) fn classify_migration_failure(
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .ok()
         .filter(|version| *version > app_schema_version as i64);
+    // The copy pointer travels inside the store's migration error; the
+    // too-new fact still wins over everything (the backstop's own
+    // meaning).
+    let backup = match &source {
+        eunomia_store::storage::StorageError::Migration { backup, .. } => backup.clone(),
+        _ => None,
+    };
     match too_new {
         Some(database_schema_version) => DbInitError::TooNew {
             path: db_path.to_owned(),
             database_schema_version,
             app_schema_version,
         },
-        None => DbInitError::Open {
-            path: db_path.to_owned(),
-            source: Box::new(source),
+        None => match source {
+            migration @ eunomia_store::storage::StorageError::Migration { .. } => {
+                DbInitError::Migration {
+                    path: db_path.to_owned(),
+                    source: Box::new(migration),
+                    backup,
+                }
+            }
+            other => DbInitError::Open {
+                path: db_path.to_owned(),
+                source: Box::new(other),
+            },
         },
     }
 }
@@ -506,21 +532,23 @@ pub(crate) fn sqlite_error_to_app_error(error: rusqlite::Error) -> AppError {
 /// app: …`, which prints the `Display` form, so the path must be in
 /// the message itself (D-027's reasoning, applied here too).
 ///
-/// One variant is a named §10 user situation rather than an anonymous
-/// infrastructure failure: [`DbInitError::TooNew`] (DB-004/NFR-010) —
+/// Two variants are named user situations rather than anonymous
+/// infrastructure failures: [`DbInitError::TooNew`] (DB-004/NFR-010) —
 /// a database created by a newer app version, which the app must not
-/// change and the user answers with "Update the app". Its typed
-/// §7.10/§10 wire form is [`DbInitError::app_error`]; every other
-/// failure stays an open/migration error that aborts the launch
-/// (D-027/D-028 — the corrupt-file recovery screen is the recovery
-/// task's).
+/// change and the user answers with "Update the app" — and
+/// [`DbInitError::Migration`] (spec UPD-004) — a migration step that
+/// failed and was rolled back, leaving the database unchanged, with
+/// the user's remedy "install the previous app version" and the
+/// pre-migration copy as the pointer. Their typed §7.10/§10 wire
+/// forms are [`DbInitError::app_error`]; every other failure stays an
+/// open error that aborts the launch (D-027/D-028 — the corrupt-file
+/// recovery screen is the recovery task's).
 #[derive(Debug)]
 pub(crate) enum DbInitError {
-    /// The file could not be opened, configured or migrated — every
-    /// failure except the too-new gate: open/pragma
+    /// The file could not be opened or configured — every failure
+    /// except the too-new gate and a rolled-back migration: open/pragma
     /// (`StorageError::Open`), WAL (`StorageError::JournalMode`),
-    /// safety copy (`StorageError::Backup`), migration
-    /// (`StorageError::Migration`).
+    /// safety copy (`StorageError::Backup`).
     Open {
         /// The database file whose open or migration failed.
         path: PathBuf,
@@ -530,6 +558,24 @@ pub(crate) enum DbInitError {
         /// error crosses the `Result` return of [`Db::open`] on every
         /// startup.
         source: Box<eunomia_store::storage::StorageError>,
+    },
+    /// A migration step failed (spec UPD-004): the step's own
+    /// transaction was rolled back, so the database keeps its schema
+    /// and data unchanged, and the user's remedy is to install the
+    /// previous app version — with the pre-migration copy of the
+    /// unchanged state as the recovery pointer. `backup` is `None`
+    /// when the run wrote no copy (the failure hit a database this run
+    /// created): not the UPD-004 situation, so the error keeps the
+    /// generic abort instead of the typed wire form.
+    Migration {
+        /// The database file whose migration failed.
+        path: PathBuf,
+        /// The store-layer failure. Boxed for the same size reason as
+        /// [`DbInitError::Open`]'s source.
+        source: Box<eunomia_store::storage::StorageError>,
+        /// The copy of the unchanged database state (UPD-004's
+        /// pointer), when the run wrote one.
+        backup: Option<PathBuf>,
     },
     /// The database was created by a newer app version: `PRAGMA
     /// user_version` exceeds what this binary's embedded migration set
@@ -552,31 +598,73 @@ impl DbInitError {
     /// NFR-010) with the database path and both schema versions as
     /// interpolation params — the contract the "Update the app"
     /// screen (§10's user action; the future recovery/update task)
-    /// renders. `None` for every other init failure: their effect is
-    /// the D-027/D-028 abort, and inventing a code for them is the
-    /// registry gap D-037 records.
+    /// renders. A rolled-back migration with its copy (UPD-004) maps
+    /// to `E_UPDATE_FAILED` with the `errors.update_migration_failed`
+    /// message key and the database and copy paths as params — see
+    /// that arm's comment for why that code is the registry's best
+    /// carrier. `None` for every other init failure (including a
+    /// migration failure without a copy: not the UPD-004 situation):
+    /// their effect is the D-027/D-028 abort, and inventing a code for
+    /// them is the registry gap D-037 records.
     pub(crate) fn app_error(&self) -> Option<AppError> {
-        let DbInitError::TooNew {
-            path,
-            database_schema_version,
-            app_schema_version,
-        } = self
-        else {
-            return None;
-        };
-        let mut error = AppError::new(ErrorCode::DbTooNew);
-        error
-            .params
-            .insert("path".to_owned(), path.display().to_string());
-        error.params.insert(
-            "database_schema_version".to_owned(),
-            database_schema_version.to_string(),
-        );
-        error.params.insert(
-            "app_schema_version".to_owned(),
-            app_schema_version.to_string(),
-        );
-        Some(error)
+        match self {
+            DbInitError::TooNew {
+                path,
+                database_schema_version,
+                app_schema_version,
+            } => {
+                let mut error = AppError::new(ErrorCode::DbTooNew);
+                error
+                    .params
+                    .insert("path".to_owned(), path.display().to_string());
+                error.params.insert(
+                    "database_schema_version".to_owned(),
+                    database_schema_version.to_string(),
+                );
+                error.params.insert(
+                    "app_schema_version".to_owned(),
+                    app_schema_version.to_string(),
+                );
+                Some(error)
+            }
+            DbInitError::Migration {
+                path,
+                backup: Some(backup),
+                ..
+            } => {
+                // The wire carrier is `E_UPDATE_FAILED` — the §10
+                // registry (fixed by T-013) has no migration-failure
+                // code, and this requirement is UPD-004, the Updates
+                // section's own rollback rule: the new version cannot
+                // be adopted ("Update not installed" — install the
+                // previous one), with "Retry later" as the
+                // complementary remedy (re-update to a fixed version).
+                // The rejected alternatives lie harder about the
+                // facts: `E_DB_CORRUPT` (the database passed the
+                // migration's own rollback intact; §10's row would
+                // steer the user to the destructive empty-database
+                // recovery), `E_DB_TOO_NEW` (no version skew exists —
+                // its action points the app version the wrong way)
+                // and `E_DB_LOCKED` (not busy; retrying the same
+                // binary fails again). The localized text comes from
+                // the message key (NFR-006), so the UI shows the
+                // UPD-004 instruction, not the §10 row's prose; the
+                // mismatch is a recorded registry gap (DECISIONS.md,
+                // with this task's entry).
+                let mut error = AppError::new(ErrorCode::UpdateFailed);
+                error.message_key = "errors.update_migration_failed".to_owned();
+                error
+                    .params
+                    .insert("path".to_owned(), path.display().to_string());
+                error
+                    .params
+                    .insert("backup_path".to_owned(), backup.display().to_string());
+                Some(error)
+            }
+            // A fresh bootstrap has no copy and no previous state to
+            // return to — the generic abort, honestly.
+            DbInitError::Migration { backup: None, .. } | DbInitError::Open { .. } => None,
+        }
     }
 }
 
@@ -590,6 +678,56 @@ impl fmt::Display for DbInitError {
                     path.display(),
                     source
                 )
+            }
+            DbInitError::Migration {
+                path,
+                source,
+                backup,
+            } => {
+                // Wording true for every producer of the variant: the
+                // failed step rolled back (nothing of it survives) and
+                // the database keeps the state of its last committed
+                // migration — which for a multi-step run may be an
+                // earlier step of the same run, and for a run that
+                // created the database is "nothing applied yet". The
+                // UPD-004 instruction and the copy pointer (this text
+                // is what the startup panic prints) follow when a
+                // copy exists.
+                match backup {
+                    Some(backup) => {
+                        // The store error's own Display repeats the
+                        // copy path (its self-contained form), so only
+                        // the underlying migration failure is printed
+                        // here — the abort text names the path once.
+                        let store: &dyn std::error::Error = source.as_ref();
+                        let root = store.source().unwrap_or(store);
+                        write!(
+                            f,
+                            "the migration of the database at {} failed and \
+                             was rolled back — the database keeps the state \
+                             of its last committed migration; install the \
+                             previous app version; a copy of that state is \
+                             at {}: {}",
+                            path.display(),
+                            backup.display(),
+                            root
+                        )
+                    }
+                    None => write!(
+                        f,
+                        // No copy exists — and for the producers of
+                        // this shape (a fresh bootstrap's failed step,
+                        // or a version read that failed before any
+                        // step ran) "was rolled back" would claim a
+                        // transaction that may never have opened; the
+                        // kept-state fact is the honest wording.
+                        "the migration of the database at {} failed — the \
+                         database keeps the state of its last committed \
+                         migration; no pre-migration copy was written: {}",
+                        path.display(),
+                        source
+                    ),
+                }
             }
             DbInitError::TooNew {
                 path,
@@ -612,7 +750,9 @@ impl fmt::Display for DbInitError {
 impl std::error::Error for DbInitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            DbInitError::Open { source, .. } => Some(source),
+            DbInitError::Open { source, .. } | DbInitError::Migration { source, .. } => {
+                Some(source.as_ref())
+            }
             // A verdict, not a wrapper: the version facts are the
             // whole failure, already in the message and the typed
             // `AppError`.
