@@ -100,6 +100,23 @@ jobs:
       # next to every test exe (exe dir is first in the search order)
       # makes resolution deterministic. The --no-run pre-build lets the
       # staging step see the DLL before any test binary executes.
+      # The eunomia-sync test exes carry no embedded manifest, so the
+      # Windows loader binds them to Common-Controls v5 and they die
+      # at startup with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139).
+      # Embedding the v6 dependency via link args — published through
+      # GITHUB_ENV on the Windows legs only, so the app build and the
+      # non-Windows legs never see the MSVC-specific flags. Cargo
+      # splits RUSTFLAGS shell-words style, so the single-quoted
+      # /MANIFESTDEPENDENCY survives as one argument.
+      - name: Request the Common-Controls v6 manifest for test binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: >-
+          echo "RUSTFLAGS=-C link-arg=/MANIFEST:EMBED
+          -C link-arg=/MANIFESTDEPENDENCY:type='win32'
+          name='Microsoft.Windows.Common-Controls' version='6.0.0.0'
+          publicKeyToken='6595b64144ccf1df' language='*'
+          processorArchitecture='*'" >> "$GITHUB_ENV"
       - name: Build tests (Windows DLL staging prerequisite)
         if: runner.os == 'Windows'
         run: cargo test --workspace --no-run
