@@ -153,14 +153,15 @@
     td.title = changed ? 'Assignment changed — will be written on the next sync' : ''
   }
 
-  /* Variant option list for a row: "Variant 1" (main) + the mapped
-     alternatives, or just "Variant 1" for badge rows without a map */
+  /* Variant option list for a row: "Default" (the main instruction text),
+     its "Variant 1" rewording and the mapped alternatives — or just
+     "Default" + "Variant 1" for badge rows without a map */
   function variantOptionsFor(row) {
     const name = (row.querySelector('.name')?.textContent ?? '').trim()
     const mapped = VARIANTS[name]
-    if (!mapped) return row.querySelector('.chip') ? ['Variant 1'] : []
+    if (!mapped) return row.querySelector('.chip') ? ['Default', 'Variant 1'] : []
     const alts = mapped.map((v) => v.name).filter((n) => n !== 'Variant 1')
-    return ['Variant 1', ...alts]
+    return ['Default', 'Variant 1', ...alts]
   }
 
   /* Every cell of a variant row gets checkbox + select; cells that had a
@@ -197,7 +198,7 @@
         prevBtn?.remove()
         const select = document.createElement('select')
         select.className = 'variant-select'
-        select.setAttribute('aria-label', `Assigned variant — ${instr}`)
+        select.setAttribute('aria-label', `Assigned text — ${instr}`)
         if (input.disabled) select.disabled = true
         for (const optName of options) {
           const opt = document.createElement('option')
