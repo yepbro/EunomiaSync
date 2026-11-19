@@ -8,6 +8,9 @@
    project settings modal (PRJ-008…012, PRJ-013…018 archive confirm),
    repository scan modal (PRJ-002…007: scripted walk, live progress,
    three result groups; NFR-015 — closing the window cancels),
+   sync summary modal (MAIN-024…031, OUT-009: simulated sync run with
+   k-of-N progress and per-project outcomes per §6.2/D-09/SYS-009,
+   pending-changes list from the counter chip; MAIN-030 guard),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -299,15 +302,11 @@
   }
 
   runSyncBtn.addEventListener('click', () => {
-    /* Sync applies pending assignments: changed cells become the new
-       initial state and lose the tint */
-    for (const input of document.querySelectorAll('.matrix tbody .assign')) {
-      const select = input.closest('td').querySelector('.variant-select')
-      if (select) select.dataset.initialVariant = select.value
-      input.dataset.initial = String(input.checked)
-      updateCellState(input)
-    }
-    refreshDirtyState()
+    /* MAIN-030: the simulated run applies pending assignments project by
+       project (the same reset the old instant-apply handler did, scoped
+       per column) and ends with the summary modal — see the sync
+       summary section at the bottom of the file */
+    startSyncRun()
   })
 
   /* ---------- Row drag-and-drop between sections (MAIN-015…023) ---------- */
@@ -2250,6 +2249,284 @@
   scanCancelBtn.addEventListener('click', () => scanDialog.close('cancel'))
   scanAddBtn.addEventListener('click', () => scanDialog.close('add'))
   scanAgainBtn.addEventListener('click', startScan)
+
+  /* ---------- Sync summary modal (MAIN-024…031, OUT-009) ------------------- */
+  /* "Run sync" starts a simulated run: the button is disabled (MAIN-030;
+     SYS-004 — one run at a time, guarded by the syncRunning flag too),
+     an adjacent live region shows "k of N" (SYS-003: ≤10 updates/s),
+     and every tick applies one project's pending assignments — the same
+     reset the old instant-apply handler did (dataset.initial /
+     initialVariant + tint), scoped to that column. Outcomes mirror the
+     demo column states per §6.2 sync_run_projects: written / unchanged
+     (D-24) / skipped — the run continues (D-09, SYS-009) / failed with a
+     kept backup (§10). At the end the dirty badge clears and the summary
+     opens in "result" mode; written/unchanged projects get fresh
+     per-project times (DB-024) while a partial run shows "Last attempt:
+     partial" in the sync bar instead of a new overall time (§9.4 phase 4,
+     LOG-007). The counter chip opens the same dialog in "pending" mode
+     (MAIN-026). */
+
+  const ssDialog = document.getElementById('sync-summary-dialog')
+  const ssTitle = document.getElementById('ss-title')
+  const ssResult = document.getElementById('ss-result')
+  const ssPending = document.getElementById('ss-pending')
+  const ssRunBadge = document.getElementById('ss-run-badge')
+  const ssRunNote = document.getElementById('ss-run-note')
+  const ssNWritten = document.getElementById('ss-n-written')
+  const ssNUchanged = document.getElementById('ss-n-unchanged')
+  const ssNSkipped = document.getElementById('ss-n-skipped')
+  const ssNFailed = document.getElementById('ss-n-failed')
+  const ssRows = document.getElementById('ss-rows')
+  const ssPendingList = document.getElementById('ss-pending-list')
+  const ssPendingRows = document.getElementById('ss-pending-rows')
+  const ssPendingEmpty = document.getElementById('ss-pending-empty')
+  const ssRunBtn = document.getElementById('ss-run-btn')
+  const syncProgress = document.getElementById('sync-progress')
+  const syncProgressText = document.getElementById('sync-progress-text')
+  const syncLastEl = document.querySelector('.syncbar .sync-last')
+  const syncCounterBtn = document.querySelector('.syncbar .sync-counter')
+
+  const SYNC_TICK_MS = 200 // ≤10 progress updates per second (SYS-003); 8 ticks ≈ 1.6 s
+
+  /* Shared wording for the four demo projects that get written */
+  const SS_WRITTEN_REASON = 'Pending assignments were applied — the target file was written.'
+
+  /* Demo outcome per project, keyed by name (§6.2 sync_run_projects
+     statuses + §10 error codes; D-09 — skips do not stop the run) */
+  const SYNC_OUTCOMES = {
+    EunomiaSync: { status: 'written', reason: SS_WRITTEN_REASON },
+    'yepbro/site': {
+      status: 'unchanged',
+      reason: 'The built content matches the file, so it was not overwritten (D-24).',
+    },
+    quotameter: {
+      status: 'skipped',
+      code: 'E_MARKERS_INVALID',
+      reason:
+        'Scheme B markers are missing or invalid in the target file — nothing was written (SYS-009).',
+      hint: 'Paste the marker block with “Copy marker block” in the project settings.',
+    },
+    'task-id-mcp': { status: 'written', reason: SS_WRITTEN_REASON },
+    'utils/deja-vu': {
+      status: 'skipped',
+      code: 'E_PROJECT_UNAVAILABLE',
+      reason:
+        'The project folder is unavailable (moved or the drive is disconnected) — the project was skipped (D-09).',
+      hint: 'Use “Locate…” to set the new path, or archive the project.',
+    },
+    docktree: { status: 'written', reason: SS_WRITTEN_REASON },
+    moli: { status: 'written', reason: SS_WRITTEN_REASON },
+    'sandbox-cf': {
+      status: 'failed',
+      code: 'E_FILE_LOCKED',
+      reason:
+        'The target file is locked by another process — 3 write retries failed; the backup is kept (§10).',
+      hint: 'Close the program that locks the file and run sync again.',
+    },
+  }
+
+  /* Run state: the timer is the only thing that must never survive the
+     run or the page (no dialog is open mid-run, so unlike the scan there
+     is no close event — the final tick stops the timer itself) */
+  let syncTimer = null
+  let syncRunning = false
+
+  function stopSyncTimer() {
+    if (syncTimer !== null) clearInterval(syncTimer)
+    syncTimer = null
+  }
+
+  /* Applies the pending assignments of one project column: changed cells
+     become the new initial state and lose the tint (the per-column
+     version of the old instant-apply loop) */
+  function applyColumnAssignments(colIdx) {
+    for (const input of document.querySelectorAll('.matrix tbody .assign')) {
+      const td = input.closest('td')
+      if (td.cellIndex - 2 !== colIdx) continue
+      const select = td.querySelector('.variant-select')
+      if (select) select.dataset.initialVariant = select.value
+      input.dataset.initial = String(input.checked)
+      updateCellState(input)
+    }
+  }
+
+  /* Demo clock, like the history panel: rendered in the fixed UTC+3 the
+     demo uses, both in the sync bar format and the short column format */
+  function syncStampNow() {
+    const d = new Date(Date.now() + 180 * 60000)
+    const hh = String(d.getUTCHours()).padStart(2, '0')
+    const mm = String(d.getUTCMinutes()).padStart(2, '0')
+    const day = d.getUTCDate()
+    const mon = MONTHS_SHORT[d.getUTCMonth()]
+    return {
+      full: `${day} ${mon} ${d.getUTCFullYear()}, ${hh}:${mm} (UTC+3)`,
+      short: `${day} ${mon}, ${hh}:${mm}`,
+    }
+  }
+
+  /* Target file of a project: <~path>/<base file>, scheme C writes
+     <STEM>.project.md instead (§9.4 preflight); the ~ mirrors the demo
+     paths of the scan modal */
+  function targetPathOf(name) {
+    const p = PROJECTS.get(name)
+    if (!p) return 'AGENTS.md'
+    const file = p.scheme === 'C' ? `${stemOf(p.baseFile)}.project.md` : p.baseFile
+    return `${p.path.replace(/^\/home\/brooks/, '~')}/${file}`
+  }
+
+  /* Final run status (§9.4 phase 4): success if every active project was
+     written or left unchanged, partial otherwise */
+  function runOutcomeOf(results) {
+    return results.some((r) => r.status === 'skipped' || r.status === 'failed')
+      ? 'partial'
+      : 'success'
+  }
+
+  /* The sync bar's overall line (MAIN-027, §9.4 phase 4, LOG-007): only a
+     successful run moves the "Last successful sync" time; a partial one
+     shows the "Last attempt: partial" note instead */
+  function renderSyncLast(outcome, stamp) {
+    syncLastEl.innerHTML =
+      outcome === 'success'
+        ? `Last successful sync: <strong>${escapeHtml(stamp.full)}</strong>`
+        : 'Last attempt: <strong>partial</strong>'
+  }
+
+  function startSyncRun() {
+    if (syncRunning) return // MAIN-030/SYS-004: a second start is not possible
+    const results = projectHeads.map((th, idx) => {
+      const name = th.querySelector('.proj-name')?.textContent.trim() ?? ''
+      return { idx, name, ...SYNC_OUTCOMES[name] }
+    })
+    syncRunning = true
+    runSyncBtn.disabled = true
+    syncProgress.hidden = false
+    syncProgressText.textContent = `0 of ${results.length}`
+    let done = 0
+    syncTimer = setInterval(() => {
+      if (results[done].status === 'written') applyColumnAssignments(results[done].idx)
+      done += 1
+      syncProgressText.textContent = `${done} of ${results.length}`
+      if (done >= results.length) {
+        stopSyncTimer()
+        finishSyncRun(results)
+      }
+    }, SYNC_TICK_MS)
+  }
+
+  function finishSyncRun(results) {
+    syncRunning = false
+    const stamp = syncStampNow()
+    /* Per-project times (§9.4 phase 4, DB-024): written/unchanged
+       projects get a fresh last_synced_at — the column tooltips and the
+       project settings modal follow; skipped/failed keep theirs */
+    for (const r of results) {
+      if (r.status !== 'written' && r.status !== 'unchanged') continue
+      const p = PROJECTS.get(r.name)
+      if (p) p.syncedAt = stamp.full
+      const st = projectColsState[r.idx]
+      st.time = stamp.short
+      /* A clean column that showed a plain time (no warning icon) shows
+         the new one; warning subs keep their markup */
+      if (st.cleanHtml && !st.cleanHtml.includes('<')) st.cleanHtml = stamp.short
+      projectHeads[r.idx].title = `${r.name} — last successful sync: ${stamp.full}`
+    }
+    renderSyncLast(runOutcomeOf(results), stamp)
+    refreshDirtyState() // applied cells are the new initial state: badge -> 0
+    runSyncBtn.disabled = false
+    syncProgress.hidden = true
+    openSyncSummary({ mode: 'result', results })
+  }
+
+  /* One summary row: status badge, then for skips/failures the error
+     code chip and the "what to do" hint (UI-011). Strings go through
+     escapeHtml even though they come from the demo data. */
+  function renderSyncResults(results) {
+    ssRows.innerHTML = results
+      .map((r) => {
+        const code = r.code ? `<span class="chip ss-code">${escapeHtml(r.code)}</span>` : ''
+        const hint = r.hint ? `<span class="ss-hint">${escapeHtml(r.hint)}</span>` : ''
+        const extra = code || hint ? `<span class="ss-code-row">${code}${hint}</span>` : ''
+        return (
+          '<tr>' +
+          `<td class="ss-proj">${escapeHtml(r.name)}</td>` +
+          `<td class="ss-file"><code>${escapeHtml(targetPathOf(r.name))}</code></td>` +
+          `<td class="ss-st-cell"><span class="chip ss-st ss-st--${escapeHtml(r.status)}">${escapeHtml(r.status)}</span></td>` +
+          `<td class="ss-reason"><span class="ss-reason-text">${escapeHtml(r.reason)}</span>${extra}</td>` +
+          '</tr>'
+        )
+      })
+      .join('')
+  }
+
+  /* Pending mode (MAIN-026): the currently dirty projects and their
+     target files; the "Run sync" convenience acts only when the list is
+     not empty */
+  function renderPendingList() {
+    const names = projectColsState
+      .map((c, i) => (c.dirty ? i : -1))
+      .filter((i) => i >= 0)
+      .map((i) => projectHeads[i].querySelector('.proj-name')?.textContent.trim() ?? '')
+    ssPendingRows.innerHTML = names
+      .map(
+        (name) =>
+          '<tr>' +
+          `<td class="ss-proj">${escapeHtml(name)}</td>` +
+          `<td class="ss-file"><code>${escapeHtml(targetPathOf(name))}</code></td>` +
+          '</tr>',
+      )
+      .join('')
+    ssPendingList.hidden = names.length === 0
+    ssPendingEmpty.hidden = names.length !== 0
+    ssRunBtn.disabled = names.length === 0
+  }
+
+  /* Both modes share the dialog chrome; the title swaps accordingly */
+  function openSyncSummary({ mode, results = [] }) {
+    const isResult = mode === 'result'
+    ssResult.hidden = !isResult
+    ssPending.hidden = isResult
+    ssRunBtn.hidden = isResult
+    if (isResult) {
+      ssTitle.textContent = 'Sync summary'
+      const n = (s) => results.filter((r) => r.status === s).length
+      const skipped = n('skipped')
+      const failed = n('failed')
+      const outcome = runOutcomeOf(results)
+      ssRunBadge.textContent = outcome
+      ssRunBadge.className = `chip ss-run-badge ss-run-badge--${outcome}`
+      ssRunNote.textContent =
+        outcome === 'partial'
+          ? 'Last attempt: partial — skips and failures do not stop the run (D-09, §9.4).'
+          : 'Every active project was written or left unchanged.'
+      ssNWritten.textContent = String(n('written'))
+      ssNUchanged.textContent = String(n('unchanged'))
+      ssNSkipped.textContent = String(skipped)
+      ssNFailed.textContent = String(failed)
+      renderSyncResults(results)
+    } else {
+      ssTitle.textContent = 'Unsynced changes'
+      renderPendingList()
+    }
+    if (!ssDialog.open) ssDialog.showModal()
+  }
+
+  /* Entry point 1: the counter chip lists the projects with unsynced
+     changes (MAIN-026); mid-run there is nothing stable to list */
+  syncCounterBtn.addEventListener('click', () => {
+    if (syncRunning) return
+    openSyncSummary({ mode: 'pending' })
+  })
+
+  /* Entry point 2 (MAIN-026 convenience): close and start the same run */
+  ssRunBtn.addEventListener('click', () => {
+    ssDialog.close('run')
+    startSyncRun()
+  })
+
+  /* No dialog is open during the run itself; make sure no orphan timer
+     can re-fire when the page goes away (scan-modal cleanup idiom) */
+  window.addEventListener('pagehide', stopSyncTimer)
 
   /* ---------- Placeholder dialogs (native <dialog>) ------------------------ */
 

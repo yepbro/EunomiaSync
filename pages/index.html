@@ -8,13 +8,16 @@
   modal (LIB-026…027, D-16: revisions, snapshots, restore variant),
   project settings modal (PRJ-008…012, PRJ-013…018 archive confirm),
   repository scan modal (PRJ-002…007: scripted walk, grouped results),
-  placeholder modals.
+  sync summary modal (MAIN-024…031, OUT-009: simulated run with k-of-N
+  progress, per-project result table, pending-changes list), placeholder
+  modals.
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
   (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-002…007 (scan) +
   PRJ-008…012 (project settings) + § 7.3 LIB-026…027 (instruction
-  history) + UI-001 (window, pinned sync panel), UI-021 (light/dark via
-  OS setting), UI-022 (reduced motion).
+  history) + § 7.5 OUT-009 + § 6.2 run statuses + UI-001 (window, pinned
+  sync panel), UI-021 (light/dark via OS setting), UI-022 (reduced
+  motion).
   Tooltips are native `title` attributes; accessible names are real labels.
 -->
 <html lang="en">
@@ -2408,6 +2411,14 @@
       <footer class="syncbar">
         <button id="run-sync" type="button" class="btn btn-primary">Run sync</button>
 
+        <!-- Run progress (MAIN-030): shown by app.js while the simulated
+           run ticks; "k of N" is a polite live region, the spinner is
+           decorative and drops its animation under reduced motion -->
+        <span id="sync-progress" class="sync-progress" aria-live="polite" hidden>
+          <span class="sync-spinner" aria-hidden="true"></span>
+          <span id="sync-progress-text">0 of 8</span>
+        </span>
+
         <span class="sync-last">
           Last successful sync:
           <strong>19 Nov 2026, 14:32 (UTC+3)</strong>
@@ -2987,6 +2998,89 @@
             <button type="button" id="scan-add-btn" class="btn btn-primary" hidden disabled>
               Add selected
             </button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Sync summary (MAIN-024…027, MAIN-030…031, OUT-009): one dialog,
+         two modes rendered by app.js. Result mode opens when the simulated
+         run finishes: run outcome badge (§6.2 sync_runs: success|partial),
+         counters, and a per-project table (§6.2 sync_run_projects:
+         written|unchanged|skipped|failed) with target file, reason, error
+         code and a "what to do" hint (UI-011). Pending mode opens from the
+         sync counter chip (MAIN-026) and lists the projects with unsynced
+         changes (G5: nothing is written outside "Run sync"). -->
+      <dialog id="sync-summary-dialog" class="modal modal-lg" aria-labelledby="ss-title">
+        <form method="dialog">
+          <h2 id="ss-title">Sync summary</h2>
+
+          <!-- Result mode: outcome + per-project table -->
+          <div id="ss-result" hidden>
+            <p class="modal-text ss-subtitle">
+              <span id="ss-run-badge" class="chip ss-run-badge">partial</span>
+              <span id="ss-run-note"></span>
+            </p>
+
+            <div id="ss-counters" class="ss-counters" role="group" aria-label="Run counters">
+              <span class="chip ss-count ss-count--written">
+                Written <strong id="ss-n-written">0</strong>
+              </span>
+              <span class="chip ss-count ss-count--unchanged">
+                Unchanged <strong id="ss-n-unchanged">0</strong>
+              </span>
+              <span class="chip ss-count ss-count--skipped">
+                Skipped <strong id="ss-n-skipped">0</strong>
+              </span>
+              <span class="chip ss-count ss-count--failed">
+                Failed <strong id="ss-n-failed">0</strong>
+              </span>
+            </div>
+
+            <div class="ss-body">
+              <table class="ss-table">
+                <caption class="visually-hidden">
+                  Sync results: project, target file, status and reason
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col" class="ss-col-proj">Project</th>
+                    <th scope="col">Target file</th>
+                    <th scope="col" class="ss-col-status">Status</th>
+                    <th scope="col">Reason</th>
+                  </tr>
+                </thead>
+                <tbody id="ss-rows"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Pending mode: projects with unsynced changes (MAIN-026) -->
+          <div id="ss-pending" hidden>
+            <p class="modal-text">Projects whose current assignments differ from the last sync.</p>
+            <div id="ss-pending-list" class="ss-body">
+              <table class="ss-table">
+                <caption class="visually-hidden">
+                  Projects with unsynced changes and their target files
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col" class="ss-col-proj">Project</th>
+                    <th scope="col">Target file</th>
+                  </tr>
+                </thead>
+                <tbody id="ss-pending-rows"></tbody>
+              </table>
+            </div>
+            <p id="ss-pending-empty" class="hist-empty" hidden>Everything is synced.</p>
+            <p class="ps-hint">
+              Files change only on the explicit “Run sync” command (G5) — nothing is written
+              meanwhile.
+            </p>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+            <button type="button" id="ss-run-btn" class="btn btn-primary" hidden>Run sync</button>
           </div>
         </form>
       </dialog>

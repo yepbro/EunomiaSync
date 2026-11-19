@@ -3,7 +3,8 @@
    Spec: docs/spec.md § 7.4 (MAIN-001…031), § 7.3 (UI-003 instruction
    editor modal, LIB-026…027 history modal, D-16), § 7.1 PRJ-002…007
    (repository scan modal, NFR-015), PRJ-008…012 (project settings
-   modal), UI-001, UI-021, UI-022, NFR-020.
+   modal), § 7.5 OUT-009 + § 6.2 run statuses (sync summary modal,
+   MAIN-024…031), UI-001, UI-011, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
 
@@ -1888,6 +1889,242 @@ label.scan-row:hover {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ----- Sync summary modal (MAIN-024…031) ---------------------------------- */
+/* One dialog, two modes rendered by app.js (OUT-009): the per-project
+   result of a sync run — outcome badge (§6.2 sync_runs), counters,
+   status badges with error codes and "what to do" hints (UI-011) — and
+   the pending-changes list opened from the sync counter (MAIN-026). */
+
+/* Run progress in the sync bar (MAIN-030): "k of N" live region next to
+   the disabled button + a small spinner; reduced motion keeps a static
+   ring (UI-022) */
+.sync-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-progress[hidden] {
+  display: none;
+}
+
+.sync-spinner {
+  inline-size: 12px;
+  block-size: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-block-start-color: var(--accent);
+  flex: none;
+  animation: sync-spin 0.9s linear infinite;
+}
+
+@keyframes sync-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sync-spinner {
+    animation: none;
+    border-block-start-color: var(--border-strong);
+  }
+}
+
+/* Run outcome badge (§6.2 sync_runs status enum: success | partial) */
+.ss-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ss-run-badge {
+  font-weight: 600;
+}
+
+.ss-run-badge--success {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.ss-run-badge--partial {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+/* Counters row: Written n · Unchanged n · Skipped n · Failed n */
+.ss-counters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ss-count strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.ss-count--written {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.ss-count--unchanged {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.ss-count--skipped {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+.ss-count--failed {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+/* Results table: scrolling body like .ps-body / .hist-body. The mode
+   wrappers are flex columns so the inner .ss-body shrinks and scrolls
+   while the title, outcome and counters stay fixed. */
+#ss-result,
+#ss-pending {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  min-inline-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* `hidden` must win over the flex display of the mode wrappers */
+#ss-result[hidden],
+#ss-pending[hidden] {
+  display: none;
+}
+
+.modal-lg .ss-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+
+.ss-table {
+  border-collapse: collapse;
+  inline-size: 100%;
+  font-size: 12.5px;
+}
+
+.ss-table th,
+.ss-table td {
+  text-align: start;
+  padding: 7px 8px;
+  border-block-end: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.ss-table th {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.ss-col-proj {
+  inline-size: 110px;
+}
+
+.ss-col-status {
+  inline-size: 92px;
+}
+
+.ss-proj {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ss-file code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.ss-st-cell {
+  white-space: nowrap;
+}
+
+/* Status badges (NFR-020: the status is in the text; the tint is a
+   secondary cue mixed from the theme vars so both themes stay readable) */
+.ss-st {
+  font-weight: 600;
+}
+
+.ss-st--written {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.ss-st--unchanged {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.ss-st--skipped {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+.ss-st--failed {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+/* Reason cell: sentence, then error-code chip + "what to do" hint
+   (UI-011). Inner spans only — the td keeps its table-cell display. */
+.ss-reason {
+  min-inline-size: 0;
+}
+
+.ss-reason-text {
+  display: block;
+  min-inline-size: 0;
+}
+
+.ss-code-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-block-start: 4px;
+}
+
+.ss-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.ss-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* The "Run sync" convenience button of pending mode is hidden in result
+   mode; `hidden` must win over the .btn display */
+#sync-summary-dialog .modal-actions .btn[hidden] {
+  display: none;
 }
 
 /* ----- Motion (UI-022: honor the OS "reduce motion" setting) ------------ */
