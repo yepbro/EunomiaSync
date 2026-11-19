@@ -686,15 +686,29 @@ updater is part of the MVP scope (spec 7.9).
 
 ## CI
 
-GitHub Actions workflow (`.github/workflows/ci.yml`) runs five jobs:
+GitHub Actions workflow (`.github/workflows/ci.yml`) runs eleven jobs
+(DECISIONS.md D-060, D-074):
 
 - **lint** — `cargo fmt --check`, `cargo clippy -D warnings`, ESLint,
   Prettier, TypeScript.
-- **test** — `cargo test --workspace`, Vitest.
+- **test-matrix** — `cargo test --workspace` on four OS legs
+  (`ubuntu-latest`, `windows-latest`, `macos-15`, `macos-15-intel`),
+  `fail-fast: false`; the frontend unit tests (Vitest) run on the Linux
+  leg only. On the Windows leg a staging step copies the app manifest
+  beside every test executable as `<exe>.manifest` — without it the
+  manifest-less test harnesses die at load with
+  `STATUS_ENTRYPOINT_NOT_FOUND` (D-074; the same note in
+  `CONTRIBUTING.md` covers running the tests on a local Windows
+  machine).
+- **test** — a roll-up gate, not a suite: it fails unless every
+  `test-matrix` leg succeeded, keeping the branch-protection context
+  literally named `test` stable while the matrix reports one check per
+  leg.
 - **deny** — `cargo-deny` (licenses, advisories, duplicate crates).
 - **e2e** — Playwright against the Vite dev server.
-- **build** — `tauri build --debug --no-bundle` on Ubuntu, Windows, and
-  macOS.
+- **build** — `tauri build --debug --no-bundle` on the same four OS
+  legs as the test matrix (a compile/link smoke; the macOS legs cover
+  both arm64 and x64).
 
 ## Platform notes
 
@@ -708,15 +722,20 @@ GitHub Actions workflow (`.github/workflows/ci.yml`) runs five jobs:
   `LongPathsEnabled` policy, which the manifest flag alone cannot turn on.
   The custom manifest replaces tauri-build's default wholesale, so it also
   reproduces the default's Common-Controls v6 dependency (needed by the
-  dialog plugin). Automated coverage stops at compile+link: `rc.exe`
-  embeds the manifest as opaque bytes (no XML validation), and the CI
-  build job never runs the binary — the two runtime criteria are verified
+  dialog plugin). Automated coverage stops at compile+link for the
+  application binary itself: `rc.exe` embeds the manifest as opaque bytes
+  (no XML validation), and the CI build job never runs the binary — the
+  two runtime criteria are verified
   by a manual smoke run: (1) with `LongPathsEnabled=1`, add a project
   whose path exceeds 260 characters and confirm load and save succeed
   (and note the expected failure with the policy off); (2) confirm no UAC
   prompt on launch and that the embedded manifest reports `asInvoker` and
   `longPathAware` (`sigcheck64 -m <exe>` or
-  `mt.exe -inputresource:<exe>;#1 -out:manifest.xml`).
+  `mt.exe -inputresource:<exe>;#1 -out:manifest.xml`). The CI test
+  matrix, however, does exercise manifest loading at runtime on Windows
+  — the test executables run with the externally staged v6 manifest
+  (D-074), so a manifest regression that breaks process startup is
+  caught by the `test-matrix` leg, not only by the manual smoke.
 - **macOS:** requires the Xcode Command Line Tools for the Rust/TKG build.
 
 ## Pending decisions

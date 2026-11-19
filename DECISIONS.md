@@ -4634,3 +4634,57 @@ has one — is a heading of level L or higher. Known open item, as in
 D-053/D-062: lib.rs's `//!` module list and ARCHITECTURE.md gain no
 `heading_range` entry — the T-045 brief capped the lib.rs change at
 one `pub mod heading_range;` line while neighbors work in the crate.
+
+### D-074 — Windows test binaries load through an externally staged Common-Controls v6 manifest; the staged copy fsyncs through a write handle — 2026-11-19
+
+Problem: the `test-matrix (windows-latest)` leg (D-060) died at process
+start with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) before any test
+executed. The PE import table showed `comctl32.dll` statically imported
+by the `eunomia_sync_lib` test exe but by none of the store exes: tao and
+tauri import `TaskDialogIndirect`, an export that exists only in Common
+Controls v6, while every cargo-test harness exe linked with no manifest
+at all — tauri-build embeds the app manifest through embed-resource's
+`cargo:rustc-link-arg-bins`, which reaches `[[bin]]` targets only
+(upstream tauri-apps/tauri#13419; the same diagnosis and fix shape are
+merged in dohooo/helmor@386f103, libnyanpasu/clash-nyanpasu#4830,
+Xoshbin/asyar#499 and Psychotoxical/psysonic#1257). With no manifest the
+loader binds comctl32 5.82 and the import cannot resolve, so the exe
+dies before `main`.
+
+Solution: CI stages `src-tauri/windows/app.manifest` as an external
+`<exe>.manifest` beside every eunomia-sync test exe, in the staging step
+between `cargo test --no-run` and the run (next to the WebView2Loader
+DLL copy; the step throws when no exe matches, so a cargo layout change
+fails loudly instead of degrading back to the loader crash). The loader's
+documented precedence makes the mechanism precise: an exe without an
+embedded manifest picks the external file up (the lib test harnesses —
+Common-Controls v6 binds and `TaskDialogIndirect` resolves), while an exe
+with an embedded manifest ignores it (the bin harness keeps tauri's
+RC-embedded one; Vista+ embedded-wins, "Specifying a Default Activation
+Context" on Microsoft Learn). Four delivery routes were measured dead on
+the way there and are kept out of future retries: RUSTFLAGS cannot carry
+`/MANIFESTDEPENDENCY` at all (cargo word-splits RUSTFLAGS shell-style; a
+quoted space-bearing value cannot survive the cargo→rustc hop);
+build-script `cargo:rustc-link-arg` `/MANIFEST:EMBED` +
+`/MANIFESTINPUT` compiled clean but changed nothing at runtime on cargo
+1.100.0 (the brand-new stable whose build-dir layout v2 places test exes
+in `build/<pkg>/<hash>/out`; every published precedent predates it); the
+same flags through RUSTFLAGS embed fine but collide with tauri's
+resource.lib on the bin test harness (CVT1100 duplicate resource
+MANIFEST/1 — cargo applies `-bins` args to a bin's test-mode link too);
+and `/MANIFESTINPUT` without `/MANIFEST:EMBED` is refused outright
+(LNK1220). Known boundary: the staging is CI-only, so a local Windows
+`cargo test --workspace` still dies with 0xc0000139 unless the manifest
+is copied beside the exes the same way — CONTRIBUTING.md documents the
+workaround; revisit when cargo's build-script link-arg behavior on
+1.100+ is understood or upstream lands a durable fix. The same task's
+second Windows find, fixed in `stage_copy`: the staged
+`*.sqlite3.tmp` was fsynced through the read-only handle `File::open`
+yields — Windows' FlushFileBuffers requires GENERIC_WRITE and returns
+ERROR_ACCESS_DENIED there (Unix fsyncs read-only descriptors fine), so
+every restore/recreate staging step died with os error 5; the handle is
+now opened `.write(true)`, flush-only, with no bytes written through it.
+The best-effort parent-directory fsync after the publish rename remains
+a de-facto Unix-only arm (Windows cannot open a directory for a flushing
+handle that way) — accepted, since the staged file's own fsync already
+ran.
