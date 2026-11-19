@@ -4832,3 +4832,74 @@ heading × every level (point-wise change, bounds) and every heading
 × both deltas over random trees (whole-shift, guard with first
 offender, untouched outsiders, +1 roundtrip), plus every non-±1
 delta rejected.
+
+### D-073 — The LIB-032 heading-level skips: adjacent-heading pairs, one report per edge — 2026-11-19
+
+Problem: T-048 asks core to find the heading-level skips the UI marks
+with the LIB-032 warning icon. The card names "ALG-063 (§9.7)", but
+§9.7 ends at ALG-062 and no ALG-063 exists in docs/spec.md — the
+rule's canon is the §7.3 acceptance row LIB-032/034/MAIN-018,019:
+"Skipping a level (for example, `##` then `####`) is allowed and
+marked with a warning icon" (the same sentence D-072 cites for "the
+icon is UI, not validation"). Left open: whether a skip reads
+branches or adjacent headings, what one report covers when several
+levels are skipped at once, and which facts the DTO carries.
+
+Solution: `gaps.rs` with one pure function,
+`heading_level_gaps(&[LibraryItem]) -> Vec<HeadingLevelGap>` — a
+single walk that remembers the previous heading only. The pair is
+ADJACENT HEADINGS: the example is two heading markers (`##` then
+`####`), instructions render no heading line (ALG-020) and never
+close a branch (ALG-060), so they are transparent — an H2 followed
+by instructions followed by an H4 is the same skip as H2 directly
+above H4. Every pair the rule reports is a parent edge under
+ALG-060 (a deeper heading never closes the branch above it, so the
+earlier heading is the later one's parent), but the readings are
+NOT equivalent: a heading that closes a deeper sub-branch and then
+hangs under an ancestor across a level gap — the H4 in `H2, H5,
+H4` — is not reported, because its immediate predecessor is deeper
+than it (a close); the adjacent-heading reading is the implemented
+one, so the icon marks the heading that ARRIVES too deep, not every
+descendant of a skipped level (review R1 pinned the divergent
+shapes as named tests). Rule: report iff `next_level > prev_level +
+1`; one
+report per offending edge however many levels it skips (H2 → H5 is
+one skip, not two). Not skips: closes and siblings (level L or
+higher closes, ALG-060), the first heading (no pair), the end of
+the list (no pair), instruction-only and empty lists. The function
+rejects nothing — skips are legal input (D-072); it supplies facts.
+
+The DTO is the minimal fact a warning icon needs: `from_index` (the
+parent), `to_index` (the row the icon marks — the heading that
+arrives too deep), `from_level`, `to_level`, plus two derived
+helpers, `jump()` (observed depth, ≥ 2 for a real report; skipped
+levels = jump − 1) and `expected_level()` (from_level + 1, the
+shallowest legal next step — a real report's from_level is at most
+an H4, so the answer is H3…H5; a hand-built pair rooted at an H6
+saturates at H6, keeping the helper total the way `jump`'s
+saturating_sub does). Following the `HeadingBranch` precedent
+(D-070) the report derives no serde — mapping it over IPC is the
+command layer's task.
+
+Tests: the DoD as unit tests — dense trees (the full H2→H6 ladder
+and a mixed close/sibling tree) report nothing; the LIB-032 example
+H2→H4 with the exact DTO; H2→H5 and H2→H6-after-an-empty-branch as
+single reports with the right jumps; several skips in one list in
+collection order; a skip deep in the tree naming its real parent
+(the H3, not the H2 root); active and hidden instructions transparent
+(bare vs interleaved ladders, indices shifted only); closes/siblings/
+equal levels never reported; the end of the list creating no report;
+a deep first heading, a single heading, instructions only, empty;
+DTO well-formedness (indices address those very headings, no heading
+strictly between, jump ≥ 2, expected = from + 1); purity and
+determinism; the T-047 integration (change-level creating a skip,
+a −1 shift closing one) and the ALG-060 cross-check (the pair's later
+heading lies inside the earlier one's branch); the divergent shapes
+where the adjacent and parent-edge readings split (`H2, H5, H4` and
+`H2, H4, H4`: the closing/sibling heading under a gap is NOT
+re-reported) and `expected_level` saturating for a hand-built
+degenerate pair. Four proptest properties (256 cases, fixed
+seed 48 — the D-053/D-070/D-071/D-072 run policy, which this entry
+joins): the reports equal the independently recomputed too-deep
+adjacent-heading pairs; every report is a real parent edge; interleaved
+instructions change only the indices; determinism.

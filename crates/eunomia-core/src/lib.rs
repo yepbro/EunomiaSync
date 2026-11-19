@@ -35,6 +35,9 @@
 //! - [`levels`] — the ALG-062 level operations: change one
 //!   heading's level point-wise, shift every heading of a branch
 //!   by ±1
+//! - [`gaps`] — the LIB-032 heading-level skips: where the next
+//!   heading arrives more than one level deeper, as facts for the
+//!   UI warning icon
 
 pub mod assembly_b;
 pub mod assignment;
@@ -42,6 +45,7 @@ pub mod body;
 pub mod compare;
 pub mod dirty;
 pub mod extra_files;
+pub mod gaps;
 pub mod hash;
 pub mod heading_range;
 pub mod levels;
