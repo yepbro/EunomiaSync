@@ -23,7 +23,6 @@
   const editVariants = document.getElementById('edit-variants')
   const editVariantsSummary = document.getElementById('edit-variants-summary')
   const editVariantsList = document.getElementById('edit-variants-list')
-  const editLabel = document.getElementById('edit-text-label')
   const runSyncBtn = document.getElementById('run-sync')
   const syncBadge = document.querySelector('.syncbar .badge')
   const syncCounterText = document.getElementById('sync-counter-text')
@@ -332,7 +331,6 @@
           `</div>`,
       )
       .join('')
-    editLabel.textContent = variants.length ? 'Text' : 'Text (main variant)'
     editDialog.showModal()
   })
 
