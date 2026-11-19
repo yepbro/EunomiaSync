@@ -590,11 +590,15 @@ log_level = "info"
     #[test]
     fn a_data_dir_that_is_not_a_directory_fails_and_names_the_path() {
         // Arrange: the would-be data directory sits under a regular
-        // file, so reading the config inside it fails with ENOTDIR
-        // before any write is attempted — the read-failure arm of the
-        // seam (the write arm is covered by the read-only-parent test
-        // below; the layout step would normally have aborted first, the
-        // seam still surfaces its own failure instead of pretending).
+        // file, so no read or write under it can succeed — the arm
+        // that reports it differs by OS (Unix reads ENOTDIR and stops
+        // in the read arm; Windows reads ERROR_PATH_NOT_FOUND, which
+        // is `ErrorKind::NotFound`, so the seam continues into the
+        // create arm and fails writing the `.tmp` sibling — the write
+        // arm's own failure mode is covered separately by the
+        // read-only-parent test below). The layout step would
+        // normally have aborted first; the seam still surfaces its
+        // own failure instead of pretending.
         let temp = tempfile::tempdir().expect("failed to create a temp directory");
         let blocker = temp.path().join("blocker");
         fs::write(&blocker, b"not a directory").expect("writing a temp file must work");
@@ -605,15 +609,12 @@ log_level = "info"
 
         // Assert: the failure is reported (never swallowed, never a
         // panic) and the message points at the data root's config
-        // file — what the startup abort prints. Cross-OS routing
-        // differs: Unix fails the read with ENOTDIR, and the read
-        // arm's error names the final `config.toml` path; Windows
-        // fails the same read with ERROR_PATH_NOT_FOUND, which is
-        // `ErrorKind::NotFound`, so the seam takes the create arm and
-        // the write error names the `.config.toml.tmp` sibling. Both
-        // spellings live under this data root and carry the config
-        // file name, so that is the asserted contract; the exact
-        // final-path spelling stays asserted on the arm that ran.
+        // file — what the startup abort prints. The root + file-name
+        // check states the platform-neutral intent once; each OS then
+        // pins its arm's exact, deterministic path spelling — the
+        // final `config.toml` on Unix (read arm), the
+        // `.config.toml.tmp` sibling on Windows (create arm) — so a
+        // drift onto the wrong arm or the wrong file fails loudly.
         let error = result.expect_err("a read under a regular file must fail");
         let expected_root = root.display().to_string();
         let message = error.to_string();
@@ -621,6 +622,19 @@ log_level = "info"
             message.contains(&expected_root) && message.contains("config.toml"),
             "the error must name the config file under the data root \
              (`{expected_root}/config.toml`), got: {error}"
+        );
+        #[cfg(unix)]
+        let exact_path = root.join("config.toml").display().to_string();
+        #[cfg(windows)]
+        let exact_path = root.join(".config.toml.tmp").display().to_string();
+        // Every leg of the CI matrix is unix or windows; the fallback
+        // only keeps the test compiling on any other target.
+        #[cfg(not(any(unix, windows)))]
+        let exact_path = root.join("config.toml").display().to_string();
+        assert!(
+            message.contains(&exact_path),
+            "the error must name the failing arm's exact path \
+             (`{exact_path}`), got: {error}"
         );
         assert!(
             error.source().is_some(),
