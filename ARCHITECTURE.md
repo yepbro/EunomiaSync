@@ -686,7 +686,7 @@ updater is part of the MVP scope (spec 7.9).
 
 ## CI
 
-GitHub Actions workflow (`.github/workflows/ci.yml`) runs eleven jobs
+GitHub Actions workflow (`.github/workflows/ci.yml`) runs twelve jobs
 (DECISIONS.md D-060, D-074):
 
 - **lint** — `cargo fmt --check`, `cargo clippy -D warnings`, ESLint,
