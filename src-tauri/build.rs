@@ -17,13 +17,15 @@ fn main() {
     // links it through `cargo:rustc-link-arg-bins`), so cargo-test harness
     // exes link with no manifest, bind comctl32 5.82, and die at load with
     // STATUS_ENTRYPOINT_NOT_FOUND (tauri-apps/tauri#13419). Delivering the
-    // manifest to test exes from HERE turned out unreliable on cargo 1.100
-    // (T-241 iteration 1: /MANIFEST:EMBED + /MANIFESTINPUT via plain
-    // `cargo:rustc-link-arg` compiled fine but changed nothing at runtime),
-    // so CI passes the same file to the linker for every test exe through a
-    // space-free RUSTFLAGS instead (see ci.yml) — RUSTFLAGS cannot carry
-    // the wordy /MANIFESTDEPENDENCY form, but /MANIFESTINPUT=<path> has no
-    // spaces and survives cargo's word splitting verbatim.
+    // manifest to test exes from the build script or RUSTFLAGS turned out
+    // to be a dead end on every front (T-241 iterations 1-3: build-script
+    // link args changed nothing at runtime on cargo 1.100; RUSTFLAGS
+    // /MANIFEST:EMBED + /MANIFESTINPUT collides with this very RC embed on
+    // the bin test harness — CVT1100 duplicate resource; /MANIFESTINPUT
+    // without embed is refused — LNK1220). CI instead stages this file as
+    // an external <exe>.manifest next to every test exe: the loader picks
+    // it up for manifest-less exes and ignores it where the embedded one
+    // exists. See the staging step in ci.yml.
     let windows =
         tauri_build::WindowsAttributes::new().app_manifest(include_str!("windows/app.manifest"));
 

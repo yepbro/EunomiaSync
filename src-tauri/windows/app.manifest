@@ -16,8 +16,8 @@
   Common-Controls v6 dependency - so the dependency below is reproduced from
   it verbatim: the dialog plugin (tauri-plugin-dialog, wired in `lib.rs`)
   needs Common Controls v6 for its native dialogs. The RC embed only reaches
-  the app `[[bin]]`; the cargo-test harness exes get this same file from CI
-  through space-free RUSTFLAGS link args (T-241, see ci.yml).
+  the app `[[bin]]`; the cargo-test harness exes get this same file staged
+  beside them by CI as an external <exe>.manifest (T-241, see ci.yml).
 
   Keep this file ASCII-only and one element per line: tauri-winres embeds it
   through the Windows resource compiler by writing each line as a separate

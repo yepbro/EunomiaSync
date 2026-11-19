@@ -103,47 +103,31 @@ jobs:
       # The Common-Controls v6 manifest for the Windows test binaries
       # (T-241). tauri-build's RC embed rides embed-resource's
       # `cargo:rustc-link-arg-bins`, which reaches only [[bin]] targets —
-      # including the bin's cargo-test harness link: every LIB test exe
-      # links with no manifest, binds comctl32 5.82, and dies at load with
+      # including the bin's cargo-test harness link: the LIB test exes link
+      # with no manifest, bind comctl32 5.82, and die at load with
       # STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) because tao/tauri
       # statically import the v6-only TaskDialogIndirect
       # (tauri-apps/tauri#13419).
       #
-      # Delivery: RUSTFLAGS link args on the Windows test legs only — the
-      # app build (job `build`) and non-Windows legs never see them, and
-      # RUSTFLAGS is part of cargo's unit fingerprints, so a restored
-      # rust-cache cannot serve manifest-less binaries as fresh. The value
-      # is deliberately space-free: cargo word-splits RUSTFLAGS shell-style,
-      # which is what killed the earlier /MANIFESTDEPENDENCY attempt (a
-      # quoted value with spaces cannot survive the cargo→rustc hop at
-      # all). /MANIFESTINPUT=<path> needs no quoting; the checkout path on
-      # GitHub runners contains no spaces, asserted below so a path change
-      # fails loudly instead of silently splitting.
+      # Dead ends measured on this repo, kept here so nobody walks them
+      # again: RUSTFLAGS cannot carry /MANIFESTDEPENDENCY (cargo word-splits
+      # it; a quoted space-bearing value cannot survive the cargo→rustc
+      # hop); /MANIFEST:EMBED + /MANIFESTINPUT via RUSTFLAGS embeds fine but
+      # collides with tauri's resource.lib on the bin test harness
+      # (CVT1100 duplicate resource MANIFEST/1); /MANIFESTINPUT without
+      # /MANIFEST:EMBED is refused outright (LNK1220).
       #
-      # /MANIFEST WITHOUT /MANIFEST:EMBED makes link.exe write an EXTERNAL
-      # <exe>.manifest next to every linked exe instead of embedding
-      # RT_MANIFEST. That is what dodges CVT1100 (duplicate resource
-      # MANIFEST/1) on the bin test harness, which already receives
-      # tauri's RC-compiled manifest through resource.lib: per Microsoft's
-      # loader rules the embedded manifest wins and the external file is
-      # ignored there, while the manifest-less lib test exes pick the
-      # external file up and bind Common-Controls v6.
-      - name: Give the test binaries a Common-Controls v6 manifest (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          manifest="$(cygpath -w "$PWD/src-tauri/windows/app.manifest")"
-          case "$manifest" in
-            *[[:space:]]*)
-              echo "manifest path contains whitespace; RUSTFLAGS delivery would split: $manifest" >&2
-              exit 1
-              ;;
-          esac
-          echo "RUSTFLAGS=-C link-arg=/MANIFEST -C link-arg=/MANIFESTINPUT:$manifest" >> "$GITHUB_ENV"
+      # What works: an EXTERNAL manifest file. The loader picks
+      # <exe>.manifest up for a manifest-less exe (the lib test harnesses)
+      # and ignores it when an embedded manifest exists (the bin harness,
+      # which keeps tauri's RC-embedded one — Vista+ precedence, see
+      # "Specifying a Default Activation Context" on Microsoft Learn). No
+      # linker involvement, so no collision and no fingerprint games.
+      # Staged below, next to the DLL, for every eunomia-sync test exe.
       - name: Build tests (Windows DLL staging prerequisite)
         if: runner.os == 'Windows'
         run: cargo test --workspace --no-run
-      - name: Stage WebView2Loader.dll beside test binaries (Windows)
+      - name: Stage WebView2Loader.dll and v6 manifests beside test binaries (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -156,6 +140,17 @@ jobs:
           Get-ChildItem -Path target\debug\build -Recurse -Filter *.exe |
             Where-Object { $_.FullName -match '\\out\\' } |
             ForEach-Object { Copy-Item $dll.FullName -Destination $_.DirectoryName -Force }
+          # T-241: external Common-Controls v6 manifest for every
+          # eunomia-sync test exe — ignored where an embedded manifest
+          # exists (bin harness), picked up where none does (lib harness).
+          # cargo 1.100's build-dir layout v2 places test exes in
+          # build/<pkg>/<hash>/out; deps/ covers the pre-1.100 layout.
+          $manifest = 'src-tauri\windows\app.manifest'
+          Get-ChildItem -Path target\debug\build\eunomia-sync -Recurse -Filter *.exe |
+            Where-Object { $_.FullName -match '\\out\\' } |
+            ForEach-Object { Copy-Item $manifest -Destination "$($_.FullName).manifest" -Force }
+          Get-ChildItem -Path target\debug\deps -Filter 'eunomia_sync*.exe' -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $manifest -Destination "$($_.FullName).manifest" -Force }
       - name: Rust tests
         run: cargo test --workspace
       # The eunomia-sync lib test exe still dies at startup with
