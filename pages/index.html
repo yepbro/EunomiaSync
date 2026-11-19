@@ -1,0 +1,2458 @@
+<!doctype html>
+<!--
+  EunomiaSync — main window prototype.
+  Markup: HTML + pure CSS (styles.css). Interactivity: light vanilla JS
+  (app.js) — search, project filter, "Show hidden", row selection,
+  section collapse, placeholder modals. No dependencies, no build step.
+  Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
+  (MAIN-001…031, D-14, UI bulk operations) + UI-001 (window, pinned sync
+  panel), UI-021 (light/dark via OS setting), UI-022 (reduced motion).
+  Tooltips are native `title` attributes; accessible names are real labels.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>EunomiaSync — Assignment Matrix (prototype)</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- ===== Toolbar: search, project filter, "Show hidden" (D-14, UI) ===== -->
+      <header class="toolbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          EunomiaSync
+        </div>
+
+        <label class="visually-hidden" for="search">Search by instruction name</label>
+        <input
+          id="search"
+          class="search"
+          type="search"
+          placeholder="Search instructions…"
+          autocomplete="off"
+        />
+
+        <label class="visually-hidden" for="proj-filter">Project filter</label>
+        <select id="proj-filter" class="filter">
+          <option selected value="all">All projects</option>
+          <option>EunomiaSync</option>
+          <option>yepbro/site</option>
+          <option>quotameter</option>
+          <option>task-id-mcp</option>
+          <option>utils/deja-vu</option>
+          <option>docktree</option>
+          <option>moli</option>
+          <option>sandbox-cf</option>
+        </select>
+
+        <label class="toggle">
+          <input id="show-hidden" type="checkbox" />
+          Show hidden
+        </label>
+
+        <span class="spacer"></span>
+
+        <span id="selected-chip" class="selected-chip" hidden></span>
+
+        <button
+          type="button"
+          class="btn btn-ghost js-open-dialog"
+          data-dialog-title="Add project"
+          data-dialog-text="Prototype placeholder: in the real app this dialog collects the project folder (with a .git check), name, label color and sync settings (PRJ-001…012)."
+        >
+          + Add project
+        </button>
+        <button
+          type="button"
+          class="btn btn-ghost js-open-dialog"
+          data-dialog-title="New instruction"
+          data-dialog-text="Prototype placeholder: in the real app this dialog creates an instruction — main name, text of the main variant («Main») and a Markdown editor (LIB-001…002)."
+        >
+          + New instruction
+        </button>
+      </header>
+
+      <!-- ===== Assignment matrix (MAIN-001…023, MAIN-010: pinned first column
+         and header row are CSS position:sticky; virtualization is a runtime
+         concern and is intentionally out of scope for this static layout) ==== -->
+      <main class="matrix-wrap" role="region" aria-label="Assignment matrix" tabindex="0">
+        <table class="matrix">
+          <caption class="visually-hidden">
+            Assignment matrix: instructions by project
+          </caption>
+
+          <colgroup>
+            <col class="col-check" />
+            <col class="col-name" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+          </colgroup>
+
+          <thead>
+            <tr>
+              <th scope="col" class="c-check">
+                <input id="select-all" type="checkbox" aria-label="Select all rows" />
+              </th>
+              <th scope="col" class="c-name">Instruction</th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="EunomiaSync — last successful sync: 19 Nov 2026, 14:32 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #10b981" aria-hidden="true"></span>
+                  <span class="proj-name">EunomiaSync</span>
+                </span>
+                <span class="proj-sub st-dirty"
+                  ><span class="dot" aria-hidden="true"></span>unsynced changes</span
+                >
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="yepbro/site — last successful sync: 19 Nov 2026, 09:14 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #3b82f6" aria-hidden="true"></span>
+                  <span class="proj-name">yepbro/site</span>
+                </span>
+                <span class="proj-sub">19 Nov, 09:14</span>
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="quotameter — target file changed outside the app (see 5.7). Last successful sync: 12 Nov 2026, 09:10 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #8b5cf6" aria-hidden="true"></span>
+                  <span class="proj-name">quotameter</span>
+                </span>
+                <span class="proj-sub st-warn">
+                  <svg class="ic" viewBox="0 0 16 16" aria-hidden="true">
+                    <path
+                      d="M8 2.6 14.4 13.4H1.6Z"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linejoin="round"
+                    />
+                    <path
+                      d="M8 6.8v3"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                    />
+                    <circle cx="8" cy="11.6" r=".9" fill="currentColor" />
+                  </svg>
+                  modified externally
+                </span>
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="task-id-mcp — last successful sync: 18 Nov 2026, 20:41 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #f59e0b" aria-hidden="true"></span>
+                  <span class="proj-name">task-id-mcp</span>
+                </span>
+                <span class="proj-sub st-dirty"
+                  ><span class="dot" aria-hidden="true"></span>unsynced changes</span
+                >
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="utils/deja-vu — folder unavailable (moved or drive disconnected). Last successful sync: 3 Nov 2026, 21:05 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #14b8a6" aria-hidden="true"></span>
+                  <span class="proj-name">utils/deja-vu</span>
+                </span>
+                <span class="proj-sub st-off">
+                  <svg class="ic" viewBox="0 0 16 16" aria-hidden="true">
+                    <circle
+                      cx="8"
+                      cy="8"
+                      r="5.4"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    />
+                    <path
+                      d="M4.6 11.4l6.8-6.8"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                    />
+                  </svg>
+                  unavailable
+                </span>
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="docktree — last successful sync: 17 Nov 2026, 11:02 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #ec4899" aria-hidden="true"></span>
+                  <span class="proj-name">docktree</span>
+                </span>
+                <span class="proj-sub st-dirty"
+                  ><span class="dot" aria-hidden="true"></span>unsynced changes</span
+                >
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="moli — last successful sync: 15 Nov 2026, 18:27 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #6366f1" aria-hidden="true"></span>
+                  <span class="proj-name">moli</span>
+                </span>
+                <span class="proj-sub st-dirty"
+                  ><span class="dot" aria-hidden="true"></span>unsynced changes</span
+                >
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="sandbox-cf — target file AGENTS.md not found. Last successful sync: 10 Nov 2026, 08:55 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #64748b" aria-hidden="true"></span>
+                  <span class="proj-name">sandbox-cf</span>
+                </span>
+                <span class="proj-sub st-warn">
+                  <svg class="ic" viewBox="0 0 16 16" aria-hidden="true">
+                    <path
+                      d="M8 2.6 14.4 13.4H1.6Z"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linejoin="round"
+                    />
+                    <path
+                      d="M8 6.8v3"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                    />
+                    <circle cx="8" cy="11.6" r=".9" fill="currentColor" />
+                  </svg>
+                  target deleted
+                </span>
+              </th>
+            </tr>
+          </thead>
+
+          <tbody>
+            <!-- ======================== ## General ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section General"
+                  ></button
+                  ><span class="hname">General</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="3" style="--depth: 1">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Communication"
+                  ></button
+                  ><span class="hname">Communication</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: Language of responses"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 2"
+                title="Always answer in the user's language; default is English."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Language of responses"
+                  ></button>
+                  <span class="name">Language of responses</span>
+                  <span class="chip" title="2 variants">2</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Language of responses — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <button
+                  type="button"
+                  class="variant-btn"
+                  aria-label="Language of responses — yepbro/site: variant Spanish"
+                  title="Variant: Spanish"
+                ></button>
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Language of responses — quotameter: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Language of responses — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Language of responses — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Language of responses — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Language of responses — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Language of responses — sandbox-cf: main variant"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Response tone" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 2"
+                title="Direct and friendly; no filler phrases."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Response tone"
+                  ></button>
+                  <span class="name">Response tone</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Response tone — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Response tone — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Response tone — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Response tone — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Response tone — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Response tone — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Response tone — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Response tone — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="3" style="--depth: 1">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Code comments"
+                  ></button
+                  ><span class="hname">Code comments</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Comment style" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 2"
+                title="Comments explain why, not what."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Comment style"
+                  ></button>
+                  <span class="name">Comment style</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Comment style — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Comment style — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Comment style — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Comment style — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Comment style — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Comment style — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Comment style — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Comment style — sandbox-cf: main variant"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: When to comment" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 2"
+                title="Public API, workarounds, non-obvious algorithms."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: When to comment"
+                  ></button>
+                  <span class="name">When to comment</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="When to comment — quotameter: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- ======================== ## Code Style ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Code Style"
+                  ></button
+                  ><span class="hname">Code Style</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: Formatting and linting"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="The formatter is the source of truth; never argue with it."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Formatting and linting"
+                  ></button>
+                  <span class="name">Formatting and linting</span>
+                  <span class="chip" title="2 variants">2</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Formatting and linting — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Formatting and linting — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Formatting and linting — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Formatting and linting — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Formatting and linting — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Formatting and linting — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Formatting and linting — moli: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Formatting and linting — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: Naming conventions"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Descriptive names; no single-letter identifiers outside loop counters."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Naming conventions"
+                  ></button>
+                  <span class="name">Naming conventions</span>
+                  <span class="chip" title="2 variants">2</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Naming conventions — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Naming conventions — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Naming conventions — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <button
+                  type="button"
+                  class="variant-btn"
+                  aria-label="Naming conventions — task-id-mcp: variant Strict"
+                  title="Variant: Strict"
+                ></button>
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Naming conventions — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Naming conventions — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Naming conventions — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Naming conventions — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Type hints" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Full annotations on all public signatures."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Type hints"
+                  ></button>
+                  <span class="name">Type hints</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Type hints — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Type hints — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Type hints — quotameter: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Type hints — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Type hints — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Type hints — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Type hints — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Type hints — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Line length" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Soft limit 100 characters, hard limit 120."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Line length"
+                  ></button>
+                  <span class="name">Line length</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Line length — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- Hidden instruction (LIB-005…007): visible only with "Show hidden" -->
+            <tr class="row-hidden">
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Docstring format" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Hidden instruction — visible only with the Show hidden toggle on."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Docstring format"
+                  ></button>
+                  <span class="name">Docstring format</span>
+                  <span class="chip" title="1 variant">1</span>
+                  <span class="hidden-chip">hidden</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Docstring format — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- ======================== ## Git Workflow ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Git Workflow"
+                  ></button
+                  ><span class="hname">Git Workflow</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  checked
+                  aria-label="Select row: Commit messages"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Imperative mood, subject up to 72 characters; the body explains why."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Commit messages"
+                  ></button>
+                  <span class="name">Commit messages</span>
+                  <span class="chip" title="2 variants">2</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Commit messages — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Commit messages — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <button
+                  type="button"
+                  class="variant-btn"
+                  aria-label="Commit messages — quotameter: variant Conventional Commits"
+                  title="Variant: Conventional Commits"
+                ></button>
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Commit messages — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Commit messages — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <button
+                  type="button"
+                  class="variant-btn"
+                  aria-label="Commit messages — docktree: variant Conventional Commits"
+                  title="Variant: Conventional Commits"
+                ></button>
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Commit messages — moli: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Commit messages — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Branch naming" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="feature/t-&lt;n&gt;-&lt;slug&gt; — from the task card number."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Branch naming"
+                  ></button>
+                  <span class="name">Branch naming</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Branch naming — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Branch naming — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Branch naming — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Branch naming — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Branch naming — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Branch naming — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Branch naming — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Branch naming — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- Empty instruction (MAIN-009): special icon, dimmed name -->
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Pre-commit checks" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Empty instruction — the text is not written yet."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Pre-commit checks"
+                  ></button>
+                  <span class="empty-mark" aria-hidden="true"></span>
+                  <span class="name name-empty">Pre-commit checks</span>
+                  <span class="visually-hidden">(empty instruction)</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Pre-commit checks — EunomiaSync: empty variant assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- Hidden instruction (LIB-005…007): visible only with "Show hidden" -->
+            <tr class="row-hidden">
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: PR review checklist"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Hidden instruction — visible only with the Show hidden toggle on."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: PR review checklist"
+                  ></button>
+                  <span class="name">PR review checklist</span>
+                  <span class="chip" title="2 variants">2</span>
+                  <span class="hidden-chip">hidden</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- ======================== ## Testing ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Testing"
+                  ></button
+                  ><span class="hname">Testing</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Unit tests" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Test behavior, not implementation."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Unit tests"
+                  ></button>
+                  <span class="name">Unit tests</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Unit tests — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Unit tests — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Unit tests — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Unit tests — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Unit tests — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Unit tests — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Unit tests — moli: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Unit tests — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: E2E tests" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Smoke scenarios run on every pull request."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: E2E tests"
+                  ></button>
+                  <span class="name">E2E tests</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="E2E tests — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="E2E tests — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="E2E tests — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="E2E tests — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="E2E tests — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="E2E tests — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input type="checkbox" class="assign" aria-label="E2E tests — moli: not assigned" />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="E2E tests — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Coverage targets" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Critical paths are covered at 80% or more."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Coverage targets"
+                  ></button>
+                  <span class="name">Coverage targets</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Coverage targets — moli: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: Bug-driven development"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="A red test first, then the fix that makes it green."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Bug-driven development"
+                  ></button>
+                  <span class="name">Bug-driven development</span>
+                  <span class="chip" title="2 variants">2</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <button
+                  type="button"
+                  class="variant-btn"
+                  aria-label="Bug-driven development — EunomiaSync: variant Bug-first"
+                  title="Variant: Bug-first"
+                ></button>
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bug-driven development — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bug-driven development — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bug-driven development — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bug-driven development — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Bug-driven development — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bug-driven development — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bug-driven development — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- ======================== ## Documentation ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Documentation"
+                  ></button
+                  ><span class="hname">Documentation</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: README updates" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="README is updated with any user-visible behavior change."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: README updates"
+                  ></button>
+                  <span class="name">README updates</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="README updates — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="README updates — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="README updates — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="README updates — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="README updates — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="README updates — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="README updates — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="README updates — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: DECISIONS.md entries"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Every solved problem gets a D-NNN entry."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: DECISIONS.md entries"
+                  ></button>
+                  <span class="name">DECISIONS.md entries</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="DECISIONS.md entries — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="DECISIONS.md entries — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="DECISIONS.md entries — quotameter: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="DECISIONS.md entries — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="DECISIONS.md entries — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="DECISIONS.md entries — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="DECISIONS.md entries — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="DECISIONS.md entries — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- Empty instruction, nowhere assigned -->
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Changelog" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Empty instruction — the text is not written yet."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Changelog"
+                  ></button>
+                  <span class="empty-mark" aria-hidden="true"></span>
+                  <span class="name name-empty">Changelog</span>
+                  <span class="visually-hidden">(empty instruction)</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input type="checkbox" class="assign" aria-label="Changelog — moli: not assigned" />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- ======================== ## Security ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Security"
+                  ></button
+                  ><span class="hname">Security</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  checked
+                  aria-label="Select row: Secrets handling"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Never commit secrets; use environment variables and secret stores."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Secrets handling"
+                  ></button>
+                  <span class="name">Secrets handling</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — quotameter: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Secrets handling — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — moli: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — sandbox-cf: main variant"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Dependency audit" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="cargo-deny and npm audit run on CI."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Dependency audit"
+                  ></button>
+                  <span class="name">Dependency audit</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Dependency audit — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Dependency audit — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Dependency audit — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Dependency audit — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Dependency audit — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Dependency audit — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Dependency audit — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Dependency audit — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- ======================== ## Performance ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Performance"
+                  ></button
+                  ><span class="hname">Performance</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: Bundle size budget"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Initial bundle is at most 200 KB gzip."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Bundle size budget"
+                  ></button>
+                  <span class="name">Bundle size budget</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Bundle size budget — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Profiling" />
+              </td>
+              <th scope="row" class="c-name" style="--depth: 1" title="Measure before optimizing.">
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Profiling"
+                  ></button>
+                  <span class="name">Profiling</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input type="checkbox" class="assign" aria-label="Profiling — moli: not assigned" />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Empty search state (UI-012) -->
+        <div id="empty-state" class="empty-state" hidden>
+          No instructions match the current search.
+        </div>
+      </main>
+
+      <!-- ===== Sync panel: pinned outside the scroll area (MAIN-024…027) ===== -->
+      <footer class="syncbar">
+        <button id="run-sync" type="button" class="btn btn-primary">Run sync</button>
+
+        <span class="sync-last">
+          Last successful sync:
+          <strong>19 Nov 2026, 14:32 (UTC+3)</strong>
+        </span>
+
+        <span class="spacer"></span>
+
+        <button
+          type="button"
+          class="sync-counter"
+          title="Projects with unsynced changes — click for the list"
+        >
+          <span class="badge" aria-hidden="true">4</span>
+          <span id="sync-counter-text">4 projects with unsynced changes</span>
+        </button>
+      </footer>
+
+      <!-- Placeholder modal (UI-002 modals; native <dialog> gives focus
+         management, inert background and Esc-close for free) -->
+      <dialog id="placeholder-dialog" class="modal" aria-labelledby="dlg-title">
+        <form method="dialog">
+          <h2 id="dlg-title">Add project</h2>
+          <p id="dlg-text" class="modal-text">Placeholder.</p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Close</button>
+            <button value="ok" class="btn btn-primary">Add</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Instruction editor (UI-003, LIB-002): textarea + variants accordion.
+         Filled by app.js from the clicked row; accordion only appears
+         when the instruction has alternative variants. -->
+      <dialog id="edit-dialog" class="modal" aria-labelledby="edit-title">
+        <form method="dialog">
+          <h2 id="edit-title">Edit instruction</h2>
+          <label class="field-label" id="edit-text-label" for="edit-text"
+            >Text (main variant)</label
+          >
+          <textarea id="edit-text" class="edit-text" rows="6"></textarea>
+          <details id="edit-variants" class="variants-accordion">
+            <summary id="edit-variants-summary">Variants</summary>
+            <div id="edit-variants-list" class="variants-list"></div>
+          </details>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="save" class="btn btn-primary">Save</button>
+          </div>
+        </form>
+      </dialog>
+
+      <script src="app.js"></script>
+    </div>
+  </body>
+</html>

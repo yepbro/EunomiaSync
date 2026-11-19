@@ -1,0 +1,799 @@
+/* ==========================================================================
+   EunomiaSync — main window prototype (static layout only).
+   Spec: docs/spec.md § 7.4 (MAIN-001…031), UI-001, UI-021, UI-022, NFR-020.
+   Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
+   ========================================================================== */
+
+:root {
+  color-scheme: light dark;
+
+  /* Light theme (UI-021: follows the OS setting via the media query below) */
+  --bg: #eef2f7;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+
+  --text: #0f172a;
+  --text-muted: #64748b;
+  --text-faint: #94a3b8;
+
+  --accent: #059669;
+  --accent-strong: #047857;
+  --accent-soft: #d1fae5;
+  --on-accent: #ffffff;
+
+  --warning: #b45309;
+  --danger: #dc2626;
+  --focus: #2563eb;
+
+  --row-hover: #f1f5f9;
+
+  --radius: 6px;
+  --radius-sm: 4px;
+
+  /* Column widths (MAIN-010: minimum row height 28px) */
+  --w-check: 40px;
+  --w-name: 300px;
+  --w-proj: 150px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1220;
+    --surface: #16213a;
+    --surface-2: #1d2a45;
+    --border: #2b3a58;
+    --border-strong: #3d4f73;
+
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --text-faint: #64748b;
+
+    --accent: #10b981;
+    --accent-strong: #34d399;
+    --accent-soft: #064e3b;
+    --on-accent: #052e22;
+
+    --warning: #f59e0b;
+    --danger: #f87171;
+    --focus: #60a5fa;
+
+    --row-hover: #22304e;
+  }
+}
+
+/* ----- Base ------------------------------------------------------------ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  block-size: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* One main window, minimum 960×600 (UI-001) */
+.app {
+  display: flex;
+  flex-direction: column;
+  block-size: 100dvh;
+  min-inline-size: 960px;
+  min-block-size: 600px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Screen-reader-only text (accessible names for icon-only controls) */
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
+/* ----- Toolbar (D-14, UI: search + project filter + "Show hidden") ----- */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border-block-end: 1px solid var(--border);
+  flex: none;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.brand-mark {
+  inline-size: 12px;
+  block-size: 12px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, #10b981, #0ea5e9);
+}
+
+.toolbar input[type='search'],
+.toolbar select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  min-block-size: 28px;
+}
+
+.toolbar input[type='search'] {
+  flex: 0 1 300px;
+  min-inline-size: 160px;
+}
+
+.toolbar select {
+  max-inline-size: 180px;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+/* ----- Buttons ---------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-weight: 600;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  padding: 5px 12px;
+  min-block-size: 28px;
+  cursor: pointer;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.btn-primary:hover {
+  background: var(--accent-strong);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+}
+
+.btn-ghost:hover {
+  color: var(--text);
+  border-color: var(--text-faint);
+}
+
+/* ----- Matrix region (MAIN-010: pinned header row and first columns) ---- */
+
+.matrix-wrap {
+  flex: 1 1 auto;
+  min-block-size: 0; /* allow the flex item to shrink so the table scrolls */
+  overflow: auto;
+  background: var(--bg);
+}
+
+.matrix-wrap:focus-visible {
+  outline-offset: -2px;
+}
+
+.matrix {
+  table-layout: fixed;
+  inline-size: max-content;
+  min-inline-size: 100%;
+  border-collapse: separate; /* required for position:sticky cells */
+  border-spacing: 0;
+}
+
+.matrix .col-check {
+  width: var(--w-check);
+}
+.matrix .col-name {
+  width: var(--w-name);
+}
+.matrix .col-proj {
+  width: var(--w-proj);
+}
+
+.matrix th,
+.matrix td {
+  padding: 3px 10px;
+  font-weight: inherit;
+  text-align: start;
+}
+
+/* Header row: pinned to the top */
+.matrix thead th {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 20;
+  background: var(--surface-2);
+  border-block-end: 1px solid var(--border-strong);
+}
+
+/* Body cells */
+.matrix tbody th,
+.matrix tbody td {
+  border-block-end: 1px solid var(--border);
+}
+
+/* First columns: pinned to the left (checkbox + instruction name) */
+.matrix .c-check {
+  inset-inline-start: 0;
+}
+
+.matrix .c-name {
+  inset-inline-start: var(--w-check);
+}
+
+.matrix tbody .c-check,
+.matrix tbody .c-name {
+  position: sticky;
+  z-index: 10;
+  background: var(--surface);
+  border-inline-end: 1px solid var(--border);
+}
+
+.matrix thead .c-check {
+  z-index: 32;
+  border-inline-end: 1px solid var(--border);
+}
+
+.matrix thead .c-name {
+  z-index: 31;
+  border-inline-end: 1px solid var(--border);
+}
+
+/* Row hover (sticky cells need a solid background to cover scrolled text) */
+.matrix tbody tr:hover .c-check,
+.matrix tbody tr:hover .c-name,
+.matrix tbody tr:hover .c-cell,
+.matrix tbody tr:hover .c-fill {
+  background-color: var(--row-hover);
+}
+
+/* Row height: at least 28 px (MAIN-010) */
+.matrix tbody th,
+.matrix tbody td {
+  block-size: 28px;
+}
+
+/* ----- Project column headers (MAIN-028: state as icon + text) ----------
+     NB: `th` must keep its table-cell display (flex on the cell itself
+     breaks the table layout); the inner spans provide the two lines. --- */
+
+.proj-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-inline-size: 0;
+  margin-block-end: 3px;
+}
+
+.proj-color {
+  inline-size: 10px;
+  block-size: 10px;
+  border-radius: 3px;
+  background: var(--c, var(--text-faint));
+  flex: none;
+}
+
+.proj-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.proj-sub {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.proj-sub .ic {
+  inline-size: 12px;
+  block-size: 12px;
+  flex: none;
+}
+
+.proj-sub.st-dirty {
+  color: var(--warning);
+}
+.proj-sub.st-warn {
+  color: var(--warning);
+}
+.proj-sub.st-off {
+  color: var(--danger);
+}
+
+.dot {
+  inline-size: 7px;
+  block-size: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+/* ----- Tree rows: headings (MAIN-015…023: nesting via indents) ---------- */
+
+.row-heading .c-check,
+.row-heading .c-name,
+.row-heading .c-fill {
+  background: var(--surface-2);
+}
+
+.row-heading .hname {
+  font-weight: 600;
+}
+
+.caret {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+/* Tree depth indent: 18 px per level */
+.matrix tbody .c-name {
+  padding-inline-start: calc(10px + var(--depth, 0) * 18px);
+}
+
+.name-wrap {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-inline-size: 0;
+}
+
+.name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Empty instruction (MAIN-009): special icon + dimmed name, shape-based */
+.name-empty {
+  color: var(--text-muted);
+}
+
+.empty-mark {
+  inline-size: 10px;
+  block-size: 10px;
+  border: 1.5px dashed var(--text-faint);
+  border-radius: 3px;
+  flex: none;
+}
+
+.chip {
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 6px;
+  flex: none;
+}
+
+.edit-btn {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  inline-size: 24px; /* target size ≥ 24 px (WCAG 2.5.8) */
+  block-size: 24px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex: none;
+}
+
+.edit-btn::before {
+  content: '✎';
+  font-size: 13px;
+  line-height: 1;
+}
+
+.edit-btn:hover {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+/* ----- Matrix cells (MAIN-001…005: four states, shape-based, NFR-020) --- */
+
+.c-cell {
+  text-align: center;
+}
+
+.c-fill {
+  background: var(--surface);
+}
+
+/* Custom checkbox: unchecked = outline, checked = filled with a check mark */
+input[type='checkbox'] {
+  appearance: none;
+  inline-size: 16px;
+  block-size: 16px;
+  margin: 0;
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 12px 12px;
+  cursor: pointer;
+  flex: none;
+}
+
+input[type='checkbox']:hover {
+  border-color: var(--accent);
+}
+
+input[type='checkbox']:checked {
+  border-color: var(--accent);
+  background-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+input[type='checkbox']:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+/* Alternative variant assigned: a diamond picker button (◇) with a tooltip */
+.variant-btn {
+  appearance: none;
+  font: inherit;
+  inline-size: 24px;
+  block-size: 22px;
+  min-block-size: 22px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.variant-btn::before {
+  content: '◇';
+  font-size: 12px;
+  line-height: 1;
+}
+
+.variant-btn:hover {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ----- Sync panel (MAIN-024…027: pinned below the scroll area) ---------- */
+
+.syncbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border-block-start: 1px solid var(--border);
+  flex: none;
+}
+
+.sync-last {
+  color: var(--text-muted);
+}
+
+.sync-last strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.sync-counter {
+  appearance: none;
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 4px 12px;
+  min-block-size: 28px;
+  cursor: pointer;
+}
+
+.sync-counter:hover {
+  color: var(--text);
+  border-color: var(--text-faint);
+}
+
+.badge {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: #ffffff;
+  background: var(--warning);
+  border-radius: 999px;
+  padding: 3px 7px;
+}
+
+/* ----- Interactive states (app.js) --------------------------------------- */
+
+/* Hidden column: the project filter collapses the whole column */
+.col-off {
+  visibility: collapse;
+}
+
+/* Hidden row: search / collapsed section */
+.row-off {
+  display: none;
+}
+
+/* Row selected via the leading checkbox (solid bg — sticky cells) */
+:root {
+  --row-selected: #d9f2e6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --row-selected: #14382b;
+  }
+}
+
+.matrix tbody tr.row-selected .c-check,
+.matrix tbody tr.row-selected .c-name,
+.matrix tbody tr.row-selected .c-cell,
+.matrix tbody tr.row-selected .c-fill {
+  background-color: var(--row-selected);
+}
+
+/* Hidden instructions (LIB-005…007): dimmed + dashed "hidden" chip */
+.row-hidden .name {
+  color: var(--text-muted);
+}
+
+.hidden-chip {
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--text-muted);
+  border: 1px dashed var(--text-faint);
+  border-radius: 999px;
+  padding: 2px 6px;
+  flex: none;
+}
+
+/* Caret buttons: collapse/expand of sections (click anywhere on the row) */
+.row-heading {
+  cursor: pointer;
+  user-select: none;
+}
+
+.caret-btn {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  inline-size: 24px;
+  block-size: 24px;
+  min-inline-size: 24px;
+  min-block-size: 24px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex: none;
+}
+
+.caret-btn::before {
+  content: '▾';
+  font-size: 11px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.caret-btn[aria-expanded='false']::before {
+  transform: rotate(-90deg);
+}
+
+.caret-btn:hover {
+  color: var(--text);
+  background: var(--row-hover);
+}
+
+/* "N rows selected" chip in the toolbar */
+.selected-chip {
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+/* Empty search state (UI-012) */
+.empty-state {
+  padding: 72px 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+/* ----- Placeholder modal (native <dialog>) -------------------------------- */
+
+.modal {
+  inline-size: min(520px, calc(100vw - 32px));
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 0;
+}
+
+.modal::backdrop {
+  background: rgb(15 23 42 / 0.5);
+}
+
+.modal form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 22px;
+}
+
+.modal h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.modal-text {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+/* Instruction editor modal (UI-003, LIB-002: monospace textarea, variants) */
+.field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.edit-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  resize: vertical;
+  min-block-size: 110px;
+}
+
+.variants-accordion {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.variants-accordion summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.variants-accordion[open] summary {
+  border-block-end: 1px solid var(--border);
+}
+
+.variants-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+}
+
+.variant-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.variant-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-strong);
+}
+
+.variant-textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  resize: vertical;
+  min-block-size: 54px;
+}
+
+/* ----- Motion (UI-022: honor the OS "reduce motion" setting) ------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
