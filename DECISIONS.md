@@ -4725,3 +4725,110 @@ every one-item range × target): interior targets are rejected, every
 other move is a permutation, the range lands whole and in order, the
 untouched items keep their relative order, and exactly the items the
 target leaves before it precede the landed range.
+
+### D-072 — The ALG-062 level operations: point-wise change, whole-branch ±1 shift, and the roundtrip asymmetry — 2026-11-19
+
+Problem: T-047 turns ALG-062 ("Shift branch level ±1" changes the
+levels of all headings in the branch if all new levels stay within
+2–6; otherwise the operation is rejected with `E_VALIDATION`) and
+the LIB-032 "Change level" command into eunomia-core code, on top of
+T-045's `heading_range` (D-070). Five points the prose left open:
+whether "Change level" fires any accompanying effect (a rebuild? a
+reorder?); what `new_level` is, given that `HeadingLevel` (D-042)
+already closes 2–6 and would make the DoD's boundary rejections
+untestable; whether the shift's delta is any integer or exactly ±1;
+what all-or-nothing means in a pure function; and what the roundtrip
+after a shift is.
+
+Solution: module `levels`
+(`crates/eunomia-core/src/levels.rs`), pure functions over
+`&[LibraryItem]` returning a NEW `Vec` (crate style, D-070/D-071) —
+never mutation:
+
+- `change_heading_level(items, index, new_level: u8)` is the
+  LIB-032 "Change level", POINT-WISE by design: "Levels are not
+  recalculated automatically" is the sentence the command answers,
+  so the level is the whole effect — the heading keeps its id, title
+  and place (nothing reorders, DB-005/D-042), instructions keep
+  everything, and the section geometry is whatever the NEXT
+  `heading_branch` call computes from the new levels (core holds no
+  cached shape). Level skips pass unchecked (LIB-032: "allowed and
+  marked with a warning icon" — the icon is UI, not validation).
+  `new_level` is a `u8`, not a `HeadingLevel`, precisely so the
+  §6.9/DoD boundary rejections (1 and 7) are representable and
+  tested; the closed type is constructed inside via `try_from`.
+- `shift_branch_level(items, index, delta: i8)` is ALG-062: the
+  branch resolves inside via `heading_branch` (a caller cannot shift
+  a set that disagrees with the tree), every HEADING in the range
+  moves one level, the range's instructions ride along untouched.
+  `delta` is exactly `-1` or `+1` — the closed set the spec's
+  command names and the UI offers; anything else is rejected as
+  caller arithmetic error (`InvalidDelta`), never clamped.
+- All-or-nothing (the `E_VALIDATION` row's "The whole operation
+  rejected", in the spirit of §6.9 over a structure operation): the
+  validation walks every heading of the branch BEFORE any level is
+  written; a rejection returns `Err` and the pure input cannot have
+  moved. The offender reported is the FIRST in collection order —
+  deterministic. Geometry hands the boundaries their shape: a
+  heading strictly inside a branch is always deeper than its root
+  (ALG-060), so the floor rejection (−1 hitting an H2) can only name
+  the ROOT, while the ceiling rejection (+1 hitting an H6) can name
+  any heading of the branch — pinned as a test.
+- E_VALIDATION boundary: the registry belongs to src-tauri
+  (`AppError`/`ErrorCode`, D-034); `LevelOutOfRange` and
+  `BranchLevelOutOfRange` are the core twins the command layer will
+  map to `E_VALIDATION` — the D-062 (`E_MARKERS_INVALID`) and D-071
+  (`TargetInsideMovedRange`) precedent, mapping left to the future
+  command task.
+- `LevelError` (thiserror): `IndexOutOfBounds`, `NotAHeading` (the
+  change checks its own operand), `LevelOutOfRange`,
+  `InvalidDelta`, `BranchLevelOutOfRange` (the variant carries
+  `index`, `delta`, `offender`, `offender_level`),
+  `Branch(HeadingBranchError)` (transparent).
+  Precedence: the operand/branch resolves first, then the delta,
+  then the levels (D-071's "no branch, no range" rule). The
+  operand-error split is an API decision, not an accident: the
+  change has no branch to resolve, so it checks its own index and
+  kind; the shift delegates to `heading_branch` and wraps. By-id
+  forms are deliberately NOT here — the brief names two
+  index-addressed operations, and the `*_by_id` twins (D-070/D-071
+  precedent) belong to the command-layer task that actually holds
+  the ids; until then `Branch(HeadingNotFound)` is unreachable and
+  documented as waiting.
+
+The roundtrip asymmetry (found by the property test, minimal case
+two sibling H4s): −1-then-+1 is NOT an identity in general — a
+shallower root owns a WIDER branch (the H4 that closed the H4 root
+does not close the H3 it becomes), so the +1 covers the widened
+range and shifts headings the −1 never touched. +1-then-−1 IS always
+the identity — the DoD's roundtrip — because deepening never widens:
+every heading inside the branch deepens with the root and keeps
+not-closing. Both directions are pinned as named tests, and the
+property asserts the roundtrip for +1 only.
+
+lib.rs gains `pub mod levels;` plus a `//!` bullet (the D-071 doc
+list keeps its remaining open items — `assembly_b`, `compare`,
+`dirty`, `extra_files`, `hash`, `marker`, `markers`, `target_file`
+and the ARCHITECTURE.md module map — for a task that owns those
+zones).
+
+Tests: the DoD as unit tests — the 2–6 boundaries for BOTH
+operations (change to 0/1 and 7/8/100/255 rejected, floor and
+ceiling values themselves legal; shift −1 on an H2 root and +1 on a
+nested H6 rejected WHOLE, with a fresh-clone re-derivation of the
+same rejection proving the input never moved); the full 5×5 grid of
+successful change levels (skips included); shift ±1 of a branch, of
+a nested branch alone inside its parent, of a multi-level H3+H4+H5
+branch, and of a lone heading; only-the-branch-touched checks (ids,
+titles, hidden states byte-for-byte); the +1→−1 roundtrip over every
+branch of the tree plus the widening counter-test for the mirror
+pair; error precedence (operand → kind → level; branch → delta →
+levels) and pinned messages; the T-045 integration — the shift walks
+exactly the range `heading_branch` computes, and the recomputed
+branch of the same heading holds the same items one level deeper;
+and change-then-shift composition. Three proptest properties (256
+cases, fixed seed 47 — the D-053/D-070/D-071 run policy) sweep every
+heading × every level (point-wise change, bounds) and every heading
+× both deltas over random trees (whole-shift, guard with first
+offender, untouched outsiders, +1 roundtrip), plus every non-±1
+delta rejected.

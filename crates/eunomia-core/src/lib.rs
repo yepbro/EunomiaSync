@@ -32,6 +32,9 @@
 //! - [`reorder`] — the ALG-061 move: cut a branch (or a one-item
 //!   range), insert it at the target position, renumber `position`
 //!   from 1
+//! - [`levels`] — the ALG-062 level operations: change one
+//!   heading's level point-wise, shift every heading of a branch
+//!   by ±1
 
 pub mod assembly_b;
 pub mod assignment;
@@ -41,6 +44,7 @@ pub mod dirty;
 pub mod extra_files;
 pub mod hash;
 pub mod heading_range;
+pub mod levels;
 pub mod library;
 pub mod marker;
 pub mod markers;
