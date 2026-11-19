@@ -9,11 +9,13 @@
 //! expresses the order as collection order, so the same fact is not
 //! stored twice where it could drift.
 //!
-//! These types carry data only. Validation that belongs to a write
-//! boundary — name lengths, duplicate names, the reserved marker lines,
-//! the 262,144-character text limit (spec §6.9, DB-006, DB-016) — is
-//! the store and IPC layers' job; core receives rows that already
-//! hold. Per spec SEC-008, variant text never goes into logs; that is
+//! These types carry data only. The §6.9 field rules themselves live
+//! next door, in [`crate::library_validators`] (name lengths, the
+//! reserved marker lines, the 262,144-character text limit — spec
+//! §6.9, DB-006, DB-016); the store applies them at the write
+//! boundary, and the cross-row rules (duplicate names) stay the
+//! store's own job, so core receives rows that already hold. Per
+//! spec SEC-008, variant text never goes into logs; that is
 //! a logging-side discipline, and this type simply carries the data.
 
 use std::convert::TryFrom;

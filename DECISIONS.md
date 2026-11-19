@@ -4865,3 +4865,134 @@ case variants and other stems; the five fields validating together
 (the modal's save), and every failure mode being a typed variant.
 No proptest: the rules are total boundary arithmetic with nothing
 random to explore beyond the exact pins.
+
+### D-076 — The §6.9 library field validators: the validation/normalization split, the reserved-line scan over the built form, and the variant-name one-line ruling — 2026-11-19
+
+Problem: T-050 transcribes the §6.9 library rows (instruction name,
+variant name, variant text, heading name + level; DB-006, DB-016) into
+`eunomia-core`, and the card's clauses left five readings open: what
+"CRLF→LF" does inside a VALIDATOR given that ALG-002
+(`normalize::variant_text`, D-044) already owns CR/CRLF→LF + BOM +
+edges; which lines DB-016's "a line equal to the marker" reserves,
+given `classify_line` (D-062) also matches padded marker lines;
+whether the variant NAME row — the one name row that does not say
+"one line" — may contain line breaks; which fields the NUL rejection
+applies to; and whether a heading-level validator is still needed at
+all.
+
+Solution: `library_validators.rs` — four pure functions plus one
+typed error enum (`LibraryFieldError`), in the T-049/D-075 shape
+(code-point counting, trim-then-count names, typed per-field errors,
+schema-CHECK agreement, boundaries pinned at 0/1/limit/limit+1). The
+rulings:
+
+1. Validation-versus-normalization split. The REJECTION rules are
+   this module's: the three length bounds (200/100/262,144 — §6.9,
+   DB-006, the §6.2 CHECKs), the NUL rejection, and DB-016's reserved
+   marker lines. The TRANSFORMATIONS stay where they already live:
+   the save-time "CRLF is changed to LF" fold is the STORE layer's
+   own §6.9 clause, and the build-time form — lone CR, BOM, block
+   edges — is ALG-002's unconditional pass, single-owned by
+   `normalize::variant_text` (D-044). `validate_variant_text` returns
+   its input UNCHANGED: validation, not normalization; nothing here
+   folds, trims or strips variant text (unlike the name fields, the
+   text row and its CHECK have no trim — "empty is allowed" means
+   the empty string, and a whitespace-only text is legal and simply
+   builds to an empty block, D-13). The store order that preserves
+   spec fidelity is fold FIRST, then validate — the length then
+   measures exactly the stored form, which is what the schema CHECK
+   sees. Validating the raw form is conservative in one direction
+   only (the round-1 review's correction of this entry's first
+   draft): it never lets a database violation through (raw length ≥
+   folded length), but it can reject a text §6.9 would allow, by one
+   code point per CRLF — a raw `"x\r\n"` paste keeps two thirds of
+   its character count once folded (measured: raw 262,146 → folded
+   174,764), so the raw form's rejection at 262,145 may be a legal
+   stored text.
+   The save-time fold itself owns no code yet — `eunomia-store` has
+   no library save path as of this task, so the card's "CRLF→LF"
+   clause lives only in this decision: the library create/update
+   STORE task owns it, with fold-before-validate as an explicit
+   acceptance criterion, and it must decide its fold's scope there
+   (§6.9's clause names CRLF only; the lone-CR conversion stays
+   build-time with ALG-002) without re-implementing the build form.
+2. The reserved-line scan runs over the text AS THE BUILD WRITES IT:
+   one `normalize::variant_text` call (reusing D-044's owner), then a
+   `classify_line` scan of the result's lines (reusing D-062's).
+   Rationale: DB-016 exists so a saved variant can never re-appear
+   as a second marker pair in a scheme-B file, and the line structure
+   a parse will see is post-ALG-002 — where a lone CR has become LF
+   and the leading BOM/empty-line edge is gone. A marker hidden
+   behind a leading BOM (`"\u{feff}\n<!-- … -->"`) or exposed by a
+   lone CR (`"x\r<!-- … -->"`) is therefore rejected too, and the
+   verdict never depends on whether the caller already folded CRLF.
+   The widening from DB-016's literal "a line EQUAL to the marker" to
+   `classify_line`'s padded match is the same safety argument: a
+   padded marker line in the managed block WOULD parse as a marker
+   line (D-062's padding class), so exact equality alone would let
+   the corruption through. The error's 1-based line number counts the
+   built form — identical to the stored text's numbering except
+   where ALG-002 dropped the leading edge. The creation-marker line
+   (D-061) is NOT reserved: DB-016 names exactly the two D-19
+   literals, the creation line never matches `classify_line`, and its
+   timestamp makes an exact-match reservation meaningless anyway — a
+   pasted copy is inert prose.
+3. Variant name is one line. §6.9 writes "one line" for the
+   instruction and heading names but only "1–100 characters" for the
+   variant name. The omission is read as editorial (the row's Limits
+   column already carries the uniqueness and Main-default notes): a
+   variant name is the same kind of thing — a list label (the
+   LIB-002 variant list) — so `validate_variant_name` rejects inner
+   `\n`/`\r` exactly like the other two name fields. The module's one
+   deliberate divergence STRICTER than the bare row; pinned by tests.
+   Accepted consequence (round-1 review): SEC-009 re-applies §6.9
+   limits to imports, so a hand-edited library JSON (D-18) carrying a
+   newline in a variant name is rejected where the literal row would
+   permit it — no legitimate export contains one, because the editor
+   itself cannot save it.
+   Edge breaks in all three names are trimmed away, not rejected:
+   the STORED name (the returned, trimmed value) is what must be one
+   line. The Unicode separators U+2028/U+2029 are whitespace, not
+   `\n`/`\r` — they ride along as content, the std-tables boundary
+   D-075 already recorded for labels.
+4. NUL fields: variant text only — that is where §6.9 and DB-016 put
+   it. The three name fields carry no NUL rule (the rows reserve no
+   control-character rule for names; the variant-text row owns that
+   concern, as D-075 ruled for the project fields), so a name
+   containing `\0` validates here. Known open item, verified against
+   SQLite directly: `length()` counts code points only up to the
+   first U+0000 (`length('a'||char(0)||'bc')` = 1), so a name whose
+   FIRST character is NUL passes this validator while the store's
+   own `length(trim(name))` CHECK measures 0 — the insert then fails
+   the CHECK with a raw database error instead of a field error. The
+   same latent gap sits in T-049's project fields; closing it belongs
+   to a validators-wide task, not to T-050's zone. The round-1
+   review added a sharper consequence for one field: the heading
+   title is the one name that reaches the target file verbatim
+   (`## <title>` via the body's heading block), so a NUL in it would
+   put a NUL byte into `AGENTS.md`/`CLAUDE.md` — git then treats the
+   file as binary. That, not the SQLite arithmetic, is the same
+   reason the variant-text NUL rule exists; it belongs on the same
+   validators-wide task's list.
+5. Heading level needs no validator: the closed `HeadingLevel` type
+   (D-042) already makes 1 and 7 unrepresentable, with `TryFrom<u8>`
+   as the store's boundary conversion — there is no free integer left
+   to validate. Also deliberately absent: the two case-insensitive
+   uniqueness clauses (cross-row store queries; the schema's NOCASE
+   index backs one), the `Main` default name (a UI default), and the
+   backup-limit row (a settings field, not a library field).
+
+Names trim-then-count exactly like D-075 (Rust's `str::trim` ⊇
+SQLite's U+0020-only `trim()`; the trimmed string is returned for the
+caller to persist; whitespace-only is Empty). Check order inside the
+text validator is fixed for a deterministic error code: length, then
+NUL, then the reserved scan; inside a name: length, then the
+one-line scan. Boundary: `ReservedContent` is core's variant for the
+future `E_CONTENT_RESERVED` mapping in the src-tauri registry
+(D-034), exactly as `MarkersError` relates to `E_MARKERS_INVALID`
+(D-062) — the mapping itself is a later command-layer task. The
+lib.rs module-list entry for `library_validators` was added; the
+older list's missing entries (markers, marker, assembly_b, compare,
+dirty, extra_files, hash, target_file — D-062's known open item)
+remain untouched: ARCHITECTURE.md, the other half of that
+reconciliation, is outside this task's zone.

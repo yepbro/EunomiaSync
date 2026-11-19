@@ -40,6 +40,8 @@
 //!   UI warning icon
 //! - [`project_validators`] — the §6.9 rules of the editable
 //!   project fields: name, label, description, color, file name
+//! - [`library_validators`] — the §6.9 rules of the editable library
+//!   fields: instruction and heading names, variant name and text
 
 pub mod assembly_b;
 pub mod assignment;
@@ -52,6 +54,7 @@ pub mod hash;
 pub mod heading_range;
 pub mod levels;
 pub mod library;
+pub mod library_validators;
 pub mod marker;
 pub mod markers;
 pub mod normalize;
