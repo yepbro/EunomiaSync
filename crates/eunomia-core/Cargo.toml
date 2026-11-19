@@ -21,6 +21,13 @@ sha2 = "0.10"
 thiserror = "2"
 
 [dev-dependencies]
+# Property tests of the body builder (spec 15.1 names them for random
+# trees; 5.3 pins proptest in the test toolchain) — a spec-pinned,
+# dev-only addition recorded in DECISIONS.md, outside the runtime
+# allow-list of D-017. Minimal features: `std` plus `bit-set`; the
+# `fork`/`timeout` machinery (rusty-fork, tempfile) is not used — the
+# properties are pure and fast.
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
 # Pins the canonical serde literals of the domain vocabulary in unit
 # tests and doc tests. Already resolved workspace-wide (1.0.154 via
 # src-tauri), so this adds no new crate version to the graph.

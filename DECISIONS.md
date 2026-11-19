@@ -3545,3 +3545,103 @@ and the zone boundaries, and caught the one stale half of the
 yet" doc paragraph and the two dead `#[allow(dead_code)]` attributes
 (`action_logged`, `mirror_level`) — removed, the doc now names
 `settings_set` as the first producer.
+
+### D-056 — Property tests of the body builder: proptest through the validating constructor, a backward-walking oracle, a pinned seed — 2026-11-18
+
+Problem: T-036 turns spec §15.1's property-test row — for random
+trees, the order in the file equals the library order (DoD 5–6: order
+and contents), the build is idempotent, a heading with no assigned
+instructions is not output — into code on top of T-035's
+`body::build_body`. Open questions: how proptest enters the graph
+given D-017's core allow-list; how random trees are generated without
+ever bypassing `BuildSnapshot::new`; how an order oracle can check the
+file order without restating the implementation's own walk; and how
+property runs stay stable across CI's three operating systems.
+
+Solution: a `#[cfg(test)] mod property_tests` beside the unit suite in
+`crates/eunomia-core/src/body.rs` (the unit tests of T-035 are
+untouched), with these decisions:
+
+- _Dependency._ `proptest = "1"` (locked 1.12.0) as an eunomia-core
+  dev-dependency: spec §5.3 pins it in the test toolchain, and
+  dev-dependencies are outside D-017's runtime allow-list
+  (serde/sha2/thiserror untouched) — the same policy D-042 applied to
+  its `serde_json` dev-dep. Features kept minimal (`std`, `bit-set`);
+  the default `fork`/`timeout` machinery (rusty-fork, tempfile) is
+  off — the properties are pure and finish in ~0.1 s. Nine new locked
+  packages (proptest, rand 0.10 stack, chacha20, rand_xorshift,
+  unarray, core_detect, borsh/borsh-derive as proptest's transitive
+  graph), licenses MIT/Apache-2.0, cargo-deny green.
+
+- _Generator._ `raw_tree()` builds raw trees — 1–3 projects, 0–15
+  items (headings of level 2–6, instructions with 0–3 variants whose
+  texts come from a ten-entry pool of ALG-002 edges: empty,
+  whitespace-only, CRLF-only, BOM behind leading blank lines, BOM+CRLF
+  plus trailing junk, and plain multi-line bodies), plus one
+  assignment choice per (project, instruction) pair. `assemble()`
+  maps that onto the domain types and builds the snapshot **only
+  through `BuildSnapshot::new`**, remapping the two shapes `new`
+  rejects: an active instruction with no variants gains the empty
+  variant (DB-010 — that empty variant is itself D-13's case), and a
+  choice pointing at a hidden variant-less instruction is dropped (an
+  assignment needs a variant to name, DB-012). A generator bug fails
+  `assemble`'s `expect` and shows up as a failing property. Heading
+  titles get an index suffix (`"<raw> [<index>]"`) and the text pool
+  holds no `'#'`, so heading blocks are unique and can hide inside no
+  variant text — the absence assertion cannot be fooled.
+
+- _Oracle._ The order property compares against an expectation built
+  from the same data by the opposite route: the implementation scans
+  forward from each heading to its section's close (first heading of
+  level ≤ L) and emits while walking; the oracle walks backward from
+  each included instruction, marking its ancestor headings with a
+  running minimum level (a heading is an ancestor iff its level is
+  strictly below every heading between it and the instruction), then
+  emits per item from the raw tree — a different representation, a
+  different geometry direction, no shared walk. The two sides share
+  only what the spec fixes verbatim: `normalize::variant_text`
+  (ALG-002's own unit-tested module, T-034), the `repeat('#', L)` +
+  `' '` + `title` block form and the `"\n\n"` separator. The
+  comparison is full-body equality, so the test pins order and
+  contents together
+  (DoD 5–6, OUT-001/LIB-035). The three §15.1 properties are three
+  tests; "assigned" in the third carries the §9.2 canon reading
+  (assigned AND active, D-053 — a hidden instruction keeps no
+  heading), and no properties beyond §15.1 were invented.
+
+- _Determinism._ The module config pins `cases = 256` and
+  `RngSeed::Fixed(36)` (the task's number — only its fixedness
+  matters), so every run on every OS explores the same trees: a green
+  run cannot flake on a slow runner and a red run reproduces byte for
+  byte, which is what the 3-OS CI criterion needs from the test
+  itself. proptest's standard failure persistence stays on: a failure
+  lands in `crates/eunomia-core/proptest-regressions/body.txt` (the
+  crate-root sibling directory of `src/`), replays on every later run,
+  and would be committed as part of the suite.
+  `PROPTEST_CASES`/`PROPTEST_RNG_SEED` override the pins for local
+  exploration only.
+
+Honest boundaries, recorded (round-1 review): CI runs
+`cargo test --workspace` on Linux only — the three-OS matrix job
+builds the app binary and never compiles, let alone runs, the test
+code — so the card's "tests pass in CI on 3 OSes" is NOT closed by
+this task; cross-OS sameness rests on the pinned ChaCha seed (a
+platform-independent algorithm, no time, environment or file-system
+dependence in the suite), and the actual execution on the other two
+OSes lands with REL-001's fuller matrix. Normalization correctness is
+out of this suite's reach by construction: the oracle calls
+`normalize::variant_text` itself, so an ALG-002 regression turns both
+sides wrong together — that risk is carried by the module's own unit
+suite (T-034) and the unit test pinning that `build_body` calls it at
+all. The idempotence property, §15.1-verbatim, can only fail on
+non-determinism leaking into the pure function (there is none to see:
+the per-project map is lookup-only); it is kept for the spec's
+wording, not counted as independent DoD 5–6 coverage.
+
+Five behavior mutations verified the suite bites, each failing the
+property it targets: section-close `<=` → `<` (order + heading
+absence), dropping the active-state check (order + heading absence),
+separator `"\n\n"` → `"\n"` (order), skipping normalization (order),
+reversed emission (order); idempotence stayed green under every
+deterministic mutation — its scope is §15.1's plain wording, nothing
+deeper.

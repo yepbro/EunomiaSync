@@ -875,3 +875,479 @@ mod tests {
         );
     }
 }
+
+/// Property tests for [`build_body`] (spec §15.1: random trees).
+///
+/// The three properties are §15.1 verbatim, one per test: *the order
+/// in the file equals the library order* (which, through the full-body
+/// oracle below, also pins the contents — DoD 5–6), *the build is
+/// idempotent*, and *a heading with no assigned instructions is not
+/// output*. "Assigned" carries the §9.2 canon's meaning, assigned AND
+/// active (D-053): a hidden instruction keeps no heading.
+///
+/// # The generator
+///
+/// [`raw_tree`] builds raw trees — 1–3 projects, 0–15 items (headings
+/// of level 2–6 and instructions with 0–3 variants whose texts come
+/// from a pool of normalization edges: empty, whitespace-only, BOM,
+/// CRLF, trailing junk), plus one assignment choice per (project,
+/// instruction) pair. [`assemble`] turns a raw tree into a
+/// [`BuildSnapshot`] **through the validating constructor** and remaps
+/// the two raw shapes the constructor rejects: an active instruction
+/// with no variants gains the empty variant (DB-010; that empty
+/// variant is itself D-13's case), and a choice pointing at a hidden
+/// instruction without variants is dropped (an assignment needs a
+/// variant to name, DB-012). Nothing bypasses `new`; a generator bug
+/// surfaces as the `expect` inside `assemble`, i.e. as a failing
+/// property.
+///
+/// # The oracle
+///
+/// The order property needs an expectation built from the same data by
+/// a different route than the implementation, or the test would only
+/// restate it. [`oracle_body`] computes the expected body in a form
+/// deliberately opposite to the implementation's: the implementation
+/// scans forward from each heading to its section's close and emits
+/// while walking; the oracle walks backwards from each included
+/// instruction, deriving its chain of ancestor headings with a running
+/// minimum level (a heading is an ancestor iff its level is strictly
+/// below every heading between it and the instruction — equivalent to
+/// §9.2's "the section ends at the first heading of level ≤ L"), marks
+/// those headings kept, and emits per item without any forward scan.
+/// The two sides share only what the spec fixes verbatim:
+/// [`normalize::variant_text`] (ALG-002, unit-tested on its own in
+/// T-034), the `repeat('#', L) + ' ' + title` block form, and the
+/// `"\n\n"` separator. A bug in the section geometry, the inclusion
+/// rule, the emission order or the separators therefore fails the
+/// comparison, while a refactor of either side alone cannot keep a
+/// wrong body passing.
+///
+/// Heading titles are uniquified (`"<raw> [<index>]"`) so the absence
+/// assertion of the third property cannot be fooled by two headings
+/// sharing one block, and the text pool contains no `'#'`, so a
+/// heading block can never hide inside a variant text.
+///
+/// # Determinism and replay
+///
+/// [`config`] pins the case budget (256 per property) and the RNG seed
+/// (the task's number — only its fixedness matters), so every run —
+/// local or CI, any OS — explores the same trees: a green run cannot
+/// flake on a slow runner, and a red run reproduces byte for byte.
+/// Deeper local exploration stays available through the crate's env
+/// knobs (`PROPTEST_CASES`, `PROPTEST_RNG_SEED`), which override the
+/// pinned values — no CI job sets them, and the determinism guarantee
+/// assumes that stays true. Any failure is persisted by proptest's
+/// standard file persistence into
+/// `crates/eunomia-core/proptest-regressions/body.txt` (the crate-root
+/// sibling directory of `src/`) and replayed on every later run; the
+/// committed regressions file, if one ever appears, is part of the
+/// suite.
+#[cfg(test)]
+mod property_tests {
+    use std::convert::TryFrom;
+    use std::path::Path;
+
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config as ProptestConfig, RngSeed};
+
+    use super::*;
+    use crate::assignment::Assignment;
+    use crate::library::{Heading, HeadingLevel, Instruction, InstructionState, Variant};
+    use crate::project::{BaseName, ExtraFile, ExtraFilePosition, ProjectWriteSettings, Scheme};
+    use crate::snapshot::SnapshotProject;
+
+    // ---- the pinned run policy -----------------------------------------
+
+    /// The deterministic run policy of every property below: 256 cases,
+    /// one fixed seed (see the module docs).
+    fn config() -> ProptestConfig {
+        ProptestConfig {
+            cases: 256,
+            rng_seed: RngSeed::Fixed(36),
+            ..ProptestConfig::default()
+        }
+    }
+
+    // ---- raw trees -------------------------------------------------------
+
+    /// Variant texts: the normalization edges plus plain bodies. The
+    /// pool holds no `'#'`, so no variant text can forge a heading
+    /// block (see the module docs).
+    const CONTENT_POOL: &[&str] = &[
+        "",                                          // empty variant (D-13): no block, heading kept
+        " ",                                         // whitespace-only: normalizes to empty
+        "\r\n",                                      // CRLF-only: normalizes to empty
+        " \n\u{feff}\n\t",                           // whitespace lines with a BOM behind them
+        "\u{feff}\r\nAlways search the web.\r\n   ", // BOM, CRLF, trailing junk
+        "Be brief.",                                 // plain single line
+        "Line one.\r\nLine two.",                    // CRLF inside becomes LF
+        "\r\n\nLate first line",                     // leading empty lines dropped
+        "Trailing two-space break  \r\n ",           // trailing whitespace of the block dropped
+        "First.\n\nSecond.",                         // inner blank line survives
+    ];
+
+    /// Heading titles. Uniqueness comes from the index suffix
+    /// [`assemble`] appends, not from this pool.
+    const TITLE_POOL: &[&str] = &[
+        "Style",
+        "Tests",
+        "",
+        "Release",
+        "Deploy & ship",
+        "Тесты",
+        "a",
+    ];
+
+    /// A library item before identifiers exist.
+    #[derive(Clone, Debug)]
+    enum RawItem {
+        Heading { level: u8, title: String },
+        Instruction { hidden: bool, contents: Vec<String> },
+    }
+
+    /// A raw tree: projects, items, and one assignment choice per
+    /// (project, item) pair in project-major order. `Some(v)` proposes
+    /// variant `v`, `None` leaves the item unassigned.
+    #[derive(Clone, Debug)]
+    struct RawTree {
+        project_count: usize,
+        items: Vec<RawItem>,
+        choices: Vec<Option<usize>>,
+    }
+
+    fn raw_item() -> BoxedStrategy<RawItem> {
+        let heading = (2u8..=6, prop::sample::select(TITLE_POOL)).prop_map(|(level, title)| {
+            RawItem::Heading {
+                level,
+                title: title.to_owned(),
+            }
+        });
+        let instruction = (
+            prop::bool::ANY,
+            prop::collection::vec(prop::sample::select(CONTENT_POOL), 0..=3),
+        )
+            .prop_map(|(hidden, contents)| RawItem::Instruction {
+                hidden,
+                contents: contents.into_iter().map(str::to_owned).collect(),
+            });
+        prop_oneof![heading, instruction].boxed()
+    }
+
+    fn raw_tree() -> impl Strategy<Value = RawTree> {
+        (1usize..=3, 0usize..=15).prop_flat_map(|(project_count, item_count)| {
+            (
+                prop::collection::vec(raw_item(), item_count),
+                prop::collection::vec(prop::option::of(0usize..=3), item_count * project_count),
+            )
+                .prop_map(move |(items, choices)| RawTree {
+                    project_count,
+                    items,
+                    choices,
+                })
+        })
+    }
+
+    // ---- assembly: raw tree → snapshot (through `new`) + oracle view ------
+
+    /// One item as the oracle sees it: generator bookkeeping applied
+    /// (unique title, effective variant list, resolved choice per
+    /// project), none of the §9.2 rules.
+    #[derive(Debug)]
+    enum OracleItem {
+        Heading {
+            level: u8,
+            title: String,
+        },
+        Instruction {
+            hidden: bool,
+            contents: Vec<String>,
+            /// Per project: the index into `contents` the assignment
+            /// picked, or `None` when the item is unassigned (or the
+            /// choice was dropped — hidden instructions without
+            /// variants cannot be assigned).
+            chosen: Vec<Option<usize>>,
+        },
+    }
+
+    #[derive(Debug)]
+    struct OracleTree {
+        project_count: usize,
+        items: Vec<OracleItem>,
+    }
+
+    /// What one generated case hands the tests: the snapshot
+    /// [`build_body`] reads, and the raw-structure view the oracle
+    /// reads — two representations of one tree.
+    #[derive(Debug)]
+    struct Assembled {
+        snapshot: BuildSnapshot,
+        oracle: OracleTree,
+    }
+
+    /// A canonical scheme-A value, mirroring the unit-test fixture (not
+    /// a §6.5 default — those belong to the store, D-039). The body is
+    /// scheme-independent; the unit suite pins that boundary.
+    fn write_settings() -> ProjectWriteSettings {
+        ProjectWriteSettings {
+            scheme: Scheme::A,
+            base_name: BaseName::AgentsMd,
+            extra_local: ExtraFile {
+                enabled: false,
+                position: ExtraFilePosition::End,
+            },
+            extra_project: ExtraFile {
+                enabled: false,
+                position: ExtraFilePosition::End,
+            },
+        }
+    }
+
+    fn assemble(raw: RawTree) -> Assembled {
+        let RawTree {
+            project_count,
+            items,
+            choices,
+        } = raw;
+        let item_count = items.len();
+        debug_assert_eq!(choices.len(), project_count * item_count);
+
+        let projects: Vec<SnapshotProject> = (0..project_count)
+            .map(|project| SnapshotProject {
+                id: ProjectId::new(format!("p-{project}")),
+                name: format!("project {project}"),
+                root: Path::new("/repos").join(format!("p-{project}")),
+                settings: write_settings(),
+            })
+            .collect();
+
+        let mut snapshot_items: Vec<LibraryItem> = Vec::with_capacity(item_count);
+        let mut oracle_items: Vec<OracleItem> = Vec::with_capacity(item_count);
+        let mut assignments: Vec<Assignment> = Vec::new();
+
+        for (index, raw) in items.into_iter().enumerate() {
+            match raw {
+                RawItem::Heading { level, title } => {
+                    // The index suffix makes titles unique, so the
+                    // third property's absence check is unambiguous.
+                    let title = format!("{title} [{index}]");
+                    snapshot_items.push(LibraryItem::Heading(Heading {
+                        id: ItemId::new(format!("h-{index}")),
+                        level: HeadingLevel::try_from(level)
+                            .unwrap_or_else(|error| panic!("generated level {level}: {error}")),
+                        title: title.clone(),
+                    }));
+                    oracle_items.push(OracleItem::Heading { level, title });
+                }
+                RawItem::Instruction { hidden, contents } => {
+                    // Constructor invariant remap #1 (DB-010): an active
+                    // instruction needs a variant; the generated empty
+                    // list becomes the empty variant (D-13's own case).
+                    let mut contents = contents;
+                    if !hidden && contents.is_empty() {
+                        contents.push(String::new());
+                    }
+
+                    let variants: Vec<Variant> = contents
+                        .iter()
+                        .enumerate()
+                        .map(|(variant, content)| Variant {
+                            id: VariantId::new(format!("v-{index}-{variant}")),
+                            // Names must never leak into a body; the
+                            // oracle's expectation contains none.
+                            name: format!("name {index}.{variant}"),
+                            content: content.clone(),
+                        })
+                        .collect();
+
+                    let mut chosen: Vec<Option<usize>> = Vec::with_capacity(project_count);
+                    for project in 0..project_count {
+                        let proposed = choices[project * item_count + index];
+                        let choice = match proposed {
+                            Some(variant) if !variants.is_empty() => {
+                                // The proposal is remapped onto the
+                                // effective variant count.
+                                let variant = variant % variants.len();
+                                assignments.push(Assignment {
+                                    project_id: ProjectId::new(format!("p-{project}")),
+                                    instruction_id: ItemId::new(format!("i-{index}")),
+                                    variant_id: VariantId::new(format!("v-{index}-{variant}")),
+                                });
+                                Some(variant)
+                            }
+                            // Unassigned, or remap #2 (DB-012): a hidden
+                            // instruction without variants cannot be
+                            // assigned, the choice is dropped.
+                            _ => None,
+                        };
+                        chosen.push(choice);
+                    }
+
+                    snapshot_items.push(LibraryItem::Instruction(Instruction {
+                        id: ItemId::new(format!("i-{index}")),
+                        title: format!("instruction {index} title"),
+                        state: if hidden {
+                            InstructionState::Hidden
+                        } else {
+                            InstructionState::Active
+                        },
+                        variants,
+                    }));
+                    oracle_items.push(OracleItem::Instruction {
+                        hidden,
+                        contents,
+                        chosen,
+                    });
+                }
+            }
+        }
+
+        // The validating constructor, never bypassed: a generator bug
+        // fails here and shows up as a failing property.
+        let snapshot = BuildSnapshot::new(projects, snapshot_items, assignments)
+            .expect("the generator only builds snapshot-valid trees");
+        Assembled {
+            snapshot,
+            oracle: OracleTree {
+                project_count,
+                items: oracle_items,
+            },
+        }
+    }
+
+    // ---- the oracle: §9.2 read backwards ----------------------------------
+
+    /// The `included` set of §9.2 for one project, as the raw tree
+    /// knows it: active AND assigned. Each included instruction maps
+    /// to its chosen content; everything else is `None`.
+    fn included(tree: &OracleTree, project: usize) -> Vec<Option<&str>> {
+        tree.items
+            .iter()
+            .map(|item| match item {
+                OracleItem::Instruction {
+                    hidden: false,
+                    contents,
+                    chosen,
+                } => chosen[project].map(|variant| contents[variant].as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Which headings §9.2 keeps for one project: a heading is kept iff
+    /// some included instruction counts it as an ancestor — a backward
+    /// walk from each included instruction, marking every heading
+    /// whose level is strictly below all headings between it and the
+    /// instruction (the mirror of the implementation's forward
+    /// section-end scan; see the module docs).
+    fn oracle_kept_headings(tree: &OracleTree, project: usize) -> Vec<bool> {
+        let included = included(tree, project);
+        let mut kept = vec![false; tree.items.len()];
+        for (index, content) in included.iter().enumerate() {
+            if content.is_none() {
+                continue;
+            }
+            let mut min_level = u8::MAX;
+            for (candidate, item) in tree.items[..index].iter().enumerate().rev() {
+                if let OracleItem::Heading { level, .. } = item
+                    && *level < min_level
+                {
+                    kept[candidate] = true;
+                    min_level = *level;
+                }
+            }
+        }
+        kept
+    }
+
+    /// The expected body, derived without the implementation's forward
+    /// scan: kept headings via [`oracle_kept_headings`], blocks per
+    /// item in tree order, normalized texts, `"\n\n"` separators
+    /// (§9.2's `BLANK_LINE`, spec-verbatim).
+    fn oracle_body(tree: &OracleTree, project: usize) -> String {
+        let included = included(tree, project);
+        let kept = oracle_kept_headings(tree, project);
+        let mut blocks: Vec<String> = Vec::new();
+        for (index, item) in tree.items.iter().enumerate() {
+            match item {
+                OracleItem::Heading { level, title } => {
+                    if kept[index] {
+                        blocks.push(format!("{} {title}", "#".repeat(usize::from(*level))));
+                    }
+                }
+                OracleItem::Instruction { .. } => {
+                    if let Some(content) = included[index] {
+                        let text = normalize::variant_text(content);
+                        if !text.is_empty() {
+                            blocks.push(text);
+                        }
+                    }
+                }
+            }
+        }
+        blocks.join("\n\n")
+    }
+
+    // ---- the properties (spec §15.1 verbatim) -----------------------------
+
+    proptest! {
+        #![proptest_config(config())]
+
+        /// §15.1: "the order in the file equals the library order" —
+        /// and, through the full-body oracle, the contents with it
+        /// (DoD 5–6, OUT-001/LIB-035).
+        #[test]
+        fn for_random_trees_the_order_in_the_file_equals_the_library_order(
+            assembled in raw_tree().prop_map(assemble),
+        ) {
+            for project in 0..assembled.oracle.project_count {
+                let id = ProjectId::new(format!("p-{project}"));
+                let body = build_body(&assembled.snapshot, &id)
+                    .expect("the generated project is in the snapshot");
+                prop_assert_eq!(body, oracle_body(&assembled.oracle, project));
+            }
+        }
+
+        /// §15.1: "the build is idempotent" — a pure function must
+        /// answer the same question twice with the same body.
+        #[test]
+        fn for_random_trees_the_build_is_idempotent(
+            assembled in raw_tree().prop_map(assemble),
+        ) {
+            for project in 0..assembled.oracle.project_count {
+                let id = ProjectId::new(format!("p-{project}"));
+                let first = build_body(&assembled.snapshot, &id);
+                let second = build_body(&assembled.snapshot, &id);
+                prop_assert_eq!(first, second);
+            }
+        }
+
+        /// §15.1: "a heading with no assigned instructions is not
+        /// output" — with §9.2's canon reading of "assigned" (assigned
+        /// AND active, D-053). Unique titles make the absence check
+        /// exact; the text pool carries no `'#'`.
+        #[test]
+        fn for_random_trees_a_heading_with_no_assigned_instructions_is_not_output(
+            assembled in raw_tree().prop_map(assemble),
+        ) {
+            for project in 0..assembled.oracle.project_count {
+                let id = ProjectId::new(format!("p-{project}"));
+                let body = build_body(&assembled.snapshot, &id)
+                    .expect("the generated project is in the snapshot");
+                let kept = oracle_kept_headings(&assembled.oracle, project);
+                for (index, item) in assembled.oracle.items.iter().enumerate() {
+                    if let OracleItem::Heading { level, title } = item
+                        && !kept[index]
+                    {
+                        let absent =
+                            format!("{} {title}", "#".repeat(usize::from(*level)));
+                        prop_assert!(
+                            !body.contains(&absent),
+                            "heading {index} ({absent:?}) has no assigned instruction \
+                             in its section yet appears in {body:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
