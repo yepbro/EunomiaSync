@@ -107,7 +107,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $dll = Get-ChildItem -Path target\debug\build -Recurse -Filter WebView2Loader.dll | Select-Object -First 1
+          $dll = Get-ChildItem -Path target\debug\build\webview2-com-sys -Recurse -Filter WebView2Loader.dll |
+            Where-Object { $_.DirectoryName -match '\\x64\\' } |
+            Select-Object -First 1
+          if (-not $dll) { throw "x64 WebView2Loader.dll not found under webview2-com-sys out-dir" }
           Write-Host "staging from: $($dll.FullName)"
           Copy-Item $dll.FullName -Destination target\debug -Force
           Get-ChildItem -Path target\debug\build -Recurse -Filter *.exe |
