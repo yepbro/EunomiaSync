@@ -3108,3 +3108,96 @@ failure class — a tampered cell's arbitrary text now reaches neither
 `params` nor `os_message`, the two surfaces the §10 log line and the
 UI-011 message render (whoever debugs a tampered database reads the
 cell from the database).
+
+### D-053 — Project body assembly: `body::build_body` over the snapshot, scheme-independent, §9.2 transcribed — 2026-11-18
+
+Problem: T-035 turns the §9.2 pseudocode (`build_body`) and its rules
+ALG-020…022 into eunomia-core code on top of the T-033 snapshot
+(D-042) and the T-034 normalization (D-044). Open questions: the
+module's name (the obvious `build.rs` shares its name with cargo's
+build-script convention); the function's contract for a project that
+is not in the snapshot versus a project that builds nothing; how the
+scheme (A/B/C) and the file skeleton relate to the body; and how the
+spec's per-decision wording maps onto the pseudocode where the prose
+is looser than the code (heading inclusion says "assigned" without
+repeating "active").
+
+Solution: module `body` (`crates/eunomia-core/src/body.rs`), one public
+function, `build_body(&BuildSnapshot, &ProjectId) -> Option<String>` —
+a direct transcription of the §9.2 pseudocode (the canon per the task
+brief), with these boundary decisions:
+
+- _Module name._ `body`, not `build`: a `src/build.rs` inside a crate
+  is technically just a module, but the name is cargo's build-script
+  convention at the package root and invites confusion; the crate names
+  modules by domain noun (`snapshot`, `normalize`, `library`) and §9.2's
+  own noun is "the project body".
+- _`None` vs `Some("")`._ An unknown project id returns `None` (the
+  caller mixed identifiers); a project with nothing to build returns
+  `Some("")` — a legitimate build result that the sync pipeline runs
+  the spec D-25 empty-build confirmation for. Collapsing the two would
+  make a caller bug indistinguishable from an empty library.
+- _Scheme independence._ The §9.2 pseudocode has no scheme parameter,
+  and §9.3 consumes its result: ALG-030 joins the extra-file lines
+  (A only), this body and the creation marker into the managed block;
+  ALG-031 wraps that block in scheme B's markers. `build_body` therefore
+  reads no project settings beyond the identity — the extra-file
+  reading lines, the marker, the trailing newline of the managed block,
+  the base-name/`<STEM>.project.md` skeleton and the build hash
+  (ALG-030…033) are all later pipeline steps, explicitly out of scope
+  here. The body carries no trailing line break: ALG-030 appends its
+  own tail.
+- _Hidden instructions (DB-013/D-11)._ The pseudocode's `included` set
+  requires `state = active` AND an assignment; the prose of ALG-020
+  ("at least one instruction assigned") omits the state word, but the
+  pseudocode is the canon and OUT-013 agrees (edits to hidden
+  instructions never affect a build). A hidden instruction therefore
+  keeps no heading either: hiding an instruction empties its section
+  for inclusion purposes, exactly as if its assignment were gone.
+- _Empty variants (D-13)._ An assigned active instruction whose variant
+  text is empty (or normalizes to empty — the rule reads the
+  ALG-002-normalized text, so whitespace-only or BOM-only content
+  behaves the same) stays in `included`: its heading survives (including
+  every ancestor heading, since the empty-variant instruction lies in
+  their ranges), but no text block is emitted.
+- _Total-function posture (D-042's)._ The per-project resolution —
+  assignments scoped to the project, joined with active instructions,
+  each mapped to its assigned variant — is the builder's internal step
+  (`selected_variants`). The variant lookup `expect`s to find the
+  assigned variant among the instruction's variants:
+  `BuildSnapshot::new` rejects the mismatch (DB-012) at assembly, so
+  the panic marks a broken invariant, not a data condition — the same
+  "validate once at the boundary" reasoning D-042 used. An assignment
+  to a heading is likewise unrepresentable in a snapshot
+  (`AssignmentToHeading`), so the builder needs no branch for it; that
+  guarantee is pinned by the snapshot suite's own rejection test.
+- _Performance._ The heading check scans each section forward to its
+  close (first heading of level ≤ L, §9.2 verbatim) instead of using a
+  stack: heading levels run 2–6 only, so an item lies in at most five
+  sections and the whole walk is linear — well inside §12.2's 20 ms
+  budget for 1000 items (5000 is the v1 ceiling), with no benchmark
+  needed to defend it.
+
+No new dependencies (a pure function; D-017's allow-list untouched).
+Testing: the §9.2 example is the oracle test with the expected string
+hardcoded from the spec (`## Style`, `### Tests`, C's text, no
+`## Release`) and doubles as the module doctest; every rule has its own
+test — section inclusion (parent kept by a nested section, empty
+sibling dropped, section closed by a same-or-higher heading, skipped
+levels nest), the preamble before the first heading (ALG-021), hidden
+exclusion (no block, no heading, all-hidden project builds empty),
+empty-variant retention (raw and normalizes-to-empty), names never
+entering the file, exactly-one-empty-line separators with no trailing
+break, library order winning over assignment-list order (OUT-001, DoD
+5), normalization applied (BOM/CRLF/edge whitespace), the `None` and
+`Some("")` boundary pair, per-project variant selection, byte-identical
+bodies across schemes A/B/C and every settings field (the boundary's
+own guard), and a combined scenario (S2 kept through an empty variant
+in a nested subsection while hidden and unassigned neighbors leave no
+trace). Five behavior mutations verified the suite bites: disabling the
+active-state check (3 tests), the one-LF separator (12), skipping
+normalization (3), a `<` instead of `<=` in the section-close rule (2),
+and dropping the empty-text guard (3). Round-1 review
+(deepseek-v4.1-flash, APPROVE, no P0/P1) added the scheme/setting
+identity test, the single `level` binding, and the linear-cost doc
+note; round-2 review (hy4-flash-free, APPROVE) found nothing further.

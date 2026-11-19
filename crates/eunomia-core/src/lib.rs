@@ -25,8 +25,11 @@
 //! - [`snapshot`] — the immutable build snapshot (ALG-001)
 //! - [`normalize`] — the ALG-002 variant text normalization the build
 //!   applies to every snapshot text before it reaches a file
+//! - [`body`] — the ALG-020…022 assembly of a project's file body
+//!   from a snapshot (§9.2)
 
 pub mod assignment;
+pub mod body;
 pub mod library;
 pub mod normalize;
 pub mod project;

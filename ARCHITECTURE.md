@@ -26,6 +26,7 @@ crates/
     src/assignment.rs      #   The project ↔ instruction ↔ variant link (working)
     src/snapshot.rs        #   Immutable build snapshot, ALG-001 (working)
     src/normalize.rs       #   ALG-002 variant text normalization (working)
+    src/body.rs            #   ALG-020…022 project body assembly (working)
     markdown               #   Markdown processing           (planned)
     diff                   #   Text diffing                  (planned)
     sync                   #   AGENTS.md sync engine         (planned)
@@ -67,7 +68,14 @@ snapshot raw and are normalized per ALG-002 before reaching a file
 (`normalize::variant_text`, a pure function — CR/CRLF become LF, the
 BOM and the block's leading empty lines and trailing whitespace are
 dropped, everything inside the text is untouched; spec D-22, recorded
-in DECISIONS.md D-044). SQLite storage lives in `eunomia-store` (see
+in DECISIONS.md D-044). The project body assembly of spec §9.2 lives in
+`body::build_body` (ALG-020…022): a pure function over the snapshot and
+a project id that walks the library order once, keeps the headings whose
+section holds an assigned active instruction (a hidden instruction keeps
+no heading, DB-013; an empty variant keeps it, D-13), normalizes each
+selected variant's text, and joins the blocks with exactly one empty
+line — the same body for schemes A, B and C, with no trailing line
+break. SQLite storage lives in `eunomia-store` (see
 DECISIONS.md D-010), which is free of Tauri dependencies for the same
 reason. File-system work — repository scan, path normalization and
 validation, backup copies, atomic writes — lives in `eunomia-fs` (see
