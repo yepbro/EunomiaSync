@@ -100,13 +100,36 @@ jobs:
       # next to every test exe (exe dir is first in the search order)
       # makes resolution deterministic. The --no-run pre-build lets the
       # staging step see the DLL before any test binary executes.
-      # The Common-Controls v6 manifest for the test binaries is NOT a CI
-      # concern: `src-tauri/build.rs` embeds `windows/app.manifest` into
-      # every linked target of the package on Windows+MSVC via
-      # /MANIFEST:EMBED + /MANIFESTINPUT (T-241). RUSTFLAGS cannot carry
-      # the wordy /MANIFESTDEPENDENCY form — cargo word-splits it and rustc
-      # re-quotes it into garbage — and build-script link args apply to the
-      # package's own targets only, so nothing env-shaped belongs here.
+      # The Common-Controls v6 manifest for the Windows test binaries
+      # (T-241). tauri-build's RC embed rides embed-resource's
+      # `cargo:rustc-link-arg-bins`, which reaches only [[bin]] targets:
+      # every cargo-test harness exe links with no manifest, binds
+      # comctl32 5.82, and dies at load with STATUS_ENTRYPOINT_NOT_FOUND
+      # (0xc0000139) because tao/tauri statically import the v6-only
+      # TaskDialogIndirect (tauri-apps/tauri#13419).
+      #
+      # Delivery: RUSTFLAGS link args on the Windows test legs only — the
+      # app build (job `build`) and non-Windows legs never see them, and
+      # RUSTFLAGS is part of cargo's unit fingerprints, so a restored
+      # rust-cache cannot serve manifest-less binaries as fresh. The value
+      # is deliberately space-free: cargo word-splits RUSTFLAGS shell-style,
+      # which is what killed the earlier /MANIFESTDEPENDENCY attempt (its
+      # quoted value with spaces cannot survive the cargo→rustc hop at
+      # all). /MANIFESTINPUT=<path> needs no quoting; the checkout path on
+      # GitHub runners contains no spaces, asserted below so a path change
+      # fails loudly instead of silently splitting.
+      - name: Embed the Common-Controls v6 manifest into test binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          manifest="$(cygpath -w "$PWD/src-tauri/windows/app.manifest")"
+          case "$manifest" in
+            *[[:space:]]*)
+              echo "manifest path contains whitespace; RUSTFLAGS delivery would split: $manifest" >&2
+              exit 1
+              ;;
+          esac
+          echo "RUSTFLAGS=-C link-arg=/MANIFEST:EMBED -C link-arg=/MANIFESTINPUT:$manifest" >> "$GITHUB_ENV"
       - name: Build tests (Windows DLL staging prerequisite)
         if: runner.os == 'Windows'
         run: cargo test --workspace --no-run
@@ -136,38 +159,65 @@ jobs:
         run: |
           python - <<'PY'
           import struct, glob
-          def imports(path):
-              data = open(path, 'rb').read()
+          def sections(data):
               pe = data.index(b'PE\0\0') + 4
               nsec, = struct.unpack_from('<H', data, pe + 2)
               optsz, = struct.unpack_from('<H', data, pe + 16)
               opt = pe + 20
               magic, = struct.unpack_from('<H', data, opt)
-              dd = opt + (0x60 if magic == 0x10b else 0x70) + 8
+              dd = opt + (0x60 if magic == 0x10b else 0x70)
               rva, = struct.unpack_from('<I', data, dd)
               secs = []
               for i in range(nsec):
                   vsz, va, rsz, roff = struct.unpack_from('<IIII', data, opt + optsz + i * 40 + 8)
                   secs.append((va, rsz, roff))
+              return secs, rva
+          def imports(path):
+              data = open(path, 'rb').read()
+              secs, rva = sections(data)
               def r2o(r):
                   for va, rsz, roff in secs:
                       if va <= r < va + rsz:
                           return roff + (r - va)
               out, o = [], r2o(rva)
               while o:
+                  thunkrva, = struct.unpack_from('<I', data, o)
                   namerva, = struct.unpack_from('<I', data, o + 12)
                   if namerva == 0:
                       break
                   no = r2o(namerva)
-                  out.append(data[no:data.index(b'\0', no)].decode())
+                  dll = data[no:data.index(b'\0', no)].decode()
+                  funcs = []
+                  if thunkrva:
+                      t = r2o(thunkrva)
+                      while t:
+                          frva, = struct.unpack_from('<Q', data, t)
+                          if frva == 0:
+                              break
+                          if not frva & (1 << 63):
+                              fo = r2o(frva)
+                              end = data.index(b'\0', fo + 2)
+                              funcs.append(data[fo + 2:end].decode())
+                          t += 8
+                  out.append((dll, funcs))
                   o += 20
               return out
           lib_exe = glob.glob(r'target\debug\build\eunomia-sync\*\out\eunomia_sync_lib-*.exe')[0]
           store_exe = glob.glob(r'target\debug\build\eunomia-store\*\out\settings-*.exe')[0]
           lib, store = imports(lib_exe), imports(store_exe)
-          print('LIB-TEST imports:', *lib, sep='\n  ')
-          print('ONLY-IN-LIB (suspects):', *(set(lib) - set(store)), sep='\n  ')
+          print('LIB-TEST imports:', *(d for d, _ in lib), sep='\n  ')
+          print('ONLY-IN-LIB (suspects):', *(set(d for d, _ in lib) - set(d for d, _ in store)), sep='\n  ')
+          for dll, funcs in lib:
+              if dll.lower() == 'comctl32.dll':
+                  print('COMCTL32 IMPORTED FUNCTIONS:', *funcs, sep='\n  ')
+          data = open(lib_exe, 'rb').read()
+          print('EMBEDDED MANIFEST PRESENT:', b'Microsoft.Windows.Common-Controls' in data)
+          if b'Microsoft.Windows.Common-Controls' in data:
+              i = data.index(b'<assembly')
+              print('MANIFEST HEAD:', data[i:i+400].decode('ascii', 'replace'))
           PY
+          echo "--- eunomia-sync build script instructions cargo recorded ---"
+          cat target/debug/build/eunomia-sync/*/run/stdout target/debug/build/eunomia-sync-*/output 2>/dev/null | grep -aE "link-arg|MANIFEST" || echo "(no link-arg lines recorded)"
       - name: Frontend unit tests
         if: runner.os == 'Linux'
         run: pnpm run test
