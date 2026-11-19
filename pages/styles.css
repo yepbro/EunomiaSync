@@ -1,7 +1,8 @@
 /* ==========================================================================
    EunomiaSync — main window prototype (static layout only).
-   Spec: docs/spec.md § 7.4 (MAIN-001…031), § 7.1 PRJ-008…012 (project
-   settings modal), UI-001, UI-021, UI-022, NFR-020.
+   Spec: docs/spec.md § 7.4 (MAIN-001…031), § 7.3 (UI-003 instruction
+   editor modal), § 7.1 PRJ-008…012 (project settings modal), UI-001,
+   UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
 
@@ -836,7 +837,8 @@ input[type='checkbox']:disabled {
   margin-top: 6px;
 }
 
-/* Instruction editor modal (UI-003, LIB-002: monospace textarea, variants) */
+/* Shared field label + monospace editor text (UI-003; also used by the
+   project settings modal) */
 .field-label {
   font-size: 12px;
   font-weight: 600;
@@ -856,53 +858,300 @@ input[type='checkbox']:disabled {
   min-block-size: 110px;
 }
 
-.variants-accordion {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+/* ----- Instruction editor modal (UI-003, LIB-002) ------------------------ */
+/* Large two-pane dialog: variant list on the left, name fields and
+   Edit/Preview tabs on the right. The custom-instruction mode hides the
+   left pane and the name fields via .ie-custom. The old stub styles
+   (.variants-accordion, .variants-list, .variant-item, .variant-name,
+   .variant-textarea) were removed — unused after the rework. */
+
+.modal-xl {
+  inline-size: min(920px, calc(100vw - 32px));
 }
 
-.variants-accordion summary {
-  cursor: pointer;
-  padding: 8px 10px;
-  font-weight: 600;
-  color: var(--text-muted);
-  user-select: none;
+/* Fixed-height form: the actions stay visible on short windows */
+.modal-xl form {
+  block-size: min(640px, calc(100dvh - 32px));
 }
 
-.variants-accordion[open] summary {
-  border-block-end: 1px solid var(--border);
+.modal-xl h2,
+.modal-xl .modal-actions {
+  flex: none;
 }
 
-.variants-list {
+.ie-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: grid;
+  grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.ie-body.ie-custom {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ie-custom .ie-variants,
+.ie-custom .ie-fields {
+  display: none;
+}
+
+/* Left pane: variant list (LIB-009…016) */
+.ie-variants {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 10px;
+  gap: 8px;
+  min-block-size: 0;
+  border-inline-end: 1px solid var(--border);
+  padding-inline-end: 14px;
 }
 
-.variant-item {
+.ie-variant-list {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
+  gap: 4px;
+}
+
+.ie-variant-row {
+  display: flex;
+  align-items: center;
   gap: 2px;
 }
 
-.variant-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--accent-strong);
+.ie-variant-item {
+  appearance: none;
+  font: inherit;
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  min-block-size: 28px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  text-align: start;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  cursor: pointer;
 }
 
-.variant-textarea {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+.ie-variant-item:hover {
+  background: var(--row-hover);
+}
+
+.ie-variant-item[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.ie-variant-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-inline-size: 0;
+}
+
+/* Empty variant (LIB-014): the dashed .empty-mark from the matrix rows
+   plus a dimmed name */
+.ie-variant-empty .ie-variant-label {
+  color: var(--text-muted);
+}
+
+/* "Main" badge (LIB-021: "Make main" moves it) */
+.ie-main-badge {
+  font-size: 10.5px;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--accent-strong);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 2px 6px;
+  flex: none;
+}
+
+.ie-variant-row .cell-icon {
+  flex: none;
+}
+
+.ie-variant-row .cell-icon:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Add variant (LIB-017): a copy of the main one or empty */
+.ie-add-variant {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 10px;
+}
+
+.ie-add-row {
+  display: flex;
+  gap: 6px;
+}
+
+.ie-add-row .btn {
   font-size: 12px;
-  line-height: 1.5;
-  color: var(--text);
+  min-block-size: 26px;
+  padding: 3px 10px;
+}
+
+/* Right pane */
+.ie-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-block-size: 0;
+  min-inline-size: 0;
+}
+
+.ie-fields {
+  flex: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.ie-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-inline-size: 0;
+}
+
+.ie-panel {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ie-panel[hidden] {
+  display: none;
+}
+
+.ie-panel .edit-text {
+  flex: 1 1 auto;
+  resize: none;
+}
+
+.ie-meta {
+  flex: none;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  text-align: end;
+}
+
+/* Preview (D-15): sanitized renderer output + non-blocking warnings */
+.ie-preview {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
-  padding: 6px 8px;
-  resize: vertical;
-  min-block-size: 54px;
+  padding: 10px 14px;
+}
+
+.ie-preview p {
+  margin: 0 0 8px;
+}
+
+.ie-preview h2,
+.ie-preview h3,
+.ie-preview h4,
+.ie-preview h5,
+.ie-preview h6 {
+  margin: 12px 0 6px;
+  line-height: 1.3;
+}
+
+.ie-preview h2 {
+  font-size: 15px;
+}
+.ie-preview h3 {
+  font-size: 14px;
+}
+.ie-preview h4 {
+  font-size: 13px;
+}
+.ie-preview h5,
+.ie-preview h6 {
+  font-size: 12.5px;
+}
+
+.ie-preview ul,
+.ie-preview ol {
+  margin: 0 0 8px;
+  padding-inline-start: 22px;
+}
+
+.ie-preview li {
+  margin: 2px 0;
+}
+
+.ie-preview pre {
+  margin: 0 0 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+
+.ie-preview code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.ie-preview :not(pre) > code {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+}
+
+.ie-warnings {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ie-warnings-list {
+  margin: 0;
+  padding-inline-start: 18px;
+  font-size: 11.5px;
+  color: var(--warning);
+}
+
+/* Narrow window: the panes stack */
+@media (max-width: 760px) {
+  .ie-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ie-variants {
+    border-inline-end: 0;
+    padding-inline-end: 0;
+  }
+
+  .ie-variant-list {
+    max-block-size: 160px;
+  }
+
+  .ie-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* ----- Project settings modal (PRJ-008…012) ------------------------------ */

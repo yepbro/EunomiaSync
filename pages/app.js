@@ -1,8 +1,10 @@
 /* ==========================================================================
    EunomiaSync — main window prototype: light vanilla-JS interactivity.
    Search, project filter, "Show hidden", row selection, section collapse,
-   instruction editor modal, project settings modal (PRJ-008…012,
-   PRJ-013…018 archive confirm), dirty-state tracking. No deps, no build step.
+   instruction editor modal (UI-003: two-pane editor — variant list,
+   Edit/Preview tabs, validation, Markdown preview, unsaved-changes guard),
+   project settings modal (PRJ-008…012, PRJ-013…018 archive confirm),
+   dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
 ;(() => {
@@ -21,9 +23,6 @@
   const editDialog = document.getElementById('edit-dialog')
   const editTitle = document.getElementById('edit-title')
   const editText = document.getElementById('edit-text')
-  const editVariants = document.getElementById('edit-variants')
-  const editVariantsSummary = document.getElementById('edit-variants-summary')
-  const editVariantsList = document.getElementById('edit-variants-list')
   const runSyncBtn = document.getElementById('run-sync')
   const syncBadge = document.querySelector('.syncbar .badge')
   const syncCounterText = document.getElementById('sync-counter-text')
@@ -470,9 +469,15 @@
   })
 
   /* ---------- Instruction editor modal (UI-003, LIB-002) ------------------- */
+  /* Large two-pane editor with three modes (options of openEditModal):
+     'edit' — row pencil button: main variant + alternatives from the
+     VARIANTS demo data below; 'create' — toolbar «+ New instruction»:
+     empty name, one Main variant with empty text; 'custom' — per-project
+     cell flows: text only, no variant list. Cancel/Esc with unsaved
+     changes opens #unsaved-dialog (UI-010). */
 
-  /* All variants per instruction; the accordion lists exactly these,
-     each with its own editable textarea. Count matches the badge. */
+  /* Alternative variants per instruction (demo data); the editor adds the
+     main variant ("Main") on top of these when opening a row */
   const VARIANTS = {
     'Language of responses': [
       {
@@ -546,41 +551,590 @@
         })[ch],
     )
 
-  function openEditModal({ title, text, placeholder, variants }) {
-    const list = variants ?? []
-    editTitle.textContent = title
-    editText.value = text
-    editText.placeholder = placeholder
-    editVariants.hidden = list.length === 0
-    editVariants.open = false // collapsed by default every time
-    editVariantsSummary.textContent = `Variants (${list.length})`
-    editVariantsList.innerHTML = list
-      .map(
-        (v, i) =>
-          `<div class="variant-item">` +
-          `<label class="variant-name" for="variant-text-${i}">${escapeHtml(v.name)}</label>` +
-          `<textarea id="variant-text-${i}" class="variant-textarea" rows="2">${escapeHtml(v.text)}</textarea>` +
-          `</div>`,
-      )
-      .join('')
-    editDialog.showModal()
+  /* Editor element refs (dialog chrome is grabbed at the top of the file) */
+  const editForm = document.getElementById('edit-form')
+  const ieBodyEl = document.getElementById('ie-body')
+  const ieVariantList = document.getElementById('ie-variant-list')
+  const ieAddCopy = document.getElementById('ie-add-copy')
+  const ieAddEmpty = document.getElementById('ie-add-empty')
+  const ieFields = document.getElementById('ie-fields')
+  const ieName = document.getElementById('ie-name')
+  const ieNameError = document.getElementById('ie-name-error')
+  const ieVName = document.getElementById('ie-vname')
+  const ieVNameError = document.getElementById('ie-vname-error')
+  const ieTablist = document.getElementById('ie-tabs')
+  const ieTabEdit = document.getElementById('ie-tab-edit')
+  const ieTabPreview = document.getElementById('ie-tab-preview')
+  const iePreview = document.getElementById('ie-preview')
+  const ieWarningsList = document.getElementById('ie-warnings-list')
+  const ieNoWarnings = document.getElementById('ie-no-warnings')
+  const ieCharCount = document.getElementById('ie-char-count')
+  const ieMarkerError = document.getElementById('ie-marker-error')
+  const ieHistoryBtn = document.getElementById('ie-history-btn')
+  const ieCancelBtn = document.getElementById('ie-cancel-btn')
+  const unsavedDialog = document.getElementById('unsaved-dialog')
+  const newInstructionBtn = document.getElementById('new-instruction-btn')
+
+  const ieTabs = [ieTabEdit, ieTabPreview]
+
+  const TEXT_LIMIT_LABEL = '262,144' // DB-006
+  /* DB-016: a line equal to either marker rejects saving */
+  const RESERVED_MARKERS = ['<!-- EUNOMIASYNC:BEGIN -->', '<!-- EUNOMIASYNC:END -->']
+
+  /* Live state of the open editor; kept until the next open so the
+     'close' handlers can still read it */
+  let ieState = null
+  let pendingVariantDelete = null
+
+  function reservedMarkerLine(text) {
+    return RESERVED_MARKERS.find((m) => text.split('\n').some((line) => line.trim() === m))
   }
+
+  /* Main instruction name: 1–200 characters, unique among visible
+     instructions case-insensitively (§6.9) — the edited row is excluded */
+  function duplicateInstructionName(name, editedRow) {
+    const lower = name.toLowerCase()
+    return rows().some(
+      (tr) =>
+        tr !== editedRow &&
+        !isHeading(tr) &&
+        !tr.classList.contains('row-hidden') &&
+        instructionName(tr) === lower,
+    )
+  }
+
+  /* ---------- Tiny Markdown preview (D-15): sanitized subset --------------- */
+  /* Hand-rolled renderer: everything is HTML-escaped first (escapeHtml),
+     then only the renderer's own tags are added — headings ##…######,
+     bold, italic, inline code, fenced code blocks and simple lists.
+     Raw user HTML is never injected. */
+
+  function mdInline(escaped) {
+    const codes = []
+    let t = escaped.replace(/`([^`]+)`/g, (_, code) => {
+      codes.push(code)
+      return `\u0000${codes.length - 1}\u0000`
+    })
+    t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    t = t.replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
+    t = t.replace(/(^|[\s(])_([^_\s][^_]*)_/g, '$1<em>$2</em>')
+    t = t.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[Number(i)]}</code>`)
+    return t
+  }
+
+  function renderMarkdown(src) {
+    const lines = escapeHtml(src.replace(/\r\n/g, '\n')).split('\n')
+    const out = []
+    let inCode = false
+    let list = null
+    const closeList = () => {
+      if (list) {
+        out.push(`</${list}>`)
+        list = null
+      }
+    }
+    for (const line of lines) {
+      const fence = line.match(/^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_-]+)?\s*$/)
+      if (fence) {
+        if (!inCode) {
+          closeList()
+          out.push('<pre><code>')
+          inCode = true
+        } else {
+          inCode = false
+          out.push('</code></pre>')
+        }
+        continue
+      }
+      if (inCode) {
+        out.push(`${line}\n`)
+        continue
+      }
+      const heading = line.match(/^(#{2,6})\s+(.+)$/)
+      if (heading) {
+        closeList()
+        out.push(`<h${heading[1].length}>${mdInline(heading[2])}</h${heading[1].length}>`)
+        continue
+      }
+      const ul = line.match(/^\s*[-*]\s+(.+)$/)
+      if (ul) {
+        if (list !== 'ul') {
+          closeList()
+          out.push('<ul>')
+          list = 'ul'
+        }
+        out.push(`<li>${mdInline(ul[1])}</li>`)
+        continue
+      }
+      const ol = line.match(/^\s*\d+[.)]\s+(.+)$/)
+      if (ol) {
+        if (list !== 'ol') {
+          closeList()
+          out.push('<ol>')
+          list = 'ol'
+        }
+        out.push(`<li>${mdInline(ol[1])}</li>`)
+        continue
+      }
+      closeList()
+      if (line.trim() !== '') out.push(`<p>${mdInline(line)}</p>`)
+    }
+    if (inCode) out.push('</code></pre>')
+    closeList()
+    return out.join('\n')
+  }
+
+  /* D-15: warnings never block saving */
+  function mdWarnings(src) {
+    const warnings = []
+    let inCode = false
+    let fenceChar = ''
+    for (const raw of src.replace(/\r\n/g, '\n').split('\n')) {
+      const fence = raw.match(/^\s*(`{3,}|~{3,})/)
+      if (fence) {
+        const ch = fence[1][0]
+        if (!inCode) {
+          inCode = true
+          fenceChar = ch
+        } else if (ch === fenceChar) {
+          inCode = false
+          fenceChar = ''
+        }
+        continue
+      }
+      if (!inCode && (raw.match(/`/g) ?? []).length % 2 === 1) {
+        warnings.push('Unclosed inline code span — an odd number of backticks on the line.')
+      }
+    }
+    if (inCode) warnings.push('Unclosed code fence — the fenced block is never closed (D-15).')
+    return [...new Set(warnings)]
+  }
+
+  /* ---------- Editor state: dirty tracking, panes, variant list ------------ */
+
+  function ieSnapshot() {
+    return JSON.stringify({
+      name: ieState.mode === 'custom' ? '' : ieName.value,
+      variants: ieState.variants.map((v) => [v.name, v.text, v.main]),
+    })
+  }
+
+  function ieIsDirty() {
+    return ieState !== null && ieSnapshot() !== ieState.initial
+  }
+
+  function previewActive() {
+    return ieTabPreview.getAttribute('aria-selected') === 'true'
+  }
+
+  function updateCharCount() {
+    ieCharCount.textContent = `${editText.value.length.toLocaleString('en-US')} / ${TEXT_LIMIT_LABEL}`
+  }
+
+  function validateMarkerLive() {
+    const marker = reservedMarkerLine(ieState.variants[ieState.selected].text)
+    ieMarkerError.hidden = !marker
+    ieMarkerError.textContent = marker
+      ? `The line ${marker} is reserved for the sync area and cannot be used in the text (DB-016).`
+      : ''
+    editText.setAttribute('aria-invalid', marker ? 'true' : 'false')
+  }
+
+  function renderPreviewPane() {
+    const src = ieState.variants[ieState.selected].text
+    iePreview.innerHTML = renderMarkdown(src)
+    const warnings = mdWarnings(src)
+    ieWarningsList.hidden = warnings.length === 0
+    ieNoWarnings.hidden = warnings.length !== 0
+    ieWarningsList.replaceChildren(
+      ...warnings.map((w) => {
+        const li = document.createElement('li')
+        li.textContent = w
+        return li
+      }),
+    )
+  }
+
+  /* Edit/Preview tabs: same roving-focus pattern as the project settings */
+  function selectIeTab(tab, moveFocus) {
+    for (const t of ieTabs) {
+      const selected = t === tab
+      t.setAttribute('aria-selected', String(selected))
+      t.tabIndex = selected ? 0 : -1
+      document.getElementById(t.getAttribute('aria-controls')).hidden = !selected
+    }
+    if (moveFocus) tab.focus()
+  }
+
+  /* Variant list items: name + Main badge + dashed mark for empty ones;
+     actions are "Make main" and "Delete" (LIB-021, LIB-023…025) */
+  function renderVariantList() {
+    if (!ieState || ieState.mode === 'custom') return
+    ieVariantList.replaceChildren(
+      ...ieState.variants.map((v, i) => {
+        const rowEl = document.createElement('div')
+        rowEl.className = 'ie-variant-row'
+        rowEl.dataset.idx = String(i)
+
+        const item = document.createElement('button')
+        item.type = 'button'
+        item.className = v.text === '' ? 'ie-variant-item ie-variant-empty' : 'ie-variant-item'
+        item.setAttribute('aria-pressed', String(i === ieState.selected))
+        item.title =
+          v.text === '' ? 'Empty variant — outputs no text, can be assigned (D-13)' : v.name
+        if (v.text === '') {
+          const mark = document.createElement('span')
+          mark.className = 'empty-mark'
+          mark.setAttribute('aria-hidden', 'true')
+          item.append(mark)
+        }
+        const label = document.createElement('span')
+        label.className = 'ie-variant-label'
+        label.textContent = v.name
+        item.append(label)
+        if (v.main) {
+          const badge = document.createElement('span')
+          badge.className = 'ie-main-badge'
+          badge.textContent = 'Main'
+          item.append(badge)
+        }
+
+        const mainBtn = document.createElement('button')
+        mainBtn.type = 'button'
+        mainBtn.className = 'cell-icon cell-icon--main'
+        mainBtn.innerHTML = ICONS.main
+        mainBtn.title = v.main ? 'Already the main variant' : `Make main — ${v.name}`
+        mainBtn.setAttribute('aria-label', mainBtn.title)
+        mainBtn.disabled = v.main
+
+        const delBtn = document.createElement('button')
+        delBtn.type = 'button'
+        delBtn.className = 'cell-icon cell-icon--delete'
+        delBtn.innerHTML = ICONS.delete
+        if (ieState.variants.length === 1) {
+          delBtn.disabled = true
+          delBtn.title = 'The last variant cannot be deleted (LIB-025)'
+        } else if (v.main) {
+          delBtn.disabled = true
+          delBtn.title =
+            'Make another variant main first — the main variant cannot be deleted (LIB-025)'
+        } else {
+          delBtn.title = `Delete variant — ${v.name}`
+        }
+        delBtn.setAttribute('aria-label', delBtn.title)
+
+        rowEl.append(item, mainBtn, delBtn)
+        return rowEl
+      }),
+    )
+  }
+
+  function loadSelectedVariant() {
+    const v = ieState.variants[ieState.selected]
+    ieVName.value = v.name
+    editText.value = v.text
+    editText.placeholder =
+      ieState.mode === 'custom'
+        ? ieState.placeholder
+        : v.text === ''
+          ? v.main
+            ? 'No text yet — write the main variant here.'
+            : 'No text yet — write the variant text here.'
+          : 'Instruction text (Markdown)…'
+    updateCharCount()
+    validateMarkerLive()
+    setFieldError(ieVName, ieVNameError, '')
+    if (previewActive()) renderPreviewPane()
+  }
+
+  function selectVariant(i) {
+    if (i === ieState.selected) return
+    ieState.selected = i
+    loadSelectedVariant()
+    renderVariantList()
+  }
+
+  function makeMain(i) {
+    ieState.variants.forEach((v, j) => (v.main = j === i))
+    renderVariantList()
+    ieVariantList
+      .querySelector(`.ie-variant-row[data-idx='${i}'] .cell-icon--main`)
+      ?.focus()
+  }
+
+  function requestDeleteVariant(i) {
+    const v = ieState.variants[i]
+    pendingVariantDelete = i
+    confirmTitle.textContent = 'Delete variant'
+    confirmText.textContent =
+      `Delete the variant "${v.name}"? Its assignments move to the main variant ` +
+      '(the main one is the default replacement — LIB-023…025).'
+    confirmDialog.showModal()
+  }
+
+  /* LIB-017: "Add variant" offers a copy of the main one or an empty one */
+  function freeVariantName() {
+    const taken = new Set(ieState.variants.map((v) => v.name.trim().toLowerCase()))
+    for (let n = 1; ; n += 1) {
+      if (!taken.has(`variant ${n}`)) return `Variant ${n}`
+    }
+  }
+
+  function addVariant(copyOfMain) {
+    const main = ieState.variants.find((v) => v.main) ?? ieState.variants[0]
+    ieState.variants.push({
+      name: freeVariantName(),
+      text: copyOfMain ? main.text : '',
+      main: false,
+    })
+    ieState.selected = ieState.variants.length - 1
+    loadSelectedVariant()
+    renderVariantList()
+    ieVName.focus()
+    ieVName.select()
+  }
+
+  /* ---------- Editor validation and save ------------------------------------ */
+
+  function validateEditor() {
+    let ok = true
+    if (ieState.mode !== 'custom') {
+      const name = ieName.value.trim()
+      if (name.length < 1 || name.length > 200) {
+        setFieldError(ieName, ieNameError, 'Name is required — 1–200 characters, one line (§6.9).')
+        ok = false
+      } else if (duplicateInstructionName(name, ieState.row)) {
+        setFieldError(ieName, ieNameError, 'This name is already used by another visible instruction.')
+        ok = false
+      } else {
+        setFieldError(ieName, ieNameError, '')
+      }
+      /* Variant names: 1–100 characters, unique within the instruction */
+      let badIdx = -1
+      let badMsg = ''
+      const seen = new Map()
+      ieState.variants.forEach((v, i) => {
+        const vn = v.name.trim()
+        if (vn.length < 1 || vn.length > 100) {
+          if (badIdx === -1) {
+            badIdx = i
+            badMsg = 'Variant name is required — 1–100 characters (§6.9).'
+          }
+        } else if (seen.has(vn.toLowerCase())) {
+          if (badIdx === -1) {
+            badIdx = i
+            badMsg = 'Variant names must be unique within the instruction (case-insensitive).'
+          }
+        } else {
+          seen.set(vn.toLowerCase(), i)
+        }
+      })
+      if (badIdx !== -1) {
+        selectVariant(badIdx)
+        setFieldError(ieVName, ieVNameError, badMsg)
+        ok = false
+      }
+    }
+    /* Reserved markers reject saving on every variant text (DB-016) */
+    let markerIdx = -1
+    ieState.variants.forEach((v, i) => {
+      if (markerIdx === -1 && reservedMarkerLine(v.text)) markerIdx = i
+    })
+    if (markerIdx !== -1) {
+      selectVariant(markerIdx)
+      validateMarkerLive()
+      ok = false
+    }
+    return ok
+  }
+
+  /* ---------- Open in one of the three modes -------------------------------- */
+
+  function openEditModal({
+    mode = 'edit',
+    row = null,
+    title,
+    name = '',
+    text = '',
+    placeholder = '',
+    variants = [],
+  }) {
+    /* The main variant always heads the list; alternatives follow it */
+    const list = [
+      { name: 'Main', text, main: true },
+      ...variants.map((v) => ({ name: v.name, text: v.text, main: false })),
+    ]
+    const resolvedTitle =
+      title ?? (mode === 'create' ? 'New instruction' : `Edit instruction — ${name}`)
+    ieState = {
+      mode,
+      row,
+      rowName: name,
+      placeholder,
+      historyName:
+        mode === 'custom'
+          ? (title ?? '').replace(/^Custom instruction — /, '')
+          : resolvedTitle.replace(/^Edit instruction — /, ''),
+      variants: list,
+      selected: 0,
+      initial: '',
+    }
+    editTitle.textContent = resolvedTitle
+    ieBodyEl.classList.toggle('ie-custom', mode === 'custom')
+    ieName.value = mode === 'custom' ? '' : name
+    setFieldError(ieName, ieNameError, '')
+    ieMarkerError.hidden = true
+    selectIeTab(ieTabEdit, false)
+    loadSelectedVariant()
+    renderVariantList()
+    ieState.initial = ieSnapshot()
+    editDialog.showModal()
+    ;(mode === 'custom' ? editText : ieName).focus()
+  }
+
+  /* ---------- Editor event wiring ------------------------------------------- */
+
+  /* Save: validate on the Save button click (preventing it keeps the
+     dialog open with inline errors — same pattern as project settings) */
+  editForm.querySelector('button[value="save"]').addEventListener('click', (e) => {
+    if (!validateEditor()) e.preventDefault()
+  })
+
+  /* Enter in a text field saves — the implicit submitter would be Cancel */
+  editForm.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.target.tagName !== 'INPUT') return
+    e.preventDefault()
+    if (validateEditor()) editDialog.close('save')
+  })
+
+  /* UI-010: Cancel and Esc with unsaved changes ask for confirmation */
+  function requestCloseEditor() {
+    if (ieIsDirty()) unsavedDialog.showModal()
+    else editDialog.close('cancel')
+  }
+
+  ieCancelBtn.addEventListener('click', (e) => {
+    e.preventDefault()
+    requestCloseEditor()
+  })
+
+  editDialog.addEventListener('cancel', (e) => {
+    if (!ieIsDirty()) return // clean: let the default Esc-close happen
+    e.preventDefault()
+    unsavedDialog.showModal()
+  })
+
+  unsavedDialog.addEventListener('close', () => {
+    if (unsavedDialog.returnValue === 'discard' && editDialog.open) {
+      editDialog.close('cancel')
+    }
+  })
+
+  /* History (UI-003): the real revisions panel is wired by a later commit */
+  ieHistoryBtn.addEventListener('click', () => {
+    dialogTitle.textContent = `History — ${ieState?.historyName ?? 'instruction'}`
+    dialogText.textContent =
+      'Prototype placeholder: the real app shows the version list of the instruction and its variants (time, operation, entity) with diff and restore (LIB-026…029).'
+    dialog.showModal()
+  })
+
+  /* Toolbar «+ New instruction» opens the editor in CREATE mode (LIB-002) */
+  newInstructionBtn.addEventListener('click', () => openEditModal({ mode: 'create' }))
+
+  /* Variant list: one delegated click handler for select / make main /
+     delete; the disabled buttons never reach it */
+  ieVariantList.addEventListener('click', (e) => {
+    const rowEl = e.target.closest('.ie-variant-row')
+    if (!rowEl || !ieState) return
+    const i = Number(rowEl.dataset.idx)
+    if (e.target.closest('.cell-icon--main')) {
+      makeMain(i)
+      return
+    }
+    if (e.target.closest('.cell-icon--delete')) {
+      requestDeleteVariant(i)
+      return
+    }
+    if (e.target.closest('.ie-variant-item')) selectVariant(i)
+  })
+
+  ieAddCopy.addEventListener('click', () => addVariant(true))
+  ieAddEmpty.addEventListener('click', () => addVariant(false))
+
+  for (const tab of ieTabs) {
+    tab.addEventListener('click', () => {
+      selectIeTab(tab, false)
+      if (tab === ieTabPreview && ieState) renderPreviewPane()
+    })
+  }
+
+  ieTablist.addEventListener('keydown', (e) => {
+    const current = ieTabs.indexOf(document.activeElement)
+    if (current === -1) return
+    let next = null
+    if (e.key === 'ArrowRight') next = (current + 1) % ieTabs.length
+    else if (e.key === 'ArrowLeft') next = (current + ieTabs.length - 1) % ieTabs.length
+    else if (e.key === 'Home') next = 0
+    else if (e.key === 'End') next = ieTabs.length - 1
+    if (next === null) return
+    e.preventDefault()
+    selectIeTab(ieTabs[next], true)
+  })
+
+  ieName.addEventListener('input', () => setFieldError(ieName, ieNameError, ''))
+
+  ieVName.addEventListener('input', () => {
+    if (!ieState) return
+    ieState.variants[ieState.selected].name = ieVName.value
+    setFieldError(ieVName, ieVNameError, '')
+    renderVariantList()
+  })
+
+  editText.addEventListener('input', () => {
+    if (!ieState) return
+    const v = ieState.variants[ieState.selected]
+    v.text = editText.value.replace(/\r\n/g, '\n') // CRLF -> LF on save (§6.9)
+    updateCharCount()
+    validateMarkerLive()
+    if (previewActive()) renderPreviewPane()
+  })
+
+  /* Saving in EDIT mode applies the name to the row (the rest of the demo
+     state stays in-memory; VARIANTS is re-keyed so the cell selects keep
+     finding their texts) */
+  editDialog.addEventListener('close', () => {
+    const st = ieState
+    if (!st || st.mode !== 'edit' || editDialog.returnValue !== 'save') return
+    const name = ieName.value.trim()
+    if (!st.row || name === st.rowName) return
+    st.row.querySelector('.name').textContent = name
+    st.row.querySelector('.edit-btn')?.setAttribute('aria-label', `Edit instruction: ${name}`)
+    st.row.querySelector('.row-sel')?.setAttribute('aria-label', `Select row: ${name}`)
+    for (const sel of st.row.querySelectorAll('.variant-select')) {
+      sel.setAttribute('aria-label', `Assigned text — ${name}`)
+    }
+    const mapped = VARIANTS[st.rowName]
+    if (mapped) {
+      delete VARIANTS[st.rowName]
+      VARIANTS[name] = mapped
+    }
+  })
 
   tbody.addEventListener('click', (e) => {
     const btn = e.target.closest('.edit-btn')
     if (!btn) return
     const row = btn.closest('tr')
-    const name = instructionName(row)
+    const name = instructionDisplay(row)
     const mainText = instructionText(row)
-    const isEmpty = !mainText
 
-    /* The accordion lists every variant the instruction has: mapped ones
-       explicitly; single-variant rows get their "Variant 1" synthesized from
-       the instruction text; badge-less rows have no variants at all.
-       "Variant 1" is the default wording of the main text: nudge it a bit
-       so the variant visibly differs from the field above */
+    /* The variant list shows the main variant first, then every alternative
+       the instruction has: mapped ones explicitly; single-variant rows get
+       their "Variant 1" synthesized from the instruction text; badge-less
+       rows have no alternatives at all. "Variant 1" is the default wording
+       of the main text: nudge it a bit so it visibly differs from the main
+       variant */
     const variantCount = Number(row.querySelector('.chip')?.textContent ?? 0)
-    const variants = (
+    const alternatives = (
       VARIANTS[name] ?? (variantCount >= 1 ? [{ name: 'Variant 1', text: mainText }] : [])
     ).map((v) =>
       v.name === 'Variant 1' && v.text === mainText
@@ -588,12 +1142,11 @@
         : v,
     )
     openEditModal({
-      title: `Edit instruction — ${name}`,
+      mode: 'edit',
+      row,
+      name,
       text: mainText,
-      placeholder: isEmpty
-        ? 'No text yet — write the main variant here.'
-        : 'Instruction text (Markdown)…',
-      variants,
+      variants: alternatives,
     })
   })
 
@@ -609,6 +1162,7 @@
     edit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.03a.996.996 0 0 0 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>',
     delete:
       '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>',
+    main: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>',
   }
 
   function refreshCellIcons(td) {
@@ -658,10 +1212,10 @@
       edit.addEventListener('click', () => {
         pendingCustomCell = td
         openEditModal({
+          mode: 'custom',
           title: `Custom instruction — ${instr} — ${proj}`,
           text: customTexts.get(td) ?? '',
           placeholder: 'Write the custom instruction text…',
-          variants: [],
         })
       })
       const del = mk('delete', `Delete the custom instruction — ${instr} — ${proj}`)
@@ -677,10 +1231,10 @@
       add.addEventListener('click', () => {
         pendingCustomCell = td
         openEditModal({
+          mode: 'custom',
           title: `Custom instruction — ${instr} — ${proj}`,
           text: optionText(row, select ? select.value : 'Default'),
           placeholder: 'Write the custom instruction text…',
-          variants: [],
         })
       })
       box.append(add)
@@ -722,6 +1276,19 @@
     refreshCellIcons(td)
     updateCellState(input)
     refreshDirtyState()
+  })
+
+  /* Variant deletion confirmed from the editor's confirm dialog (LIB-023…025):
+     the last variant and the main one never reach this — their buttons are
+     disabled in the list */
+  confirmDialog.addEventListener('close', () => {
+    const i = pendingVariantDelete
+    pendingVariantDelete = null
+    if (i === null || !ieState || confirmDialog.returnValue !== 'delete') return
+    ieState.variants.splice(i, 1)
+    ieState.selected = Math.min(ieState.selected, ieState.variants.length - 1)
+    loadSelectedVariant()
+    renderVariantList()
   })
 
   /* ---------- Project settings modal (PRJ-008…012) ------------------------- */
