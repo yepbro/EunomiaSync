@@ -628,9 +628,9 @@ pub(crate) fn stage_copy(source: &Path, db_path: &Path) -> Result<(), RecoveryEr
     // FlushFileBuffers requires GENERIC_WRITE and fails with
     // ERROR_ACCESS_DENIED (os error 5) on the read-only handle
     // `File::open` yields, while Unix fsyncs read-only descriptors
-    // fine — the T-017 open-handle review's Windows arm. The handle
-    // only flushes; nothing is written through it, so the staged
-    // bytes are untouched.
+    // fine (DECISIONS.md D-074, T-241). The handle only flushes;
+    // nothing is written through it, so the staged bytes are
+    // untouched.
     let file = std::fs::OpenOptions::new()
         .write(true)
         .open(&staging)
@@ -653,7 +653,10 @@ pub(crate) fn stage_copy(source: &Path, db_path: &Path) -> Result<(), RecoveryEr
 /// The parent fsync is best-effort (`File::open` of a directory is
 /// not available everywhere): an exotic filesystem that refuses it
 /// must not turn a completed replacement into a reported failure —
-/// the staged file's own fsync already ran.
+/// the staged file's own fsync already ran. On Windows this arm is a
+/// de-facto no-op (a directory cannot be opened for a flushing handle
+/// this way; D-074) — the durability price is one rename whose
+/// directory entry the OS flushes on its own schedule.
 pub(crate) fn publish_copy(db_path: &Path) -> Result<(), RecoveryError> {
     if db_path.exists() {
         return Err(RecoveryError::Io {
