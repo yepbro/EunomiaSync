@@ -3921,3 +3921,26 @@ instead of `current_uid()` — is caught only by the privileged run
 (the one-line call site was instead verified under root, recorded
 above). Adding a privileged or non-Linux test leg to CI is a pipeline
 decision left to its owner.
+
+### D-059 — T-240 docs: prettier's single trailing newline beats the owner's verbatim byte — 2026-11-19
+
+Problem: T-240 lands the owner-provided `CLA.md` and the full replacement
+`CONTRIBUTING.md` as verbatim copies (the only intended edits: the three
+CLA placeholders — effective date, governing-law jurisdiction ×2, contact
+email — values fixed by the owner on the card, mid-task amended for the
+jurisdiction). The owner's `CONTRIBUTING.md` source ends with a blank
+line (`licenses.\n\n`), while prettier gates root markdown through both
+`format:check` and the pre-commit hook and normalizes every file to a
+single trailing newline. A byte-verbatim copy and green checks cannot
+both hold.
+
+Solution: the checks win. The trailing blank line is dropped
+(`pnpm exec prettier --write CONTRIBUTING.md`; −1 byte — the only
+deviation from the owner's source besides the three placeholder lines;
+`CLA.md` passes prettier untouched). Rationale: `format:check` runs in
+CI on every push, so a verbatim file would keep the pipeline red; the
+dropped byte is semantically empty in Markdown (identical rendering);
+and the check is the repo's enforceable contract, while verbatim-ness
+has no enforcement and its only witness — this entry — now records the
+exact deviation. The placeholder values remain owner legal decisions
+recorded on the task card, outside this entry's scope.
