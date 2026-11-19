@@ -317,8 +317,16 @@
        explicitly; single-variant rows get their "Variant 1" synthesized from
        the instruction text; badge-less rows have no variants at all */
     const variantCount = Number(row.querySelector('.chip')?.textContent ?? 0)
-    const variants =
-      VARIANTS[name] ?? (variantCount >= 1 ? [{ name: 'Variant 1', text: editText.value }] : [])
+    const mainText = editText.value
+    /* "Variant 1" is the default wording of the main text: nudge it a bit
+       so the variant visibly differs from the field above */
+    const variants = (
+      VARIANTS[name] ?? (variantCount >= 1 ? [{ name: 'Variant 1', text: mainText }] : [])
+    ).map((v) =>
+      v.name === 'Variant 1' && v.text === mainText
+        ? { name: v.name, text: v.text + ' Slightly reworded version of the main text.' }
+        : v,
+    )
     editVariants.hidden = variants.length === 0
     editVariants.open = false // collapsed by default every time
     editVariantsSummary.textContent = `Variants (${variants.length})`
