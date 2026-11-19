@@ -2937,3 +2937,174 @@ one real oracle defect in that fix — the §10 sample had transcribed
 `MOVEFILE_*` flag names that are not registry codes — and the oracle
 now carries exactly the table's 22 codes; it also tightened the
 `StorageError::ActionLog` doc to read-path-only wording.
+
+### D-052 — `activity_list`: inclusive exact-shape date bounds, `ts DESC, id DESC` ordering, user-by-default visibility at the IPC boundary — 2026-11-18
+
+Problem: T-027 turns the "Activity" window's read (spec §7.7 UI row:
+"filters by date, project, type, and result"; §7.10 History module's
+`activity_list`) into the store's query and the first History IPC
+command. Open questions: what the date filters compare as (the `ts`
+column is TEXT); which order a paginated window needs when entries
+share one millisecond; how LOG-005's "user in the window, diagnostic
+only in diagnostics" becomes a wire contract whose default cannot leak
+diagnostic entries; how the closed store vocabularies reach
+TypeScript; and what the response's pagination meta carries.
+
+Solution, six decisions:
+
+- _Date bounds: inclusive both ends, exact DB-002 shape only._ The
+  bounds are compared as **text** against `ts` (`ts >= ? AND ts <= ?`),
+  which is equivalent to chronological comparison only because the
+  new public `values::is_db002_shape` predicate holds: the format is
+  fixed-width with fixed offsets and always the `Z` suffix, so its
+  lexicographic order IS its chronological order. A bound that merely
+  parses as RFC 3339 breaks that ("…:00Z" > "…:00.000Z" as text while
+  naming the same instant), so both the command and the store
+  (`ActionLogError::Timestamp`) reject every non-exact shape —
+  mis-ordering is not guessable at. Both ends inclusive: with
+  millisecond resolution a whole day is `…T00:00:00.000Z` to
+  `…T23:59:59.999Z`, and an entry stamped exactly at a bound is inside
+  the range (pinned by entries at both bounds). An inverted range
+  (`from > to`) is `ActionLogError::Range` — an accidental empty match
+  must not look like "nothing happened that day" (the D-039
+  explicit-over-silent policy, applied to a query). The rule lives
+  once (`is_db002_shape`); the command checks it for named-field
+  `E_VALIDATION` params, the store for its own contract — the
+  predicate, not the rule, is shared.
+- _Ordering: `ts DESC, id DESC`._ Time is the window's user-visible
+  axis; the autoincrement id is the tiebreaker that makes an
+  equal-millisecond block page deterministically (equal `ts` is common
+  — `insert` stamps its own `now_utc()` and a fast producer crosses
+  entries inside one millisecond). `recent` keeps its `id DESC`
+  insert-order semantics deliberately: it answers "the last N things
+  written" (journal replay), `list` answers "when does this say it
+  happened" — the two diverge only after a backward clock step, and
+  each seam's tests pin its own ordering. The `ix_log_ts` index serves
+  the range scans; LOG-006's retention (10 000 rows) bounds every
+  scan.
+- _LOG-005 at the IPC boundary: user by default, diagnostic only on
+  the explicit request._ The store's `ActivityQuery.visibility` is a
+  plain filter (`None` = both audiences) — the store is the executor,
+  not the policy holder. The policy lives in the command: the DTO's
+  `include_diagnostic` (absent/false → `Some(User)`, only `true` →
+  `None`) is the single switch, so an untrusted caller cannot reach a
+  diagnostic entry by omission or by filter combination — the
+  acceptance criterion is pinned at both levels (the store test loops
+  every filter over twin pairs; the IPC test drives the default call,
+  an explicit false, filtered calls and the explicit true). A
+  diagnostics-ONLY view (no user entries) is not built: no consumer
+  exists; the diagnostics section can filter client-side by the
+  `visibility` field the entries carry.
+- _Pagination: limit/offset + filter-matching `total`._ The journal is
+  retention-bounded and filterable by every axis the UI offers;
+  offset pagination is sufficient and simplest, and the response
+  carries `total` (COUNT over the same WHERE, both inside the one
+  `Db::run` transaction, so page and count describe one consistent
+  state) — the "page N of M" the window renders. Bounds:
+  `DEFAULT_PAGE_LIMIT = 50`, `MAX_PAGE_LIMIT = 500` (a response-size
+  guard, not a data-set guard), offset ≥ 0; the DTO fields are `i32`
+  so a negative value reaches _our_ `E_VALIDATION` instead of dying in
+  serde (a JSON number too large for i32 fails deserialization at the
+  invoke layer — a malformed payload, like a string where a number
+  belongs).
+- _Wire DTO: stored spellings as strings, `u32` ids, `details` as
+  JSON text._ The closed vocabularies (`action`, `result`, `level`,
+  `visibility`, `entity_type`) travel as their stored member strings;
+  the request side is parsed at the boundary through the store's own
+  now-public `Action::from_member`/`Outcome::from_member` — one owner
+  per vocabulary, unknown wire values are `E_VALIDATION` naming the
+  field/value/reason, never a silent match-all. Mirroring the 21
+  members into a src-tauri specta enum was rejected: a second list to
+  keep in sync for no behavioral gain (the backend writes every value;
+  TS gets `string`). `id` and `total` are `u32` (saturating): specta
+  forbids 64-bit integers on the TS wire (the D-049 `size_bytes`
+  precedent), and an autoincrement id or row count past 2^32 is
+  outside this app's envelope. `details` is the canonical JSON text of
+  the store's parsed value — not `serde_json::Value` on the wire,
+  because `specta/serde_json` (the feature that implements `Type` for
+  `Value`) is deliberately not enabled; parsing stays the frontend's
+  choice (the `modified_utc` precedent). Field names are snake_case on
+  the wire, the `DbBackupInfo`/`AppError` house convention.
+- _SQL shape safety and failure mapping._ The `list` statement text is
+  assembled from fixed literals only; every value — including the
+  generated `?` list of the `action IN (…)` filter — travels as a
+  bound parameter, so no filter value can change the query's shape
+  (pinned by injection-shaped project ids matching literally and
+  matching nothing). Failures map contextually (D-034):
+  `StorageError::ActionLog` → `E_VALIDATION` (a corrupt cell names
+  its column and value), SQLite failures → the shared base classifier,
+  anything else (unreachable from a read) keeps the recorded fallback
+  shape. The command logs every failure through the new
+  `logging::activity_list_failed` (error level, §10 code + params +
+  OS facts — the `recovery_failed` rationale); a successful read is
+  never journaled (the journal feeding itself) and gets no routine
+  log line. Without a managed `Db` (recovery mode) the command answers
+  the fallback code with a `NoDatabase` diagnostic rather than
+  pretending an empty journal.
+
+Testing: 14 store integration tests over real migrated databases
+(filter matrix each-alone and combined with drop-one-grow-by-one
+semantics, inclusive bounds with entries stamped exactly at them,
+shape rejection matrix, inverted range, injection-shaped values,
+visibility invariant across every filter, pagination tiling with a
+disjoint-union check, equal-`ts` page stability, `ts`-primary
+ordering with insert order deliberately contradicted, corrupt cells,
+full-column round-trip), `values` unit tests for the shape predicate
+and the lexicographic-ordering property (including the motivating
+near-miss counter-example), five IPC tests over the mock runtime
+(filtered wire DTO round-trip, the LOG-005 default/false/filtered/
+explicit-true matrix, the eight-case validation envelope, the
+no-database answer, the registration pin), the facade line test, and
+the regenerated `src/bindings.ts`. No new dependencies (enabling
+`specta/serde_json` was considered and rejected above).
+
+The round-1 review (deepseek-v4.1-flash, APPROVE) tightened six
+edges, all fixed in the same commit: (1) the wire `actions` array is
+de-duplicated during parsing, bounding the generated `IN (…)`
+placeholder list by the vocabulary's own size (21) — an unbounded
+array could otherwise push the statement past SQLite's variable limit
+and surface a frontend bug as the fallback `E_DB_LOCKED` (pinned: a
+5000-entry duplicate array succeeds and filters exactly); (2) the
+read path now validates stored `ts` cells against the same
+`is_db002_shape` predicate as the bounds (the D-039 corrupt-cells
+policy, extended to the one column the ordering claim stands on — a
+tampered shapeless `ts` fails the read instead of sorting textually;
+both seams, `recent` and `list`, share the decode and the guarantee);
+(3) the command logs every failure path — the early validation and
+no-database returns previously bypassed the single
+`logging::activity_list_failed` edge the entry claimed (the body is
+split so one `inspect_err` covers validation, state and executor
+alike); (4) a corrupt journal cell maps to the D-037 fallback with an
+`ActionLogCorrupt` diagnostic, not `E_VALIDATION` — the §10 row of
+that code tells the user to fix their input, a lie about database
+corruption, and `E_DB_CORRUPT` is the other lie D-037 already
+rejected (one bad cell must not force the destructive recovery
+screen); the raw cell deliberately does not travel in `params` (a
+tampered cell is arbitrary database text, and `params` feeds the log
+line and the UI message — SEC-008's surfaces), while bound failures
+(`Timestamp`/`Range`, caller input) keep `E_VALIDATION`; (5) the DTO
+carries `deny_unknown_fields`, so a typo'd filter key fails
+deserialization loudly instead of silently widening the query to the
+whole journal, and the empty-`actions`-means-no-filter contract is
+pinned at the IPC level (the unset-dropdown reading — the opposite
+choice would make an accidental `[]` blank the window); (6) the IPC
+tests close the app's managed `Db` before removing their temp
+directories (the Windows teardown rule the store suite pins).
+
+The round-2 review (hy4-flash-free, REQUEST CHANGES) caught the
+incomplete half of fix (4) — fixed in the same commit: the stored-`ts`
+validation had reused the bound variant `Timestamp`, so a tampered
+`ts` cell was still classified as caller input (`E_VALIDATION`) with
+its raw value in `params`. The store now separates the two producers:
+`Timestamp` stays the bound variant (caller input), and the read path
+raises the new `TsCell` variant (stored data), which the command maps
+into the `ActionLogCorrupt` fallback like every other corrupt cell —
+pinned end to end over IPC (fallback envelope, empty params, the
+fixed class-only diagnostic). The same review's second finding closed
+the last raw-cell surface: the fallback's `os_message` is no longer
+the variant's own `Display` (which embeds the stored value) but the
+fixed `corrupt_cell_diagnostic` text naming the column and the
+failure class — a tampered cell's arbitrary text now reaches neither
+`params` nor `os_message`, the two surfaces the §10 log line and the
+UI-011 message render (whoever debugs a tampered database reads the
+cell from the database).

@@ -32,8 +32,9 @@ pub(crate) mod db;
 pub(crate) mod recovery;
 
 // The IPC commands (spec §7.10): the recovery-screen group of the
-// System module — the first registered commands since `greet` was
-// removed (D-037); every later command task extends this module.
+// System module (D-009) and the History module's `activity_list`
+// (T-027) — the first registered commands since `greet` was removed
+// (D-037); every later command task extends this module.
 pub(crate) mod commands;
 
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
@@ -49,14 +50,16 @@ pub(crate) mod single_instance;
 /// registered. Shared by the app entry point and the binding export test.
 pub fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
-        // The recovery-screen group of the System module (spec §7.10,
-        // D-009) — the first registered commands since the template's
-        // demo was removed (D-037). Every later command task (dialog,
-        // settings, …) lists its own §7.10 names here. The commands
-        // are runtime-generic (the tauri-specta shape for commands
-        // that take an `AppHandle`), so the registration pins the
-        // concrete runtime of the shipped app.
+        // The registered §7.10 commands: the recovery-screen group of
+        // the System module (D-009) and the History module's
+        // `activity_list` (T-027) — the first registered commands
+        // since the template's demo was removed (D-037). Every later
+        // command task (dialog, settings, …) lists its own §7.10 names
+        // here. The commands are runtime-generic (the tauri-specta
+        // shape for commands that take an `AppHandle`), so the
+        // registration pins the concrete runtime of the shipped app.
         .commands(collect_commands![
+            commands::activity_list::<tauri::Wry>,
             commands::app_open_data_folder::<tauri::Wry>,
             commands::db_backups_list::<tauri::Wry>,
             commands::db_restore_backup::<tauri::Wry>,

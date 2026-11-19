@@ -6,6 +6,25 @@ import type { InvokeOptions } from "@tauri-apps/api/core";
 /** Commands */
 export const commands = {
 	/**
+	 *  Lists the journal for the "Activity" window and the diagnostics
+	 *  section (§7.10 History module `activity_list`; §7.7 UI row with
+	 *  filters by date, project, type and result; LOG-005).
+	 * 
+	 *  The query runs through the [`Db::run`] executor like every database
+	 *  command (D-037): one transaction off the async runtime, busy
+	 *  retries included (D-050). Visibility is LOG-005's rule applied at
+	 *  this boundary: the response carries `user` entries only, unless
+	 *  `include_diagnostic` explicitly opts the diagnostics section in —
+	 *  a `diagnostic` entry is never returned by accident, whatever the
+	 *  other filters narrow to.
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::activity_list_failed`]); a successful read is never
+	 *  journaled (writing the journal to read it would feed itself) and
+	 *  gets no routine log line (nothing happened worth a file).
+	 */
+	activityList: (query: ActivityListQuery_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<ActivityPage_Serialize>("activity_list", { query }, options),
+	/**
 	 *  Opens the data directory in the OS file manager (§7.10). The
 	 *  opener plugin runs from Rust only (SEC-001): the webview holds no
 	 *  `opener:` permission, so this command is the single path from the
@@ -41,6 +60,249 @@ export const commands = {
 };
 
 /* Types */
+/**
+ *  One journal entry on the `activity_list` wire: every `action_log`
+ *  column, with the closed vocabularies in their stored spellings
+ *  (the backend writes them; the UI switches on them). `details` is
+ *  the stored JSON as text — SEC-008's typed payload re-serialized in
+ *  its canonical form; parsing it stays the frontend's choice (the
+ *  `modified_utc` precedent of `DbBackupInfo`).
+ * 
+ *  `id` and `total` are `u32`: specta forbids 64-bit integers on the
+ *  TS wire (the `size_bytes` decision, D-049), and an autoincrement id
+ *  or a row count past 2^32 is outside this app's envelope — the
+ *  saturating cast is the honest boundary, recorded with this task's
+ *  DECISIONS.md entry.
+ */
+export type ActivityEntry = ActivityEntry_Serialize | ActivityEntry_Deserialize;
+
+/**
+ *  One journal entry on the `activity_list` wire: every `action_log`
+ *  column, with the closed vocabularies in their stored spellings
+ *  (the backend writes them; the UI switches on them). `details` is
+ *  the stored JSON as text — SEC-008's typed payload re-serialized in
+ *  its canonical form; parsing it stays the frontend's choice (the
+ *  `modified_utc` precedent of `DbBackupInfo`).
+ * 
+ *  `id` and `total` are `u32`: specta forbids 64-bit integers on the
+ *  TS wire (the `size_bytes` decision, D-049), and an autoincrement id
+ *  or a row count past 2^32 is outside this app's envelope — the
+ *  saturating cast is the honest boundary, recorded with this task's
+ *  DECISIONS.md entry.
+ */
+export type ActivityEntry_Deserialize = {
+	/**  The autoincrement id (§6.2), saturated at `u32::MAX`. */
+	id: number,
+	/**  The entry's time, DB-002 UTC ISO-8601. */
+	ts: string,
+	/**  The severity: `info`, `warn` or `error`. */
+	level: string,
+	/**  Who the entry is for (LOG-005): `user` or `diagnostic`. */
+	visibility: string,
+	/**  What happened, the `object.verb` spelling (`project.added`). */
+	action: string,
+	/**  The entity kind, when the entry names one. */
+	entity_type?: string | null,
+	/**  The entity id, when the entry names one. */
+	entity_id?: string | null,
+	/**  The project involved, when the entry names one. */
+	project_id?: string | null,
+	/**  The sync run involved, when the entry names one. */
+	sync_run_id?: string | null,
+	/**  The outcome: `ok`, `error` or `skipped`. */
+	result: string,
+	/**  The `details` JSON as canonical text, when the entry has any. */
+	details?: string | null,
+};
+
+/**
+ *  One journal entry on the `activity_list` wire: every `action_log`
+ *  column, with the closed vocabularies in their stored spellings
+ *  (the backend writes them; the UI switches on them). `details` is
+ *  the stored JSON as text — SEC-008's typed payload re-serialized in
+ *  its canonical form; parsing it stays the frontend's choice (the
+ *  `modified_utc` precedent of `DbBackupInfo`).
+ * 
+ *  `id` and `total` are `u32`: specta forbids 64-bit integers on the
+ *  TS wire (the `size_bytes` decision, D-049), and an autoincrement id
+ *  or a row count past 2^32 is outside this app's envelope — the
+ *  saturating cast is the honest boundary, recorded with this task's
+ *  DECISIONS.md entry.
+ */
+export type ActivityEntry_Serialize = {
+	/**  The autoincrement id (§6.2), saturated at `u32::MAX`. */
+	id: number,
+	/**  The entry's time, DB-002 UTC ISO-8601. */
+	ts: string,
+	/**  The severity: `info`, `warn` or `error`. */
+	level: string,
+	/**  Who the entry is for (LOG-005): `user` or `diagnostic`. */
+	visibility: string,
+	/**  What happened, the `object.verb` spelling (`project.added`). */
+	action: string,
+	/**  The entity kind, when the entry names one. */
+	entity_type: string | null,
+	/**  The entity id, when the entry names one. */
+	entity_id: string | null,
+	/**  The project involved, when the entry names one. */
+	project_id: string | null,
+	/**  The sync run involved, when the entry names one. */
+	sync_run_id: string | null,
+	/**  The outcome: `ok`, `error` or `skipped`. */
+	result: string,
+	/**  The `details` JSON as canonical text, when the entry has any. */
+	details: string | null,
+};
+
+/**
+ *  The request DTO of `activity_list` (§7.10 History module, §7.7 UI
+ *  row): every field optional, every field a filter, all of them
+ *  combining with AND. Field names are the wire contract (snake_case,
+ *  the house convention of `DbBackupInfo`/`AppError`).
+ * 
+ *  The closed vocabularies travel as strings in their stored spellings
+ *  (`"project.added"`, `"error"`) and are parsed at this boundary
+ *  through the store's own member parsers — one owner per vocabulary,
+ *  and an unknown value is `E_VALIDATION`, never a silent match-all.
+ *  Unknown keys are rejected (`deny_unknown_fields`): a typo'd filter
+ *  name must fail loudly, not silently widen the query to everything.
+ */
+export type ActivityListQuery = ActivityListQuery_Serialize | ActivityListQuery_Deserialize;
+
+/**
+ *  The request DTO of `activity_list` (§7.10 History module, §7.7 UI
+ *  row): every field optional, every field a filter, all of them
+ *  combining with AND. Field names are the wire contract (snake_case,
+ *  the house convention of `DbBackupInfo`/`AppError`).
+ * 
+ *  The closed vocabularies travel as strings in their stored spellings
+ *  (`"project.added"`, `"error"`) and are parsed at this boundary
+ *  through the store's own member parsers — one owner per vocabulary,
+ *  and an unknown value is `E_VALIDATION`, never a silent match-all.
+ *  Unknown keys are rejected (`deny_unknown_fields`): a typo'd filter
+ *  name must fail loudly, not silently widen the query to everything.
+ */
+export type ActivityListQuery_Deserialize = {
+	/**
+	 *  Inclusive lower date bound, DB-002 UTC shape
+	 *  (`YYYY-MM-DDTHH:MM:SS.sssZ`).
+	 */
+	from_ts?: string | null,
+	/**  Inclusive upper date bound, DB-002 UTC shape. */
+	to_ts?: string | null,
+	/**  The exact project id to filter by. */
+	project_id?: string | null,
+	/**
+	 *  The actions to filter by (the §7.7 "type" filter): the entry's
+	 *  action must be one of these. `None` or empty means every
+	 *  action.
+	 */
+	actions?: string[] | null,
+	/**  The result to filter by: `"ok"`, `"error"` or `"skipped"`. */
+	result?: string | null,
+	/**
+	 *  LOG-005: `false`/absent keeps the response to `user` entries —
+	 *  the "Activity" window's data; `true` includes `diagnostic`
+	 *  entries for the diagnostics section. Diagnostic entries are
+	 *  **never** returned without this explicit request.
+	 */
+	include_diagnostic?: boolean | null,
+	/**  The page size (1..=MAX_PAGE_LIMIT; defaults to 50). */
+	limit?: number | null,
+	/**  How many matching entries to skip (>= 0; defaults to 0). */
+	offset?: number | null,
+};
+
+/**
+ *  The request DTO of `activity_list` (§7.10 History module, §7.7 UI
+ *  row): every field optional, every field a filter, all of them
+ *  combining with AND. Field names are the wire contract (snake_case,
+ *  the house convention of `DbBackupInfo`/`AppError`).
+ * 
+ *  The closed vocabularies travel as strings in their stored spellings
+ *  (`"project.added"`, `"error"`) and are parsed at this boundary
+ *  through the store's own member parsers — one owner per vocabulary,
+ *  and an unknown value is `E_VALIDATION`, never a silent match-all.
+ *  Unknown keys are rejected (`deny_unknown_fields`): a typo'd filter
+ *  name must fail loudly, not silently widen the query to everything.
+ */
+export type ActivityListQuery_Serialize = {
+	/**
+	 *  Inclusive lower date bound, DB-002 UTC shape
+	 *  (`YYYY-MM-DDTHH:MM:SS.sssZ`).
+	 */
+	from_ts: string | null,
+	/**  Inclusive upper date bound, DB-002 UTC shape. */
+	to_ts: string | null,
+	/**  The exact project id to filter by. */
+	project_id: string | null,
+	/**
+	 *  The actions to filter by (the §7.7 "type" filter): the entry's
+	 *  action must be one of these. `None` or empty means every
+	 *  action.
+	 */
+	actions: string[] | null,
+	/**  The result to filter by: `"ok"`, `"error"` or `"skipped"`. */
+	result: string | null,
+	/**
+	 *  LOG-005: `false`/absent keeps the response to `user` entries —
+	 *  the "Activity" window's data; `true` includes `diagnostic`
+	 *  entries for the diagnostics section. Diagnostic entries are
+	 *  **never** returned without this explicit request.
+	 */
+	include_diagnostic: boolean | null,
+	/**  The page size (1..=MAX_PAGE_LIMIT; defaults to 50). */
+	limit: number | null,
+	/**  How many matching entries to skip (>= 0; defaults to 0). */
+	offset: number | null,
+};
+
+/**
+ *  The `activity_list` response: one page plus the pagination meta —
+ *  `total` counts what the **filters** match (independent of
+ *  limit/offset), so the UI can render "page N of M" without a second
+ *  round trip.
+ */
+export type ActivityPage = ActivityPage_Serialize | ActivityPage_Deserialize;
+
+/**
+ *  The `activity_list` response: one page plus the pagination meta —
+ *  `total` counts what the **filters** match (independent of
+ *  limit/offset), so the UI can render "page N of M" without a second
+ *  round trip.
+ */
+export type ActivityPage_Deserialize = {
+	/**
+	 *  The page's entries, newest first (`ts` descending, id
+	 *  descending within one millisecond).
+	 */
+	entries: ActivityEntry_Deserialize[],
+	/**
+	 *  How many entries the filters match in total (saturated at
+	 *  `u32::MAX`).
+	 */
+	total: number,
+};
+
+/**
+ *  The `activity_list` response: one page plus the pagination meta —
+ *  `total` counts what the **filters** match (independent of
+ *  limit/offset), so the UI can render "page N of M" without a second
+ *  round trip.
+ */
+export type ActivityPage_Serialize = {
+	/**
+	 *  The page's entries, newest first (`ts` descending, id
+	 *  descending within one millisecond).
+	 */
+	entries: ActivityEntry_Serialize[],
+	/**
+	 *  How many entries the filters match in total (saturated at
+	 *  `u32::MAX`).
+	 */
+	total: number,
+};
+
 /**
  *  The error every Tauri command returns in its `Result` (spec §7.10).
  *  A localization contract, not a Rust error type — see the module docs

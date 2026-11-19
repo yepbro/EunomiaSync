@@ -55,6 +55,54 @@ pub fn now_utc() -> String {
         .to_string()
 }
 
+/// Whether `value` has the exact DB-002 TEXT shape —
+/// `YYYY-MM-DDTHH:MM:SS.sssZ`, 24 characters: digits at every
+/// non-punctuation position, `-`/`-`/`T`/`:`/`:`/`.`/`Z` at the fixed
+/// ones (D-031/D-035).
+///
+/// The check is **character-level, not calendar-level**: `…-13-…`
+/// (month 13) is shape-valid. Calendar validity is a different
+/// concern with different owners (jiff rejects it when a value is
+/// parsed as an instant; a filter bound that is shape-valid but
+/// calendar-invalid simply matches nothing in the range comparison,
+/// which stays well-defined).
+///
+/// This is the predicate behind every **string comparison over
+/// timestamp columns**: two values of exactly this shape compare
+/// lexicographically exactly as their instants compare chronologically
+/// (fixed width, fixed offsets, always UTC `Z`). A value that merely
+/// *parses* as RFC 3339 does not have that property —
+/// `…T13:00:00Z` (no fractional digits) and `…T13:00:00.000Z` name
+/// the same instant but compare unequal as text (`Z` > `.`) — so both
+/// the query's date **bounds** and the read path's stored **cells**
+/// (`action_log`'s `ts`) accept only this exact shape and reject
+/// everything else instead of silently mis-ordering.
+#[must_use = "the check is free; skipping it forfeits the lexicographic-ordering guarantee"]
+pub fn is_db002_shape(value: &str) -> bool {
+    /// The fixed punctuation of `YYYY-MM-DDTHH:MM:SS.sssZ`, by byte
+    /// position.
+    const PUNCTUATION: [(usize, u8); 7] = [
+        (4, b'-'),
+        (7, b'-'),
+        (10, b'T'),
+        (13, b':'),
+        (16, b':'),
+        (19, b'.'),
+        (23, b'Z'),
+    ];
+    let bytes = value.as_bytes();
+    bytes.len() == 24
+        && PUNCTUATION
+            .iter()
+            .all(|(index, expected)| bytes[*index] == *expected)
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            PUNCTUATION
+                .iter()
+                .any(|(punctuation, _)| *punctuation == index)
+                || byte.is_ascii_digit()
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +143,56 @@ mod tests {
         for _ in 0..100 {
             assert_timestamp_shape(&now_utc());
         }
+    }
+
+    #[test]
+    fn is_db002_shape_accepts_the_canonical_form_and_rejects_near_misses() {
+        // The canonical shape (an oracle literal, not `now_utc` output).
+        assert!(is_db002_shape("2026-11-17T13:03:22.123Z"));
+        // The predicate is character-level, not calendar-level: month
+        // 13 is shape-valid (every non-punctuation position is a
+        // digit). Calendar validation is not this predicate's job — a
+        // calendar-invalid bound simply matches nothing in the range
+        // comparison, which is well-defined for any shape-conforming
+        // string — and pinning the boundary keeps a future "fix" from
+        // silently re-scoping it.
+        assert!(is_db002_shape("2026-13-17T13:03:22.123Z"));
+        // Near misses: each one parses as RFC 3339 (or is plainly a
+        // date), yet none has the exact fixed-width shape whose
+        // lexicographic order equals chronological order.
+        for rejected in [
+            "2026-11-17T13:03:22Z",          // no fractional digits
+            "2026-11-17T13:03:22.12Z",       // two fractional digits
+            "2026-11-17T13:03:22.1234Z",     // four fractional digits
+            "2026-11-17T13:03:22.123+00:00", // explicit offset, no Z
+            "2026-11-17t13:03:22.123Z",      // lowercase T
+            "2026-11-17T13:03:22.123z",      // lowercase Z
+            "2026-11-17 13:03:22.123Z",      // space separator
+            "2026-11-17",                    // date only
+            "2026-11-17T13:03Z",             // minute precision
+            "2026-11-17T13:03:22.12aZ",      // non-digit in the fraction
+            "",                              // empty
+        ] {
+            assert!(
+                !is_db002_shape(rejected),
+                "{rejected:?} must not pass as a DB-002 timestamp"
+            );
+        }
+    }
+
+    /// Why the exact shape matters: two DB-002 values compare
+    /// lexicographically exactly as their instants compare, while two
+    /// merely-parseable RFC 3339 spellings of one instant do not — the
+    /// property range filters over `ts` rely on, pinned as behavior.
+    #[test]
+    fn db002_values_order_lexicographically_as_instants() {
+        assert!("2026-11-17T13:03:22.123Z" < "2026-11-17T13:03:22.124Z");
+        assert!("2026-11-17T13:03:22.999Z" < "2026-11-17T13:03:23.000Z");
+        assert!("2026-11-17T23:59:59.999Z" < "2026-11-18T00:00:00.000Z");
+        // The counter-example that motivates rejecting near misses:
+        // the same instant, two spellings, unequal text comparison.
+        assert!("2026-11-17T13:03:22Z" != "2026-11-17T13:03:22.000Z");
+        assert!("2026-11-17T13:03:22Z" > "2026-11-17T13:03:22.000Z");
     }
 
     #[test]

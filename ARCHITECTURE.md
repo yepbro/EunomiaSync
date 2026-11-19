@@ -89,8 +89,12 @@ Rust commands are registered through `tauri-specta`:
 2. The command is added to `collect_commands![...]` in `src-tauri/src/lib.rs`.
    The registered set is the recovery-screen group of the System
    module (spec §7.10/D-009): `app_open_data_folder`,
-   `db_backups_list`, `db_restore_backup`, `db_recreate`. Every
-   further command name is fixed by §7.10 and belongs to its own task.
+   `db_backups_list`, `db_restore_backup`, `db_recreate` — plus the
+   History module's `activity_list` (T-027): the "Activity" window's
+   filtered, paginated journal query over the `Db::run` executor, with
+   LOG-005's visibility rule (user entries by default, `diagnostic`
+   only on the explicit `include_diagnostic` request). Every further
+   command name is fixed by §7.10 and belongs to its own task.
 3. On debug builds the specta `Builder` exports `src/bindings.ts`
    (`specta_typescript::Typescript`). The file is **committed** so the
    frontend type-checks and lints without a Rust toolchain; it is excluded
@@ -462,10 +466,22 @@ writes its entry inside the operation's own transaction (the
 `settings::set` shape — a rolled-back operation leaves no entry), and
 a failed operation's entry is written **after** the rollback, in the
 next transaction (fail-then-log: the error entry must survive the
-transaction it describes). Reads go through `recent` (newest first;
-the Activity window's filters are T-027's) and fail with
-`StorageError::ActionLog` on any cell outside its vocabulary or a
-non-JSON `details` (the D-039 corrupt-cells policy). The journal is
+transaction it describes). Reads come in two seams with two
+orderings: `recent` (newest by insert order — journal replay) and
+`list` (the Activity window's query, T-027: filters by inclusive
+DB-002 date range, project, actions, result and visibility, paginated
+with limit/offset plus a filter-matching `total`, ordered `ts DESC,
+id DESC` so equal-millisecond entries page deterministically — both
+seams fail with `StorageError::ActionLog` on any cell outside its
+vocabulary, a non-JSON `details`, a stored `ts` cell outside the
+DB-002 shape, or a date bound that is not the exact DB-002 shape;
+that shape is the precondition under which text
+comparison over `ts` equals chronological comparison, which is what
+makes the range filters correct). The `activity_list` command
+(§7.10 History module) serves that query through the `Db::run`
+executor with LOG-005 enforced at the IPC boundary: user entries by
+default, `diagnostic` only on the explicit `include_diagnostic`
+request (D-052 records the DTO design). The journal is
 mirrored into the file log by one facade function,
 `logging::action_logged` — everything mirrors except the
 info+user+non-error shape, with codes and ids only (the policy

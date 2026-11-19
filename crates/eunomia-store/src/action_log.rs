@@ -45,9 +45,19 @@
 //! cleanup at startup and daily) is **not** this module's: it belongs
 //! to the cleanup task (T-029). Nothing here deletes rows.
 //!
-//! Reading is [`recent`]: the newest `limit` entries, newest first —
-//! the minimal seam the tests and the future "Activity" query task
-//! (T-027) need; filters and pagination stay with that task.
+//! Reading comes in two seams with two different orderings, both
+//! deterministic. [`recent`] is the journal-replay seam: the newest
+//! `limit` entries by **insert order** (descending id) — what "the
+//! last N things written" means. [`list`] is the "Activity" window's
+//! query (T-027, §7.7 UI row): filtered by date range, project,
+//! action, result and visibility, paginated, ordered by `ts DESC,
+//! id DESC` — **time-primary** (the user-visible axis of the window),
+//! with the id as the tiebreaker so equal-millisecond entries have a
+//! stable order across pages. The two orderings agree on a
+//! healthy clock and diverge only after a backward clock step (a
+//! late insert carrying an earlier `ts`): `recent` answers "in what
+//! order was this written", `list` answers "when does this say it
+//! happened".
 
 use std::fmt;
 use std::path::PathBuf;
@@ -168,7 +178,11 @@ impl Outcome {
 
     /// Parses a stored member string, rejecting anything outside the
     /// CHECK vocabulary (case-sensitive, like the schema).
-    fn from_member(member: &str) -> Result<Self, ActionLogError> {
+    ///
+    /// Public for the same reason as [`Action::from_member`]: the
+    /// `activity_list` result filter (§7.7 UI row) parses its wire
+    /// value here, keeping the vocabulary's single owner.
+    pub fn from_member(member: &str) -> Result<Self, ActionLogError> {
         match member {
             "ok" => Ok(Outcome::Ok),
             "error" => Ok(Outcome::Error),
@@ -384,7 +398,13 @@ impl Action {
     /// row was written by a newer app version or tampered with — the
     /// read surfaces it instead of guessing (the same
     /// corrupt-cells-error policy as [`settings`], D-039).
-    fn from_member(member: &str) -> Result<Self, ActionLogError> {
+    ///
+    /// Public: the future IPC layer (§7.10 `activity_list`) parses its
+    /// wire strings through this same parser, so the vocabulary has one
+    /// owner — a filter the store would reject is a filter the command
+    /// layer rejects identically, and a new action member needs no
+    /// second match to keep in sync.
+    pub fn from_member(member: &str) -> Result<Self, ActionLogError> {
         match member {
             "project.added" => Ok(Action::ProjectAdded),
             "project.changed" => Ok(Action::ProjectChanged),
@@ -619,10 +639,10 @@ impl<'a> LogEntry<'a> {
     }
 }
 
-/// One stored journal row, as [`recent`] returns it: every column,
-/// typed back. `details` comes back as parsed JSON (the read path
-/// validates that the cell is JSON; interpreting the fields is the
-/// reading task's business, T-027).
+/// One stored journal row, as [`recent`] and [`list`] return it: every
+/// column, typed back. `details` comes back as parsed JSON (the read
+/// path validates that the cell is JSON; interpreting the fields is
+/// the reading task's business, T-027).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogRecord {
     /// The autoincrement id (§6.2).
@@ -670,6 +690,43 @@ pub enum ActionLogError {
         /// The rejected string.
         found: String,
     },
+    /// An [`ActivityQuery`] date **bound** is not the exact DB-002 TEXT
+    /// shape. String range comparison over `ts` is only equivalent to
+    /// chronological comparison when both bounds have the fixed
+    /// `YYYY-MM-DDTHH:MM:SS.sssZ` shape ([`values::is_db002_shape`]);
+    /// anything else would silently mis-order, so it is rejected
+    /// instead of guessed at. Distinct from [`ActionLogError::TsCell`]
+    /// (the read-side twin): this variant is the **caller's input**
+    /// and maps to `E_VALIDATION` at the command boundary; the cell
+    /// variant is stored data and takes the corrupt-cells policy.
+    Timestamp {
+        /// Which bound was invalid (`"from_ts"`/`"to_ts"`).
+        field: &'static str,
+        /// The rejected value.
+        found: String,
+    },
+    /// A **stored** `ts` cell is not the exact DB-002 shape — the
+    /// read-side half of the shape contract (the D-039 corrupt-cells
+    /// policy applied to the column the ordering and range semantics
+    /// stand on): a machine-written row always carries
+    /// [`values::now_utc`]'s shape, so a shapeless cell means
+    /// corruption or version skew, and reading it must surface that
+    /// instead of sorting it textually.
+    TsCell {
+        /// The offending stored value.
+        found: String,
+    },
+    /// An [`ActivityQuery`] date range is inverted: `from_ts` is
+    /// strictly later than `to_ts`. An inverted range matches nothing
+    /// by accident of the comparison operators; rejecting it keeps
+    /// "empty result" meaning "no entries in the range" (the D-039
+    /// explicit-error-over-silent-default policy, applied to a query).
+    Range {
+        /// The rejected bounds, in order.
+        from: String,
+        /// The rejected bounds, in order.
+        to: String,
+    },
 }
 
 impl fmt::Display for ActionLogError {
@@ -684,6 +741,23 @@ impl fmt::Display for ActionLogError {
                     f,
                     "{found:?} is not a §10 registry code (E_UPPERCASE_DIGITS)"
                 )
+            }
+            ActionLogError::Timestamp { field, found } => {
+                write!(
+                    f,
+                    "{found:?} is not a DB-002 timestamp (YYYY-MM-DDTHH:MM:SS.sssZ) \
+                     for {field}"
+                )
+            }
+            ActionLogError::TsCell { found } => {
+                write!(
+                    f,
+                    "a stored ts cell {found:?} is not a DB-002 timestamp \
+                     (YYYY-MM-DDTHH:MM:SS.sssZ)"
+                )
+            }
+            ActionLogError::Range { from, to } => {
+                write!(f, "inverted date range: from {from} is later than to {to}")
             }
         }
     }
@@ -756,14 +830,15 @@ pub fn insert(conn: &Connection, entry: &LogEntry<'_>) -> Result<i64, StorageErr
 /// query proves the round-trip and gives that task its row shape.
 ///
 /// Every vocabulary cell is validated on the way out: an unknown
-/// action, level, visibility, result or entity_type, or a `details`
-/// cell that is not valid JSON, fails the read with
-/// [`StorageError::ActionLog`] (the D-039 corrupt-cells policy — the
-/// journal is machine-written, so a bad cell means corruption or
-/// version skew). The `details` cell's *contents* are validated for
-/// well-formed JSON only: `recent` returns the parsed value as-is,
-/// and interpreting the payload (and rejecting unknown shapes inside
-/// it) is the reading task's business, T-027.
+/// action, level, visibility, result or entity_type, a `ts` cell
+/// outside the DB-002 shape, or a `details` cell that is not valid
+/// JSON, fails the read with [`StorageError::ActionLog`] (the D-039
+/// corrupt-cells policy — the journal is machine-written, so a bad
+/// cell means corruption or version skew). The `details` cell's
+/// *contents* are validated for well-formed JSON only: `recent`
+/// returns the parsed value as-is, and interpreting the payload (and
+/// rejecting unknown shapes inside it) is the reading task's
+/// business, T-027.
 ///
 /// # Errors
 ///
@@ -797,6 +872,214 @@ pub fn recent(conn: &Connection, limit: u32) -> Result<Vec<LogRecord>, StorageEr
     records.into_iter().map(LogRow::try_from_row).collect()
 }
 
+/// One "Activity" query (spec §7.7 UI row, T-027): which journal
+/// entries to return, in what page. Every optional field is a filter
+/// that must match (they combine with AND); `limit`/`offset` select
+/// the page after filtering.
+///
+/// The store is the query executor, not the policy holder: it applies
+/// exactly the filters it is handed, including [`Visibility`]. The
+/// "user entries only unless diagnostics were explicitly requested"
+/// default (LOG-005) is the IPC boundary's decision — there it is
+/// untrusted input that chooses, here it is a typed parameter a
+/// Rust-side caller sets deliberately.
+///
+/// Date bounds are compared as **text** against the `ts` column, and
+/// that is only equivalent to chronological comparison because the
+/// bounds must have the exact DB-002 shape
+/// ([`values::is_db002_shape`] — fixed width, fixed offsets, always
+/// UTC `Z`); anything else fails [`list`] with
+/// [`ActionLogError::Timestamp`] instead of silently mis-ordering.
+/// Both bounds are **inclusive** — with millisecond-resolution
+/// timestamps, a whole day is `…T00:00:00.000Z` to `…T23:59:59.999Z`,
+/// and an entry stamped exactly at a bound is inside the range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityQuery {
+    /// The inclusive lower bound on `ts` (DB-002 shape), when set.
+    pub from_ts: Option<String>,
+    /// The inclusive upper bound on `ts` (DB-002 shape), when set.
+    pub to_ts: Option<String>,
+    /// The exact `project_id` to match, when set.
+    pub project_id: Option<String>,
+    /// The actions to match (the §7.7 "type" filter): the entry's
+    /// action must be one of these. Empty means no action filter —
+    /// every action matches.
+    pub actions: Vec<Action>,
+    /// The `result` to match, when set.
+    pub result: Option<Outcome>,
+    /// The `visibility` to match: `Some(v)` keeps only entries of that
+    /// visibility, `None` keeps both (LOG-005 names the two audiences;
+    /// which one a caller serves is the caller's fact).
+    pub visibility: Option<Visibility>,
+    /// The page size: how many entries to return at most. The IPC
+    /// layer bounds this (a read-only window, not a dump); the store
+    /// itself only requires that a `u32` page of rows fits in memory.
+    pub limit: u32,
+    /// How many matching entries to skip before the page begins —
+    /// `offset 0` is the first (newest) page.
+    pub offset: u32,
+}
+
+/// One page of the "Activity" query's result (T-027): the entries and
+/// the total number of entries the **filters** match (independent of
+/// `limit`/`offset`) — the count a paginating UI needs to render
+/// "page N of M". Both queries run in the caller's transaction (the
+/// app-layer executor of DECISIONS.md D-037 wraps them in one), so the
+/// page and its total describe one consistent state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActivityPage {
+    /// The matching entries of the requested page, newest first
+    /// (`ts DESC, id DESC`).
+    pub records: Vec<LogRecord>,
+    /// How many entries the filters match in total.
+    pub total: u64,
+}
+
+/// Reads one filtered, paginated page of the journal — the "Activity"
+/// window's query (spec §7.7 UI row; LOG-005).
+///
+/// Ordering is `ts DESC, id DESC`: time is the window's user-visible
+/// axis, and the id tiebreaker makes the order of entries sharing one
+/// millisecond deterministic — the same `ActivityQuery` always returns
+/// the same pages ([`recent`] keeps its insert-order semantics for
+/// journal replay; see the module docs). The `ix_log_ts` index serves
+/// the range scans.
+///
+/// The statement text is assembled from fixed literals only — filter
+/// values never enter the SQL string, they travel as bound parameters
+/// (the `action IN (…)` placeholder list is generated `?`s), so no
+/// filter value can change the query's shape.
+///
+/// Every vocabulary cell of every returned row is validated on the way
+/// out, exactly like [`recent`] (the D-039 corrupt-cells policy):
+/// an unknown action, level, visibility, result or entity_type, a
+/// `ts` cell outside the DB-002 shape, or a `details` cell that is
+/// not valid JSON, fails the whole read with
+/// [`StorageError::ActionLog`].
+///
+/// # Errors
+///
+/// Returns [`StorageError::ActionLog`] when a date bound is not the
+/// DB-002 shape ([`ActionLogError::Timestamp`]) or the range is
+/// inverted ([`ActionLogError::Range`]), when a returned row fails
+/// vocabulary, `ts`-shape ([`ActionLogError::TsCell`]) or JSON
+/// validation, and [`StorageError::Sql`] when either statement fails.
+pub fn list(conn: &Connection, query: &ActivityQuery) -> Result<ActivityPage, StorageError> {
+    validate_query_bounds(query)?;
+    // Filter clauses: fixed SQL fragments joined with AND, with every
+    // value bound as a parameter. `conditions` and `params` grow in
+    // lockstep — the Nth `?` of the assembled WHERE binds the Nth
+    // parameter.
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(from) = &query.from_ts {
+        conditions.push("ts >= ?".to_owned());
+        params.push(rusqlite::types::Value::Text(from.clone()));
+    }
+    if let Some(to) = &query.to_ts {
+        conditions.push("ts <= ?".to_owned());
+        params.push(rusqlite::types::Value::Text(to.clone()));
+    }
+    if let Some(project_id) = &query.project_id {
+        conditions.push("project_id = ?".to_owned());
+        params.push(rusqlite::types::Value::Text(project_id.clone()));
+    }
+    if !query.actions.is_empty() {
+        // Generated placeholders only — the action strings themselves
+        // are bound parameters, never SQL text.
+        let placeholders = vec!["?"; query.actions.len()].join(", ");
+        conditions.push(format!("action IN ({placeholders})"));
+        params.extend(
+            query
+                .actions
+                .iter()
+                .map(|action| rusqlite::types::Value::Text(action.as_str().to_owned())),
+        );
+    }
+    if let Some(result) = query.result {
+        conditions.push("result = ?".to_owned());
+        params.push(rusqlite::types::Value::Text(result.as_str().to_owned()));
+    }
+    if let Some(visibility) = query.visibility {
+        conditions.push("visibility = ?".to_owned());
+        params.push(rusqlite::types::Value::Text(visibility.as_str().to_owned()));
+    }
+    let where_sql = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+
+    let total: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM action_log {where_sql}"),
+        rusqlite::params_from_iter(params.iter().cloned()),
+        |row| row.get(0),
+    )?;
+
+    let mut statement = conn.prepare(&format!(
+        "SELECT id, ts, level, visibility, action, entity_type, entity_id,
+                project_id, sync_run_id, result, details
+         FROM action_log {where_sql}
+         ORDER BY ts DESC, id DESC
+         LIMIT ? OFFSET ?"
+    ))?;
+    let page_params = params.iter().cloned().chain([
+        rusqlite::types::Value::Integer(i64::from(query.limit)),
+        rusqlite::types::Value::Integer(i64::from(query.offset)),
+    ]);
+    let records = statement
+        .query_map(rusqlite::params_from_iter(page_params), |row| {
+            Ok(LogRow {
+                id: row.get(0)?,
+                ts: row.get(1)?,
+                level: row.get(2)?,
+                visibility: row.get(3)?,
+                action: row.get(4)?,
+                entity_type: row.get(5)?,
+                entity_id: row.get(6)?,
+                project_id: row.get(7)?,
+                sync_run_id: row.get(8)?,
+                result: row.get(9)?,
+                details: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(LogRow::try_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(ActivityPage {
+        records,
+        total: u64::try_from(total).unwrap_or(0),
+    })
+}
+
+/// Validates the date bounds of an [`ActivityQuery`]: each bound must
+/// have the exact DB-002 shape (the precondition under which text
+/// comparison equals chronological comparison), and the range must not
+/// be inverted.
+fn validate_query_bounds(query: &ActivityQuery) -> Result<(), StorageError> {
+    for (field, bound) in [("from_ts", &query.from_ts), ("to_ts", &query.to_ts)] {
+        if let Some(found) = bound
+            && !crate::values::is_db002_shape(found)
+        {
+            return Err(invalid(ActionLogError::Timestamp {
+                field,
+                found: found.clone(),
+            }));
+        }
+    }
+    if let (Some(from), Some(to)) = (&query.from_ts, &query.to_ts)
+        && from > to
+    {
+        return Err(invalid(ActionLogError::Range {
+            from: from.clone(),
+            to: to.clone(),
+        }));
+    }
+    Ok(())
+}
+
 /// The raw strings of one row, as rusqlite read them — the decode
 /// step ([`LogRecord::try_from_row`]) is fallible on the vocabulary
 /// columns, and rusqlite's `query_map` closure must stay infallible.
@@ -817,7 +1100,18 @@ struct LogRow {
 impl LogRow {
     /// Decodes one raw row into a [`LogRecord`], validating every
     /// vocabulary cell and the `details` JSON.
+    ///
+    /// `ts` is validated against the DB-002 shape
+    /// ([`values::is_db002_shape`]) like every other column: `ts` is
+    /// the column the read's ordering and range semantics stand on
+    /// (text comparison equals chronological comparison only for this
+    /// exact shape), so a shapeless stored value is a corrupt cell the
+    /// read must surface — not silently sort textually (the D-039
+    /// policy, extended to `ts` by the T-027 round-1 review).
     fn try_from_row(self) -> Result<LogRecord, StorageError> {
+        if !crate::values::is_db002_shape(&self.ts) {
+            return Err(invalid(ActionLogError::TsCell { found: self.ts }));
+        }
         let entity = match (self.entity_type, self.entity_id) {
             (Some(kind), Some(id)) => Some((EntityType::from_member(&kind).map_err(invalid)?, id)),
             // The pair is written together or not at all; a row with

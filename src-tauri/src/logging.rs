@@ -521,6 +521,28 @@ fn mirror_level(entry: &eunomia_store::action_log::LogEntry<'_>) -> Option<traci
     }
 }
 
+/// The `activity_list` command failed (T-027, §10's rule that every
+/// error reaches the log with its code): the payload is the error's
+/// own §7.10 vocabulary — the code literal, the interpolation params
+/// (which name the rejected filter field/value/reason, or carry the
+/// classified SQLite facts) and the OS facts from `details` when the
+/// failure had any. `error` level: the Activity window shows the
+/// failure to the user, and the log line is its durable half (the
+/// `recovery_failed` rationale, applied to this command). A
+/// *successful* list deliberately logs nothing — reading the journal
+/// is not an event, and journaling it would feed the journal itself.
+pub(crate) fn activity_list_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::action_log",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "the activity list query failed"
+    );
+}
+
 /// A recovery operation preserved the damaged database (T-024, §10's
 /// recovery screen): renamed — never deleted — from the database path
 /// to `db-backups/pre-recovery-<UTC>.sqlite3`. `info` with both paths:
@@ -1730,6 +1752,53 @@ mod tests {
         );
         assert!(
             log.contains("recovery operation failed"),
+            "the line must say what failed, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn a_failed_activity_list_logs_its_code_params_and_os_facts() {
+        // The `activity_list` command's §10 line (T-027): every error
+        // reaches the log with its code — the same payload shape as
+        // the recovery commands' failures (code literal + params +
+        // the OS facts when present), at `error` level so it survives
+        // the strictest config. The params here name the rejected
+        // filter field/value/reason, the shape the command's
+        // validation rejections build.
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut error = AppError::new(crate::errors::ErrorCode::Validation);
+        error
+            .params
+            .insert("field".to_owned(), "from_ts".to_owned());
+        error
+            .params
+            .insert("value".to_owned(), "2026-11-10T00:00:00Z".to_owned());
+        error.params.insert(
+            "reason".to_owned(),
+            "must be a DB-002 UTC timestamp (YYYY-MM-DDTHH:MM:SS.sssZ)".to_owned(),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            activity_list_failed(&error);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("code=\"E_VALIDATION\""),
+            "the line must carry the §10 code literal, got: {log}"
+        );
+        assert!(
+            log.contains("from_ts")
+                && log.contains("2026-11-10T00:00:00Z")
+                && log.contains("must be a DB-002 UTC timestamp"),
+            "the line must carry the rejection's params (the rejected filter), got: {log}"
+        );
+        assert!(
+            log.contains("the activity list query failed"),
             "the line must say what failed, got: {log}"
         );
         drop(temp);
