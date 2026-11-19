@@ -4,13 +4,16 @@
   Markup: HTML + pure CSS (styles.css). Interactivity: light vanilla JS
   (app.js) — search, project filter, "Show hidden", row selection,
   section collapse, instruction editor (UI-003 two-pane modal: variant
-  list, Edit/Preview tabs, unsaved-changes guard), project settings
-  modal (PRJ-008…012, PRJ-013…018 archive confirm), placeholder modals.
+  list, Edit/Preview tabs, unsaved-changes guard), instruction history
+  modal (LIB-026…027, D-16: revisions, snapshots, restore variant),
+  project settings modal (PRJ-008…012, PRJ-013…018 archive confirm),
+  placeholder modals.
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
   (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-008…012 (project
-  settings) + UI-001 (window, pinned sync panel), UI-021 (light/dark via
-  OS setting), UI-022 (reduced motion).
+  settings) + § 7.3 LIB-026…027 (instruction history) + UI-001 (window,
+  pinned sync panel), UI-021 (light/dark via OS setting), UI-022
+  (reduced motion).
   Tooltips are native `title` attributes; accessible names are real labels.
 -->
 <html lang="en">
@@ -2870,6 +2873,60 @@
             <button id="archive-confirm-btn" value="archive" class="btn btn-danger" disabled>
               Archive
             </button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Instruction history (LIB-026, LIB-027, D-16): the revisions panel
+         of the instruction opened in the editor — instruction and variant
+         versions, newest first, operation badges (NFR-020: the text carries
+         the meaning), snapshot disclosures and a "Restore variant" action
+         on delete rows. Rows are rendered by app.js from demo data; the
+         panel is read-only apart from restore. -->
+      <dialog id="history-dialog" class="modal modal-lg" aria-labelledby="hist-title">
+        <form method="dialog">
+          <h2 id="hist-title">History</h2>
+          <p id="hist-subtitle" class="modal-text hist-subtitle">
+            A version is created only on a real change; up to 200 versions per entity, the oldest
+            beyond that are deleted.
+          </p>
+
+          <div class="hist-body">
+            <table class="hist-table">
+              <caption class="visually-hidden">
+                Revisions: number, time, operation, entity and snapshot
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col" class="hist-col-no">#</th>
+                  <th scope="col" class="hist-col-when">When</th>
+                  <th scope="col" class="hist-col-op">Operation</th>
+                  <th scope="col" class="hist-col-entity">Entity</th>
+                  <th scope="col" class="hist-col-snap">Snapshot</th>
+                </tr>
+              </thead>
+              <tbody id="hist-rows"></tbody>
+            </table>
+            <p id="hist-empty" class="hist-empty" hidden>No versions yet.</p>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Restore-variant confirmation (LIB-027): the demo flips the delete
+         row to a restore badge and, while the editor is open for the same
+         instruction, appends the variant back into its in-memory list;
+         no versions change. -->
+      <dialog id="restore-dialog" class="modal" aria-labelledby="restore-title">
+        <form method="dialog">
+          <h2 id="restore-title">Restore variant</h2>
+          <p id="restore-text" class="modal-text">Placeholder.</p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="restore" class="btn btn-primary">Restore</button>
           </div>
         </form>
       </dialog>

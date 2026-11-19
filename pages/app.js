@@ -3,6 +3,8 @@
    Search, project filter, "Show hidden", row selection, section collapse,
    instruction editor modal (UI-003: two-pane editor — variant list,
    Edit/Preview tabs, validation, Markdown preview, unsaved-changes guard),
+   instruction history modal (LIB-026…027: revision list, snapshot
+   disclosures, restore variant; D-16),
    project settings modal (PRJ-008…012, PRJ-013…018 archive confirm),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
@@ -1030,12 +1032,9 @@
     }
   })
 
-  /* History (UI-003): the real revisions panel is wired by a later commit */
+  /* History (UI-003): opens the revisions panel (LIB-026…027, D-16) */
   ieHistoryBtn.addEventListener('click', () => {
-    dialogTitle.textContent = `History — ${ieState?.historyName ?? 'instruction'}`
-    dialogText.textContent =
-      'Prototype placeholder: the real app shows the version list of the instruction and its variants (time, operation, entity) with diff and restore (LIB-026…029).'
-    dialog.showModal()
+    openHistory(ieState?.historyName ?? '')
   })
 
   /* Toolbar «+ New instruction» opens the editor in CREATE mode (LIB-002) */
@@ -1148,6 +1147,197 @@
       text: mainText,
       variants: alternatives,
     })
+  })
+
+  /* ---------- History modal (LIB-026, D-16) --------------------------------- */
+  /* Revisions panel of an instruction: the instruction itself and every
+     variant are separate entities, each with its own rev_no sequence
+     (§6.2). Newest first, an op badge per row (NFR-020: the operation is
+     always readable as text) and a <details> disclosure showing what the
+     snapshot holds — name + state for the instruction, name + text for a
+     variant. A deleted variant can be restored (LIB-027): the row flips
+     to a restore badge and, while the editor is open for the same
+     instruction, the variant is appended back into its in-memory list.
+     Read-only apart from restore; up to 200 versions per entity are kept,
+     the latest one never deleted (D-16). */
+
+  const histDialog = document.getElementById('history-dialog')
+  const histTitle = document.getElementById('hist-title')
+  const histTable = document.querySelector('#history-dialog .hist-table')
+  const histRows = document.getElementById('hist-rows')
+  const histEmpty = document.getElementById('hist-empty')
+  const restoreDialog = document.getElementById('restore-dialog')
+  const restoreText = document.getElementById('restore-text')
+
+  /* Demo clock: "now" matches the sync bar and the EunomiaSync column
+     (19 Nov 2026, 14:32); stamps are rendered in the fixed UTC+3 the demo
+     uses, regardless of the viewer's timezone */
+  const HIST_NOW_MS = Date.parse('2026-11-19T14:32:00+03:00')
+
+  function histStamp(minutesBack) {
+    const d = new Date(HIST_NOW_MS - minutesBack * 60000 + 180 * 60000)
+    const hh = String(d.getUTCHours()).padStart(2, '0')
+    const mm = String(d.getUTCMinutes()).padStart(2, '0')
+    return `${d.getUTCDate()} ${MONTHS_SHORT[d.getUTCMonth()]} ${d.getUTCFullYear()}, ${hh}:${mm} (UTC+3)`
+  }
+
+  /* Live state of the open history panel; kept until the next open */
+  let histState = null
+
+  /* Demo revisions for one instruction, derived from the row and the
+     VARIANTS map the same way the editor derives its variant list; the
+     latest snapshot of every entity matches the current state. Offsets
+     are minutes back from the demo "now" (larger = older), and rev_no is
+     unique per entity. Ops: create / update / hide / restore / delete. */
+  function buildDemoRevisions(name, row) {
+    const mainText = instructionText(row)
+    const chipCount = Number(row.querySelector('.chip')?.textContent ?? 0)
+    const alts = (
+      VARIANTS[name] ?? (chipCount >= 1 ? [{ name: 'Variant 1', text: mainText }] : [])
+    ).map((v) =>
+      v.name === 'Variant 1' && v.text === mainText
+        ? { name: v.name, text: v.text + ' Slightly reworded version of the main text.' }
+        : v,
+    )
+    const hidden = row.classList.contains('row-hidden')
+    const revs = []
+    const push = (entityType, entityName, op, revNo, minutesBack, snapshot) =>
+      revs.push({ entityType, entityName, op, revNo, minutesBack, snapshot })
+
+    /* Instruction entity: created active; a hidden row also carries a hide */
+    push('instruction', name, 'create', 1, 8940, { name, state: 'active' })
+    if (hidden) push('instruction', name, 'hide', 2, 240, { name, state: 'hidden' })
+
+    /* Main variant: a first-draft wording, later updated to the current text */
+    push('variant', 'Main', 'create', 1, 8870, {
+      name: 'Main',
+      text: mainText ? `${mainText} (first draft)` : '',
+    })
+    if (mainText) push('variant', 'Main', 'update', 2, 2980, { name: 'Main', text: mainText })
+
+    /* A former variant, deleted afterwards — its delete row carries
+       "Restore variant" (LIB-027) */
+    const oldWordingText = mainText
+      ? `${mainText} (superseded wording)`
+      : 'Superseded wording of the instruction text.'
+    push('variant', 'Old wording', 'create', 1, 8800, {
+      name: 'Old wording',
+      text: oldWordingText,
+    })
+    push('variant', 'Old wording', 'delete', 2, 5700, {
+      name: 'Old wording',
+      text: oldWordingText,
+    })
+
+    /* Alternatives: the first gets two updates, the rest one; the last one
+       also goes through a hide + restore pair */
+    alts.forEach((v, i) => {
+      let no = 1
+      push('variant', v.name, 'create', no++, i === 0 ? 5800 : 4320, {
+        name: v.name,
+        text: `${v.text} (first draft)`,
+      })
+      const updateOffsets = i === 0 ? [4400, 3000] : [2940]
+      for (const off of updateOffsets) {
+        const text = off === updateOffsets[updateOffsets.length - 1] ? v.text : `${v.text} (reworded)`
+        push('variant', v.name, 'update', no++, off, { name: v.name, text })
+      }
+      if (i === alts.length - 1) {
+        push('variant', v.name, 'hide', no++, 1500, { name: v.name, text: v.text })
+        push('variant', v.name, 'restore', no++, 1440, { name: v.name, text: v.text })
+      }
+    })
+
+    /* Newest first: the smaller the offset, the more recent the revision */
+    revs.sort((a, b) => a.minutesBack - b.minutesBack)
+    return revs
+  }
+
+  function histSnapshotHtml(rev) {
+    const s = rev.snapshot
+    const nameRow = `<div class="hist-snap-row"><span class="hist-snap-key">Name</span><span>${escapeHtml(s.name)}</span></div>`
+    const body =
+      rev.entityType === 'instruction'
+        ? `${nameRow}<div class="hist-snap-row"><span class="hist-snap-key">State</span><span>${s.state}</span></div>`
+        : `${nameRow}<pre class="hist-snap-text">${escapeHtml(s.text)}</pre>`
+    return `<details class="hist-snap"><summary>Snapshot</summary><div class="hist-snap-body">${body}</div></details>`
+  }
+
+  function renderRevisions() {
+    const revs = histState.revs
+    histEmpty.hidden = revs.length !== 0
+    histTable.hidden = revs.length === 0
+    histRows.innerHTML = revs
+      .map((rev, i) => {
+        const entity =
+          rev.entityType === 'instruction'
+            ? 'Instruction'
+            : `${escapeHtml(rev.entityName)}${rev.restored ? ' <span class="chip hist-restored">Restored</span>' : ''}`
+        const restoreBtn =
+          rev.op === 'delete'
+            ? `<button type="button" class="btn btn-ghost hist-restore-btn" data-hist-restore="${i}">Restore variant</button>`
+            : ''
+        return (
+          '<tr>' +
+          `<td class="hist-no">#${rev.revNo}</td>` +
+          `<td class="hist-when">${histStamp(rev.minutesBack)}</td>` +
+          `<td class="hist-op-cell"><span class="chip hist-op hist-op--${rev.op}">${rev.op}</span></td>` +
+          `<td class="hist-entity">${entity}${restoreBtn}</td>` +
+          `<td class="hist-snap-cell">${histSnapshotHtml(rev)}</td>` +
+          '</tr>'
+        )
+      })
+      .join('')
+  }
+
+  function openHistory(name) {
+    const wanted = (name ?? '').trim().toLowerCase()
+    const row = rows().find((tr) => !isHeading(tr) && instructionName(tr) === wanted)
+    histState = {
+      name: name ?? '',
+      revs: row ? buildDemoRevisions(name, row) : [],
+      pendingRestore: null,
+    }
+    histTitle.textContent = `History — ${name || 'instruction'}`
+    renderRevisions()
+    histDialog.showModal()
+  }
+
+  /* Restore variant (LIB-027): confirm first, then flip the delete row to
+     a restore badge; no new revisions appear (demo feedback only) */
+  histRows.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-hist-restore]')
+    if (!btn || !histState) return
+    const rev = histState.revs[Number(btn.dataset.histRestore)]
+    if (!rev || rev.op !== 'delete') return
+    histState.pendingRestore = rev
+    restoreText.textContent =
+      `Restore the variant "${rev.snapshot.name}"? It comes back with its name and text; ` +
+      'no version is erased (LIB-027).'
+    restoreDialog.showModal()
+  })
+
+  restoreDialog.addEventListener('close', () => {
+    const st = histState
+    const rev = st?.pendingRestore
+    if (st) st.pendingRestore = null
+    if (!rev || restoreDialog.returnValue !== 'restore') return
+    rev.op = 'restore'
+    rev.restored = true
+    renderRevisions()
+    /* With the editor open for the same instruction, the variant also
+       returns to its in-memory variant list (as a real change: the editor
+       becomes dirty and the usual unsaved-changes guard applies) */
+    if (
+      ieState &&
+      ieState.mode !== 'custom' &&
+      editDialog.open &&
+      ieState.historyName === st.name &&
+      !ieState.variants.some((v) => v.name.toLowerCase() === rev.snapshot.name.toLowerCase())
+    ) {
+      ieState.variants.push({ name: rev.snapshot.name, text: rev.snapshot.text, main: false })
+      renderVariantList()
+    }
   })
 
   /* ---------- Per-project custom instructions (cell icons + flows) -------- */
