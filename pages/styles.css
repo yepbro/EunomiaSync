@@ -590,11 +590,13 @@ input[type='checkbox']:disabled {
 /* Row selected via the leading checkbox (solid bg — sticky cells) */
 :root {
   --row-selected: #d9f2e6;
+  --cell-changed: #fde68a;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --row-selected: #14382b;
+    --cell-changed: #453411;
   }
 }
 
@@ -603,6 +605,12 @@ input[type='checkbox']:disabled {
 .matrix tbody tr.row-selected .c-cell,
 .matrix tbody tr.row-selected .c-fill {
   background-color: var(--row-selected);
+}
+
+/* Assignment differs from the last synced state: the whole cell is tinted
+   (amber) so the pending change is obvious; survives hover and selection */
+.matrix tbody td.c-cell.cell-changed {
+  background-color: var(--cell-changed);
 }
 
 /* Hidden instructions (LIB-005…007): dimmed + dashed "hidden" chip */

@@ -132,6 +132,21 @@
     }
   }
 
+  /* ---------- Changed cells: assignment differs from the last sync -------- */
+  /* data-initial="true|false" (in the markup) records the state at the last
+     sync; a checkbox that differs from it tints its cell until "Run sync"
+     applies pending changes. */
+
+  function updateCellState(input) {
+    if (!('initial' in input.dataset)) {
+      input.dataset.initial = String(input.checked)
+    }
+    const changed = (input.dataset.initial === 'true') !== input.checked
+    const td = input.closest('td')
+    td.classList.toggle('cell-changed', changed)
+    td.title = changed ? 'Assignment changed — will be written on the next sync' : ''
+  }
+
   /* ---------- Dirty state: assignments -> sync counter + column status ---- */
   /* MAIN-026/028: any assignment change makes the project dirty; the panel
      counter and the column header status reflect it. "Run sync" resets the
@@ -175,6 +190,12 @@
 
   runSyncBtn.addEventListener('click', () => {
     for (const c of projectColsState) c.dirty = false
+    /* Sync applies pending assignments: changed cells become the new
+       initial state and lose the tint */
+    for (const input of document.querySelectorAll('.matrix tbody .assign')) {
+      input.dataset.initial = String(input.checked)
+      updateCellState(input)
+    }
     renderSyncStatus()
   })
 
@@ -203,7 +224,10 @@
       { name: 'Mandarin', text: '始终以用户的语言回答；默认为中文。' },
     ],
     'Formatting and linting': [
-      { name: 'Main', text: 'The formatter is the source of truth; never argue with it.' },
+      {
+        name: 'Main',
+        text: 'The formatter is the source of truth; never argue with it.',
+      },
       {
         name: 'Per-project configs',
         text: "Respect the project's own formatter config when it exists.",
@@ -214,7 +238,10 @@
         name: 'Main',
         text: 'Descriptive names; no single-letter identifiers outside loop counters.',
       },
-      { name: 'Strict', text: 'No abbreviations at all; names are full words, even in loops.' },
+      {
+        name: 'Strict',
+        text: 'No abbreviations at all; names are full words, even in loops.',
+      },
     ],
     'Commit messages': [
       {
@@ -227,19 +254,38 @@
       },
     ],
     'Bug-driven development': [
-      { name: 'Main', text: 'A red test first, then the fix that makes it green.' },
-      { name: 'Bug-first', text: 'Reproduce the bug in a failing test committed before the fix.' },
+      {
+        name: 'Main',
+        text: 'A red test first, then the fix that makes it green.',
+      },
+      {
+        name: 'Bug-first',
+        text: 'Reproduce the bug in a failing test committed before the fix.',
+      },
     ],
     'PR review checklist': [
-      { name: 'Main', text: 'Check behavior, tests, docs and DECISIONS entries before approving.' },
-      { name: 'Lightweight', text: 'Review only the diff: behavior and tests.' },
+      {
+        name: 'Main',
+        text: 'Check behavior, tests, docs and DECISIONS entries before approving.',
+      },
+      {
+        name: 'Lightweight',
+        text: 'Review only the diff: behavior and tests.',
+      },
     ],
   }
 
   const escapeHtml = (s) =>
     s.replace(
       /[&<>"']/g,
-      (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch],
+      (ch) =>
+        ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#39;',
+        })[ch],
     )
 
   tbody.addEventListener('click', (e) => {
@@ -294,6 +340,7 @@
     }
     const assign = e.target.closest('.assign')
     if (assign && !assign.disabled) {
+      updateCellState(assign)
       const idx = assign.closest('td').cellIndex - 2
       if (idx >= 0 && idx < projectColsState.length) {
         projectColsState[idx].dirty = true
@@ -319,6 +366,11 @@
   for (const tr of rows()) {
     const box = tr.querySelector('.row-sel')
     if (box) tr.classList.toggle('row-selected', box.checked)
+  }
+
+  /* Cells seeded in the markup with data-initial get the tint right away */
+  for (const input of document.querySelectorAll('.matrix tbody .assign')) {
+    updateCellState(input)
   }
 
   applyColumnFilter()
