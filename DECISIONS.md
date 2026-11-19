@@ -4903,3 +4903,109 @@ seed 48 — the D-053/D-070/D-071/D-072 run policy, which this entry
 joins): the reports equal the independently recomputed too-deep
 adjacent-heading pairs; every report is a real parent edge; interleaved
 instructions change only the indices; determinism.
+
+### D-075 — The §6.9 project field validators: trim-then-count names, the visible-characters ruling for labels, and the palette as the color column's only gate — 2026-11-19
+
+Problem: T-049 asks for the §6.9 validators of the five editable
+project fields (the PRJ-008/009/011, 021 settings modal; the file
+name rides PRJ-012's per-project copy). §6.9 states the rows tersely
+and leaves three readings open: "1–100 characters after trimming
+spaces" (trim what, and is the trimmed value the stored one?),
+"1–6 visible characters, case is kept" (what is a visible
+character?), and "a value from the palette" (the §6.2 `color` column
+turns out to have NO CHECK — see below — so nothing at the database
+enforces it). Also open: which "file name" — the base-name list or a
+typed target path.
+
+Solution: `project_validators.rs` — five pure functions over the
+stored string forms, plus one typed error enum. The `Color` palette
+enum itself joins the domain vocabulary in `project.rs` (DB-040's
+twelve literals, `ALL` in spec order, serde pinned both directions),
+because that module is the crate's vocabulary home (D-042) — the
+validators consume it like they consume `BaseName`.
+
+Name: trim FIRST, then count — `str::trim` (all Unicode
+whitespace), then code points 1–100, returning the trimmed string
+for the caller to persist. That return contract is what keeps the
+app rule and the schema CHECK in exact agreement: SQLite's `trim()`
+strips only U+0020, a SUBSET of Rust's strip set, so the stored
+returned value satisfies `length(trim(name)) BETWEEN 1 AND 100` at
+the same length the validator measured. The one verdict divergence —
+a name made entirely of non-U+0020 whitespace (a tab, an NBSP) is
+Empty here while the bare CHECK would pass it — is deliberate and
+stricter: the row's trim exists so a name is not stored as
+nothing-but-whitespace (the row reserves no control-character rule
+for names — that concern is the variant-text row's, which rejects
+`NUL` and reserved markers). Counting unit is the code point
+(`chars().count()`), the unit SQLite's `length()` uses on TEXT —
+not bytes, not graphemes.
+
+Label — the visible-characters ruling (the spec never defines
+"visible"): a character is VISIBLE iff it is neither Unicode
+whitespace (`char::is_whitespace`) nor a control
+(`char::is_control`). Rules, in check order: total length 1–6
+INCLUDING spaces (exactly the schema CHECK's own bound, so what
+passes here passes the database), at least one visible character
+(DB-042: "An empty label is not allowed" — an empty or
+whitespace-only label renders nothing next to the color, DB-041),
+and no control character anywhere (Cc renders nothing and breaks the
+one-line tag; the variant carries index and character). Inner
+spaces are legal ON PURPOSE: DB-042 derives the default label from
+the first up to 6 characters of the name in upper case — "My
+Project" → "MY PRO" — so rejecting spaces would invalidate the
+spec's own derivation. Case is kept: `validate_label` returns its
+input slice unchanged — validation, not normalization; the
+upper-case derivation is the UI's default for a NEW label, not a
+rule stored labels follow. Recorded limitation: std's predicates
+stop at Cc and White_Space, so three near-invisible families ride
+along as legal input, each exactly as it passes the schema's bare
+length CHECK — format characters (Cf: a zero-width space, a ZWJ)
+count as visible; the line and paragraph separators (U+2028/U+2029)
+ride as whitespace like a space; a lone combining mark counts as
+visible. Separating them needs a Unicode data crate outside the
+allow-list (D-017) and waits for a consumer that needs it.
+
+Description: verbatim ≤ 1000 — no trim (the row names none, the
+CHECK has none), empty legal (the column defaults to `''`), and the
+input returned unchanged.
+
+Color: the palette literal must match exactly, case-sensitive like
+every schema literal. The §6.2 column is `color TEXT NOT NULL` with
+NO CHECK — `validate_color` is the only gate a stored color ever
+passes, which is why the palette lives in typed code rather than
+schema hope.
+
+File name: the §2 base-name list, not a typed path — §6.9's "a
+value from the list" with "path and extension are not typed in" is
+picker guidance; validation is exact membership in
+`AGENTS.md`/`CLAUDE.md` (D-03), returning the parsed `BaseName`.
+Out of scope, recorded: the §6.9 project PATH row (`.git` and
+readability are fs I/O — the fs crate, per D-006) and the name's
+"duplicates allowed with a warning" clause (a cross-row store query
+with warning severity, not a field rule).
+
+Errors: one `ProjectFieldError` enum, a variant per field and
+failure (`NameEmpty`, `NameTooLong { length }`, `LabelEmpty`,
+`LabelTooLong { length }`, `LabelControlCharacter { index,
+character }` — the index counts code points, the module's unit —
+`DescriptionTooLong { length }`, `UnknownColor
+{ value }`, `UnknownFileName { value }`) — never a string — so the
+command layer can map any of them to `E_VALIDATION` (§8) on the
+D-062/D-071/D-072 precedent of typed errors at core boundaries.
+
+Tests: the DoD as boundary pins — name 0-after-trim (empty, spaces,
+Unicode whitespace mixes) / 1 / 100 / 101, trim-before-count (100
+padded with edges), inner spaces kept, code points not bytes or
+graphemes ("é"×100 vs 101, "e+accent"×51 = 102 code points); label
+0 / 1 / 6 / 7 total, case kept verbatim (no folding, no trimming),
+inner space legal (the DB-042 "MY PRO" shape, visible-plus-padding
+to 6 on both edges), controls rejected with index at any position
+(BEL, NUL, ESC, newline), the fixed precedence too-long →
+no-visible → control (7 spaces is TooLong; a lone tab is Empty),
+and the Cf boundary pinned as accepted; description 0 / 1000 /
+1001 verbatim; color all twelve literals plus case and near-miss
+rejections with the value kept; file name both literals plus paths,
+case variants and other stems; the five fields validating together
+(the modal's save), and every failure mode being a typed variant.
+No proptest: the rules are total boundary arithmetic with nothing
+random to explore beyond the exact pins.

@@ -19,7 +19,7 @@
 //! ## Modules
 //!
 //! - [`project`] — the project write vocabulary: scheme, base name,
-//!   extra files
+//!   extra files, palette color
 //! - [`library`] — library items: instructions, headings, variants
 //! - [`assignment`] — the project ↔ instruction ↔ variant link
 //! - [`snapshot`] — the immutable build snapshot (ALG-001)
@@ -38,6 +38,8 @@
 //! - [`gaps`] — the LIB-032 heading-level skips: where the next
 //!   heading arrives more than one level deeper, as facts for the
 //!   UI warning icon
+//! - [`project_validators`] — the §6.9 rules of the editable
+//!   project fields: name, label, description, color, file name
 
 pub mod assembly_b;
 pub mod assignment;
@@ -54,6 +56,7 @@ pub mod marker;
 pub mod markers;
 pub mod normalize;
 pub mod project;
+pub mod project_validators;
 pub mod reorder;
 pub mod snapshot;
 pub mod target_file;

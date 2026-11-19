@@ -13,7 +13,11 @@
 //! the `projects.scheme`, `projects.base_name` and `extra_*_position`
 //! CHECK literals of schema §6.2, and the §6.5 JSON object shape
 //! `{"enabled": …, "position": …}` for an extra file. The unit tests
-//! pin every literal in both directions.
+//! pin every literal in both directions. The palette [`Color`]
+//! serializes to its DB-040 literal; the §6.2 `projects.color` column
+//! carries NO CHECK, so the palette gate lives in
+//! [`project_validators`](crate::project_validators) (DECISIONS.md
+//! D-075).
 
 use std::fmt;
 
@@ -256,6 +260,113 @@ pub struct ProjectWriteSettings {
     pub extra_project: ExtraFile,
 }
 
+/// A project color from the fixed palette (spec §6.8 DB-040).
+///
+/// The palette is closed — twelve colors, no more — and each one
+/// passes a label-text contrast check of at least 4.5:1 in both
+/// themes; that check was done when the palette was fixed, and core
+/// only carries its words. The serde form is the palette literal,
+/// case-sensitive in both directions, like every schema literal.
+///
+/// The §6.2 `projects.color` column stores this literal with NO
+/// CHECK constraint, so nothing at the database level enforces the
+/// palette — [`project_validators::validate_color`] is the gate
+/// (DECISIONS.md D-075).
+///
+/// # Examples
+///
+/// ```
+/// use eunomia_core::project::Color;
+///
+/// assert_eq!(Color::Teal.as_str(), "teal");
+/// assert_eq!(serde_json::to_string(&Color::Slate).unwrap(), "\"slate\"");
+/// // Case-sensitive, like the palette literal:
+/// assert!(serde_json::from_str::<Color>("\"Red\"").is_err());
+/// ```
+///
+/// [`project_validators::validate_color`]:
+/// crate::project_validators::validate_color
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Color {
+    /// `red`.
+    #[serde(rename = "red")]
+    Red,
+    /// `orange`.
+    #[serde(rename = "orange")]
+    Orange,
+    /// `amber`.
+    #[serde(rename = "amber")]
+    Amber,
+    /// `lime`.
+    #[serde(rename = "lime")]
+    Lime,
+    /// `green`.
+    #[serde(rename = "green")]
+    Green,
+    /// `teal`.
+    #[serde(rename = "teal")]
+    Teal,
+    /// `cyan`.
+    #[serde(rename = "cyan")]
+    Cyan,
+    /// `blue`.
+    #[serde(rename = "blue")]
+    Blue,
+    /// `indigo`.
+    #[serde(rename = "indigo")]
+    Indigo,
+    /// `violet`.
+    #[serde(rename = "violet")]
+    Violet,
+    /// `pink`.
+    #[serde(rename = "pink")]
+    Pink,
+    /// `slate`.
+    #[serde(rename = "slate")]
+    Slate,
+}
+
+impl Color {
+    /// The whole palette, in DB-040's order: `red`, `orange`,
+    /// `amber`, `lime`, `green`, `teal`, `cyan`, `blue`, `indigo`,
+    /// `violet`, `pink`, `slate`. Twelve colors, no more — the
+    /// D-29 rule (PRJ-010) picks from this order when a new project
+    /// gets its color.
+    pub const ALL: [Self; 12] = [
+        Self::Red,
+        Self::Orange,
+        Self::Amber,
+        Self::Lime,
+        Self::Green,
+        Self::Teal,
+        Self::Cyan,
+        Self::Blue,
+        Self::Indigo,
+        Self::Violet,
+        Self::Pink,
+        Self::Slate,
+    ];
+
+    /// The palette literal (the stored `projects.color` word).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Red => "red",
+            Self::Orange => "orange",
+            Self::Amber => "amber",
+            Self::Lime => "lime",
+            Self::Green => "green",
+            Self::Teal => "teal",
+            Self::Cyan => "cyan",
+            Self::Blue => "blue",
+            Self::Indigo => "indigo",
+            Self::Violet => "violet",
+            Self::Pink => "pink",
+            Self::Slate => "slate",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,5 +494,40 @@ mod tests {
             settings
         );
         assert!(json.contains(r#""scheme":"B""#));
+    }
+
+    #[test]
+    fn color_literals_round_trip_and_reject_other_strings() {
+        // DB-040's twelve literals, both directions, case-sensitive.
+        for color in Color::ALL {
+            let literal = color.as_str();
+            assert_eq!(
+                serde_json::to_string(&color).unwrap(),
+                format!("\"{literal}\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<Color>(&format!("\"{literal}\"")).unwrap(),
+                color
+            );
+        }
+        for rejected in ["Red", "RED", "teal ", "", "purple"] {
+            assert!(
+                serde_json::from_str::<Color>(&format!("\"{rejected}\"")).is_err(),
+                "the palette has no {rejected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_palette_is_db_040s_twelve_colors_in_order() {
+        let words: Vec<&str> = Color::ALL.iter().map(|color| color.as_str()).collect();
+        assert_eq!(
+            words,
+            [
+                "red", "orange", "amber", "lime", "green", "teal", "cyan", "blue", "indigo",
+                "violet", "pink", "slate",
+            ]
+        );
+        assert_eq!(Color::ALL.len(), 12);
     }
 }

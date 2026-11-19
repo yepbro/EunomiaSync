@@ -1,0 +1,802 @@
+//! Project field validators: the §6.9 rules of the five editable
+//! project fields — name, label, description, color and file name —
+//! that the "Project settings" modal saves in one transaction (spec
+//! §7.1, the PRJ-008, 009, 011, 021 row) and that a new project's
+//! fielded copy carries (PRJ-012).
+//!
+//! Each rule is transcribed next to the schema CHECK (§6.2) that
+//! stores the same verdict, so a value that passes here never fails
+//! the database:
+//!
+//! | Field     | §6.9 rule                                        | schema CHECK (§6.2)                            | this module returns                       |
+//! | --------- | ------------------------------------------------ | ---------------------------------------------- | ----------------------------------------- |
+//! | Name      | 1–100 characters after trimming spaces           | `length(trim(name)) BETWEEN 1 AND 100`         | the TRIMMED name                          |
+//! | Label     | 1–6 visible characters, case is kept             | `length(label) BETWEEN 1 AND 6`                | the label, unchanged                      |
+//! | Description | up to 1000 characters                          | `length(description) <= 1000`                  | the description, unchanged                |
+//! | Color     | a value from the palette                         | none — `color TEXT NOT NULL` only              | the [`Color`]                             |
+//! | File name | a value from the list                            | `base_name IN ('AGENTS.md','CLAUDE.md')`       | the [`BaseName`]                          |
+//!
+//! The counting unit everywhere is the Unicode scalar value
+//! (`str::chars().count()` — code points), the same unit SQLite's
+//! `length()` uses on TEXT: not bytes (`"é"` is one, not two) and
+//! not graphemes (`"e\u{301}"` is two, not one).
+//!
+//! Two §6.9 rows are deliberately NOT here: the project PATH row is
+//! file-system access (a `.git` check, readability — the fs crate's
+//! job; core does no I/O, D-006), and the name's "duplicates are
+//! allowed with a warning" clause is a cross-row query with a warning
+//! severity, not a field rule — the store layer's job.
+//!
+//! # The name: trim, then count
+//!
+//! "1–100 characters after trimming spaces" reads in that order:
+//! trim first, then the length. The trim is Rust's `str::trim` (all
+//! Unicode whitespace), and [`validate_name`] returns the trimmed
+//! string — the value to persist. That contract is what keeps the app
+//! rule and the schema CHECK in exact agreement: SQLite's `trim()`
+//! strips only U+0020, a SUBSET of what Rust strips, so a name
+//! validated here and stored as returned satisfies
+//! `length(trim(name)) BETWEEN 1 AND 100` with the same length the
+//! validator measured. A name made entirely of non-U+0020 whitespace
+//! (a tab, an NBSP) is rejected here as empty — stricter than the
+//! bare CHECK, and the point of the rule: a name is not stored as
+//! nothing-but-whitespace. (The row reserves no
+//! control-character rule for names — that concern belongs to the
+//! variant-text row, which rejects `NUL` and reserved markers.)
+//!
+//! # The label: what "visible" means
+//!
+//! §6.9 says "1–6 visible characters, case is kept" without defining
+//! "visible". The ruling implemented here (DECISIONS.md D-075):
+//!
+//! - a character is VISIBLE when it is neither Unicode whitespace
+//!   (`char::is_whitespace`) nor a control character
+//!   (`char::is_control`);
+//! - inner spaces stay legal — DB-042 derives the default label from
+//!   the first up to 6 characters of the name, in upper case, and
+//!   names contain spaces ("My Project" → "MY PRO"), while the label
+//!   always sits next to the color as the real sign, never alone
+//!   (DB-041);
+//! - at least one character must be visible (DB-042: "An empty label
+//!   is not allowed" — an empty or whitespace-only label renders
+//!   nothing next to the color);
+//! - a control character is rejected wherever it sits: it renders
+//!   nothing and breaks the one-line tag;
+//! - the TOTAL length — spaces included — stays within 6, exactly the
+//!   schema's `length(label) BETWEEN 1 AND 6`, so whatever passes
+//!   here passes the database unchanged.
+//!
+//! Case is kept: [`validate_label`] returns its input slice on
+//! success — validation, not normalization. No trimming (the row
+//! does not ask for one) and no upper-casing (DB-042's derivation is
+//! the UI's default for a NEW label, not a rule every label must
+//! follow).
+//!
+//! std's predicates stop at the Cc and White_Space tables, so three
+//! near-invisible families ride along as legal input, each exactly
+//! as it passes the schema's bare length CHECK: format characters
+//! (Unicode Cf — a zero-width space, a ZWJ) are neither control nor
+//! whitespace and so count as VISIBLE; the line and paragraph
+//! separators (U+2028/U+2029, Zl/Zp) are whitespace and so ride like
+//! a space; and a lone combining mark counts as visible. Separating
+//! them needs a Unicode data crate outside the dependency allow-list
+//! (D-017); that refinement waits for a consumer that needs it.
+//!
+//! # The description: verbatim
+//!
+//! "Up to 1000 characters" with no trim mentioned and no trim in the
+//! CHECK: [`validate_description`] measures the raw length and
+//! returns the input unchanged. Empty is legal — the column's default
+//! is `''` (§6.2) — and newlines are prose here, not layout damage.
+//!
+//! # The color and the file name: closed lists
+//!
+//! The palette is the fixed 12 colors of DB-040, and the §6.2 column
+//! carries NO CHECK on them — [`validate_color`] is the only gate a
+//! stored color ever passes. The file name is the §2 base-name list
+//! (`AGENTS.md` or `CLAUDE.md`; the §6.9 note "path and extension
+//! are not typed in" describes the picker — validation is plain list
+//! membership, case-sensitive like the schema literals).
+//!
+//! # Errors
+//!
+//! Every failure is a typed [`ProjectFieldError`] variant naming the
+//! field and the broken rule — never a string — so the command layer
+//! can map any of them to `E_VALIDATION` (§8; the D-062/D-071/D-072
+//! precedent of typed errors at core boundaries).
+//!
+//! # Examples
+//!
+//! The five fields of a "Project settings" save (PRJ-008), each at a
+//! legal value:
+//!
+//! ```
+//! use eunomia_core::project::{BaseName, Color};
+//! use eunomia_core::project_validators::{
+//!     validate_color, validate_description, validate_file_name, validate_label, validate_name,
+//! };
+//!
+//! let name = validate_name("  EunomiaSync  ").unwrap(); // trimmed…
+//! assert_eq!(name, "EunomiaSync");
+//! assert_eq!(validate_label("MY PRO").unwrap(), "MY PRO"); // …case kept
+//! assert_eq!(validate_description("").unwrap(), ""); // empty is legal
+//! assert_eq!(validate_color("teal").unwrap(), Color::Teal);
+//! assert_eq!(validate_file_name("CLAUDE.md").unwrap(), BaseName::ClaudeMd);
+//!
+//! // And the failures are typed, field by field:
+//! use eunomia_core::project_validators::ProjectFieldError;
+//!
+//! assert_eq!(validate_name("   ").unwrap_err(), ProjectFieldError::NameEmpty);
+//! assert_eq!(
+//!     validate_label("ABCDEFG").unwrap_err(),
+//!     ProjectFieldError::LabelTooLong { length: 7 }
+//! );
+//! ```
+
+use thiserror::Error;
+
+use crate::project::{BaseName, Color};
+
+/// A project field that failed its §6.9 rule: which field, and what
+/// is wrong with it.
+///
+/// One variant per field and failure — the command layer maps any of
+/// them to `E_VALIDATION` (§8) with the field-scoped message; the
+/// variants carry the measured length (or the offending character,
+/// or the unknown value) so the UI can say exactly that.
+///
+/// # Examples
+///
+/// ```
+/// use eunomia_core::project_validators::{validate_description, ProjectFieldError};
+///
+/// let error = validate_description(&"x".repeat(1001)).unwrap_err();
+/// assert_eq!(
+///     error,
+///     ProjectFieldError::DescriptionTooLong { length: 1001 }
+/// );
+/// assert_eq!(
+///     error.to_string(),
+///     "project description is 1001 characters; the limit is 1000"
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ProjectFieldError {
+    /// The name is empty — the empty string, or nothing but
+    /// whitespace, after trimming (§6.9: 1–100 after trimming).
+    #[error("project name is empty after trimming")]
+    NameEmpty,
+    /// The name is longer than 100 characters after trimming; the
+    /// length is the trimmed, code-point count.
+    #[error("project name is {length} characters after trimming; the limit is 100")]
+    NameTooLong {
+        /// The trimmed length that exceeded the limit.
+        length: usize,
+    },
+    /// The label renders nothing: it is empty, or nothing but
+    /// whitespace (DB-042: "An empty label is not allowed").
+    #[error("project label has no visible characters")]
+    LabelEmpty,
+    /// The label is longer than 6 characters in total, spaces
+    /// included — the same bound the schema CHECK measures.
+    #[error("project label is {length} characters; the limit is 6")]
+    LabelTooLong {
+        /// The total length that exceeded the limit.
+        length: usize,
+    },
+    /// The label contains a control character (Unicode Cc) at
+    /// `index` — it renders nothing and breaks the one-line tag.
+    #[error("project label contains the control character {character:?} at index {index}")]
+    LabelControlCharacter {
+        /// The code-point index the character sits at.
+        index: usize,
+        /// The offending character.
+        character: char,
+    },
+    /// The description is longer than 1000 characters.
+    #[error("project description is {length} characters; the limit is 1000")]
+    DescriptionTooLong {
+        /// The length that exceeded the limit.
+        length: usize,
+    },
+    /// The color is not one of the 12 palette colors (DB-040) — the
+    /// §6.2 column has no CHECK, so this validator is the only gate.
+    #[error("{value:?} is not one of the 12 palette colors (DB-040)")]
+    UnknownColor {
+        /// The value that matched no palette literal.
+        value: String,
+    },
+    /// The file name is not `AGENTS.md` or `CLAUDE.md` (§2 base-name
+    /// list; §6.9 "a value from the list").
+    #[error("{value:?} is not one of the file names AGENTS.md, CLAUDE.md")]
+    UnknownFileName {
+        /// The value that matched no list literal.
+        value: String,
+    },
+}
+
+/// Whether a character counts as VISIBLE in a label: neither Unicode
+/// whitespace nor a control character (the D-075 ruling; see the
+/// module docs for what that accepts and why).
+const fn is_visible(character: char) -> bool {
+    !character.is_control() && !character.is_whitespace()
+}
+
+/// Validate a project name (§6.9: "1–100 characters after trimming
+/// spaces"; PRJ-008's editable name field).
+///
+/// The input is trimmed — all Unicode whitespace — and the TRIMMED
+/// string is what gets measured and returned: callers persist the
+/// returned value, which keeps the schema's
+/// `length(trim(name)) BETWEEN 1 AND 100` and this rule in exact
+/// agreement (SQLite's `trim()` strips only U+0020, a subset of what
+/// Rust strips — see the module docs). Inner spaces stay; only the
+/// edges go. A name that is empty after trimming — the empty string
+/// or pure whitespace — fails with [`ProjectFieldError::NameEmpty`].
+///
+/// # Examples
+///
+/// ```
+/// use eunomia_core::project_validators::validate_name;
+///
+/// assert_eq!(validate_name("  My Project  ").unwrap(), "My Project");
+/// assert_eq!(validate_name("A").unwrap(), "A");
+/// assert_eq!(validate_name(&"a".repeat(100)).unwrap(), "a".repeat(100));
+/// assert!(validate_name(&"a".repeat(101)).is_err());
+/// ```
+pub fn validate_name(name: &str) -> Result<String, ProjectFieldError> {
+    let trimmed = name.trim();
+    let length = trimmed.chars().count();
+    if length == 0 {
+        Err(ProjectFieldError::NameEmpty)
+    } else if length > 100 {
+        Err(ProjectFieldError::NameTooLong { length })
+    } else {
+        Ok(trimmed.to_owned())
+    }
+}
+
+/// Validate a project label (§6.9: "1–6 visible characters, case is
+/// kept"; PRJ-008's editable label field, shown next to the color —
+/// DB-041).
+///
+/// Validation, not normalization: on success the input slice is
+/// returned unchanged — no trimming, no case folding (DB-042's
+/// upper-case derivation is the UI's default for a new label, not a
+/// rule stored labels follow). The D-075 ruling on "visible"
+/// (module docs): at most 6 characters in total, spaces included —
+/// the schema CHECK's own bound; at least one character that is
+/// neither whitespace nor control; and no control character anywhere.
+/// Inner spaces are legal ("MY PRO" is the shape DB-042 derives).
+///
+/// # Examples
+///
+/// ```
+/// use eunomia_core::project_validators::validate_label;
+///
+/// assert_eq!(validate_label("MY PRO").unwrap(), "MY PRO");
+/// assert_eq!(validate_label("aBc").unwrap(), "aBc"); // case kept
+/// assert_eq!(validate_label("ABCDEF").unwrap(), "ABCDEF"); // 6, the edge
+/// assert!(validate_label("ABCDEFG").is_err()); // 7
+/// assert!(validate_label("   ").is_err()); // renders nothing
+/// ```
+pub fn validate_label(label: &str) -> Result<&str, ProjectFieldError> {
+    let length = label.chars().count();
+    if length > 6 {
+        Err(ProjectFieldError::LabelTooLong { length })
+    } else if !label.chars().any(is_visible) {
+        Err(ProjectFieldError::LabelEmpty)
+    } else if let Some((index, character)) = label
+        .chars()
+        .enumerate()
+        .find(|&(_, character)| character.is_control())
+    {
+        Err(ProjectFieldError::LabelControlCharacter { index, character })
+    } else {
+        Ok(label)
+    }
+}
+
+/// Validate a project description (§6.9: "up to 1000 characters";
+/// PRJ-008's editable description field).
+///
+/// Verbatim: the raw length is measured and the input is returned
+/// unchanged — the row names no trim and the schema CHECK has none.
+/// Empty is legal (the column defaults to `''`, §6.2); newlines are
+/// prose.
+///
+/// # Examples
+///
+/// ```
+/// use eunomia_core::project_validators::validate_description;
+///
+/// assert_eq!(validate_description("").unwrap(), "");
+/// assert_eq!(
+///     validate_description(&"x".repeat(1000)).unwrap(),
+///     "x".repeat(1000)
+/// );
+/// assert!(validate_description(&"x".repeat(1001)).is_err());
+/// ```
+pub fn validate_description(description: &str) -> Result<&str, ProjectFieldError> {
+    let length = description.chars().count();
+    if length > 1000 {
+        Err(ProjectFieldError::DescriptionTooLong { length })
+    } else {
+        Ok(description)
+    }
+}
+
+/// Validate a project color (§6.9: "a value from the palette" — the
+/// fixed 12 colors of DB-040; PRJ-008's editable color field).
+///
+/// The palette literal must match exactly, case-sensitive like every
+/// schema literal. The §6.2 `color` column carries NO CHECK, so this
+/// function is the only gate a stored color passes (D-075). Returns
+/// the parsed [`Color`].
+///
+/// # Examples
+///
+/// ```
+/// use eunomia_core::project::{Color};
+/// use eunomia_core::project_validators::validate_color;
+///
+/// assert_eq!(validate_color("teal").unwrap(), Color::Teal);
+/// assert_eq!(validate_color("slate").unwrap(), Color::Slate);
+/// assert!(validate_color("purple").is_err()); // not in the palette
+/// assert!(validate_color("Red").is_err()); // case-sensitive
+/// ```
+pub fn validate_color(color: &str) -> Result<Color, ProjectFieldError> {
+    Color::ALL
+        .iter()
+        .copied()
+        .find(|candidate| candidate.as_str() == color)
+        .ok_or_else(|| ProjectFieldError::UnknownColor {
+            value: color.to_owned(),
+        })
+}
+
+/// Validate a project's target file name (§6.9: "a value from the
+/// list" — the §2 base-name list `AGENTS.md` / `CLAUDE.md`, D-03;
+/// PRJ-012's per-project copy of the write settings).
+///
+/// Exact, case-sensitive list membership, like the schema CHECK. The
+/// §6.9 note "path and extension are not typed in" describes the
+/// picker the UI offers; validation itself is plain membership, so a
+/// typed path (`docs/AGENTS.md`) or a case variant (`agents.md`)
+/// simply matches no literal. Returns the parsed [`BaseName`].
+///
+/// # Examples
+///
+/// ```
+/// use eunomia_core::project::{BaseName};
+/// use eunomia_core::project_validators::validate_file_name;
+///
+/// assert_eq!(validate_file_name("AGENTS.md").unwrap(), BaseName::AgentsMd);
+/// assert_eq!(validate_file_name("CLAUDE.md").unwrap(), BaseName::ClaudeMd);
+/// assert!(validate_file_name("GEMINI.md").is_err());
+/// assert!(validate_file_name("agents.md").is_err());
+/// ```
+pub fn validate_file_name(file_name: &str) -> Result<BaseName, ProjectFieldError> {
+    [BaseName::AgentsMd, BaseName::ClaudeMd]
+        .into_iter()
+        .find(|candidate| candidate.as_str() == file_name)
+        .ok_or_else(|| ProjectFieldError::UnknownFileName {
+            value: file_name.to_owned(),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- name: 0 / 1 / 100 / 101 after trim ------------------------------
+
+    #[test]
+    fn name_boundaries_after_trim() {
+        // 0 after trimming: the empty string, plain spaces, and a
+        // mix of Unicode whitespace edges (tab, newline, NBSP) — a
+        // name must render.
+        for empty in ["", " ", "   ", "\t", "\n \u{00A0}\u{3000}"] {
+            assert_eq!(validate_name(empty), Err(ProjectFieldError::NameEmpty));
+        }
+        // 1 and 100: legal.
+        assert_eq!(validate_name("A").unwrap(), "A");
+        let hundred = "a".repeat(100);
+        assert_eq!(validate_name(&hundred).unwrap(), hundred);
+        // 101: one over.
+        assert_eq!(
+            validate_name(&"a".repeat(101)).unwrap_err(),
+            ProjectFieldError::NameTooLong { length: 101 }
+        );
+    }
+
+    #[test]
+    fn name_is_trimmed_at_the_edges_and_keeps_inner_spaces() {
+        // Trim FIRST, then count: 100 characters with whitespace
+        // around them still fit (§6.9 "after trimming spaces").
+        let hundred = "a".repeat(100);
+        let padded = format!("  {hundred}\t");
+        assert_eq!(validate_name(&padded).unwrap(), hundred);
+        // Inner spaces are content, not edges.
+        assert_eq!(validate_name("  My Project  ").unwrap(), "My Project");
+        // The trim is Unicode-wide: NBSP and ideographic space edges
+        // go too.
+        assert_eq!(validate_name("\u{00A0}Omega\u{3000}").unwrap(), "Omega");
+    }
+
+    #[test]
+    fn name_counts_code_points_not_bytes_or_graphemes() {
+        // "é" is one code point however many bytes it takes: 100 fit,
+        // 101 do not.
+        assert_eq!(validate_name(&"é".repeat(100)).unwrap(), "é".repeat(100));
+        assert_eq!(
+            validate_name(&"é".repeat(101)).unwrap_err(),
+            ProjectFieldError::NameTooLong { length: 101 }
+        );
+        // "e" + combining accent is TWO code points, one grapheme:
+        // 51 of them measure 102 — over the limit at 51 graphemes.
+        // The unit matches SQLite's length() on TEXT.
+        assert_eq!(
+            validate_name(&"e\u{301}".repeat(51)).unwrap_err(),
+            ProjectFieldError::NameTooLong { length: 102 }
+        );
+        // An astral-plane character is still one code point.
+        assert_eq!(validate_name(&"\u{1F600}".repeat(100)).unwrap().len(), 400);
+    }
+
+    #[test]
+    fn name_errors_say_what_is_wrong() {
+        assert_eq!(
+            validate_name("   ").unwrap_err().to_string(),
+            "project name is empty after trimming"
+        );
+        assert_eq!(
+            validate_name(&"a".repeat(101)).unwrap_err().to_string(),
+            "project name is 101 characters after trimming; the limit is 100"
+        );
+    }
+
+    // ---- label: 0 / 1 / 6 / 7, visible characters, case kept --------------
+
+    #[test]
+    fn label_boundaries_total_and_visible() {
+        // 0 visible — empty or pure whitespace (spaces, NBSP, tab):
+        // renders nothing next to the color (DB-042).
+        for empty in ["", " ", "      ", "\u{00A0}", "\t"] {
+            assert_eq!(validate_label(empty), Err(ProjectFieldError::LabelEmpty));
+        }
+        // 1 and 6 total characters: legal.
+        assert_eq!(validate_label("A").unwrap(), "A");
+        assert_eq!(validate_label("ABCDEF").unwrap(), "ABCDEF");
+        // 7: one over — the schema CHECK's own bound.
+        assert_eq!(
+            validate_label("ABCDEFG").unwrap_err(),
+            ProjectFieldError::LabelTooLong { length: 7 }
+        );
+        // Six code points, not bytes: "Проект" fits, "Проект1" does
+        // not.
+        assert_eq!(validate_label("Проект").unwrap(), "Проект");
+        assert_eq!(
+            validate_label("Проект1").unwrap_err(),
+            ProjectFieldError::LabelTooLong { length: 7 }
+        );
+    }
+
+    #[test]
+    fn label_keeps_case_and_text_verbatim() {
+        // Case is kept (§6.9): both spellings validate, each returned
+        // exactly as typed — no upper-casing, no folding.
+        assert_eq!(validate_label("aBc").unwrap(), "aBc");
+        assert_eq!(validate_label("abc").unwrap(), "abc");
+        assert_eq!(validate_label("ABC").unwrap(), "ABC");
+        assert_eq!(validate_label("ÄöÜ").unwrap(), "ÄöÜ");
+        // And no trimming either: the edges are content here.
+        assert_eq!(validate_label(" A").unwrap(), " A");
+    }
+
+    #[test]
+    fn label_inner_space_is_legal_the_default_derivation_shape() {
+        // DB-042 derives the default label from the first up to 6
+        // characters of the name in upper case — "My Project" →
+        // "MY PRO" — so an inner space must validate.
+        assert_eq!(validate_label("MY PRO").unwrap(), "MY PRO");
+        // A visible character plus padding up to the total of 6 is
+        // still 1–6 visible characters.
+        assert_eq!(validate_label("A     ").unwrap(), "A     ");
+        assert_eq!(validate_label("     B").unwrap(), "     B");
+        // But the TOTAL stays within 6: a space is a character too.
+        assert_eq!(
+            validate_label("AB CDE F").unwrap_err(),
+            ProjectFieldError::LabelTooLong { length: 8 }
+        );
+        // The exact case that splits the readings: 6 visible
+        // characters + 1 inner space = 7 total. The bound is the
+        // schema CHECK's total, not "6 visible, spaces free".
+        assert_eq!(
+            validate_label("MY PROJ").unwrap_err(),
+            ProjectFieldError::LabelTooLong { length: 7 }
+        );
+    }
+
+    #[test]
+    fn label_control_characters_are_rejected_wherever_they_sit() {
+        // Cc renders nothing and breaks the one-line tag — rejected
+        // with the position and the character, at any index. The
+        // index counts CODE POINTS (the module's unit), not bytes:
+        // after a two-byte "Ü" the BEL is at index 1, not 2.
+        assert_eq!(
+            validate_label("A\u{7}B").unwrap_err(),
+            ProjectFieldError::LabelControlCharacter {
+                index: 1,
+                character: '\u{7}'
+            }
+        );
+        assert_eq!(
+            validate_label("Ü\u{7}").unwrap_err(),
+            ProjectFieldError::LabelControlCharacter {
+                index: 1,
+                character: '\u{7}'
+            }
+        );
+        assert_eq!(
+            validate_label("\u{1F600}\u{7}").unwrap_err(),
+            ProjectFieldError::LabelControlCharacter {
+                index: 1,
+                character: '\u{7}'
+            }
+        );
+        assert_eq!(
+            validate_label("AB\u{0}").unwrap_err(),
+            ProjectFieldError::LabelControlCharacter {
+                index: 2,
+                character: '\u{0}'
+            }
+        );
+        assert_eq!(
+            validate_label("A\u{1B}").unwrap_err(),
+            ProjectFieldError::LabelControlCharacter {
+                index: 1,
+                character: '\u{1B}'
+            }
+        );
+        // A newline inside is a control character too — the label is
+        // one line.
+        assert_eq!(
+            validate_label("A\nB").unwrap_err(),
+            ProjectFieldError::LabelControlCharacter {
+                index: 1,
+                character: '\n'
+            }
+        );
+    }
+
+    #[test]
+    fn label_precedence_is_length_then_visible_then_control() {
+        // A label can break several rules at once; the checks fire in
+        // a fixed order so the message is deterministic.
+        // 7 spaces: too long beats "renders nothing".
+        assert_eq!(
+            validate_label("       ").unwrap_err(),
+            ProjectFieldError::LabelTooLong { length: 7 }
+        );
+        // A lone tab is whitespace AND control: no visible
+        // characters is the truer message.
+        assert_eq!(
+            validate_label("\t").unwrap_err(),
+            ProjectFieldError::LabelEmpty
+        );
+        // Whitespace around a control character still renders
+        // nothing: the visible-count check fires first.
+        assert_eq!(
+            validate_label(" \u{7} ").unwrap_err(),
+            ProjectFieldError::LabelEmpty
+        );
+    }
+
+    #[test]
+    fn label_format_characters_are_the_std_boundary() {
+        // Unicode Cf (zero-width space, ZWJ) is neither whitespace
+        // nor control in std's tables, so it counts as visible — the
+        // same input the schema's bare length CHECK accepts. Pinned
+        // here as the recorded limitation of the D-075 ruling, not an
+        // accident.
+        assert_eq!(validate_label("\u{200B}").unwrap(), "\u{200B}");
+        assert_eq!(validate_label("A\u{200D}B").unwrap(), "A\u{200D}B");
+    }
+
+    #[test]
+    fn label_errors_say_what_is_wrong() {
+        assert_eq!(
+            validate_label(" ").unwrap_err().to_string(),
+            "project label has no visible characters"
+        );
+        assert_eq!(
+            validate_label("ABCDEFG").unwrap_err().to_string(),
+            "project label is 7 characters; the limit is 6"
+        );
+        assert_eq!(
+            validate_label("A\u{7}B").unwrap_err().to_string(),
+            "project label contains the control character '\\u{7}' at index 1"
+        );
+    }
+
+    // ---- description: 0 / 1000 / 1001, verbatim ---------------------------
+
+    #[test]
+    fn description_boundaries_empty_through_1000() {
+        // 0 is legal — the column defaults to '' (§6.2).
+        assert_eq!(validate_description("").unwrap(), "");
+        // 1000 exactly: legal, whitespace included.
+        let thousand = "x".repeat(999) + "\n";
+        assert_eq!(validate_description(&thousand).unwrap(), thousand);
+        assert_eq!(
+            validate_description(&"x".repeat(1000)).unwrap(),
+            "x".repeat(1000)
+        );
+        // 1001: one over.
+        assert_eq!(
+            validate_description(&"x".repeat(1001)).unwrap_err(),
+            ProjectFieldError::DescriptionTooLong { length: 1001 }
+        );
+        // Code points again: 1001 two-byte characters measure 1001.
+        assert_eq!(
+            validate_description(&"é".repeat(1001)).unwrap_err(),
+            ProjectFieldError::DescriptionTooLong { length: 1001 }
+        );
+    }
+
+    #[test]
+    fn description_is_verbatim_with_no_trim() {
+        // The row names no trim and the CHECK has none: edges stay.
+        assert_eq!(validate_description("  padded  ").unwrap(), "  padded  ");
+        assert_eq!(validate_description("\n\n").unwrap(), "\n\n");
+    }
+
+    #[test]
+    fn description_errors_say_what_is_wrong() {
+        assert_eq!(
+            validate_description(&"x".repeat(1001))
+                .unwrap_err()
+                .to_string(),
+            "project description is 1001 characters; the limit is 1000"
+        );
+    }
+
+    // ---- color: the 12 palette literals ------------------------------------
+
+    #[test]
+    fn color_accepts_exactly_the_twelve_palette_literals() {
+        let palette = [
+            (Color::Red, "red"),
+            (Color::Orange, "orange"),
+            (Color::Amber, "amber"),
+            (Color::Lime, "lime"),
+            (Color::Green, "green"),
+            (Color::Teal, "teal"),
+            (Color::Cyan, "cyan"),
+            (Color::Blue, "blue"),
+            (Color::Indigo, "indigo"),
+            (Color::Violet, "violet"),
+            (Color::Pink, "pink"),
+            (Color::Slate, "slate"),
+        ];
+        // Every literal parses to its variant, and the variant says
+        // the same literal back.
+        for (color, literal) in palette {
+            assert_eq!(validate_color(literal).unwrap(), color);
+            assert_eq!(color.as_str(), literal);
+        }
+        // DB-040's order is the palette's order.
+        let all: Vec<&str> = Color::ALL.iter().map(|color| color.as_str()).collect();
+        assert_eq!(
+            all,
+            [
+                "red", "orange", "amber", "lime", "green", "teal", "cyan", "blue", "indigo",
+                "violet", "pink", "slate",
+            ]
+        );
+    }
+
+    #[test]
+    fn color_rejects_everything_else_with_the_value_kept() {
+        for unknown in [
+            "purple", "Red", "RED", "", "red ", " red", "teal\n", "crimson", "grey", "rose",
+        ] {
+            assert_eq!(
+                validate_color(unknown).unwrap_err(),
+                ProjectFieldError::UnknownColor {
+                    value: unknown.to_owned()
+                },
+                "the palette has no {unknown:?}"
+            );
+        }
+        assert_eq!(
+            validate_color("purple").unwrap_err().to_string(),
+            "\"purple\" is not one of the 12 palette colors (DB-040)"
+        );
+    }
+
+    // ---- file name: the two list literals -----------------------------------
+
+    #[test]
+    fn file_name_accepts_the_two_list_literals() {
+        assert_eq!(validate_file_name("AGENTS.md").unwrap(), BaseName::AgentsMd);
+        assert_eq!(validate_file_name("CLAUDE.md").unwrap(), BaseName::ClaudeMd);
+    }
+
+    #[test]
+    fn file_name_rejects_paths_case_variants_and_other_names() {
+        // §6.9: "path and extension are not typed in" — the picker's
+        // job; validation is plain membership, so all of these match
+        // no literal.
+        for unknown in [
+            "agents.md",
+            "AGENTS.MD",
+            "GEMINI.md",
+            "AGENTS",
+            "AGENTS.md ",
+            "docs/AGENTS.md",
+            "",
+        ] {
+            assert_eq!(
+                validate_file_name(unknown).unwrap_err(),
+                ProjectFieldError::UnknownFileName {
+                    value: unknown.to_owned()
+                },
+                "the list has no {unknown:?}"
+            );
+        }
+        assert_eq!(
+            validate_file_name("GEMINI.md").unwrap_err().to_string(),
+            "\"GEMINI.md\" is not one of the file names AGENTS.md, CLAUDE.md"
+        );
+    }
+
+    // ---- the five fields together -------------------------------------------
+
+    #[test]
+    fn the_settings_modal_fields_validate_together() {
+        // One PRJ-008 save: every field at a legal value, and the
+        // returned values are what the store persists.
+        let name = validate_name("  EunomiaSync  ").unwrap();
+        let label = validate_label("MY PRO").unwrap();
+        let description = validate_description("").unwrap();
+        let color = validate_color("teal").unwrap();
+        let file_name = validate_file_name("AGENTS.md").unwrap();
+        assert_eq!(name, "EunomiaSync");
+        assert_eq!(label, "MY PRO");
+        assert_eq!(description, "");
+        assert_eq!(color, Color::Teal);
+        assert_eq!(file_name, BaseName::AgentsMd);
+    }
+
+    #[test]
+    fn every_failure_is_typed_never_a_string() {
+        // The E_VALIDATION mapping (§8) matches on variants; each
+        // field's every failure mode has one.
+        let failures = [
+            validate_name("").map(|_| ()),
+            validate_name(&"a".repeat(101)).map(|_| ()),
+            validate_label("").map(|_| ()),
+            validate_label("ABCDEFG").map(|_| ()),
+            validate_label("A\u{7}B").map(|_| ()),
+            validate_description(&"x".repeat(1001)).map(|_| ()),
+            validate_color("purple").map(|_| ()),
+            validate_file_name("GEMINI.md").map(|_| ()),
+        ];
+        for failure in failures {
+            let error = failure.unwrap_err();
+            assert!(matches!(
+                error,
+                ProjectFieldError::NameEmpty
+                    | ProjectFieldError::NameTooLong { .. }
+                    | ProjectFieldError::LabelEmpty
+                    | ProjectFieldError::LabelTooLong { .. }
+                    | ProjectFieldError::LabelControlCharacter { .. }
+                    | ProjectFieldError::DescriptionTooLong { .. }
+                    | ProjectFieldError::UnknownColor { .. }
+                    | ProjectFieldError::UnknownFileName { .. }
+            ));
+        }
+    }
+}
