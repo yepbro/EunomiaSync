@@ -308,10 +308,14 @@
 
   /* ---------- Row drag-and-drop between sections (MAIN-015…023) ---------- */
   /* Instructions move between sections; headings move with their whole
-     content (LIB-032/034). A branch cannot be dropped inside itself, and a
-     heading only lands on headings of the same or a shallower level. */
+     content (LIB-032/034). A branch cannot be dropped inside itself:
+     dropped on any other heading a section becomes its last child, and
+     dropped on the "Instruction" column header it becomes the first
+     top-level section. */
 
   function initRowDrag() {
+    const table = document.querySelector('.matrix')
+    const headerTh = document.getElementById('instruction-header')
     let dragged = null
     let draggedSectionRows = []
     let dropMark = null
@@ -319,6 +323,14 @@
     const clearDropMark = () => {
       dropMark?.classList.remove('drop-target')
       dropMark = null
+    }
+
+    const finishDrag = () => {
+      dragged?.classList.remove('dragging')
+      dragged = null
+      draggedSectionRows = []
+      clearDropMark()
+      applyFilters()
     }
 
     /* First row after the heading's section (insertion point) */
@@ -341,6 +353,19 @@
         tr = tr.nextElementSibling
       }
       return rowsList
+    }
+
+    /* Shift levels and indents of the moved rows by delta. --depth lives on
+       the th.c-name (it drives the indent), not on the tr */
+    const shiftLevels = (moving, delta) => {
+      for (const row of moving) {
+        const styleEl = row.querySelector('.c-name')
+        const depth = Number(styleEl.style.getPropertyValue('--depth') || 0) + delta
+        styleEl.style.setProperty('--depth', String(depth))
+        if (isHeading(row)) {
+          row.querySelector('[data-level]').dataset.level = String(headingLevel(row) + delta)
+        }
+      }
     }
 
     for (const tr of rows()) tr.draggable = true
@@ -367,8 +392,19 @@
       clearDropMark()
     })
 
-    tbody.addEventListener('dragover', (e) => {
+    table.addEventListener('dragover', (e) => {
       if (!dragged) return
+      if (e.target.closest('#instruction-header')) {
+        if (!isHeading(dragged)) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'move'
+        if (dropMark !== headerTh) {
+          clearDropMark()
+          dropMark = headerTh
+          headerTh.classList.add('drop-target')
+        }
+        return
+      }
       const target = e.target.closest('tr')
       const insideSelf = draggedSectionRows.includes(target) || target === dragged
       if (!target || insideSelf || target.classList.contains('row-hidden')) {
@@ -384,40 +420,31 @@
       }
     })
 
-    tbody.addEventListener('drop', (e) => {
+    table.addEventListener('drop', (e) => {
+      /* Dropped on the "Instruction" column header: the section becomes the
+         very first top-level one */
+      if (e.target.closest('#instruction-header')) {
+        if (dragged && isHeading(dragged)) {
+          e.preventDefault()
+          const moving = [dragged, ...draggedSectionRows]
+          shiftLevels(moving, 2 - headingLevel(dragged))
+          tbody.prepend(...moving)
+        }
+        finishDrag()
+        return
+      }
       e.preventDefault()
       const target = e.target.closest('tr')
       clearDropMark()
       if (!dragged || !target || target === dragged || draggedSectionRows.includes(target)) {
-        dragged?.classList.remove('dragging')
-        dragged = null
-        draggedSectionRows = []
-        applyFilters()
+        finishDrag()
         return
       }
       if (isHeading(dragged)) {
-        /* dropped heading: the whole section follows it. On a heading of the
-           same level it becomes a preceding sibling (levels unchanged); on
-           any other heading it nests as the target's last subsection and the
-           levels of the moved rows follow the new depth */
+        /* dropped on a heading: the section becomes its last child */
         const moving = [dragged, ...draggedSectionRows]
-        if (isHeading(target) && headingLevel(target) === headingLevel(dragged)) {
-          target.before(...moving)
-        } else if (isHeading(target)) {
-          const delta = headingLevel(target) + 1 - headingLevel(dragged)
-          const boundary = sectionEndAfter(target)
-          for (const row of moving) {
-            const styleEl = isHeading(row) ? row.querySelector('[data-level]') : row
-            const depth = Number(styleEl.style.getPropertyValue('--depth') || 0) + delta
-            styleEl.style.setProperty('--depth', String(depth))
-            if (isHeading(row)) {
-              row.querySelector('[data-level]').dataset.level = String(headingLevel(row) + delta)
-            }
-          }
-          boundary.before(...moving)
-        } else {
-          target.after(...moving)
-        }
+        shiftLevels(moving, headingLevel(target) + 1 - headingLevel(dragged))
+        sectionEndAfter(target).before(...moving)
       } else if (isHeading(target)) {
         /* dropped on a section heading: move to the end of that section */
         tbody.insertBefore(dragged, sectionEndAfter(target))
@@ -425,10 +452,7 @@
         /* dropped on a row: insert right after it */
         target.after(dragged)
       }
-      dragged.classList.remove('dragging')
-      dragged = null
-      draggedSectionRows = []
-      applyFilters()
+      finishDrag()
     })
   }
 

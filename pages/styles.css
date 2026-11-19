@@ -538,6 +538,11 @@ input[type='checkbox']:disabled {
   margin-inline-start: 3px;
 }
 
+/* Section drop target: the "Instruction" column header */
+#instruction-header.drop-target {
+  background-color: var(--row-drop);
+}
+
 /* Per-project custom instruction icons (add / edit / delete) */
 .cell-icons {
   display: inline-flex;
