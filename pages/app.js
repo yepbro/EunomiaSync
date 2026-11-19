@@ -590,14 +590,23 @@
     const columnUnavailable = !!input?.disabled && !isCustom
 
     let box = td.querySelector('.cell-icons')
-    if (!select || columnUnavailable) {
+    if (columnUnavailable) {
       box?.remove()
       return
+    }
+    /* chip-less cells keep a bare checkbox in the td: give them the same
+       flex wrapper so the icon aligns with it */
+    let wrap = td.querySelector('.cell-assign')
+    if (!wrap) {
+      wrap = document.createElement('span')
+      wrap.className = 'cell-assign'
+      input.before(wrap)
+      wrap.append(input)
     }
     if (!box) {
       box = document.createElement('span')
       box.className = 'cell-icons'
-      td.querySelector('.cell-assign')?.append(box)
+      wrap.append(box)
     }
     const mk = (kind, title) => {
       const b = document.createElement('button')
@@ -634,7 +643,7 @@
         pendingCustomCell = td
         openEditModal({
           title: `Custom instruction — ${instr} — ${proj}`,
-          text: optionText(row, select.value),
+          text: optionText(row, select ? select.value : 'Default'),
           placeholder: 'Write the custom instruction text…',
           variants: [],
         })
@@ -755,9 +764,9 @@
     line.append(btn)
   }
 
-  /* Per-project custom instruction icons on every variant cell */
+  /* Per-project custom instruction icons on every assignable cell */
   for (const td of document.querySelectorAll('.matrix tbody td.c-cell')) {
-    if (td.querySelector('.variant-select')) refreshCellIcons(td)
+    refreshCellIcons(td)
   }
 
   /* Cells seeded in the markup with data-initial get the tint right away,
