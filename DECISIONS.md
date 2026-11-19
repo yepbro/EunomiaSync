@@ -5476,3 +5476,159 @@ space; a hand-written escaping literal (quote, backslash, line break, tab,
 verbatim emoji/Cyrillic) with its oracle hash; the serde_json byte-compat
 battery (all control characters, round-trip parse back to the same pair)
 across both shapes; and the DB-006 boundary text building deterministically.
+
+### D-083 — The `markdown_preview` pipeline: renderer in src-tauri, event-level raw-HTML escaping, ammonia-minus-`img`; inline render, no `spawn_blocking` — 2026-11-19
+
+Problem: T-056 implements §7.10's `markdown_preview` (SEC-005, D-15,
+the D-009 name): "renders Markdown into sanitized HTML (SEC-005)",
+the command being editor-facing — "В сборке файлов не используется".
+SEC-005 pins the policy in one sentence: "The Markdown preview is
+built in Rust; the HTML is sanitized (`ammonia`); raw HTML from
+instruction text is escaped. External resources are not loaded." Six
+readings were open: (1) WHERE the renderer lives — D-006's original
+vision had markdown logic in eunomia-core, but D-017 pinned core to
+the spec 5.2 allow-list ("only `serde`, `sha2`, `thiserror`"), which
+neither §5.3's `pulldown-cmark` nor SEC-005's `ammonia` belongs to;
+(2) HOW "raw HTML … is escaped" is achieved — ammonia _strips_
+disallowed tags (and drops `script`/`style` contents wholesale), it
+does not turn them into visible text, so an ammonia-only pipeline
+fails the "escaped" half of SEC-005; (3) which ammonia config makes
+"External resources are not loaded" true (the crate default _allows_
+`<img src=http…>` — `Builder::new()` alone violates the sentence);
+(4) whether the command needs `spawn_blocking` (SYS-001 names DB,
+files, scan, sync — not CPU renders; the generic rule "CPU work →
+blocking pool" would disagree); (5) adopting two crates outside every
+existing dependency family, with the license/advisory gate that adds;
+(6) the response shape — the T-055/T-057 line puts warnings in this
+command's response later, and the card demands a shape that can gain
+a field without breaking.
+
+Solution: `src-tauri/src/markdown.rs` (`preview_html`, pure
+`&str → String`) behind the thin command in `commands.rs`.
+
+- PLACEMENT: src-tauri, beside the command. Spec 5.2's crate table is
+  explicit and closed about core — "only `serde`, `sha2`,
+  `thiserror`" — and D-017 made that list enforceable at the manifest
+  level precisely so a dependency question like this one has an
+  answer; §5.3 names `pulldown-cmark` ("Preview and warnings. Not
+  used when building files") and SEC-005 names `ammonia` for the app
+  without assigning a crate. D-006's "storage, markdown, diff, sync,
+  watch" phrasing predates the allow-list and its markdown clause is
+  superseded by it. The app crate's dependency set is open (it
+  already carries `rusqlite`/`jiff`/`tokio`/`tracing`/`toml`/specta
+  beyond the table's "the other crates, `tauri`"), so the renderer
+  lands there — a reviewer can check the whole policy by noting that
+  `crates/eunomia-core` stayed untouched. The §5.3 "not used when
+  building files" note is enforced structurally: `preview_html` has
+  exactly one caller (the command), and no assembly/target-file code
+  reaches the module.
+- ESCAPING: at the pulldown-cmark event level, _before_ rendering —
+  `Event::Html`/`Event::InlineHtml` (whole HTML blocks and inline
+  tags) are re-typed as `Event::Text`, which `html::push_html`
+  escapes into `&lt;…&gt;` visible literals; Markdown image syntax
+  gets the same treatment one level up, its `Start/End(Image)` tag
+  events dropped so the alt text (the parser's inner content) remains
+  and no `<img>` — hence no `src` — is ever generated. Ammonia is the
+  SECOND gate (SEC-005 names it as the sanitizer, and it stays as
+  defense in depth), not the escaping mechanism: the two gates are
+  pinned by separate tests, so removing one cannot silently disarm
+  the other.
+- AMMONIA CONFIG: crate defaults minus `img` (`rm_tags`) — with no
+  `img` in the allow-list, no `src` attribute survives anywhere, so
+  no relative/external image policy is even expressible (an `<img>`
+  the sanitizer _does_ see — i.e. bypassing the escaping gate — is
+  stripped whole). The defaults carry the rest — and they were
+  verified against the resolved ammonia 4.2.5 source, not assumed:
+  `script`/`style` contents dropped (`clean_content_tags`), HTML
+  comments stripped (`strip_comments` already defaults to `true` in
+  ammonia 4 — initially added as an explicit call under the wrong
+  belief that the default kept comments; removed as a no-op after
+  the round-1 review), URL schemes closed to the safe set
+  (`javascript:` and friends unrepresentable), every link forced
+  `rel="noopener noreferrer"` (`link_rel` — on every surviving
+  anchor, href-less ones included), `class` not allowed (the
+  code-fence language class is dropped — no highlighting in MVP).
+  One deliberate addition: a closed task-list carve-out — `input`
+  joins the tags; `disabled`/`checked` are whitelisted as plain
+  attributes (booleans, no behavior), while `type` is whitelisted
+  ONLY through the value set, because ammonia's attribute check is a
+  disjunction (`tag_attributes` OR `tag_attribute_values`) and a
+  `type` line in the plain set would pass with ANY value — the
+  round-1 review caught exactly that configuration bug (the value
+  pin was inert); with `type` value-pinned to `checkbox` (what
+  TASKLISTS emits), the extension's checkboxes render, a
+  non-checkbox input loses its `type` (and with it its usefulness),
+  and only a bare, attribute-less `<input>` — which renders no
+  executable or resource-loading behavior (a browser would show a
+  default text field, nothing more) — could survive a caller that
+  bypasses the escaping gate. Links
+  are the one external reference kept: inert in the output (nothing
+  loads until clicked), and click navigation is the frontend Preview
+  tab's contract, outside this command. D-022's deferred live
+  runtime check ("an external image in the preview does not load")
+  stays with that frontend task — this task guarantees the content
+  side (nothing remote survives sanitization; the IPC tests prove
+  it) while the CSP already held the browser side.
+- EXTENSIONS: the pulldown-cmark extension bits `ENABLE_TABLES`,
+  `ENABLE_STRIKETHROUGH` and `ENABLE_TASKLISTS` — the
+  GitHub-flavored basics an instruction text plausibly uses; §5.3 pins the crate, not a dialect. Footnotes,
+  math, metadata, heading attributes (they would emit `id`/`class`
+  the sanitizer strips anyway) and smart punctuation (it would
+  rewrite the author's literal quotes) stay off.
+- SPAWN_BLOCKING: no. The established SYS-001 policy (commands.rs's
+  section, D-037) routes DB/file/scan/sync work — blocking I/O — to
+  `tauri::async_runtime::spawn_blocking`; `app_info` (T-031) already
+  established that a command with neither I/O nor state runs inline.
+  The render is pure CPU with no lock and no `.await` inside, so
+  there is nothing to starve; realistic inputs stay in the
+  milliseconds range because the editor's §6.9/DB-006 text ceiling
+  (262,144 characters) bounds what the UI sends — a caller-side
+  bound the command deliberately does not enforce (the round-1
+  review flagged the original wording, which claimed the command was
+  bounded; it renders whatever it is handed). The generic "CPU work →
+  blocking pool" guidance prices _unbounded_ work, which a live
+  editor preview is not. The input is not §6.9-validated on purpose:
+  the preview renders whatever the editor currently holds, and the
+  save path's validating constructors are where length and reserved
+  markers are enforced. The command is stateless (no `AppHandle` —
+  the first such command; registered in the bare tauri-specta form),
+  answers in any mode, and its `Result<T, AppError>` is §7.10's
+  uniform shape, not a claim of fallibility: the pipeline is total,
+  no `Err` is reachable, so no §10 log edge exists either.
+- DEPENDENCIES: `pulldown-cmark = { version = "0.13", default-
+features = false, features = ["html"] }` (0.13.6 resolves; the
+  dropped default features take the `getopts` CLI machinery out of
+  the build) and `ammonia = "4"` (4.2.5 resolves). Both are NEW
+  crates in the graph — unlike the rusqlite/jiff/tokio precedents
+  there was no existing version to re-use — and both pass
+  `cargo deny check` (pulldown-cmark MIT, ammonia MIT OR Apache-2.0;
+  no advisories). Manifest comments carry the spec anchors and the
+  placement rationale.
+- RESPONSE SHAPE: a named struct `MarkdownPreview { html: String }`,
+  not a bare `String` — D-15's warnings list (T-057) joins as an
+  additional field in a coordinated bindings regeneration (the
+  frontend always regenerates with the Rust change in the same
+  commit), never reshaping the wire the UI consumes. The bindings
+  pin (`export_bindings_are_up_to_date`) and the lib.rs registration
+  pin keep the surface honest in both directions.
+
+Tests: 13 unit tests in `markdown.rs` — the acceptance pair (script
+never markup, external image in BOTH spellings never
+executable/referenceable; the Markdown spelling leaves no trace of
+the URL, the raw spelling survives only as escaped text, upper-case
+tags included), benign raw HTML also escaped, the heading/emphasis/
+fenced-code render pins (the TAGGED fence exercises the no-class
+policy for real — an untagged fence in the first revision never
+produced a class for the sanitizer to strip, a round-1 review
+catch), the link `rel="noopener noreferrer"` pin, `javascript:` and
+`data:` links each reduced to their text (the scheme gate, end to
+end — the `data:` leg added after the round-2 review noted the doc
+claimed the scheme without a test), the checkbox carve-out, the
+sanitizer's own gate driven directly (hostile fragment in — script
+payloads, handler, comment, `javascript:` and `data:` hrefs, iframe,
+non-checkbox input — and only text, href-less anchors and a bare
+`<input>` out, proving the second gate and its carve-out's negative
+half independently of the first), and the empty-input answer. 4
+command-level tests in `ipc_tests.rs`: the acceptance pair over the
+real mock-IPC envelope, escape-and-render over IPC, the empty
+result, and the registered-exactly-once pin.

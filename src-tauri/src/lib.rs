@@ -43,6 +43,13 @@ pub(crate) mod recovery;
 // (D-037); every later command task extends this module.
 pub(crate) mod commands;
 
+// The Markdown preview renderer (spec §7.10 Library module
+// `markdown_preview`, §5.3, SEC-005, D-15; T-056): pulldown-cmark
+// parse → raw-HTML escape → ammonia sanitize, editor-facing only —
+// the §5.3 "not used when building files" note holds because the
+// build path never calls it (its sole caller is the command).
+pub(crate) mod markdown;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -59,12 +66,14 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // The registered §7.10 commands: the recovery-screen group of
         // the System module (D-009), the History module's
         // `activity_list` (T-027), the Settings module's
-        // `settings_get`/`settings_set` (T-030) and the System
-        // module's `app_info` (T-031). Every later command
+        // `settings_get`/`settings_set` (T-030), the System
+        // module's `app_info` (T-031) and the Library module's
+        // `markdown_preview` (T-056). Every later command
         // task (dialog, library, …) lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
         // commands that take an `AppHandle`), so the registration pins
-        // the concrete runtime of the shipped app.
+        // the concrete runtime of the shipped app; `markdown_preview`
+        // takes no state at all, hence the bare form.
         .commands(collect_commands![
             commands::activity_list::<tauri::Wry>,
             commands::app_info::<tauri::Wry>,
@@ -72,6 +81,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::db_backups_list::<tauri::Wry>,
             commands::db_restore_backup::<tauri::Wry>,
             commands::db_recreate::<tauri::Wry>,
+            commands::markdown_preview,
             commands::settings_get::<tauri::Wry>,
             commands::settings_set::<tauri::Wry>,
         ])

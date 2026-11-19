@@ -52,6 +52,15 @@
 //! root-launch flag on the wire (with the environment's half asserted
 //! conditionally) and both halves of the uid predicate through the
 //! injected-uid sheet.
+//!
+//! The `markdown_preview` tests (T-056, §7.10 Library module, SEC-005,
+//! D-15) pin the acceptance pair on the wire: a `<script>` block and an
+//! external image (both spellings — Markdown `![alt](https://…)` and
+//! raw `<img src="https://…">`) reach the command's result only as
+//! escaped visible text, never as executable or referenceable markup;
+//! plus the empty-input answer and the specta registration pin. The
+//! renderer's own policy has its unit suite in `markdown.rs`; these
+//! tests prove the command carries it over the real IPC envelope.
 
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -1833,5 +1842,157 @@ fn the_app_info_command_is_registered_with_the_specta_builder() {
         lib.matches("commands::app_info").count(),
         1,
         "lib.rs must register the `app_info` command exactly once (§7.10)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `markdown_preview` (T-056, §7.10 Library module, SEC-005, D-15)
+// ---------------------------------------------------------------------------
+
+/// Invokes `markdown_preview` over the app's `main` webview,
+/// deserializing the success payload into the typed DTO.
+fn invoke_markdown_preview(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    text: &str,
+) -> Result<crate::commands::MarkdownPreview, serde_json::Value> {
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request("markdown_preview", serde_json::json!({ "text": text })),
+    );
+    match response {
+        Ok(payload) => Ok(payload
+            .deserialize::<crate::commands::MarkdownPreview>()
+            .expect("the success payload must deserialize into the DTO")),
+        Err(error) => Err(error),
+    }
+}
+
+/// The mock app `markdown_preview` serves: the command is stateless
+/// (no managed state, no database — the reason it answers in any mode,
+/// recovery included).
+fn markdown_preview_app() -> tauri::App<tauri::test::MockRuntime> {
+    mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::markdown_preview])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app")
+}
+
+#[test]
+fn markdown_preview_never_returns_script_or_external_images_as_markup() {
+    // Arrange: the T-056 acceptance pair in one text — a `<script>`
+    // block and an external image in BOTH spellings (Markdown syntax
+    // and raw HTML, the latter in both cases), around a heading that
+    // proves ordinary Markdown still renders.
+    let app = markdown_preview_app();
+    let text = "# Guide\n\n<script>alert('xss')</script>\n\n\
+                ![logo](https://tracker.example/pixel.png)\n\n\
+                <img src=\"https://ads.example/banner.png\">\n\n\
+                <IMG SRC=\"https://ads.example/tall.png\">\n";
+
+    // Act
+    let preview =
+        invoke_markdown_preview(&main_webview(&app), text).expect("the command must succeed");
+
+    // Assert: no script or img element reaches the result as markup —
+    // executable code (script) and resource references (img, either
+    // spelling) are unrepresentable in the answer; the Markdown
+    // spelling's remote URL must not survive anywhere, because nothing
+    // in the output would be allowed to load it.
+    assert!(
+        !preview.html.contains("<script"),
+        "script markup must not reach the result: {}",
+        preview.html
+    );
+    assert!(
+        !preview.html.contains("<img") && !preview.html.contains("<IMG"),
+        "img markup must not reach the result: {}",
+        preview.html
+    );
+    assert!(
+        !preview.html.contains("tracker.example"),
+        "the Markdown-spelling image URL must be gone entirely: {}",
+        preview.html
+    );
+    // The raw-HTML spellings survive only as escaped visible text —
+    // the SEC-005 escape requirement, observed on the wire.
+    assert!(
+        preview.html.contains("&lt;img src=") && preview.html.contains("&lt;IMG SRC="),
+        "raw img tags must survive as escaped visible text: {}",
+        preview.html
+    );
+    assert!(
+        preview.html.contains("&lt;script&gt;"),
+        "the script block must survive as escaped visible text: {}",
+        preview.html
+    );
+    assert!(
+        preview.html.contains("<h1>Guide</h1>"),
+        "ordinary Markdown around the hostile fragments still renders: {}",
+        preview.html
+    );
+    assert!(
+        preview.html.contains("logo"),
+        "the image alt text survives: {}",
+        preview.html
+    );
+    drop(app);
+}
+
+#[test]
+fn markdown_preview_escapes_raw_html_and_renders_markdown_over_ipc() {
+    // Arrange: benign raw HTML (escaped, not kept as markup) next to a
+    // fenced code block — the wire answer for the editor's mixed
+    // drafts.
+    let app = markdown_preview_app();
+    let text = "see <b>bold</b>\n\n```\ncode <here>\n```";
+
+    // Act
+    let preview =
+        invoke_markdown_preview(&main_webview(&app), text).expect("the command must succeed");
+
+    // Assert: the raw tag is a visible literal, the fence renders with
+    // its content escaped — both observable through the same result.
+    assert!(
+        preview.html.contains("&lt;b&gt;bold&lt;/b&gt;"),
+        "raw HTML arrives as escaped text: {}",
+        preview.html
+    );
+    assert!(
+        !preview.html.contains("<b>"),
+        "no raw tag passes as markup: {}",
+        preview.html
+    );
+    assert!(
+        preview.html.contains("<pre><code>") && preview.html.contains("&lt;here&gt;"),
+        "the fenced block renders with escaped content: {}",
+        preview.html
+    );
+    drop(app);
+}
+
+#[test]
+fn markdown_preview_renders_empty_text_to_an_empty_result() {
+    // Arrange: the §6.9-empty variant text (LIB-002's empty variant)
+    // is a real editor state.
+    let app = markdown_preview_app();
+
+    // Act
+    let preview =
+        invoke_markdown_preview(&main_webview(&app), "").expect("the command must succeed");
+
+    // Assert: the honest preview of nothing is nothing.
+    assert_eq!(preview.html, "");
+    drop(app);
+}
+
+#[test]
+fn the_markdown_preview_command_is_registered_with_the_specta_builder() {
+    // The §7.10 Library-module name (D-009's registry), registered
+    // exactly once (the D-034 wiring-pin rationale).
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("commands::markdown_preview").count(),
+        1,
+        "lib.rs must register the `markdown_preview` command exactly once (§7.10)"
     );
 }

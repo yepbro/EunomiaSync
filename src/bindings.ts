@@ -76,6 +76,30 @@ export const commands = {
 	 */
 	dbRecreate: (options?: InvokeOptions) => __TAURI_INVOKE<null>("db_recreate", undefined, options),
 	/**
+	 *  Renders the editor's Markdown into sanitized preview HTML (§7.10
+	 *  Library module `markdown_preview`, the D-009 name registry;
+	 *  SEC-005, D-15).
+	 * 
+	 *  Stateless and **non-database**: it reads no managed state and does
+	 *  no I/O, so there is nothing to route through [`Db::run`], and
+	 *  SYS-001's executor policy is not triggered either — its
+	 *  `spawn_blocking` list is DB, files, scan and sync (blocking *I/O*),
+	 *  while this render is pure CPU with no lock and no `.await` inside,
+	 *  and realistic inputs stay in the milliseconds range: the editor's
+	 *  §6.9 text ceiling (DB-006: 262,144 characters) bounds what the UI
+	 *  sends, though the command itself does not enforce that ceiling
+	 *  (see the validation note below). It answers in any mode, recovery
+	 *  included. There is no §6.9 validation here on purpose: this is the
+	 *  editor's live preview of whatever the field currently holds, and
+	 *  the save path (the validating constructors of the
+	 *  instruction/variant tasks) is where text length and reserved
+	 *  markers are enforced. The `Result` shape is §7.10's uniform command
+	 *  contract, not a claim of fallibility: the pipeline is total, so no
+	 *  `Err` is reachable today — and there is no log edge for the same
+	 *  reason (§10 logs errors; none can occur).
+	 */
+	markdownPreview: (text: string, options?: InvokeOptions) => __TAURI_INVOKE<MarkdownPreview>("markdown_preview", { text }, options),
+	/**
 	 *  Reads every §6.5 setting with its default applied (spec §7.10
 	 *  Settings module `settings_get`; the §7.2 window opens on this map).
 	 * 
@@ -698,6 +722,24 @@ export type ErrorDetails_Serialize = {
 	 *  localized message (NFR-006).
 	 */
 	os_message: string | null,
+};
+
+/**
+ *  The `markdown_preview` response (§7.10 Library module): the
+ *  sanitized preview HTML. A named struct, not a bare `String`, so
+ *  D-15's warnings list (the editor's "Markdown warnings that do not
+ *  block saving", the T-057 card) can join as an additional field in a
+ *  coordinated bindings regeneration without reshaping the wire shape
+ *  the UI already consumes.
+ */
+export type MarkdownPreview = {
+	/**
+	 *  The sanitized HTML (SEC-005): pulldown-cmark's render with
+	 *  every raw-HTML fragment of the text escaped into visible text
+	 *  and no resource-loading element anywhere —
+	 *  [`markdown::preview_html`] is the pipeline and its policy.
+	 */
+	html: string,
 };
 
 /**

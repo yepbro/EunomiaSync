@@ -56,6 +56,29 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The Markdown preview pipeline (markdown.rs, `markdown_preview`, spec
+# §7.10 Library module, SEC-005, D-15; DECISIONS.md T-056 entry): CommonMark
+# parsing and HTML generation. §5.3 names pulldown-cmark for exactly this
+# ("Preview and warnings. Not used when building files") but pins no crate
+# for it; it cannot live in eunomia-core — §5.2 restricts core to
+# serde/sha2/thiserror (D-017) — so the renderer sits here, beside the
+# command. License MIT — inside the cargo-deny allow-list. Naming note:
+# SEC-005's ammonia joins this pipeline separately (the sanitizer, below);
+# the raw-HTML escaping happens in markdown.rs before it. New
+# dependencies in the graph (not an existing version re-used like
+# rusqlite/jiff/tokio above): both are new license/advisory rows for
+# `cargo deny check` (both pass).
+# `default-features = false` drops the `getopts`-backed CLI machinery of
+# the crate's default feature set (a library consumer needs none of it);
+# `html` pulls in the escape crate behind `html::push_html`, the renderer
+# the pipeline is built on.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# SEC-005's sanitizer: "the HTML is sanitized (`ammonia`)" — the
+# spec-named second gate of markdown.rs's pipeline (the first gate is
+# the raw-HTML escaping). It re-parses whatever HTML string it is
+# handed, so no version-alignment constraint exists between the two
+# crates. MIT OR Apache-2.0 — inside the cargo-deny allow-list.
+ammonia = "4"
 # File logging (spec §5.3, SYS-011..013, SEC-008; DECISIONS.md D-032).
 # `tracing` 0.1 is already resolved workspace-wide (0.1.44 via tauri), so
 # that line adds no new version to the graph. `tracing-subscriber` is the
