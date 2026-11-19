@@ -6,6 +6,8 @@
    instruction history modal (LIB-026…027: revision list, snapshot
    disclosures, restore variant; D-16),
    project settings modal (PRJ-008…012, PRJ-013…018 archive confirm),
+   repository scan modal (PRJ-002…007: scripted walk, live progress,
+   three result groups; NFR-015 — closing the window cancels),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -2007,6 +2009,247 @@
       refreshDirtyState()
     }
   })
+
+  /* ---------- Scan modal (PRJ-002, NFR-015) --------------------------------- */
+  /* Toolbar «+ Add project»: the real app opens a folder picker first
+     (PRJ-001); the prototype pretends ~/projects was picked and starts
+     the scan right away. Phase 1 walks a pre-scripted demo list at
+     120 ms per tick (under the 10 progress updates/s of SYS-003); phase
+     2 shows the three result groups — New / Already added / Skipped
+     (PRJ-002). Depth and exclusions are per D-04/D-05; a .git file and
+     access errors follow D-06/PRJ-007. Closing the window (Cancel, Esc)
+     stops the timer — closing means cancel — and re-opening always
+     starts fresh. "Add selected" is a demo stub: it closes the dialog
+     and never touches the matrix. */
+
+  const scanDialog = document.getElementById('scan-dialog')
+  const scanProgress = document.getElementById('scan-progress')
+  const scanResults = document.getElementById('scan-results')
+  const scanFoldersEl = document.getElementById('scan-count-folders')
+  const scanReposEl = document.getElementById('scan-count-repos')
+  const scanPathEl = document.getElementById('scan-current-path')
+  const scanNewList = document.getElementById('scan-new-list')
+  const scanKnownList = document.getElementById('scan-known-list')
+  const scanSkippedList = document.getElementById('scan-skipped-list')
+  const scanNewCount = document.getElementById('scan-new-count')
+  const scanKnownCount = document.getElementById('scan-known-count')
+  const scanSkippedCount = document.getElementById('scan-skipped-count')
+  const scanAgainBtn = document.getElementById('scan-again-btn')
+  const scanAddBtn = document.getElementById('scan-add-btn')
+  const scanCancelBtn = document.getElementById('scan-cancel-btn')
+  const addProjectBtn = document.getElementById('add-project-btn')
+
+  const SCAN_ROOT = '~/projects'
+  const SCAN_TICK_MS = 120 // ≤10 progress updates per second (SYS-003)
+
+  /* Repos the scan discovers that are not in the demo matrix yet */
+  const SCAN_NEW = [
+    { name: 'notes-api', path: 'notes/notes-api' },
+    { name: 'landing-new', path: 'yepbro/landing-new' },
+    { name: 'scripts-kit', path: 'scripts/scripts-kit' },
+  ]
+
+  /* Repos already registered as demo projects (no checkboxes) */
+  const SCAN_KNOWN = [
+    { name: 'EunomiaSync', path: 'business/EunomiaSync' },
+    { name: 'yepbro/site', path: 'yepbro/site' },
+    { name: 'quotameter', path: 'business/quotameter' },
+    { name: 'task-id-mcp', path: 'utils/task-id-mcp' },
+    { name: 'utils/deja-vu', path: 'utils/deja-vu' },
+    { name: 'docktree', path: 'tools/docktree' },
+    { name: 'moli', path: 'apps/moli' },
+    { name: 'sandbox-cf', path: 'labs/sandbox-cf' },
+  ]
+
+  /* Skipped folders, one row per reason from the spec (D-05, D-06,
+     PRJ-007); tone tints the badge, the reason text carries the meaning */
+  const SCAN_SKIPPED = [
+    {
+      path: 'business/quotameter/node_modules',
+      reason: 'excluded',
+      hint: 'default excluded folder name (D-05)',
+      tone: 'warn',
+    },
+    {
+      path: 'libs/web-grid',
+      reason: 'submodule or worktree',
+      hint: '.git is a file — add it by hand if needed (D-06)',
+      tone: 'warn',
+    },
+    {
+      path: 'private/locked-vault',
+      reason: 'no access',
+      hint: 'os error 13 — permission denied; fix the rights and rescan',
+      tone: 'bad',
+    },
+    {
+      path: 'scratch/old-playground',
+      reason: 'in exclusions',
+      hint: 'the path was added to the exclusions list by hand',
+      tone: '',
+    },
+    {
+      path: 'attic/legacy-api',
+      reason: 'archived',
+      hint: 'already an archived project — restore it from the archived list',
+      tone: '',
+    },
+  ]
+
+  /* Pre-scripted depth-first walk under the simulated root (~40 folders,
+     ~5 s). A plain path is just a folder checked; found: 'known' | 'new'
+     | 'archived' is a repository discovery (bumps "Repositories found");
+     skip is a folder passed over with a reason. Every repo of the three
+     result groups is on this walk. */
+  const SCAN_WALK = [
+    { path: 'business' },
+    { path: 'business/EunomiaSync', found: 'known' },
+    { path: 'business/EunomiaSync/docs' },
+    { path: 'business/quotameter', found: 'known' },
+    { path: 'business/quotameter/node_modules', skip: true },
+    { path: 'business/quotameter/src' },
+    { path: 'business/kwork-ai' },
+    { path: 'business/tasks-board' },
+    { path: 'yepbro' },
+    { path: 'yepbro/site', found: 'known' },
+    { path: 'yepbro/site/src' },
+    { path: 'yepbro/landing-new', found: 'new' },
+    { path: 'tools' },
+    { path: 'tools/docktree', found: 'known' },
+    { path: 'tools/docktree/docs' },
+    { path: 'apps' },
+    { path: 'apps/moli', found: 'known' },
+    { path: 'apps/gallery-old' },
+    { path: 'utils' },
+    { path: 'utils/task-id-mcp', found: 'known' },
+    { path: 'utils/task-id-mcp/src' },
+    { path: 'utils/deja-vu', found: 'known' },
+    { path: 'labs' },
+    { path: 'labs/sandbox-cf', found: 'known' },
+    { path: 'labs/sandbox-cf/tests' },
+    { path: 'notes' },
+    { path: 'notes/notes-api', found: 'new' },
+    { path: 'scripts' },
+    { path: 'scripts/scripts-kit', found: 'new' },
+    { path: 'libs' },
+    { path: 'libs/web-grid', skip: true },
+    { path: 'private' },
+    { path: 'private/locked-vault', skip: true },
+    { path: 'scratch' },
+    { path: 'scratch/old-playground', skip: true },
+    { path: 'attic' },
+    { path: 'attic/legacy-api', found: 'archived' },
+    { path: 'tmp-sandbox' },
+    { path: 'website-archive' },
+    { path: 'playground' },
+  ]
+
+  /* Live scan state; the timer is the only thing that must never survive
+     a close (NFR-015: closing the scan window means cancel) */
+  let scanTimer = null
+  let scanIdx = 0
+  let scanReposFound = 0
+
+  function stopScanTimer() {
+    if (scanTimer === null) return
+    clearInterval(scanTimer)
+    scanTimer = null
+  }
+
+  function scanTick() {
+    const step = SCAN_WALK[scanIdx]
+    scanIdx += 1
+    scanFoldersEl.textContent = String(scanIdx)
+    scanPathEl.textContent = `${SCAN_ROOT}/${step.path}`
+    if (step.found) {
+      scanReposFound += 1
+      scanReposEl.textContent = String(scanReposFound)
+    }
+    if (scanIdx >= SCAN_WALK.length) {
+      stopScanTimer()
+      renderScanResults()
+    }
+  }
+
+  /* Fresh phase 1: called on open and by "Scan again" — the stopScanTimer
+     guard keeps there from ever being two running timers */
+  function startScan() {
+    stopScanTimer()
+    scanIdx = 0
+    scanReposFound = 0
+    scanFoldersEl.textContent = '0'
+    scanReposEl.textContent = '0'
+    scanPathEl.textContent = SCAN_ROOT
+    scanNewList.replaceChildren()
+    scanKnownList.replaceChildren()
+    scanSkippedList.replaceChildren()
+    scanProgress.hidden = false
+    scanResults.hidden = true
+    scanAgainBtn.hidden = true
+    scanAddBtn.hidden = true
+    scanAddBtn.disabled = true
+    scanTimer = setInterval(scanTick, SCAN_TICK_MS)
+  }
+
+  /* Phase 2 (PRJ-002): strings go through escapeHtml, counters through
+     textContent only */
+  function renderScanResults() {
+    const rowPath = (p) => escapeHtml(`${SCAN_ROOT}/${p}`)
+    scanNewList.innerHTML = SCAN_NEW.map(
+      (r) =>
+        '<label class="scan-row">' +
+        '<input type="checkbox" class="scan-check" checked />' +
+        `<span class="scan-row-name">${escapeHtml(r.name)}</span>` +
+        `<code class="scan-row-path">${rowPath(r.path)}</code>` +
+        '</label>',
+    ).join('')
+    scanKnownList.innerHTML = SCAN_KNOWN.map(
+      (r) =>
+        '<div class="scan-row scan-row-known">' +
+        `<span class="scan-row-name">${escapeHtml(r.name)}</span>` +
+        `<code class="scan-row-path">${rowPath(r.path)}</code>` +
+        '</div>',
+    ).join('')
+    scanSkippedList.innerHTML = SCAN_SKIPPED.map(
+      (r) =>
+        '<div class="scan-row scan-row-skip">' +
+        `<span class="chip scan-reason${r.tone ? ` scan-reason--${r.tone}` : ''}">${escapeHtml(r.reason)}</span>` +
+        `<code class="scan-row-path">${rowPath(r.path)}</code>` +
+        `<span class="scan-reason-hint">${escapeHtml(r.hint)}</span>` +
+        '</div>',
+    ).join('')
+    scanNewCount.textContent = String(SCAN_NEW.length)
+    scanKnownCount.textContent = String(SCAN_KNOWN.length)
+    scanSkippedCount.textContent = String(SCAN_SKIPPED.length)
+    scanProgress.hidden = true
+    scanResults.hidden = false
+    scanAgainBtn.hidden = false
+    scanAddBtn.hidden = false
+    syncScanAddBtn()
+  }
+
+  /* "Add selected" is disabled while nothing is checked */
+  function syncScanAddBtn() {
+    scanAddBtn.disabled = scanResults.querySelectorAll('.scan-check:checked').length === 0
+  }
+
+  /* Toolbar entry: simulated picked root, straight into phase 1 */
+  addProjectBtn.addEventListener('click', () => {
+    startScan()
+    scanDialog.showModal()
+  })
+
+  scanResults.addEventListener('change', (e) => {
+    if (e.target.closest('.scan-check')) syncScanAddBtn()
+  })
+
+  /* Cancel / Esc / "Add selected" all funnel through close: stopping the
+     timer on the close event makes closing the window equal to cancel
+     (NFR-015; PRJ-002 AC: canceling adds no projects) */
+  scanDialog.addEventListener('close', stopScanTimer)
+  scanCancelBtn.addEventListener('click', () => scanDialog.close('cancel'))
+  scanAddBtn.addEventListener('click', () => scanDialog.close('add'))
+  scanAgainBtn.addEventListener('click', startScan)
 
   /* ---------- Placeholder dialogs (native <dialog>) ------------------------ */
 

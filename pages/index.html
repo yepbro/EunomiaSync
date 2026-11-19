@@ -7,13 +7,14 @@
   list, Edit/Preview tabs, unsaved-changes guard), instruction history
   modal (LIB-026…027, D-16: revisions, snapshots, restore variant),
   project settings modal (PRJ-008…012, PRJ-013…018 archive confirm),
+  repository scan modal (PRJ-002…007: scripted walk, grouped results),
   placeholder modals.
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
-  (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-008…012 (project
-  settings) + § 7.3 LIB-026…027 (instruction history) + UI-001 (window,
-  pinned sync panel), UI-021 (light/dark via OS setting), UI-022
-  (reduced motion).
+  (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-002…007 (scan) +
+  PRJ-008…012 (project settings) + § 7.3 LIB-026…027 (instruction
+  history) + UI-001 (window, pinned sync panel), UI-021 (light/dark via
+  OS setting), UI-022 (reduced motion).
   Tooltips are native `title` attributes; accessible names are real labels.
 -->
 <html lang="en">
@@ -64,12 +65,7 @@
 
         <span id="selected-chip" class="selected-chip" hidden></span>
 
-        <button
-          type="button"
-          class="btn btn-ghost js-open-dialog"
-          data-dialog-title="Add project"
-          data-dialog-text="Prototype placeholder: in the real app this dialog collects the project folder (with a .git check), name, label color and sync settings (PRJ-001…012)."
-        >
+        <button id="add-project-btn" type="button" class="btn btn-ghost">
           + Add project
         </button>
         <button id="new-instruction-btn" type="button" class="btn btn-ghost">
@@ -2927,6 +2923,70 @@
           <div class="modal-actions">
             <button value="cancel" class="btn btn-ghost">Cancel</button>
             <button value="restore" class="btn btn-primary">Restore</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Repository scan (PRJ-002, PRJ-005…007, NFR-015): the toolbar
+         «+ Add project» simulates a picked root folder (~/projects, the
+         picker of PRJ-001) and opens the scan directly. Phase 1: live
+         progress — folders checked, repositories found, current path
+         (SYS-003: at most 10 updates/s). Phase 2: three result groups —
+         New (checked checkboxes), Already added, Skipped with a reason
+         (D-05 exclusions, D-06 submodule/worktree, PRJ-007 access
+         errors). Closing the window cancels the scan; "Add selected" is
+         a demo stub that never touches the matrix. Rows are rendered by
+         app.js from the scripted walk. -->
+      <dialog id="scan-dialog" class="modal modal-lg" aria-labelledby="scan-title">
+        <form method="dialog" novalidate>
+          <h2 id="scan-title" title="/home/brooks/projects">Scan — ~/projects</h2>
+          <p
+            id="scan-config"
+            class="modal-text"
+            title="Depth is configurable from 1 to 20 and the exclusion list is editable (D-04, D-05) — a later stage"
+          >
+            Depth 6 · Excluded: node_modules, vendor, .git, dist, build, target, .venv
+          </p>
+
+          <!-- Phase 1: progress, starts automatically when the dialog opens -->
+          <div id="scan-progress" class="scan-progress">
+            <div id="scan-counters" class="scan-counters" aria-live="polite">
+              <span><strong id="scan-count-folders">0</strong> Folders checked</span>
+              <span><strong id="scan-count-repos">0</strong> Repositories found</span>
+            </div>
+            <code id="scan-current-path" class="scan-path">~/projects</code>
+            <div class="scan-bar" aria-hidden="true"><div class="scan-bar-fill"></div></div>
+          </div>
+
+          <!-- Phase 2: results in three groups (PRJ-002), rendered by app.js -->
+          <div id="scan-results" class="scan-results" hidden>
+            <section class="scan-group" aria-labelledby="scan-new-heading">
+              <h3 id="scan-new-heading">New <span id="scan-new-count" class="chip">0</span></h3>
+              <div id="scan-new-list" class="scan-group-list"></div>
+            </section>
+            <section class="scan-group" aria-labelledby="scan-known-heading">
+              <h3 id="scan-known-heading">
+                Already added <span id="scan-known-count" class="chip">0</span>
+              </h3>
+              <div id="scan-known-list" class="scan-group-list"></div>
+            </section>
+            <section class="scan-group" aria-labelledby="scan-skipped-heading">
+              <h3 id="scan-skipped-heading">
+                Skipped <span id="scan-skipped-count" class="chip">0</span>
+              </h3>
+              <div id="scan-skipped-list" class="scan-group-list"></div>
+            </section>
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" id="scan-again-btn" class="btn btn-ghost" hidden>
+              Scan again
+            </button>
+            <span class="spacer"></span>
+            <button type="button" id="scan-cancel-btn" class="btn btn-ghost">Cancel</button>
+            <button type="button" id="scan-add-btn" class="btn btn-primary" hidden disabled>
+              Add selected
+            </button>
           </div>
         </form>
       </dialog>

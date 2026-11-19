@@ -1,8 +1,9 @@
 /* ==========================================================================
    EunomiaSync — main window prototype (static layout only).
    Spec: docs/spec.md § 7.4 (MAIN-001…031), § 7.3 (UI-003 instruction
-   editor modal, LIB-026…027 history modal, D-16), § 7.1 PRJ-008…012
-   (project settings modal), UI-001, UI-021, UI-022, NFR-020.
+   editor modal, LIB-026…027 history modal, D-16), § 7.1 PRJ-002…007
+   (repository scan modal, NFR-015), PRJ-008…012 (project settings
+   modal), UI-001, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
 
@@ -1693,6 +1694,200 @@ input[type='checkbox']:disabled {
   margin: 32px 0;
   text-align: center;
   color: var(--text-muted);
+}
+
+/* ----- Scan modal (PRJ-002, NFR-015) -------------------------------------- */
+/* Simulated repository scan of ~/projects: phase 1 live progress (SYS-003:
+   at most 10 updates/s), phase 2 grouped results — New / Already added /
+   Skipped with a reason (D-05, D-06, PRJ-007). Both phases share one
+   fixed-height dialog, so the phase switch does not jump. */
+
+#scan-dialog form {
+  block-size: min(560px, calc(100dvh - 32px));
+}
+
+/* `hidden` must win over the flex display of the phase blocks and the
+   phase-dependent action buttons */
+#scan-dialog .scan-progress[hidden],
+#scan-dialog .scan-results[hidden],
+#scan-dialog .modal-actions .btn[hidden] {
+  display: none;
+}
+
+/* Phase 1: the progress block fills the dialog between header and actions */
+.scan-progress {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
+}
+
+.scan-counters {
+  display: flex;
+  gap: 24px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.scan-counters strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Current path: fixed height + ellipsis — fast path changes do not jitter
+   the layout (PRJ-002) */
+.scan-path {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Thin indeterminate bar; under reduced motion the animation is dropped
+   and a static sliver stays on the track */
+.scan-bar {
+  block-size: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.scan-bar-fill {
+  inline-size: 40%;
+  block-size: 100%;
+  background: var(--accent);
+  animation: scan-bar-slide 1.2s linear infinite;
+}
+
+@keyframes scan-bar-slide {
+  from {
+    translate: -100% 0;
+  }
+  to {
+    translate: 250% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-bar-fill {
+    animation: none;
+    translate: 30% 0;
+  }
+}
+
+/* Phase 2: scrolling results body, like .ps-body / .hist-body */
+.scan-results {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-inline-end: 4px;
+}
+
+.scan-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scan-group h3 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.scan-group-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.scan-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-inline-size: 0;
+  padding: 6px 10px;
+  border-block-end: 1px solid var(--border);
+}
+
+.scan-row:last-child {
+  border-block-end: 0;
+}
+
+label.scan-row {
+  cursor: pointer;
+}
+
+label.scan-row:hover {
+  background: var(--row-hover);
+}
+
+.scan-row-name {
+  flex: none;
+  font-weight: 600;
+}
+
+.scan-row-path {
+  flex: 0 1 auto;
+  min-inline-size: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Already added: muted, no checkboxes (PRJ-002) */
+.scan-row-known .scan-row-name {
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+/* Skipped: reason badge (the reason is in the text, not color-only) and
+   an OS-style hint, per UI-011 */
+.scan-reason {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.scan-reason--warn {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+.scan-reason--bad {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+.scan-reason-hint {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ----- Motion (UI-022: honor the OS "reduce motion" setting) ------------ */
