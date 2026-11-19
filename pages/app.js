@@ -238,7 +238,7 @@
     ],
     'Formatting and linting': [
       {
-        name: 'Main',
+        name: 'Variant 1',
         text: 'The formatter is the source of truth; never argue with it.',
       },
       {
@@ -248,7 +248,7 @@
     ],
     'Naming conventions': [
       {
-        name: 'Main',
+        name: 'Variant 1',
         text: 'Descriptive names; no single-letter identifiers outside loop counters.',
       },
       {
@@ -258,7 +258,7 @@
     ],
     'Commit messages': [
       {
-        name: 'Main',
+        name: 'Variant 1',
         text: 'Imperative mood, subject up to 72 characters; the body explains why.',
       },
       {
@@ -268,7 +268,7 @@
     ],
     'Bug-driven development': [
       {
-        name: 'Main',
+        name: 'Variant 1',
         text: 'A red test first, then the fix that makes it green.',
       },
       {
@@ -278,7 +278,7 @@
     ],
     'PR review checklist': [
       {
-        name: 'Main',
+        name: 'Variant 1',
         text: 'Check behavior, tests, docs and DECISIONS entries before approving.',
       },
       {
@@ -315,11 +315,11 @@
       : 'Instruction text (Markdown)…'
 
     /* The accordion lists every variant the instruction has: mapped ones
-       explicitly; single-variant rows get their "Main" synthesized from
+       explicitly; single-variant rows get their "Variant 1" synthesized from
        the instruction text; badge-less rows have no variants at all */
     const variantCount = Number(row.querySelector('.chip')?.textContent ?? 0)
     const variants =
-      VARIANTS[name] ?? (variantCount >= 1 ? [{ name: 'Main', text: editText.value }] : [])
+      VARIANTS[name] ?? (variantCount >= 1 ? [{ name: 'Variant 1', text: editText.value }] : [])
     editVariants.hidden = variants.length === 0
     editVariants.open = false // collapsed by default every time
     editVariantsSummary.textContent = `Variants (${variants.length})`
