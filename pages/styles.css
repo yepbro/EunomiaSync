@@ -579,6 +579,32 @@ input[type='checkbox']:disabled {
   background: transparent;
 }
 
+/* Row drag-and-drop between sections */
+:root {
+  --row-drop: #dbeafe;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --row-drop: #14315c;
+  }
+}
+
+.matrix tbody tr:not(.row-heading) {
+  cursor: grab;
+}
+
+.matrix tbody tr.dragging {
+  opacity: 0.5;
+}
+
+.matrix tbody tr.drop-target > .c-check,
+.matrix tbody tr.drop-target > .c-name,
+.matrix tbody tr.drop-target > .c-cell,
+.matrix tbody tr.drop-target > .c-fill {
+  background-color: var(--row-drop);
+}
+
 /* ----- Sync panel (MAIN-024…027: pinned below the scroll area) ---------- */
 
 .syncbar {

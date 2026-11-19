@@ -306,6 +306,80 @@
     refreshDirtyState()
   })
 
+  /* ---------- Row drag-and-drop between sections (MAIN-018/019) ---------- */
+
+  function initRowDrag() {
+    let dragged = null
+    let dropMark = null
+
+    const clearDropMark = () => {
+      dropMark?.classList.remove('drop-target')
+      dropMark = null
+    }
+
+    /* First row after the heading's section (insertion point) */
+    const sectionEndAfter = (headingRow) => {
+      const level = headingLevel(headingRow)
+      let tr = headingRow.nextElementSibling
+      while (tr && !(tr.classList.contains('row-heading') && headingLevel(tr) <= level)) {
+        tr = tr.nextElementSibling
+      }
+      return tr
+    }
+
+    for (const tr of rows()) {
+      if (!isHeading(tr)) tr.draggable = true
+    }
+
+    tbody.addEventListener('dragstart', (e) => {
+      const tr = e.target.closest('tr')
+      if (!tr || isHeading(tr) || tr.classList.contains('row-hidden')) return
+      dragged = tr
+      tr.classList.add('dragging')
+      e.dataTransfer.effectAllowed = 'move'
+      e.dataTransfer.setData('text/plain', instructionDisplay(tr))
+    })
+
+    tbody.addEventListener('dragend', () => {
+      dragged?.classList.remove('dragging')
+      dragged = null
+      clearDropMark()
+    })
+
+    tbody.addEventListener('dragover', (e) => {
+      if (!dragged) return
+      const target = e.target.closest('tr')
+      if (!target || target === dragged || target.classList.contains('row-hidden')) {
+        clearDropMark()
+        return
+      }
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'move'
+      if (dropMark !== target) {
+        clearDropMark()
+        dropMark = target
+        dropMark.classList.add('drop-target')
+      }
+    })
+
+    tbody.addEventListener('drop', (e) => {
+      e.preventDefault()
+      const target = e.target.closest('tr')
+      clearDropMark()
+      if (!dragged || !target || target === dragged) return
+      if (isHeading(target)) {
+        /* dropped on a section heading: move to the end of that section */
+        tbody.insertBefore(dragged, sectionEndAfter(target))
+      } else {
+        /* dropped on a row: insert right after it */
+        target.after(dragged)
+      }
+      dragged.classList.remove('dragging')
+      dragged = null
+      applyFilters()
+    })
+  }
+
   /* ---------- Section collapse/expand (headings + carets) ----------------- */
 
   tbody.addEventListener('click', (e) => {
@@ -615,6 +689,9 @@
   /* Variant selects are synthesized first so every cell has one before
      the changed-state pass runs */
   buildVariantSelects()
+
+  /* Row drag-and-drop between sections */
+  initRowDrag()
 
   /* Per-project edit icon in the header: opens a placeholder modal only */
   for (const th of projectHeads) {
