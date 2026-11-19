@@ -380,9 +380,14 @@ mod tests {
             .expect("Failed to export typescript bindings");
         let on_disk = std::fs::read_to_string("../src/bindings.ts")
             .expect("the exported bindings file must be readable");
+        // EOL-normalized on both sides: a Windows checkout translates
+        // text files to CRLF (the runner's git runs autocrlf), so the
+        // compile-time `include_str!` bytes carry CRLF while the
+        // exporter writes LF — the staleness check is about the
+        // bindings CONTENT, not the checkout's line endings.
         assert_eq!(
-            on_disk,
-            include_str!("../../src/bindings.ts"),
+            on_disk.replace("\r\n", "\n"),
+            include_str!("../../src/bindings.ts").replace("\r\n", "\n"),
             "src/bindings.ts is stale: the committed bindings differ from \
              what the registered commands and types generate — commit the \
              regenerated file"
