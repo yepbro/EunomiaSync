@@ -4321,6 +4321,95 @@ absence, verbatim body splicing, and the five panic postures (B,
 empty marker, marker with `\n`, marker with `\r`, body with a framing
 break) — plus doc tests.
 
+### D-067 — The ALG-033 existing-file comparison: byte-exact drop of the last marker line's full span — 2026-11-19
+
+Task T-043 (depends on T-038's marker format). Problem: ALG-033/D-24
+say "in the existing file, the last non-empty line that starts with
+`<!-- Created by EunomiaSync ` and ends with ` -->` is dropped; the
+rest is compared with the new content byte for byte", and leaves four
+readings open when turning it into `compare::contents_match` in
+`eunomia-core`.
+
+Solution — the four readings, fixed:
+
+1. _Which line._ A content match over every line, position-independent:
+   the scan keeps the LAST line anywhere in the file whose content
+   carries the exact prefix and suffix — the same reading the merged
+   D-064 test mirror already lives by, and the one that behaves right
+   on both realistic shapes (a stray marker copy inside the managed
+   text loses to the real trailing one; a user edit below the marker
+   stays in the rest and differs). The spec's "non-empty" holds by
+   construction (the prefix is non-empty); the timestamp between
+   prefix and suffix is NOT re-validated against ALG-032 — recognition
+   is the two strings only.
+2. _What the drop removes._ The line's span: content bytes plus its
+   terminator (`\r\n` or `\n`; the bare content when the final line is
+   unterminated). This is deliberately byte-exact where the D-064
+   test-local `lines().remove().join()` mirror is lossy (a proof
+   device, as D-064 records): the mirror eats one adjacent break,
+   which a production seam must not guess at. The caller's contract
+   mirrors it: `new_without_marker_line` is the new build with its own
+   marker line's span removed — for the ALG-030 shape (managed, an
+   empty line, the marker, one line break) that is `managed + "\n\n"`,
+   and the empty string when managed is empty. The new side is not
+   scanned: the build knows where its marker line is.
+3. _The terminator's `\r`._ One `\r` before a `\n` belongs to the
+   terminator, not the content — `str::lines()` semantics, on bytes.
+   Needed because ALG-031 lets the app itself write CRLF marker lines
+   into CRLF scheme-B files; without the absorption a second sync of
+   such a file could never be `unchanged`, against D-24's acceptance.
+   A `\r` anywhere else is an ordinary byte and breaks the suffix.
+4. _No marker, nothing dropped._ The whole existing bytes are then
+   compared as is; a file from which the marker line was removed by
+   hand matches exactly when what is left is already the markerless
+   build.
+
+Input types: `existing: &[u8]` — the comparison is byte for byte and
+only scheme B promises UTF-8 (§9.4 checks `E_NOT_UTF8` there), so the
+A/C reader may hand over raw disk bytes; a file whose compared rest
+holds invalid bytes never matches (they stay in the rest while the
+build is UTF-8; invalid bytes inside the dropped marker line go with
+the line, and only the prefix and the suffix decide), which the
+`&[u8]` parameter absorbs without caller-side logic.
+`new_without_marker_line: &str` — the build is text. Pure, allocation-
+free: the rest is compared as prefix-plus-suffix slices of the new
+bytes (length, then `starts_with`, then `ends_with`). One published
+precondition (review R1, P2): `existing` is the bytes of a file that
+exists — a missing target is OUT-005's write case, never a
+comparison, because an empty-managed build's markerless form is the
+empty string and empty bytes standing in for a missing file would
+read `unchanged` and the file would never be created.
+
+Testing: sixteen unit tests plus the doctest, markers formatted by the
+real `creation_marker_line`. The criterion's match case: files whose
+only difference is the marker (another time, another date and zone,
+the D-23 UTC fallback, a negative offset) all match one markerless
+build; the scheme-B placement — the creation marker between the
+managed block and the END line, not at the file's end, LF and CRLF —
+matches its markerless twin through the real BEGIN/END constants. The difference cases: a body edit (down to one trailing byte),
+an extra line before the managed text and a blank line after the
+marker, a BOM outside the marker, CRLF breaks against an LF build,
+near-miss marker lines (double space in the phrase, leading indent,
+trailing space, the prefix's trailing space and the suffix's leading
+space removed), content added after the marker, non-UTF-8 bytes
+outside the marker, a missing marker with and without the separator
+breaks, an empty existing file, and a marker-only file (with and
+without its final break). Four behavior mutations verified the suite
+bites: the prefix without its trailing space fails the damaged-marker
+test, first-match-instead-of-last fails the last-marker test, no `\r`
+absorption fails the CRLF-recognition test, and a span without the
+terminator fails five match tests at once.
+
+Boundaries: the return value is the bare D-24 answer; SYS-008's
+externally-modified state, the DB-021 dirty flag and any journal
+detail are later consumers (T-044) and are not shaped here. Reading
+the file and assembling the build (ALG-030/031) are other tasks'
+seams. No new dependencies (D-017's list untouched; pure code). The
+lib.rs module-index prose does not yet list `compare` — the same
+deliberate lag D-064 recorded: T-043's zone constraint allows exactly
+one `pub mod` line while neighboring core tasks run, and the prose
+reconciliation belongs to the orchestrator's docs pass.
+
 ### D-069 — Scheme-B file assembly in eunomia-core: ALG-030's layout inside the splice, dominant line breaks counted over the preserved outside, String output — 2026-11-19
 
 Problem: T-041 turns ALG-031 ("the `managed` block and the marker (by

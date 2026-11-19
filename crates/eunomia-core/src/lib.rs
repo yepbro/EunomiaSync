@@ -31,6 +31,7 @@
 pub mod assembly_b;
 pub mod assignment;
 pub mod body;
+pub mod compare;
 pub mod extra_files;
 pub mod hash;
 pub mod library;
