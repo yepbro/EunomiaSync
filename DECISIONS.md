@@ -3795,3 +3795,129 @@ and the observation-order rationale was corrected (this entry's
 fresh-flag paragraph above carries the corrected wording — the first
 draft wrongly claimed the too-new gate's 0-byte file would change the
 answer).
+
+### D-058 — `running_as_root`: the effective-uid seam behind app_info, the crate's first unsafe block, and a Linux-only target-gated libc — 2026-11-18
+
+Problem: T-032 adds the NFR-023 flag to `app_info` ("Linux: running as
+root shows a warning, because the created files will be owned by
+root"). Open questions: which uid answers "running as root" (real vs
+effective, and the task brief's own `getuid()` suggestion); which
+platforms carry the flag at all; how to read the uid when std exports
+no such API and the project is unsafe-free (rust-skills EunomiaSync
+Notes) with new crates gated behind D-012; and how to test a fact the
+suite cannot produce (the test process cannot become root).
+
+Solution, four decisions:
+
+- _Platform scope is the spec's letter: Linux only._ NFR-023 prefixes
+  the requirement with "Linux:", so the flag is answered by a
+  compile-time pair: on `target_os = "linux"` it is the uid predicate,
+  on every other platform it is `false` by a `cfg(not(…))` twin
+  definition — a structural fact, not an untested convention. macOS
+  could detect root the same way (`geteuid() == 0` works there), but
+  the spec assigns no warning outside Linux, and a `true` flag there
+  would drive a UI warning the spec does not define. The Windows half
+  of NFR-023 (long-path manifest) is a packaging fact, not a runtime
+  one — nothing to serve on the wire.
+- _The effective uid, not the real one._ The card's detection hint
+  said `getuid() == 0`; this task serves `libc::geteuid()` instead,
+  because NFR-023's rationale is ownership — files a process creates
+  are owned by its effective (fs) uid, and `id -u`, the conventional
+  "am I root" check, prints the effective uid. The two readings
+  coincide for every launch path a desktop app really has (direct
+  launch, `sudo`, `pkexec` all set ruid = euid = 0); they differ only
+  for setuid-root binaries, which EunomiaSync is not and cannot become
+  accidentally. The deviation from the brief's letter is recorded
+  here deliberately.
+- _`libc` as a direct, Linux-target-gated dependency — and the
+  crate's first `unsafe` block._ std exposes no uid API; the safe
+  std-only alternatives are folklore (parsing `/proc/self/status`,
+  stat-ing `/proc/self` or a temp file and reading its owner) whose
+  semantics are undocumented and side-effectful — rejected as a
+  foundation for a correctness flag. Between the wrapper crates,
+  `nix`/`uzers` would be genuinely new crates in the graph for one
+  call; `libc` 0.2 is already built workspace-wide (gtk/tao pull it on
+  Linux), so the direct edge adds no version and no code — the
+  rusqlite/jiff precedent of an edge, not a crate. The dependency is
+  declared under `[target.'cfg(target_os = "linux")'.dependencies]`,
+  so Windows/macOS builds do not even resolve it. This introduces the
+  workspace's first `unsafe` block, which the EunomiaSync Notes pin
+  down as a DECISIONS-first act: the block is one call,
+  `unsafe { libc::geteuid() }`, inside `commands::current_uid` —
+  async-signal-safe, no arguments to validate, no failure mode, no
+  state held across the call; the wrapper is one function whose
+  invariant is trivial by inspection, exactly the minimal shape that
+  note demands. A `// SAFETY:` comment states it at the block.
+- _The seam: a pure predicate over a raw `u32`, one thin reader, an
+  injected uid._ `is_root(uid: u32) -> bool` (pure, platform-
+  independent; gated `#[cfg(any(test, target_os = "linux"))]` —
+  production uses it on Linux alone, and a non-Linux release build
+  drops it rather than carrying dead code) + `current_uid() -> u32`
+  (cfg pair: the real `geteuid` read on Linux, an inert `0` off Linux
+  where no uid is ever read — the placeholder keeps the command body
+  platform-uniform, it is not a sentinel) + `running_as_root(uid)` (the
+  cfg pair holding the platform policy: the root predicate on Linux,
+  `false` regardless of uid elsewhere) + `app_info_impl(app, uid)` —
+  the uid enters the sheet builder as a **parameter the tests can
+  drive**. The suite cannot become root, so the acceptance pair
+  ("under root true, under a regular user false") is exercised two
+  ways: the pure truth table (`is_root(0)`, `is_root(1000)`,
+  `is_root(65534)`), and the driven sheet — `app_info_impl(&app, 0)`
+  must carry `true`, `app_info_impl(&app, 1000)` must carry `false`
+  (direct literals, Linux-gated; a hardcoded flag fails one half in
+  either direction, no privilege needed). The IPC equality pin
+  (`info.running_as_root == running_as_root(current_uid())`) is
+  honestly scoped: it bites under a root run; in an unprivileged run
+  both sides read false (the vacuity the round-1 review caught in the
+  first draft's no-arg pin — see below), so the falsifiable coverage
+  is the driven test, and the IPC test's if/else asserts whichever
+  half the environment produces. The under-root half WAS executed
+  privileged: `sudo -A <test binary> --exact …` ran the flag's IPC
+  test as uid 0 during review and the final proof — it passes with
+  the flag true on the wire. The non-Linux half keeps a dormant unit
+  test (`#[cfg(not(target_os = "linux"))]`, asserting even uid 0
+  answers false): it executes only under a non-Linux test build, which
+  today's CI matrix does not run (it builds but does not test the
+  Windows/macOS legs) — recorded here as deliberately unpinnable on
+  this machine and the Linux CI. A local cross-check was attempted
+  and is not feasible: `cargo check --target x86_64-pc-windows-msvc`
+  dies in rusqlite's bundled-SQLite build script (`cc` wants MSVC
+  `lib.exe`), and the Apple targets need an SDK; the compile-side
+  guarantee for the non-Linux branches is the CI build matrix, which
+  compiles both legs.
+
+Testing: two unit tests (the truth table through the seam, the
+dormant non-Linux pin) and two IPC tests over the mock runtime (the
+wire flag with its plumbing equality and the environment's half
+asserted by if/else; the driven sheet falsifying both halves without
+privilege), plus the regenerated `src/bindings.ts`
+(`running_as_root: boolean` with the platform semantics in its docs).
+No new failure paths: the uid read cannot fail, so `app_info` keeps
+its single reachable failure (missing `DataRoot`) and no logging edge
+is added.
+
+The round-1 review (deepseek-v4.1-flash, APPROVE, no P0/P1; it
+independently ran the suite, clippy, the bindings export check and —
+via `sudo -A` — the flag's tests as uid 0) tightened four edges, all
+fixed in the same commit: `is_root` warned `dead_code` on non-Linux
+release builds (the plugin-pair precedent: the platform twin never
+calls it there) — fixed with the `any(test, linux)` gate; the first
+draft's no-arg plumbing pin (`running_as_root() ==
+is_root(current_uid())`) was vacuous in an unprivileged run, and its
+comments plus this entry overstated what it catches — replaced by the
+uid-parameterized `app_info_impl` and the driven-sheet test above,
+with the IPC equality honestly scoped and the under-root branch made
+a positive assertion; the dormant non-Linux test was accepted as
+documented (no change); and "launch-time uid" wording became "the
+process's effective uid" — the flag is computed per call, not
+recorded at launch.
+
+The round-2 review (hy4-flash-free, APPROVE, no P0/P1/P2) found
+nothing to fix; its two P3 notes are the same recorded limits: the
+off-Linux test pins stay dormant until CI runs tests on those legs
+(the build matrix already compiles the twins), and the one mutation
+left to unprivileged CI — the command passing a constant non-root uid
+instead of `current_uid()` — is caught only by the privileged run
+(the one-line call site was instead verified under root, recorded
+above). Adding a privileged or non-Linux test leg to CI is a pipeline
+decision left to its owner.

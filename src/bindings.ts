@@ -475,7 +475,9 @@ export type AppError_Serialize = {
  *  `LICENSE-APACHE` pair in the repository root), `data_dir` is the
  *  resolved data-directory root (the managed [`data_dirs::DataRoot`],
  *  D-049), and `db_created_fresh` is the launch-time fact
- *  [`Db::open`] observed (see the command docs). The path renders
+ *  [`Db::open`] observed (see the command docs). `running_as_root`
+ *  (NFR-023) is the process's effective-uid fact — see the seam
+ *  functions above it. The path renders
  *  through `display()` — a lossy display string for the About window;
  *  the OS-level "open it" action goes through `app_open_data_folder`.
  */
@@ -515,6 +517,14 @@ export type AppInfo = {
 	 *  flag — is the honest state display.
 	 */
 	db_created_fresh: boolean,
+	/**
+	 *  Whether this launch runs with root privileges on Linux (NFR-023)
+	 *  — the fact behind the UI warning "the created files will be
+	 *  owned by root". `false` on every other platform: the spec
+	 *  assigns the warning to Linux alone (the compile-time branch is
+	 *  [`running_as_root`]).
+	 */
+	running_as_root: boolean,
 };
 
 /**

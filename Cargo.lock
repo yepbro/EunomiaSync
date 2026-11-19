@@ -1118,6 +1118,7 @@ version = "0.1.0"
 dependencies = [
  "eunomia-store",
  "jiff 1.0.1",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

@@ -26,8 +26,9 @@
 //! (D-051), and both commands validate through the store's single
 //! settings parse (D-039) — every rejection is `E_VALIDATION` naming
 //! the key, the sent value and the reason. `app_info` is the About
-//! window's fact sheet (UPD-005/REL-004 plus the §5.5 hints): a
-//! non-database command that answers from compile-time constants and
+//! window's fact sheet (UPD-005/REL-004 plus the §5.5 hints, and the
+//! NFR-023 root-launch flag): a non-database command that answers
+//! from compile-time constants, the process's effective uid and
 //! managed state alone, in any mode — see its section below.
 //!
 //! # Lifecycle (the honest boundary this task fixes, DECISIONS.md
@@ -1106,6 +1107,63 @@ const APP_IDENTIFIER: &str = "pro.yepbro.eunomiasync";
 /// spec fixes the URL itself.
 const REPOSITORY_URL: &str = "https://github.com/yepbro/EunomiaSync";
 
+/// The pure half of the NFR-023 root seam: root is uid `0` on every
+/// Unix, so the predicate is one comparison. A free function over a
+/// raw `u32` (not a libc type) so it is testable on every platform.
+/// Production code uses it on Linux alone (the platform twin of
+/// [`running_as_root`] answers `false` without a uid), so the gate
+/// keeps it in Linux builds and every test build — a non-Linux
+/// release build drops it instead of carrying dead code.
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn is_root(uid: u32) -> bool {
+    uid == 0
+}
+
+/// The uid the OS gives files this process creates — the **effective**
+/// user id (`geteuid`, the `id -u` answer). Chosen over the real uid
+/// because NFR-023's rationale is ownership — "the created files will
+/// be owned by root" follows the effective uid — and because the two
+/// coincide for every launch path a desktop app really has (direct,
+/// `sudo`, `pkexec`); see the task's DECISIONS.md entry. The real read
+/// is Linux only (NFR-023 scopes the root warning there, and with it
+/// the crate's single `unsafe` block lives only there).
+#[cfg(target_os = "linux")]
+pub(crate) fn current_uid() -> u32 {
+    // SAFETY: `geteuid` is a pure libc query — async-signal-safe, no
+    // arguments to validate, no failure mode, nothing held across the
+    // call: it answers the calling process's effective user id and can
+    // do nothing else.
+    unsafe { libc::geteuid() }
+}
+
+/// The off-Linux twin of [`current_uid`]: no uid is read there (the
+/// platform twin of [`running_as_root`] never looks at one), so the
+/// `0` is inert — a placeholder that keeps the command body
+/// platform-uniform, not a sentinel the caller must interpret.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn current_uid() -> u32 {
+    0
+}
+
+/// The NFR-023 policy for a given uid: on Linux — the only platform
+/// the spec assigns a root warning to — the flag is the root
+/// predicate; the uid is the launch's effective id the command reads.
+#[cfg(target_os = "linux")]
+pub(crate) fn running_as_root(uid: u32) -> bool {
+    is_root(uid)
+}
+
+/// The non-Linux half of the NFR-023 platform semantics: the spec
+/// assigns the root warning to Linux alone, so the flag is `false` on
+/// Windows and macOS regardless of uid — by this compile-time branch,
+/// not by an untested convention. (macOS could detect root the same
+/// way; the spec's letter wins. Recorded in the task's DECISIONS.md
+/// entry.)
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn running_as_root(_uid: u32) -> bool {
+    false
+}
+
 /// The About window's fact sheet (§7.10 System module `app_info`;
 /// UPD-005: version, identifier, author, license, repository link;
 /// the §5.5 pair: the data directory and whether this launch created
@@ -1123,7 +1181,9 @@ const REPOSITORY_URL: &str = "https://github.com/yepbro/EunomiaSync";
 /// `LICENSE-APACHE` pair in the repository root), `data_dir` is the
 /// resolved data-directory root (the managed [`data_dirs::DataRoot`],
 /// D-049), and `db_created_fresh` is the launch-time fact
-/// [`Db::open`] observed (see the command docs). The path renders
+/// [`Db::open`] observed (see the command docs). `running_as_root`
+/// (NFR-023) is the process's effective-uid fact — see the seam
+/// functions above it. The path renders
 /// through `display()` — a lossy display string for the About window;
 /// the OS-level "open it" action goes through `app_open_data_folder`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -1151,6 +1211,12 @@ pub(crate) struct AppInfo {
     /// fresh database was created, and the recovery screen — not this
     /// flag — is the honest state display.
     pub(crate) db_created_fresh: bool,
+    /// Whether this launch runs with root privileges on Linux (NFR-023)
+    /// — the fact behind the UI warning "the created files will be
+    /// owned by root". `false` on every other platform: the spec
+    /// assigns the warning to Linux alone (the compile-time branch is
+    /// [`running_as_root`]).
+    pub(crate) running_as_root: bool,
 }
 
 /// Serves the About window's facts (§7.10 System module `app_info`).
@@ -1171,12 +1237,15 @@ pub(crate) struct AppInfo {
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn app_info<R: Runtime>(app: AppHandle<R>) -> Result<AppInfo, AppError> {
-    app_info_impl(&app).inspect_err(logging::app_info_failed)
+    app_info_impl(&app, current_uid()).inspect_err(logging::app_info_failed)
 }
 
 /// The body of [`app_info`], split so the one logging edge covers its
-/// every failure path (the `activity_list` shape).
-fn app_info_impl<R: Runtime>(app: &AppHandle<R>) -> Result<AppInfo, AppError> {
+/// every failure path (the `activity_list` shape). `uid` is the
+/// process's effective id the command read — a parameter (not a read
+/// inside) so the tests can drive both halves of the root flag's
+/// truth table without becoming root themselves.
+pub(crate) fn app_info_impl<R: Runtime>(app: &AppHandle<R>, uid: u32) -> Result<AppInfo, AppError> {
     Ok(AppInfo {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         identifier: APP_IDENTIFIER.to_owned(),
@@ -1187,6 +1256,7 @@ fn app_info_impl<R: Runtime>(app: &AppHandle<R>) -> Result<AppInfo, AppError> {
         db_created_fresh: app
             .try_state::<Db>()
             .is_some_and(|database| database.created_fresh()),
+        running_as_root: running_as_root(uid),
     })
 }
 
@@ -1457,6 +1527,46 @@ mod tests {
             serde_json::json!(env!("CARGO_PKG_VERSION")),
             "the src-tauri crate version and the tauri.conf.json version \
              must agree"
+        );
+    }
+
+    // ---- `running_as_root` seam tests (T-032, NFR-023) ---------------
+
+    #[test]
+    fn uid_zero_is_root_and_regular_uids_are_not() {
+        // The card's acceptance pair ("under root true, under a regular
+        // user false"), driven through the seam — the test suite cannot
+        // become root itself. Uid 0 is root on every Unix; 1000 is the
+        // first regular user on a default Linux install; 65534 is
+        // `nobody`, the largest typical uid — a one-comparison
+        // predicate's whole truth table is its boundary values.
+        assert!(is_root(0), "uid 0 is root");
+        assert!(!is_root(1000), "a regular user's uid is not root");
+        assert!(!is_root(65534), "`nobody`'s uid is not root");
+    }
+
+    // The wiring pin that used to sit here (`running_as_root() ==
+    // is_root(current_uid())`) was vacuous in an unprivileged run —
+    // both sides read false, so a hardcoded-false flag passed it. The
+    // round-1 review replaced it: `app_info_impl` now takes the uid as
+    // a parameter, and the IPC tests drive both halves with chosen
+    // uids (see `the_sheets_root_flag_answers_the_uid`), which a
+    // hardcoded flag fails in either direction.
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn the_flag_is_false_off_linux() {
+        // NFR-023's platform scope, pinned where it applies: outside
+        // Linux the flag is false by the compile-time branch. This
+        // test runs only under a non-Linux test build — today's CI
+        // matrix builds but does not test the Windows/macOS legs, so
+        // it is dormant on this machine and the Linux CI (recorded in
+        // the task's DECISIONS.md entry); it exists to pin the
+        // semantics for any future non-Linux test run.
+        assert!(
+            !running_as_root(0),
+            "NFR-023 assigns the root warning to Linux alone — even uid 0 \
+             does not raise it elsewhere"
         );
     }
 }

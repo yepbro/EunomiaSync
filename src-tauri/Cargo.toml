@@ -77,6 +77,16 @@ specta = "=2.0.0-rc.28"
 specta-typescript = "0.0.15"
 tauri-specta = { version = "=2.0.0-rc.29", features = ["typescript"] }
 
+# The NFR-023 root-launch detection (commands.rs, T-032): the one libc
+# call `geteuid` behind the `running_as_root` flag of `app_info`. Not a
+# new crate in the graph: libc 0.2 is already built workspace-wide
+# (via gtk/tao on Linux) — this adds an edge, not a version — and the
+# Linux-only target gate keeps the dependency off Windows/macOS builds,
+# where NFR-023 assigns no root warning. The crate's single `unsafe`
+# block lives in the same seam; both are justified in DECISIONS.md.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # The `test` feature enables the mock runtime used by the updater and
 # single-instance tests (and formerly the greet IPC tests, removed

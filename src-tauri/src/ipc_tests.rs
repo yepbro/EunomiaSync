@@ -48,7 +48,10 @@
 //! answer (the command is non-DB by design and creates no database
 //! file), and the missing-`DataRoot` fallback envelope; the recovery
 //! round-trip tests above pin the flag's recreate/restore
-//! consequences.
+//! consequences. The `running_as_root` tests (T-032, NFR-023) pin the
+//! root-launch flag on the wire (with the environment's half asserted
+//! conditionally) and both halves of the uid predicate through the
+//! injected-uid sheet.
 
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -1697,6 +1700,103 @@ fn a_preexisting_empty_database_file_is_created_fresh() {
          fresh creation"
     );
     // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn app_info_carries_the_root_launch_flag() {
+    // NFR-023's flag on the About sheet's wire: present and bool-typed
+    // (the typed DTO deserialization enforces both — a missing field or
+    // a non-bool value fails it) and equal to what the platform policy
+    // answers for this process's uid. That equality is a plumbing pin
+    // in the D-057 `version`-macro shape — honest about its reach: it
+    // bites under a root run (a hardcoded-false flag fails it there);
+    // in an unprivileged run both sides read false, so the falsifiable
+    // both-halves coverage lives in the driven test below. The
+    // conditional if/else asserts whichever half of the card's
+    // acceptance pair this environment produces — including the
+    // under-root half when the suite runs privileged.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let root = temp.path().to_path_buf();
+    let app = app_info_app(database, root);
+
+    let info = invoke_app_info(&main_webview(&app)).expect("the command must succeed");
+
+    assert_eq!(
+        info.running_as_root,
+        crate::commands::running_as_root(crate::commands::current_uid()),
+        "the wire flag is what the platform policy answers for this \
+         process's uid (NFR-023)"
+    );
+    #[cfg(target_os = "linux")]
+    if crate::commands::current_uid() == 0 {
+        assert!(
+            info.running_as_root,
+            "under root the flag is true (NFR-023)"
+        );
+    } else {
+        assert!(
+            !info.running_as_root,
+            "a regular-user launch must not raise the root flag (NFR-023)"
+        );
+    }
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_sheets_root_flag_answers_the_uid() {
+    // Both halves of the card's acceptance pair ("under root true,
+    // under a regular user false"), falsifiable without privilege:
+    // `app_info_impl` takes the uid the command read as a parameter,
+    // so the sheet is driven with chosen uids — a hardcoded flag fails
+    // one half in either direction. Off Linux the same driven uids pin
+    // the platform twin (false regardless of uid, NFR-023's
+    // Linux-only scope); only `DataRoot` is needed — the sheet is a
+    // read of constants and managed state.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the layout in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::app_info])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(data_dirs::DataRoot(temp.path().to_path_buf()));
+
+    let as_root = crate::commands::app_info_impl(app.handle(), 0).expect("uid 0 must succeed");
+    let as_user =
+        crate::commands::app_info_impl(app.handle(), 1000).expect("uid 1000 must succeed");
+
+    #[cfg(target_os = "linux")]
+    {
+        assert!(
+            as_root.running_as_root,
+            "uid 0 is root: the sheet must carry the warning fact (NFR-023)"
+        );
+        assert!(
+            !as_user.running_as_root,
+            "a regular user's uid must not raise the root flag (NFR-023)"
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert!(
+            !as_root.running_as_root,
+            "off Linux even uid 0 does not raise the flag (NFR-023's \
+             Linux-only scope)"
+        );
+        assert!(
+            !as_user.running_as_root,
+            "off Linux a regular uid does not raise the flag (NFR-023's \
+             Linux-only scope)"
+        );
+    }
     drop(app);
     drop(temp);
 }
