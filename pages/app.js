@@ -27,6 +27,7 @@
   const runSyncBtn = document.getElementById('run-sync')
   const syncBadge = document.querySelector('.syncbar .badge')
   const syncCounterText = document.getElementById('sync-counter-text')
+  const hiddenCountChip = document.getElementById('hidden-count')
 
   /* Project columns: skip the pinned checkbox + instruction columns */
   const projectCols = [...document.querySelectorAll('.matrix colgroup col')].slice(2)
@@ -381,6 +382,11 @@
   for (const input of document.querySelectorAll('.matrix tbody .assign')) {
     updateCellState(input)
   }
+
+  /* "Show hidden" badge: how many instructions are hidden */
+  hiddenCountChip.textContent = String(
+    document.querySelectorAll('.matrix tbody .row-hidden').length,
+  )
 
   applyColumnFilter()
   applyFilters()

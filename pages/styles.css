@@ -680,6 +680,17 @@ input[type='checkbox']:disabled {
   padding: 4px 10px;
 }
 
+/* Hidden-instruction counter next to the "Show hidden" toggle: dashed
+   border echoes the "hidden" chip on the rows */
+.toggle-count {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-muted);
+  border: 1px dashed var(--text-faint);
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
 /* Empty search state (UI-012) */
 .empty-state {
   padding: 72px 24px;
