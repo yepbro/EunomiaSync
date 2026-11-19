@@ -1085,6 +1085,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-specta",
  "tempfile",
+ "tokio",
  "toml 1.2.1+spec-1.1.0",
  "tracing",
  "tracing-appender",

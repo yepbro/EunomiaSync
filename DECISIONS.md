@@ -3202,6 +3202,204 @@ and dropping the empty-text guard (3). Round-1 review
 identity test, the single `level` binding, and the linear-cost doc
 note; round-2 review (hy4-flash-free, APPROVE) found nothing further.
 
+### D-054 — LOG-006 retention: the disjunction of the two log limits, strictly-older age, last 500 runs by (started_at, id); a 24 h spawned ticker, settings read in the prune's own transaction — 2026-11-18
+
+Problem: T-029 turns LOG-006 ("Log limits come from settings (10,000
+entries or 180 days by default); cleanup runs at startup and once a
+day") and §6.4's "Log and runs" row ("10,000 entries or 180 days for
+the log; the last 500 runs") into the retention mechanism. Open
+questions: what the "or" of the two limits means for a single row;
+which boundary the age criterion cuts; what "the last N" means when
+`ts` and insert order disagree; whether the 500 is a setting; what
+happens to `sync_run_projects` and `backup_records` when runs are
+deleted; how "once a day" reaches a long-running process (T-021's
+daily copy is a startup check, not a timer); and what a failed
+cleanup does to the launch.
+
+Solution, nine decisions:
+
+- _Where the code lives._ The semantics are the store's —
+  `eunomia_store::action_log::cleanup(conn, limits, now)`, extending
+  the journal's own module (the module docs' "nothing here deletes
+  rows" paragraph is replaced by the retention section). §6.4 names
+  "Log and runs" as one housekeeping row, LOG-006 draws both log
+  limits from settings, and the runs cap is fixed — one function
+  keeping the three together is the shape that cannot drift apart.
+- _The disjunction._ A journal row is deleted when **either** limit
+  alone rejects it: it is outside the newest `max_entries` rows, or
+  its `ts` is strictly older than the cutoff `now − max_days` days.
+  Equivalently, surviving = inside the newest N **and** not older
+  than the cutoff — tightening either setting prunes immediately
+  (each criterion is pinned deleting an entry the other would keep).
+  One `DELETE … WHERE id NOT IN (newest N) OR ts < cutoff` expresses
+  it; §6.4's wording "10,000 entries or 180 days" reads naturally
+  as the disjunction of removal conditions.
+- _The age boundary is strict._ "Older than max_days" deletes
+  `ts < cutoff` only: an entry stamped exactly `max_days` before
+  `now` is at the limit, not past it, and survives (pinned at
+  millisecond precision). The cutoff is compared as DB-002-shaped
+  text — the same precondition `list`'s range filters stand on
+  ([`values::is_db002_shape`]: that exact shape is where text
+  comparison equals chronological comparison). Days are exactly
+  86 400 s (`SignedDuration`, not a calendar `Span` — `ts` cells are
+  UTC instants; no timezone exists that could make a day anything
+  else for this comparison).
+- _"The last N" is time-primary._ The keep-set orders by
+  `ts DESC, id DESC` — T-027's `list` ordering, not `recent`'s
+  insert order: a backward clock step can write a high-id entry with
+  an old `ts`, and retention keeps what the Activity window would
+  show as newest (pinned: a late-inserted old entry is deleted while
+  lower-id newer entries survive). `sync_runs` gets the run twin,
+  `started_at DESC, id DESC` — the UUIDv7 text id (D-031) breaking
+  `started_at` ties deterministically (pinned with a tied pair at
+  the keep-window boundary).
+- _500 is a constant, not a setting._ §6.5 has no key for runs and
+  LOG-006 draws only the log limits from settings;
+  `action_log::SYNC_RUNS_KEPT = 500` carries the §6.4 number next to
+  the query that enforces it. The log limits travel as a
+  `LogLimits { max_entries, max_days }` parameter whose validation
+  owner stays the settings repository (D-039): re-checking the ranges
+  in the cleanup would duplicate the §6.5 canon; the precondition
+  (§6.5-validated values) is documented on the type, and the app
+  seam honors it by reading both keys through `settings::get` in the
+  prune's own transaction.
+- _Cascade, SET NULL, and the journal's own references._ Deleting old
+  runs rides the schema (D-036): `sync_run_projects` follows through
+  `ON DELETE CASCADE` (the connection's `PRAGMA foreign_keys=ON`,
+  D-030), `backup_records` rows survive with a NULL `sync_run_id`
+  (`ON DELETE SET NULL` — a file backup outlives its run), and
+  journal entries naming a pruned run keep their `sync_run_id`
+  string (§6.2 puts no FK there; the journal is a historical record
+  — an id that names a pruned run still names what happened). All
+  three are pinned; no explicit child DELETEs were added (the
+  cascade is the schema's own contract, exercised here through the
+  production open). Recorded boundary (round-1 review): the cap
+  keeps the newest 500 runs **regardless of status**, so an app
+  whose newest 500 runs are all failed/aborted loses the rows
+  LOG-007's "overall last successful sync" would derive from the
+  runs table — §6.4 mandates the cap, so the task that builds
+  LOG-007 must read the overall time from `projects.last_synced_at`
+  (or another denormalized field), never by scanning `sync_runs`.
+  The schema's own `action_log` comment still says "append-only":
+  the migration file is frozen (D-010/D-036), and this cleanup is
+  the one deliberate deleter since T-029 — ARCHITECTURE.md says so
+  next to the retention description.
+- _One transaction, idempotent, caller-owned._ Both DELETEs join the
+  caller's transaction (the `insert`/`settings::set` shape): the app
+  seam (`src-tauri/src/retention.rs`) reads the two settings and
+  prunes inside **one** `Db::run` operation (D-037), so the limits
+  and the deletes describe one consistent state and a mid-operation
+  failure rolls the whole pass back (pinned by an explicit rollback).
+  A second pass over the pruned state removes nothing (pinned) —
+  which is also why the daily tick needs no same-day guard: unlike
+  the ERR-001 copy (D-046) there is no day-named artifact to key on,
+  and an extra pass is a no-op, not a duplicate.
+- _Startup + a 24 h spawned ticker._ `retention::spawn_daily_cleanup`
+  spawns one task on tauri's async runtime: the startup pass runs
+  immediately (right after `app.manage` — LOG-006's "at startup"
+  fired off the `setup` thread; commands keep answering through the
+  whole pass, the executor serializing them on the one connection
+  behind the prune's single transaction — a bounded queue, not
+  concurrency), then the task sleeps `DAILY_INTERVAL` (24 h) between
+  passes. Honest
+  boundaries: the tick counts from launch, not UTC midnight — an app
+  kept running prunes once per day on its own schedule, which is
+  the natural reading of "once a day" for a limit that idempotence
+  already bounds; and the task deliberately has no cancellation
+  token — process exit drops it, a pass interrupted by exit rolls
+  back with its transaction (SQLite atomicity), and the next
+  startup's pass re-runs. `tokio` (feature `time` only) joins
+  src-tauri for the timer: tauri's `async_runtime` re-exports its
+  task API but not its timers, and its docs point at tokio for the
+  missing items — no new crate version (already resolved via tauri;
+  the D-029 lockfile-reuse pattern), `cargo deny` green. The
+  startup ordering is deliberate: after the ERR-001 daily copy (the
+  copy is the day's recovery point of the state as the app found
+  it, housekeeping shrinks it afterwards) and after `app.manage`
+  (pinned by extending the existing `db_tests.rs` wiring pin: open →
+  daily → manage → retention spawn).
+- _Degrade, keep ticking, journal nothing._ A failed pass is logged
+  through the facade (`logging::db_cleanup_failed`, a `warn` — the
+  D-046 policy: the launch continues, an `error` line would read as
+  a failed launch) and the loop sleeps on: the failure may be
+  transient, the next day retries. A pass that removed something
+  gets one `logging::db_cleanup` `info` line with the two counts
+  (SEC-008: numeric only); a no-op gets none (the idempotent common
+  case, D-046's no-op-no-line policy). The cleanup writes no
+  `action_log` entry: LOG-001…004's vocabulary has no housekeeping
+  member and extending the closed enum beyond the requirement's list
+  is not this task's call — the facade lines are its whole journal
+  (D-046's boundary note, mirrored). A corrupt `log.*` cell fails
+  the settings read explicitly (the D-039 corrupt-cells policy) and
+  the pass surfaces the D-037 fallback wire shape with a class-only
+  diagnostic in `details.os_message` — the failing key and the
+  failure class, never the stored cell's bytes (the T-027
+  `corrupt_cell_diagnostic` rule; the registry has no
+  "housekeeping failed" code; the error is logged, never shown).
+
+Testing: the store suite (`tests/action_log_cleanup.rs`, 14 tests
+over real migrated databases seeded by direct SQL — the history
+under test is accumulated rows with explicit timestamps, which the
+production writers stamp with the wall clock) pins the card's two
+acceptance criteria (1200 entries → exactly the newest 1000; 501
+runs → 500 with zero orphaned `sync_run_projects`), the strict age
+boundary (the exactly-`max_days`-old entry survives, one millisecond
+older goes), each half of the disjunction deleting alone, the
+combined mix, the ts-primary determinism and the run tiebreak, the
+empty-database no-op, `backup_records` SET NULL, journal references
+surviving, idempotency, the explicit-rollback transactionality, and
+the `StorageError::Sql` error shape. The app side
+(`retention.rs`' test module) pins the seam over a real `Db` in a
+temp data directory: stored settings govern the prune over the
+defaults (1001 entries + a stored limit of 1000 → 1000), a stored
+`log.max_days` governs the age criterion, `read_limits` returns the
+§6.5 defaults on a fresh database, the fresh first launch is a clean
+no-op, a corrupt settings cell fails with the fallback shape
+carrying a class-only diagnostic, the fallback builder's wire shape,
+and the ticker's lifecycle (a bounded-loop seam: the first pass
+fires with no external trigger; a failed tick does not end the
+loop — the second tick of the same run prunes after the fault is
+repaired). `logging.rs` gains one test for the two facade lines
+(counts on the `info`, code + reason on the `warn`).
+
+The round-1 review (deepseek-v4.1-flash, APPROVE, no P0/P1; all
+findings fixed in the same commit) tightened five edges: (1) the
+`LogLimits` doc claimed `max_entries <= 0` "keeps everything" — true
+only for negative values (SQLite treats a negative `LIMIT` as
+unlimited); `0` empties the keep-set and deletes the whole journal,
+and the doc now says exactly that asymmetry; (2) the fallback's
+`os_message` used the storage error's own `Display`, which for some
+`SettingsError` variants embeds the stored cell's text — the T-027
+`corrupt_cell_diagnostic` rule now applies here too: class and key
+travel, stored text does not (pinned: the planted cell's bytes reach
+no log surface); (3) the ticker itself had no behavioral coverage —
+the loop is now a bounded-tick seam (`cleanup_loop`) with two
+lifecycle tests; (4) the app seam pinned only `log.max_entries` — a
+`log.max_days` seam test and a `read_limits`-defaults test close the
+copy-paste hole; (5) the wiring pin's failure message, the §6.2→§6.4
+mis-cite, the LOG-007 runs-cap boundary and the "commands keep
+working" queueing wording (the boundaries recorded above and in
+ARCHITECTURE.md). The review also confirmed the truncating `%.3f`
+cutoff is exact at the system's own millisecond resolution (both
+sides of the comparison truncate — `now_utc` stamps cells the same
+way), now documented on `age_cutoff`.
+
+The round-2 review (hy4-flash-free, APPROVE, no P0/P1) caught three
+stale docstrings still describing the fallback `os_message` as
+"the storage error's own text" — the class-only rewrite of round-1
+fix 2 had missed the `run_once` docs, the `db_cleanup_failed` docs
+and one D-054 sentence; all three now say class-only, so no future
+reader "restores" the `Display`-based message and the SEC-008 leak
+with it. Its P3 widened the failed-tick test's timing margin (the
+tick interval is 100 ms now, the repair's ~95 ms margin and the
+weaken-not-flake boundary recorded in the test).
+
+Dependencies: `tokio = { version = "1", default-features = false,
+features = ["time"] }` joins src-tauri (already resolved
+workspace-wide via tauri — an edge, not a new version; deny stays
+green with no new ignores). Everything else is covered by
+`rusqlite`, `jiff` and the existing crates.
+
 ### D-055 — `settings_get`/`settings_set`: string-shaped wire, partial atomic save, per-key journal entries in the operation's transaction — 2026-11-18
 
 Problem: T-030 turns the §7.10 Settings module (`settings_get`,

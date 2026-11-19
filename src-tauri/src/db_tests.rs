@@ -1989,6 +1989,9 @@ fn setup_runs_the_daily_backup_after_open_and_before_managing() {
     // Wiring pin (the `config_tests.rs` style): the ERR-001 step must
     // run at startup, after the database is open, before the state is
     // published — and its failure arms must log through the facade.
+    // Extended by T-029: the LOG-006 retention task is spawned right
+    // after the manage step (the cleanup runs on the already-managed
+    // database, its startup pass off the setup thread).
     let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
     let markers = [
         "db::Db::open(&data_dir)",
@@ -1996,6 +1999,7 @@ fn setup_runs_the_daily_backup_after_open_and_before_managing() {
         "logging::db_backup_daily(",
         "logging::db_backup_daily_failed(",
         "app.manage(database);",
+        "retention::spawn_daily_cleanup(",
     ];
     let positions: Vec<usize> = markers
         .iter()
@@ -2016,7 +2020,8 @@ fn setup_runs_the_daily_backup_after_open_and_before_managing() {
             pair[0] < pair[1],
             "lib.rs must open the database, run the ERR-001 daily \
              backup (logging written copies and failures through the \
-             facade), and only then manage the state (spec §10, D-046); \
+             facade), manage the state, and only then spawn the \
+             LOG-006 retention task (spec §10, D-046; D-054); \
              marker positions: {positions:?}"
         );
     }

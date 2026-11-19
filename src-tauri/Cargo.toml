@@ -33,6 +33,14 @@ rusqlite = "0.41"
 # graph: jiff 1 is already built through eunomia-store (values.rs,
 # D-035) — this adds an edge, not a version.
 jiff = { version = "1", default-features = false, features = ["std"] }
+# The LOG-006 daily tick of the retention task (retention.rs,
+# DECISIONS.md D-054): `tokio::time::sleep` inside a
+# `tauri::async_runtime::spawn`ed task — tauri's async runtime re-exports
+# its task API but not its timers, and its own docs point at tokio for
+# the missing items. Not a new crate in the graph: tokio 1 is already
+# resolved workspace-wide (via tauri), and only the `time` feature is
+# requested — no runtime, no macros.
+tokio = { version = "1", default-features = false, features = ["time"] }
 tauri = { version = "2", features = [] }
 # The full allowed Tauri plugin set (spec §5.3). All four plugins are
 # invoked from Rust only (SEC-001): the webview gets neither their JS

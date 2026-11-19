@@ -26,6 +26,12 @@ pub(crate) mod data_dirs;
 // executor (SYS-001/SYS-002, NFR-008; DECISIONS.md D-037).
 pub(crate) mod db;
 
+// The LOG-006 retention task (spec §7.7, §6.4 "Log and runs"):
+// journal/sync-run cleanup at startup and once a day, over the
+// `Db::run` executor with the limits read from the settings table in
+// the same transaction (DECISIONS.md D-054).
+pub(crate) mod retention;
+
 // The recovery-screen backend (spec §7.10 command notes, §10
 // E_DB_CORRUPT row; T-024): the file mechanics behind
 // `db_recreate`/`db_restore_backup` and the `db-backups/` listing.
@@ -310,7 +316,21 @@ pub fn run() {
                 Ok(eunomia_store::storage::DailyBackupOutcome::AlreadyPresent(_)) => {}
                 Err(error) => logging::db_backup_daily_failed(&error),
             }
+            // The LOG-006 retention task (spec §7.7, §6.4): journal and
+            // sync-run cleanup by the settings limits — the startup run
+            // fires immediately inside the spawned task (the database is
+            // open and managed by now), then once a day. Deliberately
+            // *after* `app.manage` and after the ERR-001 daily copy
+            // above: the copy is the day's recovery point of the state
+            // as the app found it, housekeeping shrinks it afterwards,
+            // and commands keep answering through the whole pass — the
+            // executor serializes them on the one connection behind the
+            // prune's single transaction, a bounded queue rather than a
+            // hang. A failure degrades exactly like the daily copy's —
+            // logged through the facade, the launch unaffected (D-054).
+            let retention_db = database.clone();
             app.manage(database);
+            retention::spawn_daily_cleanup(retention_db);
             Ok(())
         })
         .run(tauri::generate_context!())

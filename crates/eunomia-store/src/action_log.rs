@@ -39,11 +39,18 @@
 //! sides: the canonical JSON forms, and the rejection of instruction-
 //! shaped strings by [`FailureCode::new`].
 //!
-//! # Limits and cleanup
+//! # Limits and cleanup (LOG-006, §6.4 "Log and runs")
 //!
-//! LOG-006's retention (10 000 entries / 180 days from settings,
-//! cleanup at startup and daily) is **not** this module's: it belongs
-//! to the cleanup task (T-029). Nothing here deletes rows.
+//! Retention is one housekeeping concern with one entry point,
+//! [`cleanup`]: a journal entry is deleted when it falls outside the
+//! newest `log.max_entries` entries **or** is strictly older than
+//! `log.max_days` days (the disjunction of LOG-006 — either limit
+//! alone removes), and `sync_runs` keeps the last
+//! [`SYNC_RUNS_KEPT`] runs. The limits arrive as a [`LogLimits`]
+//! parameter — the settings repository owns their validation
+//! (D-039) — and `cleanup` joins the caller's transaction like
+//! [`insert`] does, so the app-layer executor reads the settings and
+//! prunes in one transaction.
 //!
 //! Reading comes in two seams with two different orderings, both
 //! deterministic. [`recent`] is the journal-replay seam: the newest
@@ -62,6 +69,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use jiff::{SignedDuration, Timestamp};
 use rusqlite::Connection;
 
 use crate::storage::StorageError;
@@ -1080,6 +1088,172 @@ fn validate_query_bounds(query: &ActivityQuery) -> Result<(), StorageError> {
     Ok(())
 }
 
+// ---- LOG-006 retention (§6.4 "Log and runs", §6.5 limits) --------------------
+
+/// How many `sync_runs` rows are kept (§6.4's "the last 500 runs").
+///
+/// A fixed number, not a setting: §6.5 has no key for it, and LOG-006
+/// draws only the *log* limits from settings. The constant lives here,
+/// next to the query that enforces it, so the §6.4 row and its
+/// implementation cannot drift apart silently (a change is a spec
+/// decision, made consciously in this file).
+pub const SYNC_RUNS_KEPT: i64 = 500;
+
+/// The LOG-006 log limits as [`cleanup`] consumes them: the §6.5
+/// `log.max_entries` and `log.max_days` values.
+///
+/// Plain `i64` fields on purpose: the ranges (1000–100000, 7–3650)
+/// have exactly one owner — the settings repository, which validates
+/// them on every read and write ([`crate::settings`], D-039) — and
+/// re-validating here would duplicate that canon. The precondition is
+/// therefore part of the contract: a caller passes §6.5-validated
+/// values (the app-layer seam reads both keys through
+/// [`crate::settings::get`] in the same transaction as the prune).
+/// Out-of-range values are the caller's bug and behave as SQLite
+/// decides, which is **not** uniform: a *negative* `max_entries`
+/// keeps everything on the count criterion (SQLite treats a negative
+/// `LIMIT` as unlimited), while `max_entries = 0` empties the
+/// keep-set and deletes the whole journal — a plausible "unlimited"
+/// sentinel is exactly the value that wipes the table. A negative
+/// `max_days` pushes the age cutoff into the future and deletes up
+/// to everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogLimits {
+    /// How many of the newest journal entries are kept
+    /// (`log.max_entries`, §6.5: 1000–100000, default 10 000).
+    pub max_entries: i64,
+    /// How many days of journal history are kept (`log.max_days`,
+    /// §6.5: 7–3650, default 180).
+    pub max_days: i64,
+}
+
+/// What one [`cleanup`] run removed — the payload of the housekeeping
+/// log line and the return value the app layer's degrade decision
+/// hangs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CleanupCounts {
+    /// How many `action_log` rows were deleted.
+    pub log_entries: u64,
+    /// How many `sync_runs` rows were deleted (their
+    /// `sync_run_projects` rows went with them through the schema's
+    /// `ON DELETE CASCADE`, D-036).
+    pub sync_runs: u64,
+}
+
+/// Enforces the LOG-006 retention (§6.4 "Log and runs"): deletes
+/// journal entries beyond the limits and sync runs beyond the last
+/// [`SYNC_RUNS_KEPT`], and returns what it removed.
+///
+/// # The disjunction of the two log limits
+///
+/// A journal entry is deleted when **either** LOG-006 limit alone
+/// rejects it: it is outside the newest `max_entries` entries
+/// (ordered `ts DESC, id DESC` — the same deterministic ordering as
+/// [`list`], so "the newest N" means the same thing here and in the
+/// Activity window), **or** its `ts` is strictly older than the
+/// cutoff `now − max_days` days ("10,000 entries **or** 180 days").
+/// Equivalently, an entry survives only by being inside the newest N
+/// *and* not older than the cutoff — so tightening either setting
+/// prunes immediately. The age boundary is strict on purpose and
+/// pinned by a test: an entry stamped *exactly* `max_days` days
+/// before `now` is at the limit, not past it, and survives; one
+/// millisecond older goes. The cutoff is compared as DB-002-shaped
+/// text (`ts < ?`), which equals chronological comparison for that
+/// exact shape ([`crate::values::is_db002_shape`] — the same
+/// precondition the range filters of [`list`] stand on).
+///
+/// # Sync runs
+///
+/// `sync_runs` keeps the newest [`SYNC_RUNS_KEPT`] rows ordered
+/// `started_at DESC, id DESC` — the run twin of the journal's
+/// ordering, with the UUIDv7 id (D-031) breaking `started_at` ties.
+/// Older runs are deleted outright (§6.4 has no "pruned" status for
+/// runs); their `sync_run_projects` rows follow through the schema's
+/// `ON DELETE CASCADE` (D-036 — requires `PRAGMA foreign_keys=ON`,
+/// which the production open applies on every connection, D-030),
+/// and `backup_records.sync_run_id` becomes NULL by the same
+/// schema's `ON DELETE SET NULL` — a file backup outliving its run
+/// keeps its row (BKP records are not run-scoped history). Journal
+/// entries naming a deleted run keep their `sync_run_id` string: the
+/// schema has no foreign key there (§6.2), and the journal is a
+/// historical record — an id that names a pruned run still names
+/// *what happened*.
+///
+/// # Transaction, idempotency, boundaries
+///
+/// Both statements join the caller's transaction (the [`insert`]
+/// shape): a caller wrapping the settings read and this prune in one
+/// transaction (the `Db::run` executor, D-037) gets one consistent
+/// operation that rolls back as a set — pinned by a test that
+/// rollbacks instead of committing. The operation is idempotent: a
+/// second run over the pruned state removes nothing (also pinned).
+/// Honest boundary: a stored `ts` cell outside the DB-002 shape (a
+/// corrupt or hand-edited cell — every writer goes through
+/// [`insert`]) is not validated here; the text comparisons stay
+/// total-but-arbitrary for such a cell (it may or may not be pruned),
+/// and surfacing the corruption stays the read path's job
+/// ([`ActionLogError::TsCell`], the D-039 corrupt-cells policy).
+///
+/// # Errors
+///
+/// Returns [`StorageError::Sql`] when either statement fails.
+///
+/// # Panics
+///
+/// Panics only when the cutoff arithmetic overflows a `jiff`
+/// `Timestamp` — impossible for §6.5-validated `max_days` values
+/// (7–3650; see [`LogLimits`]).
+pub fn cleanup(
+    conn: &Connection,
+    limits: &LogLimits,
+    now: Timestamp,
+) -> Result<CleanupCounts, StorageError> {
+    let cutoff = age_cutoff(now, limits.max_days);
+    let log_entries = conn.execute(
+        "DELETE FROM action_log
+          WHERE id NOT IN (
+              SELECT id FROM action_log ORDER BY ts DESC, id DESC LIMIT ?1
+          )
+             OR ts < ?2",
+        rusqlite::params![limits.max_entries, cutoff],
+    )?;
+    let sync_runs = conn.execute(
+        "DELETE FROM sync_runs
+          WHERE id NOT IN (
+              SELECT id FROM sync_runs
+               ORDER BY started_at DESC, id DESC LIMIT ?1
+          )",
+        rusqlite::params![SYNC_RUNS_KEPT],
+    )?;
+    Ok(CleanupCounts {
+        log_entries: u64::try_from(log_entries).unwrap_or(0),
+        sync_runs: u64::try_from(sync_runs).unwrap_or(0),
+    })
+}
+
+/// The `ts` value an entry must not be strictly older than:
+/// `now − max_days` days, rendered in the DB-002 shape so the SQL
+/// text comparison `ts < cutoff` equals the chronological one.
+///
+/// Days are exactly 24 h here (a `SignedDuration`, not a calendar
+/// `Span`): `ts` cells are UTC instants, and LOG-006's "days" bounds
+/// the age of an instant — no timezone exists that could make a day
+/// anything but 86 400 s for this comparison.
+///
+/// The cutoff is rendered at the DB-002 millisecond resolution —
+/// `%.3f` truncates (jiff's own documented behavior, the same
+/// convention [`crate::values::now_utc`] stamps cells with), so both
+/// sides of the comparison live at the system's own precision and
+/// the boundary is exact there; a `now` with sub-millisecond digits
+/// simply rounds the cutoff down to the last whole millisecond.
+fn age_cutoff(now: Timestamp, max_days: i64) -> String {
+    let days = SignedDuration::from_secs(max_days.saturating_mul(86_400));
+    now.checked_sub(days)
+        .expect("§6.5 bounds max_days to 7–3650; the cutoff cannot leave the Timestamp range")
+        .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
+}
+
 /// The raw strings of one row, as rusqlite read them — the decode
 /// step ([`LogRecord::try_from_row`]) is fallible on the vocabulary
 /// columns, and rusqlite's `query_map` closure must stay infallible.
@@ -1479,5 +1653,31 @@ mod tests {
         assert!(entry.project_id.is_none());
         assert!(entry.sync_run_id.is_none());
         assert!(entry.details.is_none());
+    }
+
+    /// The age cutoff is the DB-002 rendering of
+    /// `now − max_days × 24 h` — the exact string the SQL comparison
+    /// `ts < ?` binds, pinned with hardcoded oracle literals (a wrong
+    /// format directive or a wrong multiplier fails this test without
+    /// any database involved). The month rollover case is deliberate:
+    /// pure seconds arithmetic, no calendar component to get wrong.
+    #[test]
+    fn age_cutoff_renders_now_minus_days_in_db002_shape() {
+        let now =
+            Timestamp::from_millisecond(1_795_046_400_000).expect("a fixed instant must parse");
+        // 2026-11-19T00:00:00.000Z minus 180 days = 2026-05-23T00:00:00.000Z
+        // (May has 31, June 30, July 31, August 31, September 30,
+        // October 31, November 19 — 180 days back crosses six month
+        // boundaries, so the arithmetic and the calendar agree only if
+        // the multiplication is exactly 86 400 s per day).
+        assert_eq!(age_cutoff(now, 180), "2026-05-23T00:00:00.000Z");
+        // The §6.5 bounds: the smallest and the largest legal day
+        // counts, both rendered without panicking and in shape.
+        assert!(crate::values::is_db002_shape(&age_cutoff(now, 7)));
+        assert!(crate::values::is_db002_shape(&age_cutoff(now, 3650)));
+        // One day keeps the millisecond precision of `now`.
+        let with_millis =
+            Timestamp::from_millisecond(1_795_046_400_123).expect("a fixed instant must parse");
+        assert_eq!(age_cutoff(with_millis, 1), "2026-11-18T00:00:00.123Z");
     }
 }

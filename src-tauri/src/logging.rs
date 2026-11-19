@@ -404,6 +404,50 @@ pub(crate) fn db_backup_daily_failed(error: &eunomia_store::storage::StorageErro
     );
 }
 
+/// The LOG-006 retention cleanup removed rows (spec §7.7, §6.4 "Log
+/// and runs"): journal entries beyond `log.max_entries` or
+/// `log.max_days`, sync runs beyond the last 500 (their per-project
+/// outcome rows with them). `info`: a routine housekeeping event —
+/// the counts are the audit fact (how much history the limits
+/// reclaimed). A cleanup that removed **nothing** gets no line: it
+/// is the idempotent common case (every second startup, every daily
+/// tick of a quiet app), and a line per day would only repeat
+/// itself — the same no-op policy as [`db_backup_daily`]'s.
+///
+/// Boundary with the `action_log` journal, mirroring D-046's: the
+/// cleanup itself writes no journal entry (LOG-001…004's vocabulary
+/// has no housekeeping member), so this file-log line is its whole
+/// journal. The payload is numeric only (SEC-008).
+pub(crate) fn db_cleanup(counts: &eunomia_store::action_log::CleanupCounts) {
+    tracing::info!(
+        target: "eunomia::db",
+        log_entries = counts.log_entries,
+        sync_runs = counts.sync_runs,
+        "retention cleanup removed rows beyond the limits"
+    );
+}
+
+/// The LOG-006 retention cleanup failed: `warn`, not `error`, for
+/// the same reason as [`db_backup_daily_failed`] — the launch and
+/// the app continue to work with an over-long journal, and an
+/// `error` line would read as a failed launch in log triage. The
+/// task keeps its daily tick, so the next day retries on its own.
+/// The payload is the error's own §7.10 vocabulary (code literal,
+/// params, OS facts from `details` — for this producer the D-037
+/// fallback shape carrying a class-only diagnostic: the failing key
+/// and failure class, never the stored cell's bytes); nothing
+/// free-text is added (SEC-008).
+pub(crate) fn db_cleanup_failed(error: &AppError) {
+    tracing::warn!(
+        target: "eunomia::db",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "retention cleanup failed; continuing without it (retried at the next daily tick)"
+    );
+}
+
 /// A database operation hit SQLite's busy/locked state, its
 /// `busy_timeout` expired, and the `Db::run` executor is replaying
 /// the whole operation in a fresh transaction (spec §10 `E_DB_LOCKED`
@@ -1933,5 +1977,54 @@ mod tests {
             "the failure line must carry the opener's own text from details, \
              got: {log}"
         );
+    }
+
+    #[test]
+    fn retention_lines_carry_counts_and_the_failure_reason() {
+        // The LOG-006 housekeeping pair (D-054): a cleanup that
+        // removed something logs its counts at `info`; a failed one
+        // logs at `warn` with the fallback wire shape — code literal
+        // plus the storage failure's own text from `details` — and
+        // neither line can carry anything but numbers and codes
+        // (SEC-008: housekeeping has no paths or content to begin
+        // with, and the payload shape pins that).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+
+        tracing::subscriber::with_default(subscriber, || {
+            db_cleanup(&eunomia_store::action_log::CleanupCounts {
+                log_entries: 214,
+                sync_runs: 3,
+            });
+            let mut error = AppError::new(crate::errors::ErrorCode::DbLocked);
+            error.details = Some(crate::errors::ErrorDetails {
+                os_code: None,
+                os_kind: Some("StorageError".to_owned()),
+                os_message: Some("invalid setting log.max_days: range".to_owned()),
+            });
+            db_cleanup_failed(&error);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("log_entries=214") && log.contains("sync_runs=3"),
+            "the success line must carry the removal counts, got: {log}"
+        );
+        assert!(
+            log.contains("retention cleanup removed rows beyond the limits"),
+            "the success line must say what happened, got: {log}"
+        );
+        assert!(
+            log.contains("code=\"E_DB_LOCKED\"") && log.contains("log.max_days"),
+            "the failure line must carry the code literal and the storage \
+             layer's own reason, got: {log}"
+        );
+        assert!(
+            log.contains("WARN") && log.contains("retention cleanup failed"),
+            "the failure line must be a warn naming the failed cleanup, got: {log}"
+        );
+        drop(temp);
     }
 }

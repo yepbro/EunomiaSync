@@ -395,6 +395,46 @@ file-log lines remain the whole journal of daily-copy creation: the
 creation" is the BKP-001 target-file family, not this database copy
 (see the boundary note on `logging::db_backup_daily`).
 
+Right after the daily copy and `app.manage`, the `setup` hook spawns
+the LOG-006 retention task (spec §7.7, §6.4 "Log and runs",
+DECISIONS.md D-054): `src-tauri/src/retention.rs` runs one cleanup
+pass immediately (asynchronously — `setup` does not wait) and then
+once every 24 h, on `tauri::async_runtime` with `tokio::time::sleep`
+as the timer. One pass is one `Db::run` operation: both `log.*`
+settings are read and the prune executes in the **same** transaction
+(SYS-002 — the limits and the deletes describe one consistent
+state). The semantics live in the store
+(`eunomia_store::action_log::cleanup`): a journal entry is deleted
+when it is outside the newest `log.max_entries` entries (`ts DESC,
+id DESC` — the Activity window's ordering) **or** strictly older than
+`now − log.max_days` days (an entry exactly at the boundary
+survives), and `sync_runs` keeps the last 500 by `started_at DESC,
+id DESC` — older runs go with their `sync_run_projects` rows (the
+schema's `ON DELETE CASCADE`), `backup_records` rows keep theirs
+with a NULL `sync_run_id` (`ON DELETE SET NULL`), and journal
+entries naming a pruned run keep the id string (no FK there). The
+pass is idempotent and joins its caller's transaction, so a rollback
+restores everything. Failure policy — the D-046 shape: a failed pass
+is logged through the facade (`logging::db_cleanup_failed`, a `warn`)
+and the loop sleeps on to retry next day; a pass that removed
+something gets one `logging::db_cleanup` `info` line with the counts,
+a no-op gets none. The cleanup writes no `action_log` entry itself
+(LOG-001..004 has no housekeeping member — the facade lines are its
+whole journal). Honest boundaries, recorded in D-054: the 24 h tick
+counts from launch, not UTC midnight; the task has no cancellation
+token — process exit drops it, an interrupted pass rolls back with
+its transaction, and the next startup re-runs it; the runs cap keeps
+the newest 500 regardless of status, so an app whose newest 500 runs
+are all failed/aborted loses the rows LOG-007's "overall last
+successful sync" would read from the runs table — §6.4 mandates the
+cap, so the task that builds LOG-007 must read the overall time from
+`projects.last_synced_at`, not from the runs; and the schema's own
+comment on `action_log` still says "append-only" — the migration
+file is frozen (D-010/D-036), and since T-029 this retention cleanup
+is the one deliberate deleter. The startup wiring
+(open → daily copy → manage → retention spawn) is pinned by the
+extended `db_tests.rs` text pin.
+
 **Recovery mode** (spec §10 `E_DB_CORRUPT` row, §7.10 command notes;
 DECISIONS.md D-049): when the startup open fails the quick_check gate,
 the `setup` hook logs the verdict and continues **without** managing a
@@ -512,14 +552,16 @@ request (D-052 records the DTO design). The journal is
 mirrored into the file log by one facade function,
 `logging::action_logged` — everything mirrors except the
 info+user+non-error shape, with codes and ids only (the policy
-reasoning lives with the function). LOG-006's
-retention/cleanup is T-029's; nothing in the module deletes rows. The
-first producer is wired (T-030): `settings_set` writes its
-`settings.changed` entries through `insert` inside the operation's
-transaction and mirrors them through `logging::action_logged` (a
-no-op for the info+user+ok shape, per the policy above); the
-fail-then-log half stays with the first operation that fails after
-writing.
+reasoning lives with the function). LOG-006's retention/cleanup
+lives in the same module since T-029: `cleanup(conn, limits, now)`
+enforces the §6.4 "Log and runs" row over the caller's transaction
+(see the Database section above for the full semantics and the
+startup wiring). The first producer is wired (T-030): `settings_set`
+writes its `settings.changed` entries through `insert` inside the
+operation's transaction and mirrors them through
+`logging::action_logged` (a no-op for the info+user+ok shape, per
+the policy above); the fail-then-log half stays with the first
+operation that fails after writing.
 
 ## Config
 
