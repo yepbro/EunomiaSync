@@ -141,10 +141,77 @@
     if (!('initial' in input.dataset)) {
       input.dataset.initial = String(input.checked)
     }
-    const changed = (input.dataset.initial === 'true') !== input.checked
     const td = input.closest('td')
+    const select = td.querySelector('.variant-select')
+    if (select && !('initialVariant' in select.dataset)) {
+      select.dataset.initialVariant = select.value
+    }
+    const checkedChanged = (input.dataset.initial === 'true') !== input.checked
+    const variantChanged = !!select && select.dataset.initialVariant !== select.value
+    const changed = checkedChanged || variantChanged
     td.classList.toggle('cell-changed', changed)
     td.title = changed ? 'Assignment changed — will be written on the next sync' : ''
+  }
+
+  /* Variant option list for a row: "Variant 1" (main) + the mapped
+     alternatives, or just "Variant 1" for badge rows without a map */
+  function variantOptionsFor(row) {
+    const name = (row.querySelector('.name')?.textContent ?? '').trim()
+    const mapped = VARIANTS[name]
+    if (!mapped) return row.querySelector('.chip') ? ['Variant 1'] : []
+    const alts = mapped.map((v) => v.name).filter((n) => n !== 'Variant 1')
+    return ['Variant 1', ...alts]
+  }
+
+  /* Every cell of a variant row gets checkbox + select; cells that had a
+     variant-btn get a checked checkbox and keep that variant preselected */
+  function buildVariantSelects() {
+    for (const row of rows()) {
+      if (isHeading(row)) continue
+      const options = variantOptionsFor(row)
+      if (!options.length) continue
+      const instr = (row.querySelector('.name')?.textContent ?? '').trim()
+      for (const td of row.querySelectorAll('td.c-cell')) {
+        let input = td.querySelector('.assign')
+        const prevBtn = td.querySelector('.variant-btn')
+        const fromBtn = (prevBtn?.getAttribute('title') || '').match(/^Variant: (.+)$/)
+        if (!input) {
+          if (!prevBtn) continue
+          /* former variant-btn cells had no checkbox: the alternative was
+             assigned, so the checkbox starts checked */
+          input = document.createElement('input')
+          input.type = 'checkbox'
+          input.className = 'assign'
+          input.checked = true
+          input.dataset.initial = 'true'
+          const proj = document
+            .querySelectorAll('thead th')
+            [td.cellIndex]?.querySelector('.proj-name')
+            ?.textContent.trim()
+          input.setAttribute(
+            'aria-label',
+            `${instr} — ${proj}: variant ${fromBtn ? fromBtn[1] : options[0]} (changed)`,
+          )
+        }
+        const selected = fromBtn && options.includes(fromBtn[1]) ? fromBtn[1] : options[0]
+        prevBtn?.remove()
+        const select = document.createElement('select')
+        select.className = 'variant-select'
+        select.setAttribute('aria-label', `Assigned variant — ${instr}`)
+        if (input.disabled) select.disabled = true
+        for (const optName of options) {
+          const opt = document.createElement('option')
+          opt.value = optName
+          opt.textContent = optName
+          if (optName === selected) opt.selected = true
+          select.append(opt)
+        }
+        const wrap = document.createElement('span')
+        wrap.className = 'cell-assign'
+        td.append(wrap)
+        wrap.append(input, select)
+      }
+    }
   }
 
   /* ---------- Dirty state: assignments -> sync counter + column status ---- */
@@ -195,7 +262,11 @@
     for (const input of document.querySelectorAll('.matrix tbody .assign')) {
       const idx = input.closest('td').cellIndex - 2
       if (idx < 0 || idx >= changed.length) continue
-      changed[idx] = changed[idx] || (input.dataset.initial === 'true') !== input.checked
+      const select = input.closest('td').querySelector('.variant-select')
+      const cellChanged =
+        (input.dataset.initial === 'true') !== input.checked ||
+        (!!select && select.dataset.initialVariant !== select.value)
+      changed[idx] = changed[idx] || cellChanged
     }
     projectColsState.forEach((c, i) => (c.dirty = changed[i]))
     renderSyncStatus()
@@ -205,6 +276,8 @@
     /* Sync applies pending assignments: changed cells become the new
        initial state and lose the tint */
     for (const input of document.querySelectorAll('.matrix tbody .assign')) {
+      const select = input.closest('td').querySelector('.variant-select')
+      if (select) select.dataset.initialVariant = select.value
       input.dataset.initial = String(input.checked)
       updateCellState(input)
     }
@@ -361,6 +434,13 @@
     if (assign && !assign.disabled) {
       updateCellState(assign)
       refreshDirtyState()
+      return
+    }
+    const select = e.target.closest('.variant-select')
+    if (select) {
+      const input = select.closest('td').querySelector('.assign')
+      if (input) updateCellState(input)
+      refreshDirtyState()
     }
   })
 
@@ -382,6 +462,10 @@
     const box = tr.querySelector('.row-sel')
     if (box) tr.classList.toggle('row-selected', box.checked)
   }
+
+  /* Variant selects are synthesized first so every cell has one before
+     the changed-state pass runs */
+  buildVariantSelects()
 
   /* Cells seeded in the markup with data-initial get the tint right away,
      and the dirty flags follow from the actual differences */
