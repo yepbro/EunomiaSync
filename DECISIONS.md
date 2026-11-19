@@ -4563,3 +4563,74 @@ debug-only check. Known open item, as in D-062: lib.rs's `//!` module
 list and ARCHITECTURE.md still gain no `assembly_b` entry — the T-041
 brief capped the lib.rs change at one `pub mod assembly_b;` line while
 three tasks share that file.
+
+### D-070 — The ALG-060 heading branch range as an index-range function — 2026-11-19
+
+Problem: T-045 turns ALG-060 ("the branch range of a level-L heading
+goes from the heading itself to the item before the next heading of
+level L or higher, hidden instructions included") into eunomia-core
+code — the foundation T-046 (ALG-061 move) and T-047 (ALG-062 level
+shift) build on. Open questions: what the function returns (a copied
+item list vs. positions); how "level L or higher" maps to the schema
+integers (H2 is the highest level, so "higher" is a SMALLER number);
+how the §2 term "heading section" (items after the heading) relates to
+ALG-060's branch (heading included); and how the module coexists with
+`body.rs`'s private `section_end` (D-053), which walks the same
+geometry for ALG-020 heading inclusion.
+
+Solution: module `heading_range`
+(`crates/eunomia-core/src/heading_range.rs`), pure functions over
+`&[LibraryItem]` — a snapshot's `items()` slice or any collection in
+library order (the order is the canon, DB-005/D-042; no `position`
+number is read):
+
+- `heading_branch(items, heading_index)` returns
+  `HeadingBranch { level, range }` where `range` is `Range<usize>`:
+  start = the heading's own index (ALG-060: "from the heading
+  itself"), end = the closing heading's index or `items.len()` at the
+  end of the list. INDICES, not a copied list: ALG-061's cut-and-
+  insert and ALG-062's "all headings in the branch" consume positions
+  directly, and "moving a branch inside its own range" becomes an
+  index check on `range` — no second traversal to map items back to
+  positions.
+- `heading_branch_by_id(items, &ItemId)` — the same branch addressed
+  by heading id, the form a reorder command naturally holds; errors
+  with `HeadingNotFound` (an instruction id is rejected too).
+- `HeadingBranch::section()` — the §2 "heading section" as
+  `range.start + 1..range.end`, so callers never re-derive the
+  off-by-one; the spec defines both terms and they share the close.
+- Errors: `IndexOutOfBounds`, `NotAHeading` (only headings root a
+  branch), `HeadingNotFound` — thiserror, `ItemId` carried in the
+  not-found variant for diagnostics.
+
+The closing predicate is `heading.level.as_u8() <= L` ("L or higher" =
+number less than or equal; `HeadingLevel` has no `Ord` impl and
+library.rs is frozen, hence `as_u8`). Hidden instructions need no
+code: they are ordinary items of the ordered structure (D-11), the
+walk never reads instruction state — the tests pin that with hidden
+items placed at branch edges. Level skips are the same rule read
+twice: an H4 after an H2 with no H3 between is a branch inside the H2
+(deeper never closes higher), and its own branch closes at the first
+heading of level 2–4. `body.rs` stays untouched (out of the task's
+zone, D-053): the two modules share the §9.2/ALG-060 closing rule,
+not code; its `section_end` keeps serving ALG-020's per-heading
+inclusion. Follow-up for whoever opens `body.rs`'s zone next: replace
+its private `section_end` with this module's walk, so ALG-020 and
+ALG-060 cannot drift apart silently.
+
+Tests: the DoD list as unit tests — nested levels (an H3 branch as a
+subrange of its H2), level skips in both directions (H2→H4 nesting;
+H4 closed by an H3 before any same-level H4), the deeper-branch close
+on "L or higher" (including H3 NOT closed by a following H4), H6
+closing only on H6-or-higher, end of list (branch to `len`, heading
+as the last item, instruction as the last item), H2 at index 0,
+adjacent same-level branches (empty branch, empty section), hidden
+instructions inside and at the last position, all three errors, and
+the id form resolving to the index form's answer. Plus one proptest
+over random trees (256 cases, fixed seed 45 — body.rs's run policy,
+D-053): for every heading of every tree, nothing of level L or higher
+sits strictly inside the range, and the item at `end` — when the list
+has one — is a heading of level L or higher. Known open item, as in
+D-053/D-062: lib.rs's `//!` module list and ARCHITECTURE.md gain no
+`heading_range` entry — the T-045 brief capped the lib.rs change at
+one `pub mod heading_range;` line while neighbors work in the crate.

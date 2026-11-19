@@ -35,6 +35,7 @@ pub mod compare;
 pub mod dirty;
 pub mod extra_files;
 pub mod hash;
+pub mod heading_range;
 pub mod library;
 pub mod marker;
 pub mod markers;
