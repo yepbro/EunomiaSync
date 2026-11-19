@@ -4410,6 +4410,81 @@ deliberate lag D-064 recorded: T-043's zone constraint allows exactly
 one `pub mod` line while neighboring core tasks run, and the prose
 reconciliation belongs to the orchestrator's docs pass.
 
+### D-068 — The dirty predicate: an empty stored hash never reaches the difference comparison; the no-assignments exception is absolute — 2026-11-19
+
+Problem: T-044 turns DB-021 into a pure eunomia-core predicate. The
+rule names three facts-compound clauses (archived never dirty per
+DB-014; active ∧ [empty `last_synced_hash` while the build text is
+not empty ∨ hash differs]; no-assignments ∧ never-synced not dirty),
+but leaves their intersections open. The load-bearing one: what "the
+hash differs from the current one" means when `last_synced_hash` IS
+empty. Read as a bare inequality, "" ≠ the current hash holds for
+EVERY project — `build_hash` always returns sixty-four hex characters
+(D-064) — so the second disjunct alone would mark every never-synced
+active project dirty, the first disjunct ("empty while the build text
+is not empty") would be fully redundant, and a project whose
+assignments all point at hidden instructions (DB-013: real
+assignments, empty build) would be dirty with nothing to write. The
+exception sentence would then exist only to rescue the narrower
+no-assignments case — an asymmetry between two project shapes that
+both build nothing.
+
+Solution: module `dirty`
+(`crates/eunomia-core/src/dirty.rs`), `is_dirty(state,
+last_synced_hash, current_hash, build_text, has_assignments) -> bool`
+with `ProjectState { Active, Archived }` as the module's own input
+enum (the snapshot carries no state — D-042 holds active projects
+only and keeps housekeeping columns out — while DB-014 still has to
+be encoded; the schema's two CHECK literals, no serde until a wire
+consumer exists, per the crate's consumed-vocabulary practice). Two
+interpretations, both pinned by tests that fail under the rejected
+reading:
+
+1. _The empty stored hash never reaches the comparison._ "Differs"
+   presupposes a stored hash; with none stored (`None` or `Some("")`
+   — the §6.2 column is nullable, DB-024 fills it only after a
+   `written`/`unchanged` status, and the only writer, `build_hash`,
+   never stores an empty string, D-064 — so both spellings mean
+   "never synced"), the first clause alone decides: dirty iff the
+   build text is non-empty. This keeps the first clause meaningful,
+   makes never-synced empty builds clean with or without assignments
+   (the symmetric outcome), and matches how OUT-013 frames the flag —
+   unsynced changes that affect a build, not a vacant comparison.
+2. _The exception is absolute._ DB-021's second sentence ("is not
+   counted as dirty") is phrased exactly like DB-014's archived rule,
+   so it overrides the first clause too: a never-synced project with
+   no assignments stays clean EVEN when the build text is non-empty —
+   reachable today only through extra-file reading lines, which
+   ALG-030 joins without a single assignment. With a stored hash
+   present the exception stops applying ("has never been synced"
+   fails) and the comparison alone decides — including dirty for a
+   synced project whose assignments were later removed or all went
+   hidden: the emptied build moved the hash, and the sync pipeline
+   has a D-25 empty write to confirm.
+
+DB-023 needs no rule of its own here: the scheme and the target path
+are `build_hash` inputs (D-064), so either change moves the current
+hash and the difference clause fires — pinned by a composition test
+through the real hash function. The inputs stay facts, not handles:
+state and stored hash come from the store row, the build text and its
+hash from the build pipeline (DB-022's recalculation is the future
+caller), so the predicate keeps the crate's no-IO, no-clock posture.
+
+Testing: the full oracle matrix — state × stored hash (`None`,
+`Some("")`, equal, differing) × build text (non-empty, empty) ×
+assignments — each row's verdict fixed by the clause cited for its
+group (with inline notes where a row needs its own),
+plus four focused tests (the guarded comparison, the absolute
+exception, the DB-023 composition, and the OUT-013
+edit→sync→edit lifecycle over real hashes) and the doc example. Three
+behavior mutations verified the suite bites: dropping the exception
+(two tests fail), the literal empty-hash inequality (two fail), and
+dropping the archived gate (one fails).
+
+Card-vs-spec: no divergence — the card's wording is a faithful
+condensation of DB-021/DB-014/DB-023; the intersections it asks
+about are exactly the ones resolved above.
+
 ### D-069 — Scheme-B file assembly in eunomia-core: ALG-030's layout inside the splice, dominant line breaks counted over the preserved outside, String output — 2026-11-19
 
 Problem: T-041 turns ALG-031 ("the `managed` block and the marker (by
