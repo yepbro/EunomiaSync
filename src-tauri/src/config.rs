@@ -604,14 +604,23 @@ log_level = "info"
         let result = load_or_create(&root);
 
         // Assert: the failure is reported (never swallowed, never a
-        // panic) and the message carries the full config path — what
-        // the startup abort prints.
+        // panic) and the message points at the data root's config
+        // file — what the startup abort prints. Cross-OS routing
+        // differs: Unix fails the read with ENOTDIR, and the read
+        // arm's error names the final `config.toml` path; Windows
+        // fails the same read with ERROR_PATH_NOT_FOUND, which is
+        // `ErrorKind::NotFound`, so the seam takes the create arm and
+        // the write error names the `.config.toml.tmp` sibling. Both
+        // spellings live under this data root and carry the config
+        // file name, so that is the asserted contract; the exact
+        // final-path spelling stays asserted on the arm that ran.
         let error = result.expect_err("a read under a regular file must fail");
-        let expected_path = root.join("config.toml").display().to_string();
+        let expected_root = root.display().to_string();
+        let message = error.to_string();
         assert!(
-            error.to_string().contains(&expected_path),
-            "the error must name the full config path (`{expected_path}`), \
-             got: {error}"
+            message.contains(&expected_root) && message.contains("config.toml"),
+            "the error must name the config file under the data root \
+             (`{expected_root}/config.toml`), got: {error}"
         );
         assert!(
             error.source().is_some(),
