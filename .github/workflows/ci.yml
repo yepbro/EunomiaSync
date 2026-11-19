@@ -127,11 +127,40 @@ jobs:
         if: runner.os == 'Windows' && failure()
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Path target\debug\build\eunomia-sync -Recurse -Filter *.exe |
-            Where-Object { $_.Name -like 'eunomia_sync_lib-*' } | Select-Object -First 1
-          Write-Host "probing: $($exe.FullName)"
-          try { & $exe.FullName --list 2>&1 | Select-Object -First 5 | Write-Host }
-          catch { Write-Host "loader said: $($_.Exception.Message)" }
+          python - <<'PY'
+          import struct, glob
+          def imports(path):
+              data = open(path, 'rb').read()
+              pe = data.index(b'PE\0\0') + 4
+              nsec, = struct.unpack_from('<H', data, pe + 2)
+              optsz, = struct.unpack_from('<H', data, pe + 16)
+              opt = pe + 20
+              magic, = struct.unpack_from('<H', data, opt)
+              dd = opt + (0x60 if magic == 0x10b else 0x70) + 8
+              rva, = struct.unpack_from('<I', data, dd)
+              secs = []
+              for i in range(nsec):
+                  vsz, va, rsz, roff = struct.unpack_from('<IIII', data, opt + optsz + i * 40 + 8)
+                  secs.append((va, rsz, roff))
+              def r2o(r):
+                  for va, rsz, roff in secs:
+                      if va <= r < va + rsz:
+                          return roff + (r - va)
+              out, o = [], r2o(rva)
+              while o:
+                  namerva, = struct.unpack_from('<I', data, o + 12)
+                  if namerva == 0:
+                      break
+                  no = r2o(namerva)
+                  out.append(data[no:data.index(b'\0', no)].decode())
+                  o += 20
+              return out
+          lib_exe = glob.glob(r'target\debug\build\eunomia-sync\*\out\eunomia_sync_lib-*.exe')[0]
+          store_exe = glob.glob(r'target\debug\build\eunomia-store\*\out\settings-*.exe')[0]
+          lib, store = imports(lib_exe), imports(store_exe)
+          print('LIB-TEST imports:', *lib, sep='\n  ')
+          print('ONLY-IN-LIB (suspects):', *(set(lib) - set(store)), sep='\n  ')
+          PY
       - name: Frontend unit tests
         if: runner.os == 'Linux'
         run: pnpm run test
