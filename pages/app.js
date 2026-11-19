@@ -1,7 +1,8 @@
 /* ==========================================================================
    EunomiaSync — main window prototype: light vanilla-JS interactivity.
    Search, project filter, "Show hidden", row selection, section collapse,
-   instruction editor modal, dirty-state tracking. No deps, no build step.
+   instruction editor modal, project settings modal (PRJ-008…012,
+   PRJ-013…018 archive confirm), dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
 ;(() => {
@@ -723,6 +724,504 @@
     refreshDirtyState()
   })
 
+  /* ---------- Project settings modal (PRJ-008…012) ------------------------- */
+  /* Opened by the pencil button in a project column header. Fields are
+     prefilled from the demo data below; Save updates the column header
+     live. Archive uses type-to-confirm (PRJ-013) and stays non-destructive. */
+
+  /* Fixed 12-color palette (DB-040): [hex, accessible name] */
+  const PS_PALETTE = [
+    ['#ef4444', 'Red'],
+    ['#f97316', 'Orange'],
+    ['#f59e0b', 'Amber'],
+    ['#84cc16', 'Lime'],
+    ['#10b981', 'Green'],
+    ['#14b8a6', 'Teal'],
+    ['#06b6d4', 'Cyan'],
+    ['#3b82f6', 'Blue'],
+    ['#6366f1', 'Indigo'],
+    ['#8b5cf6', 'Violet'],
+    ['#ec4899', 'Pink'],
+    ['#64748b', 'Slate'],
+  ]
+
+  /* Demo project data, keyed by name; colors match the column headers in
+     the markup, sync times match their `title` tooltips. `editBtn` is
+     attached in the init section. */
+  const PROJECTS = new Map(
+    [
+      {
+        name: 'EunomiaSync',
+        label: 'ES',
+        color: '#10b981',
+        description: 'The app itself, syncing these instructions into its own AGENTS.md.',
+        path: '/home/brooks/projects/business/EunomiaSync',
+        addedVia: 'Manual',
+        scheme: 'A',
+        baseFile: 'AGENTS.md',
+        extraLocal: true,
+        extraLocalPos: 'end',
+        extraProject: false,
+        extraProjectPos: 'end',
+        syncedAt: '19 Nov 2026, 14:32 (UTC+3)',
+        runs: 47,
+      },
+      {
+        name: 'yepbro/site',
+        label: 'SITE',
+        color: '#3b82f6',
+        description: 'Marketing site repo; agent rules live in the marked area of AGENTS.md.',
+        path: '/home/brooks/projects/yepbro/site',
+        addedVia: 'Found by scan',
+        scheme: 'B',
+        baseFile: 'AGENTS.md',
+        extraLocal: false,
+        extraLocalPos: 'end',
+        extraProject: false,
+        extraProjectPos: 'end',
+        syncedAt: '19 Nov 2026, 09:14 (UTC+3)',
+        runs: 12,
+      },
+      {
+        name: 'quotameter',
+        label: 'QM',
+        color: '#8b5cf6',
+        description: 'Metering dashboard; the target file is CLAUDE.md here.',
+        path: '/home/brooks/projects/business/quotameter',
+        addedVia: 'Manual',
+        scheme: 'A',
+        baseFile: 'CLAUDE.md',
+        extraLocal: false,
+        extraLocalPos: 'end',
+        extraProject: true,
+        extraProjectPos: 'end',
+        syncedAt: '12 Nov 2026, 09:10 (UTC+3)',
+        runs: 8,
+      },
+      {
+        name: 'task-id-mcp',
+        label: 'TIM',
+        color: '#f59e0b',
+        description: 'Task numbering MCP service (Docker, autostart).',
+        path: '/home/brooks/projects/utils/task-id-mcp',
+        addedVia: 'Manual',
+        scheme: 'A',
+        baseFile: 'AGENTS.md',
+        extraLocal: true,
+        extraLocalPos: 'end',
+        extraProject: true,
+        extraProjectPos: 'start',
+        syncedAt: '18 Nov 2026, 20:41 (UTC+3)',
+        runs: 31,
+      },
+      {
+        name: 'utils/deja-vu',
+        label: 'DV',
+        color: '#14b8a6',
+        description: 'Past-session memory search; the folder is currently unavailable.',
+        path: '/home/brooks/projects/utils/deja-vu',
+        addedVia: 'Found by scan',
+        scheme: 'A',
+        baseFile: 'AGENTS.md',
+        extraLocal: false,
+        extraLocalPos: 'end',
+        extraProject: false,
+        extraProjectPos: 'end',
+        syncedAt: '3 Nov 2026, 21:05 (UTC+3)',
+        runs: 5,
+      },
+      {
+        name: 'docktree',
+        label: 'DT',
+        color: '#ec4899',
+        description: 'Container layout helper; instructions go to a separate project file.',
+        path: '/home/brooks/projects/tools/docktree',
+        addedVia: 'Manual',
+        scheme: 'C',
+        baseFile: 'AGENTS.md',
+        extraLocal: false,
+        extraLocalPos: 'end',
+        extraProject: false,
+        extraProjectPos: 'end',
+        syncedAt: '17 Nov 2026, 11:02 (UTC+3)',
+        runs: 22,
+      },
+      {
+        name: 'moli',
+        label: 'MOLI',
+        color: '#6366f1',
+        description: 'Small gallery app; local overrides are included at the start of the file.',
+        path: '/home/brooks/projects/apps/moli',
+        addedVia: 'Manual',
+        scheme: 'A',
+        baseFile: 'AGENTS.md',
+        extraLocal: true,
+        extraLocalPos: 'start',
+        extraProject: false,
+        extraProjectPos: 'end',
+        syncedAt: '15 Nov 2026, 18:27 (UTC+3)',
+        runs: 14,
+      },
+      {
+        name: 'sandbox-cf',
+        label: 'SB',
+        color: '#64748b',
+        description: 'Cloudflare experiments sandbox; the target file is not created yet.',
+        path: '/home/brooks/projects/labs/sandbox-cf',
+        addedVia: 'Found by scan',
+        scheme: 'B',
+        baseFile: 'AGENTS.md',
+        extraLocal: false,
+        extraLocalPos: 'end',
+        extraProject: false,
+        extraProjectPos: 'end',
+        syncedAt: '10 Nov 2026, 08:55 (UTC+3)',
+        runs: 3,
+      },
+    ].map((p) => [p.name, p]),
+  )
+
+  const psDialog = document.getElementById('project-settings-dialog')
+  const psForm = document.getElementById('ps-form')
+  const psTitle = document.getElementById('ps-title')
+  const psTablist = document.getElementById('ps-tabs')
+  const psTabGeneral = document.getElementById('ps-tab-general')
+  const psTabBackups = document.getElementById('ps-tab-backups')
+  const psName = document.getElementById('ps-name')
+  const psNameError = document.getElementById('ps-name-error')
+  const psLabel = document.getElementById('ps-label')
+  const psLabelError = document.getElementById('ps-label-error')
+  const psLabelPreview = document.getElementById('ps-label-preview')
+  const psDescription = document.getElementById('ps-description')
+  const psDescCount = document.getElementById('ps-desc-count')
+  const psSwatches = document.getElementById('ps-swatches')
+  const psPath = document.getElementById('ps-path')
+  const psAddedVia = document.getElementById('ps-added-via')
+  const psLastSync = document.getElementById('ps-last-sync')
+  const psSchemes = document.getElementById('ps-schemes')
+  const psBaseFile = document.getElementById('ps-base-file')
+  const psExtraFiles = document.getElementById('ps-extra-files')
+  const psExtraLocal = document.getElementById('ps-extra-local')
+  const psExtraLocalPos = document.getElementById('ps-extra-local-pos')
+  const psExtraProject = document.getElementById('ps-extra-project')
+  const psExtraProjectPos = document.getElementById('ps-extra-project-pos')
+  const psExtraLocalName = document.getElementById('ps-extra-local-name')
+  const psExtraProjectName = document.getElementById('ps-extra-project-name')
+  const psSchemeB = document.getElementById('ps-scheme-b')
+  const psSchemeC = document.getElementById('ps-scheme-c')
+  const psSnippet = document.getElementById('ps-snippet')
+  const psBackupsBody = document.getElementById('ps-backups-body')
+  const psArchiveBtn = document.getElementById('ps-archive-btn')
+  const archiveDialog = document.getElementById('archive-dialog')
+  const archiveText = document.getElementById('archive-text')
+  const archiveInput = document.getElementById('archive-input')
+  const archiveConfirmBtn = document.getElementById('archive-confirm-btn')
+
+  const psTabs = [psTabGeneral, psTabBackups]
+  let psCurrentName = ''
+
+  /* Swatch radios are generated so the palette stays single-sourced */
+  for (const [hex, colorName] of PS_PALETTE) {
+    const label = document.createElement('label')
+    label.className = 'ps-swatch'
+    label.title = colorName
+    const input = document.createElement('input')
+    input.type = 'radio'
+    input.name = 'ps-color'
+    input.value = hex
+    input.setAttribute('aria-label', colorName)
+    const fill = document.createElement('span')
+    fill.className = 'ps-swatch-fill'
+    fill.style.setProperty('--c', hex)
+    label.append(input, fill)
+    psSwatches.append(label)
+  }
+
+  const psColorInput = () => psSwatches.querySelector('input:checked')
+  const psSchemeInput = () => psSchemes.querySelector('input:checked')
+  const stemOf = (fileName) => fileName.replace(/\.md$/, '')
+
+  /* <STEM>.local.md / <STEM>.project.md follow the base file name (D-20);
+     the scheme C snippet uses the D-21 wording */
+  function updateDerivedNames() {
+    const stem = stemOf(psBaseFile.value)
+    psSnippet.textContent = `If ${stem}.project.md exists in the repository root, read it before starting work and follow its instructions.`
+    psExtraLocalName.textContent = `${stem}.local.md`
+    psExtraProjectName.textContent = `${stem}.project.md`
+  }
+
+  /* Which blocks are visible per scheme: extras for A, marker pair for B,
+     snippet for C */
+  function updateSchemeUI() {
+    const scheme = psSchemeInput()?.value ?? 'A'
+    psExtraFiles.hidden = scheme !== 'A'
+    psSchemeB.hidden = scheme !== 'B'
+    psSchemeC.hidden = scheme !== 'C'
+  }
+
+  function syncExtraRowUI() {
+    psExtraLocalPos.disabled = !psExtraLocal.checked
+    psExtraProjectPos.disabled = !psExtraProject.checked
+  }
+
+  function setFieldError(input, errorEl, message) {
+    errorEl.hidden = !message
+    errorEl.textContent = message
+    input.setAttribute('aria-invalid', message ? 'true' : 'false')
+  }
+
+  /* §6.9: name 1–100 after trimming, label 1–6 visible characters (DB-042);
+     description is capped by maxlength=1000 */
+  function validatePsFields() {
+    let ok = true
+    const name = psName.value.trim()
+    if (name.length < 1 || name.length > 100) {
+      setFieldError(psName, psNameError, 'Name is required — 1–100 characters after trimming.')
+      ok = false
+    } else if (name !== psCurrentName && PROJECTS.has(name)) {
+      /* Demo guard: the real app only warns about duplicates (§6.9) */
+      setFieldError(psName, psNameError, 'This name is already used by another project.')
+      ok = false
+    } else {
+      setFieldError(psName, psNameError, '')
+    }
+    const label = psLabel.value.trim()
+    if (label.length < 1 || label.length > 6) {
+      setFieldError(psLabel, psLabelError, 'Label is required — 1–6 visible characters (DB-042).')
+      ok = false
+    } else {
+      setFieldError(psLabel, psLabelError, '')
+    }
+    return ok
+  }
+
+  const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+  function shiftedDate(dateStr, daysBack) {
+    const d = new Date(dateStr)
+    d.setDate(d.getDate() - daysBack)
+    return `${d.getDate()} ${MONTHS_SHORT[d.getMonth()]} ${d.getFullYear()}`
+  }
+
+  /* BKP-004 demo rows: the three latest backups of the base file */
+  function renderBackups(p) {
+    const [date, timeTz] = p.syncedAt.split(', ')
+    const m = timeTz.match(/^(\d{2}:\d{2}) (.+)$/)
+    const time = m ? m[1] : timeTz
+    const tz = m ? ` ${m[2]}` : ''
+    const sizes = ['8.4 KB', '8.1 KB', '7.9 KB']
+    psBackupsBody.innerHTML = [0, 1, 2]
+      .map((i) => {
+        const cells = [
+          `${shiftedDate(date, i)}, ${time}${tz}`,
+          p.baseFile,
+          sizes[i],
+          `#${Math.max(1, p.runs - i)}`,
+        ]
+        return (
+          '<tr>' +
+          cells
+            .map(
+              (cell, ci) =>
+                `<td${ci === 1 ? ' class="ps-backup-file"' : ''}>${escapeHtml(cell)}</td>`,
+            )
+            .join('') +
+          '</tr>'
+        )
+      })
+      .join('')
+  }
+
+  function selectPsTab(tab, moveFocus) {
+    for (const t of psTabs) {
+      const selected = t === tab
+      t.setAttribute('aria-selected', String(selected))
+      t.tabIndex = selected ? 0 : -1
+      const panel = document.getElementById(t.getAttribute('aria-controls'))
+      if (panel) panel.hidden = !selected
+    }
+    if (moveFocus) tab.focus()
+  }
+
+  function openProjectSettings(name) {
+    const p = PROJECTS.get(name)
+    if (!p) return
+    psCurrentName = name
+    psTitle.textContent = `Project settings — ${name}`
+    psName.value = p.name
+    psLabel.value = p.label
+    psLabelPreview.textContent = p.label || '—'
+    psDescription.value = p.description ?? ''
+    psDescCount.textContent = `${psDescription.value.length} / 1000`
+    /* PRJ-010: the prototype preselects the current color; in the real app
+       a project without a pick gets one by D-29 */
+    for (const input of psSwatches.querySelectorAll('input')) {
+      input.checked = input.value === p.color
+    }
+    for (const input of psSchemes.querySelectorAll('input')) {
+      input.checked = input.value === (p.scheme ?? 'A')
+    }
+    psBaseFile.value = p.baseFile
+    psExtraLocal.checked = !!p.extraLocal
+    psExtraLocalPos.value = p.extraLocalPos ?? 'end'
+    psExtraProject.checked = !!p.extraProject
+    psExtraProjectPos.value = p.extraProjectPos ?? 'end'
+    psPath.textContent = p.path
+    psPath.title = p.path
+    psAddedVia.textContent = p.addedVia
+    psLastSync.textContent = p.syncedAt
+    renderBackups(p)
+    updateDerivedNames()
+    updateSchemeUI()
+    syncExtraRowUI()
+    setFieldError(psName, psNameError, '')
+    setFieldError(psLabel, psLabelError, '')
+    selectPsTab(psTabGeneral, false)
+    archiveInput.value = ''
+    archiveConfirmBtn.disabled = true
+    psDialog.showModal()
+    psName.focus()
+  }
+
+  /* Saving: validate on the Save button click (preventing it keeps the
+     dialog open with inline errors); on close apply to the column header */
+  psForm.querySelector('button[value="save"]').addEventListener('click', (e) => {
+    if (!validatePsFields()) e.preventDefault()
+  })
+
+  /* Enter in a text field saves — the implicit submitter would be Cancel */
+  psForm.addEventListener('keydown', (e) => {
+    const t = e.target
+    if (e.key !== 'Enter' || t.tagName !== 'INPUT' || t.type === 'radio' || t.type === 'checkbox') {
+      return
+    }
+    e.preventDefault()
+    if (validatePsFields()) psDialog.close('save')
+  })
+
+  psDialog.addEventListener('close', () => {
+    if (psDialog.returnValue !== 'save') return
+    const p = PROJECTS.get(psCurrentName)
+    if (!p) return
+    const name = psName.value.trim()
+    p.name = name
+    p.label = psLabel.value.trim()
+    p.description = psDescription.value
+    p.color = psColorInput()?.value ?? p.color
+    p.scheme = psSchemeInput()?.value ?? p.scheme
+    p.baseFile = psBaseFile.value
+    p.extraLocal = psExtraLocal.checked
+    p.extraLocalPos = psExtraLocalPos.value
+    p.extraProject = psExtraProject.checked
+    p.extraProjectPos = psExtraProjectPos.value
+    if (name !== psCurrentName) {
+      PROJECTS.delete(psCurrentName)
+      PROJECTS.set(name, p)
+      psCurrentName = name
+    }
+    /* Live header update: color dot, name and the pencil tooltip; the th
+       title (state + sync time) stays as-is */
+    const th = p.editBtn?.closest('th')
+    if (th) {
+      th.querySelector('.proj-color')?.style.setProperty('--c', p.color)
+      th.querySelector('.proj-name').textContent = name
+      p.editBtn.title = `Edit project — ${name}`
+      p.editBtn.setAttribute('aria-label', `Edit project — ${name}`)
+    }
+  })
+
+  /* Tabs: click + roving arrow-key focus (WAI-ARIA tabs) */
+  for (const tab of psTabs) {
+    tab.addEventListener('click', () => selectPsTab(tab, false))
+  }
+
+  psTablist.addEventListener('keydown', (e) => {
+    const current = psTabs.indexOf(document.activeElement)
+    if (current === -1) return
+    let next = null
+    if (e.key === 'ArrowRight') next = (current + 1) % psTabs.length
+    else if (e.key === 'ArrowLeft') next = (current + psTabs.length - 1) % psTabs.length
+    else if (e.key === 'Home') next = 0
+    else if (e.key === 'End') next = psTabs.length - 1
+    if (next === null) return
+    e.preventDefault()
+    selectPsTab(psTabs[next], true)
+  })
+
+  /* Live field feedback */
+  psName.addEventListener('input', () => setFieldError(psName, psNameError, ''))
+  psLabel.addEventListener('input', () => {
+    setFieldError(psLabel, psLabelError, '')
+    psLabelPreview.textContent = psLabel.value.trim() || '—'
+  })
+  psDescription.addEventListener('input', () => {
+    psDescCount.textContent = `${psDescription.value.length} / 1000`
+  })
+  psBaseFile.addEventListener('change', updateDerivedNames)
+  for (const input of psSchemes.querySelectorAll('input')) {
+    input.addEventListener('change', updateSchemeUI)
+  }
+  psExtraLocal.addEventListener('change', syncExtraRowUI)
+  psExtraProject.addEventListener('change', syncExtraRowUI)
+
+  /* Copy helpers (D-19 marker pair for scheme B, D-21 snippet for scheme C) */
+  function wireCopyButton(btn, getText) {
+    const original = btn.textContent
+    btn.addEventListener('click', async () => {
+      if (btn.dataset.busy) return
+      btn.dataset.busy = 'true'
+      try {
+        await navigator.clipboard.writeText(getText())
+        btn.textContent = 'Copied'
+      } catch {
+        btn.textContent = 'Copy failed'
+      }
+      setTimeout(() => {
+        btn.textContent = original
+        delete btn.dataset.busy
+      }, 1500)
+    })
+  }
+
+  wireCopyButton(document.getElementById('ps-copy-markers'), () =>
+    ['<!-- EUNOMIASYNC:BEGIN -->', '<!-- EUNOMIASYNC:END -->'].join('\n'),
+  )
+  wireCopyButton(document.getElementById('ps-copy-snippet'), () => psSnippet.textContent)
+
+  /* Danger zone: archive with type-to-confirm (PRJ-013…018). The demo is
+     non-destructive: confirming just closes both dialogs. */
+  psArchiveBtn.addEventListener('click', () => {
+    const p = PROJECTS.get(psCurrentName)
+    if (!p) return
+    archiveText.textContent =
+      `"${p.name}" will be archived. The project folder is not touched, assignments are kept, ` +
+      'and the project stops taking part in syncs' +
+      (p.addedVia === 'Found by scan' ? '; its path goes to the exclusions list' : '') +
+      '. You can restore it later from the "Archived projects" screen.'
+    archiveInput.value = ''
+    archiveConfirmBtn.disabled = true
+    archiveDialog.showModal()
+    archiveInput.focus()
+  })
+
+  archiveInput.addEventListener('input', () => {
+    archiveConfirmBtn.disabled = archiveInput.value.trim() !== psCurrentName
+  })
+
+  /* Enter in the confirm field archives (the implicit submitter would be
+     the Cancel button) */
+  archiveInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return
+    e.preventDefault()
+    if (!archiveConfirmBtn.disabled) archiveDialog.close('archive')
+  })
+
+  archiveDialog.addEventListener('close', () => {
+    if (archiveDialog.returnValue === 'archive' && psDialog.open) {
+      psDialog.close('archive')
+    }
+  })
+
   /* ---------- Toolbar wiring ----------------------------------------------- */
 
   searchInput.addEventListener('input', applyFilters)
@@ -778,7 +1277,8 @@
   /* Row drag-and-drop between sections */
   initRowDrag()
 
-  /* Per-project edit icon in the header: opens a placeholder modal only */
+  /* Per-project edit icon in the header: opens the project settings modal,
+     prefilled from the demo data of that column */
   for (const th of projectHeads) {
     const proj = th.querySelector('.proj-name')?.textContent.trim() ?? ''
     const line = th.querySelector('.proj-line')
@@ -789,11 +1289,10 @@
     btn.innerHTML = ICONS.edit
     btn.title = `Edit project — ${proj}`
     btn.setAttribute('aria-label', `Edit project — ${proj}`)
+    const p = PROJECTS.get(proj)
+    if (p) p.editBtn = btn
     btn.addEventListener('click', () => {
-      dialogTitle.textContent = `Edit project — ${proj}`
-      dialogText.textContent =
-        'Prototype placeholder: project editing (name, label color, description, sync settings — PRJ-008…) is not implemented in this prototype.'
-      dialog.showModal()
+      openProjectSettings(th.querySelector('.proj-name').textContent.trim())
     })
     line.append(btn)
   }
