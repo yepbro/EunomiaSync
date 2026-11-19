@@ -1,5 +1,3 @@
-use std::{env, path::PathBuf};
-
 fn main() {
     // The Windows manifest is a separate file (`windows/app.manifest`), so
     // edits to it must re-run this build script. tauri-build emits narrower
@@ -9,38 +7,25 @@ fn main() {
     // manifest.
     println!("cargo:rerun-if-changed=windows/app.manifest");
 
-    // How the manifest reaches Windows binaries (T-241). tauri-build's RC
-    // embed travels through embed-resource's `cargo:rustc-link-arg-bins`,
-    // which reaches ONLY `[[bin]]` targets: every cargo-test harness exe
-    // (`eunomia_sync_lib-*.exe` and friends) links with no manifest at all,
-    // binds comctl32 5.82, and dies at load with
-    // STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) because tao/tauri statically
-    // import TaskDialogIndirect, a v6-only export (tauri-apps/tauri#13419).
-    // On Windows+MSVC the linker therefore embeds the manifest for EVERY
-    // linked target of this package and tauri-build's own embed is switched
-    // off — the app exe cannot carry the RT_MANIFEST resource twice (the RC
-    // embed and /MANIFEST:EMBED collide at link time). /MANIFESTINPUT takes
-    // a file path, so unlike a RUSTFLAGS-borne /MANIFESTDEPENDENCY there is
-    // no whitespace to re-quote on the cargo → rustc → link.exe way.
-    let windows_msvc = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
-
-    let windows = if windows_msvc {
-        let manifest =
-            PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"))
-                .join("windows")
-                .join("app.manifest");
-        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
-        println!("cargo:rustc-link-arg=/MANIFESTINPUT={}", manifest.display());
-        tauri_build::WindowsAttributes::new_without_app_manifest()
-    } else {
-        // `WindowsAttributes::app_manifest` replaces the default manifest
-        // wholesale (tauri-build 2.7.5 embeds only the Common-Controls v6
-        // dependency by default), so `windows/app.manifest` reproduces that
-        // dependency and adds the NFR-023 (longPathAware) and SEC-012/NFR-011
-        // (asInvoker) settings. `config_tests.rs` pins all of it.
-        tauri_build::WindowsAttributes::new().app_manifest(include_str!("windows/app.manifest"))
-    };
+    // `WindowsAttributes::app_manifest` replaces the default manifest
+    // wholesale (tauri-build 2.7.5 embeds only the Common-Controls v6
+    // dependency by default), so `windows/app.manifest` reproduces that
+    // dependency and adds the NFR-023 (longPathAware) and SEC-012/NFR-011
+    // (asInvoker) settings. `config_tests.rs` pins all of it.
+    //
+    // T-241: this RC embed only reaches `[[bin]]` targets (embed-resource
+    // links it through `cargo:rustc-link-arg-bins`), so cargo-test harness
+    // exes link with no manifest, bind comctl32 5.82, and die at load with
+    // STATUS_ENTRYPOINT_NOT_FOUND (tauri-apps/tauri#13419). Delivering the
+    // manifest to test exes from HERE turned out unreliable on cargo 1.100
+    // (T-241 iteration 1: /MANIFEST:EMBED + /MANIFESTINPUT via plain
+    // `cargo:rustc-link-arg` compiled fine but changed nothing at runtime),
+    // so CI passes the same file to the linker for every test exe through a
+    // space-free RUSTFLAGS instead (see ci.yml) — RUSTFLAGS cannot carry
+    // the wordy /MANIFESTDEPENDENCY form, but /MANIFESTINPUT=<path> has no
+    // spaces and survives cargo's word splitting verbatim.
+    let windows =
+        tauri_build::WindowsAttributes::new().app_manifest(include_str!("windows/app.manifest"));
 
     tauri_build::try_build(tauri_build::Attributes::new().windows_attributes(windows))
         .expect("failed to run tauri-build");

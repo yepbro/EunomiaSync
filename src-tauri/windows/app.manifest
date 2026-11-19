@@ -9,18 +9,15 @@
   own default manifest ships without one - a leading space before the
   `assembly` root element is harmless.
 
-  Embedded into Windows binaries by `src-tauri/build.rs` (T-241). On
-  Windows+MSVC the linker does it for EVERY linked target of the package
-  (/MANIFESTINPUT with this file), so the cargo-test harness exes get it
-  too; tauri-build's own RC embed is switched off there to avoid a double
-  RT_MANIFEST. On other toolchains (and as this comment's RC caveats
-  assume) it travels the classic route:
+  Embedded into the app executable by `src-tauri/build.rs` via
   `WindowsAttributes::app_manifest` (tauri-build 2.7.5). That API REPLACES
   tauri-build's default manifest wholesale - the default
   (`windows-app-manifest.xml` inside the tauri-build crate) carries only the
   Common-Controls v6 dependency - so the dependency below is reproduced from
   it verbatim: the dialog plugin (tauri-plugin-dialog, wired in `lib.rs`)
-  needs Common Controls v6 for its native dialogs.
+  needs Common Controls v6 for its native dialogs. The RC embed only reaches
+  the app `[[bin]]`; the cargo-test harness exes get this same file from CI
+  through space-free RUSTFLAGS link args (T-241, see ci.yml).
 
   Keep this file ASCII-only and one element per line: tauri-winres embeds it
   through the Windows resource compiler by writing each line as a separate
