@@ -543,6 +543,12 @@ input[type='checkbox']:disabled {
   background-color: var(--row-drop);
 }
 
+/* Netlify "Powered by" badge (injected by the edge for free-plan sites):
+   hidden for every visitor — it overlaps the sync bar in the corner */
+#nl-badge-frame {
+  display: none !important;
+}
+
 /* Per-project custom instruction icons (add / edit / delete) */
 .cell-icons {
   display: inline-flex;
