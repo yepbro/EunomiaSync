@@ -148,9 +148,10 @@
   }
 
   /* ---------- Dirty state: assignments -> sync counter + column status ---- */
-  /* MAIN-026/028: any assignment change makes the project dirty; the panel
-     counter and the column header status reflect it. "Run sync" resets the
-     demo state (clean columns show the time, warnings stay intact). */
+  /* MAIN-026/028: a project is "unsynced changes" while at least one
+     assignment differs from data-initial; when every change reverts, the
+     previous status (warning/unavailable) or the last sync time returns.
+     "Run sync" applies pending changes and resets the demo state. */
 
   const projectHeads = [...document.querySelectorAll('thead th.c-proj')]
 
@@ -188,15 +189,26 @@
       n === 1 ? '1 project with unsynced changes' : `${n} projects with unsynced changes`
   }
 
+  /* Dirty = the column has at least one assignment differing from data-initial */
+  function refreshDirtyState() {
+    const changed = new Array(projectColsState.length).fill(false)
+    for (const input of document.querySelectorAll('.matrix tbody .assign')) {
+      const idx = input.closest('td').cellIndex - 2
+      if (idx < 0 || idx >= changed.length) continue
+      changed[idx] = changed[idx] || (input.dataset.initial === 'true') !== input.checked
+    }
+    projectColsState.forEach((c, i) => (c.dirty = changed[i]))
+    renderSyncStatus()
+  }
+
   runSyncBtn.addEventListener('click', () => {
-    for (const c of projectColsState) c.dirty = false
     /* Sync applies pending assignments: changed cells become the new
        initial state and lose the tint */
     for (const input of document.querySelectorAll('.matrix tbody .assign')) {
       input.dataset.initial = String(input.checked)
       updateCellState(input)
     }
-    renderSyncStatus()
+    refreshDirtyState()
   })
 
   /* ---------- Section collapse/expand (headings + carets) ----------------- */
@@ -341,11 +353,7 @@
     const assign = e.target.closest('.assign')
     if (assign && !assign.disabled) {
       updateCellState(assign)
-      const idx = assign.closest('td').cellIndex - 2
-      if (idx >= 0 && idx < projectColsState.length) {
-        projectColsState[idx].dirty = true
-        renderSyncStatus()
-      }
+      refreshDirtyState()
     }
   })
 
@@ -368,12 +376,13 @@
     if (box) tr.classList.toggle('row-selected', box.checked)
   }
 
-  /* Cells seeded in the markup with data-initial get the tint right away */
+  /* Cells seeded in the markup with data-initial get the tint right away,
+     and the dirty flags follow from the actual differences */
   for (const input of document.querySelectorAll('.matrix tbody .assign')) {
     updateCellState(input)
   }
 
   applyColumnFilter()
   applyFilters()
-  renderSyncStatus()
+  refreshDirtyState()
 })()
