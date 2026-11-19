@@ -97,6 +97,30 @@ pnpm run test                # run frontend unit tests (Vitest)
 pnpm run e2e                 # run browser end-to-end tests (Playwright)
 ```
 
+### Running Rust tests on Windows
+
+`cargo test --workspace` on Windows currently dies at process start with
+`STATUS_ENTRYPOINT_NOT_FOUND` (`0xc0000139`): the test executables link
+without an application manifest — tauri-build embeds it into `[[bin]]`
+targets only ([tauri-apps/tauri#13419](https://github.com/tauri-apps/tauri/issues/13419))
+— so the loader binds Common-Controls v5 and the v6-only
+`TaskDialogIndirect` import (via tao/tauri) cannot resolve. CI stages the
+app manifest beside the test executables (see the staging step in
+`.github/workflows/ci.yml` and DECISIONS.md D-074); locally, copy it the
+same way before running the tests:
+
+```powershell
+Get-ChildItem target\debug\build\eunomia-sync -Recurse -Filter *.exe -ErrorAction SilentlyContinue |
+  Where-Object { $_.FullName -match '\\out\\' } |
+  ForEach-Object { Copy-Item src-tauri\windows\app.manifest "$($_.FullName).manifest" -Force }
+Get-ChildItem target\debug\deps -Filter 'eunomia_sync*.exe' -ErrorAction SilentlyContinue |
+  ForEach-Object { Copy-Item src-tauri\windows\app.manifest "$($_.FullName).manifest" -Force }
+```
+
+The first glob covers cargo 1.100+ (its build-dir layout v2 places test
+executables in `build\<pkg>\<hash>\out`), the second the older `deps\`
+layout. Delete this section when a durable fix lands upstream.
+
 ### Pre-commit Hooks
 
 Git pre-commit hooks are installed automatically: running `pnpm install` executes the `prepare` script, which sets `git config core.hooksPath .githooks`.
