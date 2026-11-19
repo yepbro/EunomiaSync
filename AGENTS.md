@@ -2,6 +2,8 @@
 
 Instructions for coding agents working in this repository.
 
+Main-window prototype (html-pages branch): https://es-demo-634.netlify.app
+
 ## 1. Read Local Instructions First
 
 If `AGENTS.local.md` exists in the repository root, read it before doing
