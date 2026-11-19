@@ -3645,3 +3645,153 @@ separator `"\n\n"` → `"\n"` (order), skipping normalization (order),
 reversed emission (order); idempotence stayed green under every
 deterministic mutation — its scope is §15.1's plain wording, nothing
 deeper.
+
+### D-057 — `app_info`: compile-time facts, the DataRoot path, and the fresh-database flag observed inside `Db::open` — 2026-11-18
+
+Problem: T-031 turns the §7.10 System-module `app_info` into the About
+window's backend (UPD-005/REL-004: version, identifier, author,
+license, repository link; the task card adds the §5.5 pair — the data
+directory and whether this launch created the database from scratch).
+Open questions: the source of every field (several candidates exist
+per field: crate macros, `tauri.conf.json`, the runtime config, spec
+literals — each needed one owner, or the same fact would live in two
+places and drift); whether the command goes through `Db::run` (D-037)
+or the `DataRoot` pattern (D-049); and where the launch-time fact
+"the database was created from scratch at this run" lives — `Db::open`
+knows it, but neither the setup hook nor the store was available to
+record it (the setup region of `lib.rs` and `crates/eunomia-store/**`
+were frozen in this task's window, T-029).
+
+Solution, four decisions:
+
+- _One source per fact, each pinned against its second declaration._
+  `version` is `env!("CARGO_PKG_VERSION")` — the src-tauri crate
+  version, which is the app version (`version.workspace = true`; the
+  `tauri.conf.json` `version` mirrors it, and a unit test pins the two
+  equal, so a bump of either alone fails the suite). `identifier` and
+  `repository` are spec literals in `commands.rs` (UPD-005/REL-004
+  fix both; no `repository` field exists in Cargo or the tauri config,
+  so `CARGO_PKG_REPOSITORY` would be empty); the identifier is pinned
+  equal to the `tauri.conf.json` field (D-020's home — the config that
+  actually locates the data directory), and reading
+  `app.config().identifier` at runtime was rejected: the mock runtime
+  of the IPC tests carries its own default config, which would make
+  the spec value unpinnable over IPC. `author` is
+  `env!("CARGO_PKG_AUTHORS")` (the `src-tauri/Cargo.toml` field D-020
+  names; the single-author manifest makes the macro exactly
+  `Den Brooks <denis@yepbro.pro>` — the Cargo `Name <email>` form of
+  UPD-005's "Den Brooks, denis@yepbro.pro", both facts on the wire).
+  `license` is `env!("CARGO_PKG_LICENSE")`: the workspace's
+  `MIT OR Apache-2.0`, the SPDX expression for UPD-005/REL-004's
+  "dual license: MIT License and Apache License, Version 2.0"
+  (the `LICENSE-MIT`/`LICENSE-APACHE` pair in the repo root), carried
+  as the machine form the About window renders from. The tests use
+  hardcoded spec literals as oracles for identifier/author/license/
+  repository; the version alone is asserted against the same macro the
+  command reads — deliberately not a literal (the value is defined by
+  the build and changes every release; a literal oracle would turn
+  each release into a red test), so that assertion pins the plumbing,
+  and the crate↔config drift risk is pinned by the unit test instead.
+- _Non-Db path, D-049's pattern._ Every field is a compile-time
+  constant or a managed-state read: there is no blocking work, so
+  nothing goes through `Db::run` and nothing needs `spawn_blocking`
+  (SYS-001's executor policy serves DB/file operations; this command
+  has neither). `data_dir` is the managed `data_dirs::DataRoot` — the
+  same seam the recovery commands read, and the same property: tests
+  point it at temp roots instead of the real
+  `~/.local/share/pro.yepbro.eunomiasync`. The path renders through
+  `display()` (a lossy display string for the About window; the
+  OS-level open action belongs to `app_open_data_folder`). The command
+  answers in any mode, recovery included — the About window must not
+  depend on a healthy database. Its only reachable failure is the
+  missing `DataRoot` state (an uninitialized-app bug; the state is
+  managed before anything that can fail), answered with the D-037
+  fallback shape and a `DataRootMissing` diagnostic like the recovery
+  commands, and logged through one new facade line
+  (`logging::app_info_failed`, the `activity_list_failed` shape — a
+  minimal additive edit to `logging.rs` outside the task's named
+  zones, the D-055 precedent, flagged to the operator).
+- _The fresh flag lives inside `Db`, observed as the open's first
+  statement._ `Db::open` records `created_fresh` from one metadata
+  check — the §5.5 database file is missing (NotFound) or 0-byte —
+  fresh iff the path is definitively absent or definitively empty
+  (any other metadata failure reads as not fresh; the state fails the
+  open itself a moment later, so the flag never reaches the wire
+  wrongly). The load-bearing boundary of the placement is `open_db`,
+  which writes the database header and schema: the gates before it
+  leave at most a 0-byte file (D-040), and the predicate still reads
+  a 0-byte file as fresh, so the observation's position ahead of the
+  gates is belt-and-suspenders against a future inserted step, not a
+  present-day hazard (a round-1 review correction of this entry's
+  first draft, which wrongly claimed the gate's 0-byte file "would
+  erase the fact"). Missing-or-empty is the §5.5 tip's own reading
+  ("the app starts with an empty DB and says so": deleted data = no
+  previous database), and it matches D-038's bootstrap semantics for
+  every state the app itself produces. The flag is a field on `Db`
+  (plus a `created_fresh()` accessor) rather than a second managed
+  state or a `Db::open` return value: the setup hook and both
+  recovery reopens go through `Db::open`, so every path that brings a
+  database into existence publishes the fact without orchestration
+  changes — and the frozen setup region (T-029) needed no edit at
+  all. Consequences that fell out for free, pinned by assertions in
+  the recovery IPC tests: after `db_recreate` the reopened handle
+  answers `true` (§7.10's "starts with an empty database" is a fresh
+  bootstrap), after `db_restore_backup` it answers `false` (the copy
+  held a database) unless the copy was 0-byte (D-046's valid empty
+  daily copy — the bootstrap then genuinely created the schema).
+  Without a managed `Db` (recovery mode) `app_info` answers `false`
+  — no fresh database was created, and the recovery screen, not this
+  flag, is the state display. This edit touched `db.rs`, which the
+  task brief did not list among its zones (it lists commands.rs,
+  ipc_tests.rs, bindings.ts, the lib.rs registration region,
+  data_dirs.rs) — but the brief itself names "Db::open returns?" as a
+  candidate home for the flag, and the change is strictly additive
+  (field, accessor, one observation line); neither parallel task
+  (T-029: eunomia-store + setup region; T-036: eunomia-core) touches
+  `db.rs`, so the window's merge risk is nil. Recorded here so the
+  zone deviation is visible.
+- _Wire shape._ `AppInfo` carries snake_case fields
+  (`version`, `identifier`, `author`, `license`, `repository`,
+  `data_dir`, `db_created_fresh`), strings plus the one bool — the
+  house convention of `DbBackupInfo`/`AppError`; `db_created_fresh` is
+  a plain `bool`, not `Option` (the card names a flag; "no database
+  running" is expressed by `false` plus the state the rest of the app
+  already displays).
+
+Testing: six IPC tests over the mock runtime (the full DTO against
+spec-literal oracles with the version-macro rationale above and
+`db_created_fresh = true` over a clean root; the 0-byte-file half of
+the predicate — the shape a crashed first launch leaves; the
+not-fresh half driven through the same real `Db::open` seam —
+bootstrap, close, reopen — asserting only the flag differs; the
+no-database answer with `data_dir` still served from `DataRoot` and
+the database file provably not created by the call; the
+missing-`DataRoot` fallback envelope with its diagnostic; the lib.rs
+registration pin), `created_fresh` assertions inside the two existing
+recovery round-trip tests (recreate → true, restore → false — the
+consequences recorded above), two unit tests pinning the field
+sources against `tauri.conf.json` (identifier and version), one
+facade line test in `logging.rs` (`app_info_failed`'s code +
+diagnostic), and the regenerated `src/bindings.ts`. No new
+dependencies (macros and managed state only).
+
+Two requirements deliberately left to the About-window UI task,
+recorded so they do not fall between tasks: REL-004's "the 'About'
+window shows the list of dependency licenses" (the command serves the
+app's own license; the dependency list is a screen of `cargo deny`
+output, not an `app_info` field), and the human rendering of the
+machine forms — the SPDX expression and the Cargo `Name <email>`
+author spelling are what travels on the wire; turning them into
+UPD-005's prose ("dual license: MIT License and Apache License,
+Version 2.0") is the frontend's localization choice.
+
+The round-1 review (deepseek-v4.1-flash, APPROVE, no P0/P1) tightened
+five edges, all fixed in the same commit: the facade's log target is
+`eunomia::system` (the §7.10 System-module group, not a new
+`eunomia::app`); the 0-byte half of the predicate gained its own IPC
+test; the no-database test now proves the command creates no database
+file; the two recovery round-trip tests pin the flag consequences;
+and the observation-order rationale was corrected (this entry's
+fresh-flag paragraph above carries the corrected wording — the first
+draft wrongly claimed the too-new gate's 0-byte file would change the
+answer).

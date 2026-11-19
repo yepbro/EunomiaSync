@@ -1,9 +1,10 @@
 //! The IPC commands (spec §7.10) — the recovery-screen group of the
 //! System module (D-009), the History module's `activity_list`
-//! (T-027) and the Settings module's `settings_get`/`settings_set`
-//! (T-030): `app_open_data_folder`, `db_backups_list`,
-//! `db_restore_backup`, `db_recreate`, `activity_list`,
-//! `settings_get`, `settings_set`.
+//! (T-027), the Settings module's `settings_get`/`settings_set`
+//! (T-030) and the System module's `app_info` (T-031):
+//! `app_open_data_folder`, `db_backups_list`, `db_restore_backup`,
+//! `db_recreate`, `activity_list`, `settings_get`, `settings_set`,
+//! `app_info`.
 //!
 //! Every command returns `Result<T, AppError>` (§7.10) and is generic
 //! over the Tauri runtime — the documented tauri-specta shape for
@@ -24,7 +25,10 @@
 //! entries (LOG-001…004) inside the operation's own transaction
 //! (D-051), and both commands validate through the store's single
 //! settings parse (D-039) — every rejection is `E_VALIDATION` naming
-//! the key, the sent value and the reason.
+//! the key, the sent value and the reason. `app_info` is the About
+//! window's fact sheet (UPD-005/REL-004 plus the §5.5 hints): a
+//! non-database command that answers from compile-time constants and
+//! managed state alone, in any mode — see its section below.
 //!
 //! # Lifecycle (the honest boundary this task fixes, DECISIONS.md
 //! T-024)
@@ -1080,6 +1084,112 @@ fn settings_corrupt_diagnostic(source: &SettingsError) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `app_info` (T-031, §7.10 System module, §7.9 UPD-005/REL-004, §5.5)
+// ---------------------------------------------------------------------------
+
+/// The app identifier (UPD-005/REL-004/D-020): the bundle ID and the
+/// last path component of the data directory on every OS (§5.5). A
+/// spec literal, deliberately not a runtime read of
+/// `app.config().identifier`: the identifier is a build-time constant
+/// of this app, and the runtime config would answer with the mock
+/// runtime's own default in the IPC tests, making the spec value
+/// unpinnable there. A unit test pins the literal equal to the
+/// `tauri.conf.json` field (the config's home, D-020), so the command
+/// cannot drift from the config that actually locates the data
+/// directory.
+const APP_IDENTIFIER: &str = "pro.yepbro.eunomiasync";
+
+/// The repository link (UPD-005/REL-004): a spec literal — no
+/// `repository` field exists in `Cargo.toml` or `tauri.conf.json`
+/// today (so `env!("CARGO_PKG_REPOSITORY")` would be empty), and the
+/// spec fixes the URL itself.
+const REPOSITORY_URL: &str = "https://github.com/yepbro/EunomiaSync";
+
+/// The About window's fact sheet (§7.10 System module `app_info`;
+/// UPD-005: version, identifier, author, license, repository link;
+/// the §5.5 pair: the data directory and whether this launch created
+/// the database from scratch).
+///
+/// Field sources, one each — see the task's DECISIONS.md entry for
+/// the full rationale: `version` is the src-tauri crate version
+/// (`CARGO_PKG_VERSION`, which `tauri.conf.json` mirrors — pinned by
+/// a unit test), `identifier` and `repository` are the spec literals
+/// above, `author` is `CARGO_PKG_AUTHORS` (the `src-tauri/Cargo.toml`
+/// field D-020 names, `Den Brooks <denis@yepbro.pro>`), `license` is
+/// `CARGO_PKG_LICENSE` (the workspace's `MIT OR Apache-2.0` — the
+/// SPDX form of UPD-005/REL-004's "dual license: MIT License and
+/// Apache License, Version 2.0", matching the `LICENSE-MIT`/
+/// `LICENSE-APACHE` pair in the repository root), `data_dir` is the
+/// resolved data-directory root (the managed [`data_dirs::DataRoot`],
+/// D-049), and `db_created_fresh` is the launch-time fact
+/// [`Db::open`] observed (see the command docs). The path renders
+/// through `display()` — a lossy display string for the About window;
+/// the OS-level "open it" action goes through `app_open_data_folder`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct AppInfo {
+    /// The app version (`CARGO_PKG_VERSION`; `tauri.conf.json`
+    /// mirrors it).
+    pub(crate) version: String,
+    /// The bundle identifier `pro.yepbro.eunomiasync` (UPD-005,
+    /// REL-004, D-020).
+    pub(crate) identifier: String,
+    /// The author, `Name <email>` (the Cargo manifest form of
+    /// UPD-005's "Den Brooks, denis@yepbro.pro").
+    pub(crate) author: String,
+    /// The license as an SPDX expression (`MIT OR Apache-2.0` — the
+    /// dual license of UPD-005/REL-004).
+    pub(crate) license: String,
+    /// The repository link (UPD-005/REL-004).
+    pub(crate) repository: String,
+    /// The data-directory root resolved at startup (§5.5), as a
+    /// display string.
+    pub(crate) data_dir: String,
+    /// Whether this launch created the database from scratch (§5.5
+    /// tip: deleted data → "the app starts with an empty DB and says
+    /// so"). `false` without a running database (recovery mode): no
+    /// fresh database was created, and the recovery screen — not this
+    /// flag — is the honest state display.
+    pub(crate) db_created_fresh: bool,
+}
+
+/// Serves the About window's facts (§7.10 System module `app_info`).
+///
+/// A **non-database** command by construction: every field is a
+/// compile-time constant or a managed-state read, so there is no
+/// blocking work and nothing to route through [`Db::run`] (SYS-001's
+/// executor policy is for DB/file operations; this one has neither —
+/// the D-049 `DataRoot` pattern instead). It answers in any mode,
+/// recovery included: the About window must not depend on a healthy
+/// database, and `db_created_fresh` degrades to `false` there rather
+/// than failing the whole sheet.
+///
+/// The only reachable failure is the missing `DataRoot` state (an
+/// uninitialized-app bug — the state is managed before anything that
+/// could fail); it answers the D-037 fallback shape with a
+/// `DataRootMissing` diagnostic, like the recovery commands.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn app_info<R: Runtime>(app: AppHandle<R>) -> Result<AppInfo, AppError> {
+    app_info_impl(&app).inspect_err(logging::app_info_failed)
+}
+
+/// The body of [`app_info`], split so the one logging edge covers its
+/// every failure path (the `activity_list` shape).
+fn app_info_impl<R: Runtime>(app: &AppHandle<R>) -> Result<AppInfo, AppError> {
+    Ok(AppInfo {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        identifier: APP_IDENTIFIER.to_owned(),
+        author: env!("CARGO_PKG_AUTHORS").to_owned(),
+        license: env!("CARGO_PKG_LICENSE").to_owned(),
+        repository: REPOSITORY_URL.to_owned(),
+        data_dir: data_root(app)?.display().to_string(),
+        db_created_fresh: app
+            .try_state::<Db>()
+            .is_some_and(|database| database.created_fresh()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     //! The seam tests of the pure mappings — the opener mapping and
@@ -1310,5 +1420,43 @@ mod tests {
                 "the diagnostic names the class only, never the stored value"
             );
         }
+    }
+
+    // ---- `app_info` field-source pins (T-031) --------------------------
+
+    /// Parses the bundled `tauri.conf.json` — the config tauri compiles
+    /// into the binary — for the drift pins below.
+    fn bundled_config() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json must parse as JSON")
+    }
+
+    #[test]
+    fn the_identifier_literal_matches_the_bundled_app_config() {
+        // `APP_IDENTIFIER` is a spec literal (UPD-005/REL-004), while the
+        // config field is what actually locates the data directory
+        // (D-020); this pin keeps the two from drifting apart silently —
+        // changing either one alone fails here.
+        let config = bundled_config();
+        assert_eq!(
+            config["identifier"],
+            serde_json::json!(APP_IDENTIFIER),
+            "the app_info identifier literal and the tauri.conf.json \
+             identifier must agree (D-020)"
+        );
+    }
+
+    #[test]
+    fn the_crate_version_matches_the_bundled_app_config() {
+        // `app_info` serves `CARGO_PKG_VERSION` while the bundler and the
+        // updater read `tauri.conf.json`'s `version` — two declarations of
+        // one fact that must not drift: a bump of either alone fails here.
+        let config = bundled_config();
+        assert_eq!(
+            config["version"],
+            serde_json::json!(env!("CARGO_PKG_VERSION")),
+            "the src-tauri crate version and the tauri.conf.json version \
+             must agree"
+        );
     }
 }

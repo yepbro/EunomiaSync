@@ -101,12 +101,18 @@ Rust commands are registered through `tauri-specta`:
    History module's `activity_list` (T-027): the "Activity" window's
    filtered, paginated journal query over the `Db::run` executor, with
    LOG-005's visibility rule (user entries by default, `diagnostic`
-   only on the explicit `include_diagnostic` request) — and the
+   only on the explicit `include_diagnostic` request) — the
    Settings module's `settings_get`/`settings_set` (T-030): the
    §6.5 settings map read/written atomically through the store's
    single validation path, each changed key journaled
-   `settings.changed` inside the operation's own transaction. Every
-   further command name is fixed by §7.10 and belongs to its own task.
+   `settings.changed` inside the operation's own transaction — and
+   the System module's `app_info` (T-031): the About window's fact
+   sheet (version, identifier, author, license, repository, data
+   directory, and whether this launch created the database from
+   scratch), a non-database command that answers from compile-time
+   constants and managed state in any mode, recovery included.
+   Every further command name is fixed by §7.10 and belongs to its
+   own task.
 3. On debug builds the specta `Builder` exports `src/bindings.ts`
    (`specta_typescript::Typescript`). The file is **committed** so the
    frontend type-checks and lints without a Rust toolchain; it is excluded
@@ -118,9 +124,11 @@ Rust commands are registered through `tauri-specta`:
 `commands` (see DECISIONS.md D-003). Every command returns
 `Result<T, AppError>`; database commands reach the one-transaction
 executor (`db::Db::run`, see the Storage section), which is what makes
-SYS-001/SYS-002 hold for every command alike — the one deliberate
-exception is the recovery group, which by design runs when no database
-exists (see the Storage section's recovery paragraph and D-049).
+SYS-001/SYS-002 hold for every command alike — the deliberate
+exceptions are the recovery group, which by design runs when no
+database exists (see the Storage section's recovery paragraph and
+D-049), and `app_info`, which has no database work at all (constants
+and managed state only, any mode).
 
 The error half of the contract — `AppError` (spec §7.10: every command
 returns `Result<T, AppError>`) — lives in `src-tauri/src/errors.rs`: the

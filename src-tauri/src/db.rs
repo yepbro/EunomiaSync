@@ -211,6 +211,25 @@ pub(crate) struct Db {
     /// call site (the same drift-avoidance reasoning as [`Db::open`]'s
     /// path handling, D-037).
     backups_dir: PathBuf,
+    /// Whether this open bootstrapped the database from scratch: the
+    /// file at the §5.5 path was missing or empty **before the open
+    /// ran** — the launch-time fact §5.5's tip describes ("the app
+    /// starts with an empty DB and says so"), observed here because
+    /// `Db::open` is the single place a database comes into existence
+    /// (the startup hook and the recovery reopen both go through it,
+    /// so every open path publishes the fact without orchestration
+    /// changes). The observation is the open's first statement: the
+    /// load-bearing boundary is `open_db`, which writes the database
+    /// header and schema — the gates before it leave at most a 0-byte
+    /// file (D-040), and this predicate still reads a 0-byte file as
+    /// fresh, so the placement ahead of them is belt-and-suspenders
+    /// against a future step, not a present-day hazard. The recovery
+    /// commands publish their copy/empty start through this same seam
+    /// — a restore answers `false` (the copy held a database), a
+    /// recreate answers `true` (§7.10's "starts with an empty
+    /// database" is a fresh bootstrap). Consumed by the `app_info`
+    /// command (T-031).
+    created_fresh: bool,
 }
 
 impl Db {
@@ -286,6 +305,19 @@ impl Db {
     pub(crate) fn open(data_dir: &Path) -> Result<Self, DbInitError> {
         let db_path = crate::data_dirs::db_file_path(data_dir);
         let backups_dir = crate::data_dirs::db_backups_dir(data_dir);
+        // Observed as the open's first statement, before any step can
+        // touch the path (see the field docs): fresh iff the file is
+        // definitively absent (NotFound) or definitively empty — no
+        // previous database in either case (a 0-byte file is an empty
+        // SQLite database, the exact shape a crashed first launch or a
+        // gate connection leaves behind, D-040). Any other metadata
+        // failure reads as not fresh: the path exists but cannot be
+        // stat'ed, a state `open_db` fails on a moment later anyway,
+        // so the flag never reaches the wire wrongly.
+        let created_fresh = match std::fs::metadata(&db_path) {
+            Ok(metadata) => metadata.len() == 0,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
         // DB-004 order: the too-new gate runs before `open_db`, so a
         // newer database is rejected before the pragma set can touch
         // the file (see the method docs).
@@ -310,7 +342,18 @@ impl Db {
         Ok(Db {
             connection: Arc::new(Mutex::new(connection)),
             backups_dir,
+            created_fresh,
         })
+    }
+
+    /// Whether this database was created from scratch by the open that
+    /// produced this handle (see the field docs): the §5.5 "empty DB"
+    /// hint `app_info` serves. `false` when no database is running at
+    /// all — that is the caller's decision to make (recovery mode's
+    /// honest answer is "no fresh database was created", which the
+    /// `app_info` command encodes).
+    pub(crate) fn created_fresh(&self) -> bool {
+        self.created_fresh
     }
 
     /// The ERR-001 startup step (spec §10): one `VACUUM INTO` copy per

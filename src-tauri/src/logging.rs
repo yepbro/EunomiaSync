@@ -625,6 +625,26 @@ pub(crate) fn settings_set_failed(error: &AppError) {
     );
 }
 
+/// The `app_info` command failed (T-031, §10's every-error rule): the
+/// payload is the error's own §7.10 vocabulary, in the
+/// `activity_list_failed` shape. The only reachable failure is the
+/// missing `DataRoot` state (an uninitialized-app bug — the state is
+/// managed before anything that could fail), so this line is a
+/// wiring-canary record, not a user-facing situation the About window
+/// acts on. Target `eunomia::system`, the §7.10 System-module group
+/// the command belongs to (`data_folder_opened`/`_failed`).
+pub(crate) fn app_info_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::system",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "the app_info command failed"
+    );
+}
+
 /// A recovery operation preserved the damaged database (T-024, §10's
 /// recovery screen): renamed — never deleted — from the database path
 /// to `db-backups/pre-recovery-<UTC>.sqlite3`. `info` with both paths:
@@ -1934,6 +1954,40 @@ mod tests {
         assert!(
             log.contains("the settings read failed") && log.contains("the settings save failed"),
             "each command's line must say what failed, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn a_failed_app_info_command_logs_its_code_and_diagnostic() {
+        // The `app_info` command's §10 line (T-031), in the same payload
+        // shape: the only reachable failure is the missing `DataRoot`
+        // bug-state, so the test drives exactly that shape — the
+        // fallback code and the `DataRootMissing` diagnostic the
+        // command builds for it.
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut missing = AppError::new(crate::errors::ErrorCode::DbLocked);
+        missing.details = Some(crate::errors::ErrorDetails {
+            os_code: None,
+            os_kind: Some("DataRootMissing".to_owned()),
+            os_message: Some("the data directory was not resolved at startup".to_owned()),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            app_info_failed(&missing);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("code=\"E_DB_LOCKED\"") && log.contains("DataRootMissing"),
+            "the line must carry its code and diagnostic, got: {log}"
+        );
+        assert!(
+            log.contains("the app_info command failed"),
+            "the line must say what failed, got: {log}"
         );
         drop(temp);
     }

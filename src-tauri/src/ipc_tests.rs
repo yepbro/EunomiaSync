@@ -40,6 +40,15 @@
 //! every rejected change, the in-transaction journal (D-051) with its
 //! rollback proof, the DEF-005 pin over a seeded project row, and the
 //! corrupt-cell and no-database answers.
+//!
+//! The `app_info` tests (T-031, UPD-005/REL-004, §5.5) pin the About
+//! window's fact sheet: every field against its spec oracle, every
+//! state of `db_created_fresh` through the real `Db::open` seam
+//! (missing file, 0-byte file, existing database), the no-database
+//! answer (the command is non-DB by design and creates no database
+//! file), and the missing-`DataRoot` fallback envelope; the recovery
+//! round-trip tests above pin the flag's recreate/restore
+//! consequences.
 
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -235,9 +244,12 @@ fn db_recreate_recovers_the_database_over_ipc() {
         db_path.is_file(),
         "a fresh database file exists at the §5.5 path"
     );
+    let database = app
+        .try_state::<crate::db::Db>()
+        .expect("the recreated database is managed — the app continues without a restart");
     assert!(
-        app.try_state::<crate::db::Db>().is_some(),
-        "the recreated database is managed — the app continues without a restart"
+        database.created_fresh(),
+        "the recreate is a fresh bootstrap: the flag answers true (D-057)"
     );
     drop(temp);
 }
@@ -333,6 +345,10 @@ fn db_restore_applies_the_chosen_copy_over_ipc() {
     }))
     .expect("the restored database must answer queries");
     assert_eq!(marker, "ipc-restore");
+    assert!(
+        !database.created_fresh(),
+        "the restored copy held a database: the flag answers false (D-057)"
+    );
     let preserved: Vec<_> = std::fs::read_dir(&backups)
         .expect("db-backups/ must be readable")
         .map(|entry| {
@@ -1497,4 +1513,225 @@ fn the_settings_commands_are_registered_with_the_specta_builder() {
             "lib.rs must register the `{name}` command exactly once (§7.10, D-009)"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// `app_info` (T-031, §7.10 System module, §7.9 UPD-005/REL-004, §5.5)
+// ---------------------------------------------------------------------------
+
+/// Invokes `app_info` over the app's `main` webview, deserializing the
+/// success payload into the typed DTO.
+fn invoke_app_info(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+) -> Result<crate::commands::AppInfo, serde_json::Value> {
+    let response =
+        tauri::test::get_ipc_response(webview, invoke_request("app_info", serde_json::json!({})));
+    match response {
+        Ok(payload) => Ok(payload
+            .deserialize::<crate::commands::AppInfo>()
+            .expect("the success payload must deserialize into the DTO")),
+        Err(error) => Err(error),
+    }
+}
+
+/// A mock app in the healthy state `app_info` serves: the command
+/// registered, `DataRoot` managed at `root` and the given real `Db`
+/// managed. `database` decides the `db_created_fresh` half under
+/// test — the caller opens it over `root` either as the first open of
+/// a clean root (this open creates the database: the §5.5 "empty DB"
+/// state) or as a second open over a root whose database already
+/// exists (every launch after the first).
+fn app_info_app(
+    database: crate::db::Db,
+    root: std::path::PathBuf,
+) -> tauri::App<tauri::test::MockRuntime> {
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::app_info])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(data_dirs::DataRoot(root));
+    app.manage(database);
+    app
+}
+
+#[test]
+fn app_info_serves_the_spec_facts_and_the_fresh_database_flag() {
+    // Arrange: the first launch over a clean root — no database file
+    // exists, so the open this harness performs creates one from
+    // scratch (the §5.5 "empty DB" state the flag exists to name).
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let root = temp.path().to_path_buf();
+    let app = app_info_app(database, root);
+
+    // Act
+    let info = invoke_app_info(&main_webview(&app)).expect("the command must succeed");
+
+    // Assert: every field equals its spec oracle. Identifier, author,
+    // license and repository are UPD-005/REL-004 literals (never
+    // derived from the production constants — a mutated source fails
+    // here); `data_dir` is the harness's temp root (the D-049
+    // managed-`DataRoot` seam — the real `~/.local/share/...` never
+    // enters a test); `db_created_fresh` is true — the state this
+    // arrangement produces. The version is compared against
+    // `env!("CARGO_PKG_VERSION")`, NOT a literal — deliberately: the
+    // value is defined by the build and changes with every release,
+    // so a literal oracle would turn each release into a red test;
+    // the macro instead pins the plumbing (the DTO carries the crate
+    // version macro the command reads), and the crate↔tauri.conf.json
+    // drift risk is pinned by the unit test beside the DTO.
+    assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(info.identifier, "pro.yepbro.eunomiasync");
+    assert_eq!(info.author, "Den Brooks <denis@yepbro.pro>");
+    assert_eq!(info.license, "MIT OR Apache-2.0");
+    assert_eq!(info.repository, "https://github.com/yepbro/EunomiaSync");
+    assert_eq!(
+        info.data_dir,
+        temp.path().display().to_string(),
+        "the data dir is the managed DataRoot (the test temp root)"
+    );
+    assert!(info.db_created_fresh);
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn app_info_reports_an_existing_database_as_not_created_fresh() {
+    // The other state of the flag, driven through the same real seam
+    // (`Db::open`): a root whose database already exists — created by
+    // a first open, closed, then opened again, exactly the shape of
+    // every launch after the first. The open that produces the
+    // managed handle must observe an existing file and answer false.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the layout in a temp directory must work");
+    let first = crate::db::Db::open(temp.path()).expect("the bootstrap open must succeed");
+    assert!(
+        first.created_fresh(),
+        "the bootstrap open itself must observe the fresh state"
+    );
+    drop(first); // closes the connection — the database file remains
+    let second = crate::db::Db::open(temp.path()).expect("the second open must succeed");
+    let root = temp.path().to_path_buf();
+    let app = app_info_app(second, root);
+
+    // Act
+    let info = invoke_app_info(&main_webview(&app)).expect("the command must succeed");
+
+    // Assert: only the flag differs — the facts sheet stays whole.
+    assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(info.identifier, "pro.yepbro.eunomiasync");
+    assert!(
+        !info.db_created_fresh,
+        "an existing database is not 'created from scratch at this launch'"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn app_info_answers_without_a_database() {
+    // The non-DB half of the contract (the D-049 pattern): recovery
+    // mode manages `DataRoot` but no `Db`, and the About window must
+    // still get its facts — the flag degrades to false (no fresh
+    // database was created; the recovery screen is the state display),
+    // it does not fail the whole sheet.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the layout in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::app_info])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(data_dirs::DataRoot(temp.path().to_path_buf()));
+
+    let info = invoke_app_info(&main_webview(&app)).expect("the command must succeed");
+
+    assert_eq!(info.identifier, "pro.yepbro.eunomiasync");
+    assert_eq!(
+        info.data_dir,
+        temp.path().display().to_string(),
+        "the data dir is served from DataRoot, not from a database"
+    );
+    assert!(
+        !info.db_created_fresh,
+        "no database running means no fresh database was created"
+    );
+    assert!(
+        !data_dirs::db_file_path(temp.path()).exists(),
+        "the non-Db path must not create the database file — answering \
+         the sheet is a read of constants and managed state only"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_preexisting_empty_database_file_is_created_fresh() {
+    // The 0-byte half of the observation predicate: an empty file at
+    // the §5.5 path is "no previous database" exactly like a missing
+    // one (the shape a crashed first launch or a gate's bare
+    // connection leaves behind, D-040) — the open bootstraps it, and
+    // the flag answers true. The counter-case (a non-empty file
+    // answering false) is the neighboring test's second open.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the layout in a temp directory must work");
+    std::fs::write(data_dirs::db_file_path(temp.path()), b"")
+        .expect("creating the empty fixture file must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening over an empty file must bootstrap, not fail");
+    let root = temp.path().to_path_buf();
+    let app = app_info_app(database, root);
+
+    let info = invoke_app_info(&main_webview(&app)).expect("the command must succeed");
+
+    assert!(
+        info.db_created_fresh,
+        "a 0-byte file is an empty database: bootstrapping it is a \
+         fresh creation"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn app_info_names_the_missing_data_root_state() {
+    // The command's only reachable failure (an uninitialized-app bug):
+    // the same fallback envelope the recovery commands answer for the
+    // same missing state — code, default key, the `DataRootMissing`
+    // diagnostic in details.
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::app_info])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    let error =
+        invoke_app_info(&main_webview(&app)).expect_err("the command without DataRoot must fail");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(error["message_key"], serde_json::json!("errors.db_locked"));
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("DataRootMissing"),
+        "the diagnostic names the state, got {error}"
+    );
+}
+
+#[test]
+fn the_app_info_command_is_registered_with_the_specta_builder() {
+    // The §7.10 System-module name, registered exactly once (the
+    // D-034 wiring-pin rationale: without it, dropping the
+    // registration would leave `export_bindings_are_up_to_date` green
+    // while silently rewriting the committed bindings).
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("commands::app_info").count(),
+        1,
+        "lib.rs must register the `app_info` command exactly once (§7.10)"
+    );
 }

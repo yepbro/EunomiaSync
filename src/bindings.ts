@@ -25,6 +25,24 @@ export const commands = {
 	 */
 	activityList: (query: ActivityListQuery_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<ActivityPage_Serialize>("activity_list", { query }, options),
 	/**
+	 *  Serves the About window's facts (§7.10 System module `app_info`).
+	 * 
+	 *  A **non-database** command by construction: every field is a
+	 *  compile-time constant or a managed-state read, so there is no
+	 *  blocking work and nothing to route through [`Db::run`] (SYS-001's
+	 *  executor policy is for DB/file operations; this one has neither —
+	 *  the D-049 `DataRoot` pattern instead). It answers in any mode,
+	 *  recovery included: the About window must not depend on a healthy
+	 *  database, and `db_created_fresh` degrades to `false` there rather
+	 *  than failing the whole sheet.
+	 * 
+	 *  The only reachable failure is the missing `DataRoot` state (an
+	 *  uninitialized-app bug — the state is managed before anything that
+	 *  could fail); it answers the D-037 fallback shape with a
+	 *  `DataRootMissing` diagnostic, like the recovery commands.
+	 */
+	appInfo: (options?: InvokeOptions) => __TAURI_INVOKE<AppInfo>("app_info", undefined, options),
+	/**
 	 *  Opens the data directory in the OS file manager (§7.10). The
 	 *  opener plugin runs from Rust only (SEC-001): the webview holds no
 	 *  `opener:` permission, so this command is the single path from the
@@ -437,6 +455,66 @@ export type AppError_Serialize = {
 	 *  OS. `null` when there is nothing technical to attach.
 	 */
 	details: ErrorDetails_Serialize | null,
+};
+
+/**
+ *  The About window's fact sheet (§7.10 System module `app_info`;
+ *  UPD-005: version, identifier, author, license, repository link;
+ *  the §5.5 pair: the data directory and whether this launch created
+ *  the database from scratch).
+ * 
+ *  Field sources, one each — see the task's DECISIONS.md entry for
+ *  the full rationale: `version` is the src-tauri crate version
+ *  (`CARGO_PKG_VERSION`, which `tauri.conf.json` mirrors — pinned by
+ *  a unit test), `identifier` and `repository` are the spec literals
+ *  above, `author` is `CARGO_PKG_AUTHORS` (the `src-tauri/Cargo.toml`
+ *  field D-020 names, `Den Brooks <denis@yepbro.pro>`), `license` is
+ *  `CARGO_PKG_LICENSE` (the workspace's `MIT OR Apache-2.0` — the
+ *  SPDX form of UPD-005/REL-004's "dual license: MIT License and
+ *  Apache License, Version 2.0", matching the `LICENSE-MIT`/
+ *  `LICENSE-APACHE` pair in the repository root), `data_dir` is the
+ *  resolved data-directory root (the managed [`data_dirs::DataRoot`],
+ *  D-049), and `db_created_fresh` is the launch-time fact
+ *  [`Db::open`] observed (see the command docs). The path renders
+ *  through `display()` — a lossy display string for the About window;
+ *  the OS-level "open it" action goes through `app_open_data_folder`.
+ */
+export type AppInfo = {
+	/**
+	 *  The app version (`CARGO_PKG_VERSION`; `tauri.conf.json`
+	 *  mirrors it).
+	 */
+	version: string,
+	/**
+	 *  The bundle identifier `pro.yepbro.eunomiasync` (UPD-005,
+	 *  REL-004, D-020).
+	 */
+	identifier: string,
+	/**
+	 *  The author, `Name <email>` (the Cargo manifest form of
+	 *  UPD-005's "Den Brooks, denis@yepbro.pro").
+	 */
+	author: string,
+	/**
+	 *  The license as an SPDX expression (`MIT OR Apache-2.0` — the
+	 *  dual license of UPD-005/REL-004).
+	 */
+	license: string,
+	/**  The repository link (UPD-005/REL-004). */
+	repository: string,
+	/**
+	 *  The data-directory root resolved at startup (§5.5), as a
+	 *  display string.
+	 */
+	data_dir: string,
+	/**
+	 *  Whether this launch created the database from scratch (§5.5
+	 *  tip: deleted data → "the app starts with an empty DB and says
+	 *  so"). `false` without a running database (recovery mode): no
+	 *  fresh database was created, and the recovery screen — not this
+	 *  flag — is the honest state display.
+	 */
+	db_created_fresh: boolean,
 };
 
 /**

@@ -58,14 +58,16 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
         // The registered §7.10 commands: the recovery-screen group of
         // the System module (D-009), the History module's
-        // `activity_list` (T-027) and the Settings module's
-        // `settings_get`/`settings_set` (T-030). Every later command
+        // `activity_list` (T-027), the Settings module's
+        // `settings_get`/`settings_set` (T-030) and the System
+        // module's `app_info` (T-031). Every later command
         // task (dialog, library, …) lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
         // commands that take an `AppHandle`), so the registration pins
         // the concrete runtime of the shipped app.
         .commands(collect_commands![
             commands::activity_list::<tauri::Wry>,
+            commands::app_info::<tauri::Wry>,
             commands::app_open_data_folder::<tauri::Wry>,
             commands::db_backups_list::<tauri::Wry>,
             commands::db_restore_backup::<tauri::Wry>,
