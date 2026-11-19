@@ -4131,3 +4131,103 @@ Boundary: ALG-030's `join(parts, BLANK_LINE)`, the creation marker and
 the scheme gate stay with the by-scheme builder (T-039); the §7.5 hint
 about `.local.md` and Git and the scheme-C snippet (same D-21 sentence,
 §7.5) are UI concerns.
+
+### D-064 — Project build hash: DB-020's fields in spec order, length-framed; the marker exclusion is structural; hand-rolled lowercase hex — 2026-11-19
+
+Problem: T-042 turns DB-020 (`sha256('v1' + scheme + target path +
+extra-file flags and positions + build text without the creation
+marker)`) and ALG-033 ("computed on `managed` without the marker") into
+`eunomia-core` code. The spec fixes the field list and its order but
+leaves open: the separators — a `+` chain over two arbitrary-length
+fields (path, text) and four fixed-vocabulary tokens is not injective:
+a path ending `…falseend` with a managed text starting
+`trueendtrueend…` re-splits into a different valid input (a concrete
+pair is pinned by test); the path encoding and normalization; the
+extra-file field order and spelling; whether the extras count under
+schemes B and C (ALG-030 adds reading lines under A only); and the
+output format (`last_synced_hash` is bare TEXT).
+
+Solution: `hash::build_hash(scheme, target_path, extra_local,
+extra_project, managed_without_marker) -> String` in the new `hash`
+module — a pure function, no clock, and the first user of `sha2`,
+which D-017 pinned in the allow-list ahead of exactly this task. Five
+decisions inside it:
+
+1. _Framing._ Every field is fed as an 8-byte little-endian `u64` byte
+   length followed by the bytes, in DB-020's field order, behind the
+   literal `v1` tag (a constant prefix needs no framing and versions
+   the formula — a future `v2` tag cannot collide with `v1` hashes).
+   The framing makes input → byte stream injective, so distinct inputs
+   cannot share a hash short of breaking SHA-256 itself; plain
+   concatenation was rejected on the collision pair above (the test
+   asserts the pair's naive `+` streams are byte-identical, then that
+   their hashes differ).
+2. _Path._ The platform's own bytes (`as_os_str().as_encoded_bytes()`),
+   no normalization: the snapshot's project root is canonical (DB-030)
+   and the target path derives from it, so one project yields the same
+   bytes on every run of the same platform — cross-platform spelling
+   equality is not this hash's job. The base name reaches the hash
+   through the target path only (`<root>/<base_name>` /
+   `<root>/<STEM>.project.md`), exactly the formula's field list; that
+   is how DB-023's "changing the file name makes the project dirty" is
+   satisfied (pinned with a base-name-change path test).
+3. _Extras._ Both extra files in the §6.2 column order (`extra_local`,
+   then `extra_project`), each as its enabled flag (`"true"`/`"false"`,
+   the §6.5 JSON spelling) followed by its position
+   (`"start"`/`"end"`), included under EVERY scheme: the formula has no
+   scheme qualifier, and the hash fingerprints the project's build
+   configuration, not just the bytes one scheme writes (the same
+   reading that makes the scheme itself an input, DB-023); a scheme-B
+   test pins the case where the built file ignores the extras yet the
+   hash still moves.
+4. _Marker exclusion is structural._ The signature has no time, zone
+   or marker parameter — ALG-032's run time physically cannot reach
+   the hash. Today the markerless managed text is `build_body`'s
+   output (the §9.2 body never contains the marker, D-053); when the
+   ALG-030 assembly joins the extra-file reading lines around the
+   body, its `managed` string (still without the marker) is what gets
+   passed here — the seam is "the assembled managed, marker excluded".
+   Proof test: full contents in the ALG-030 shape (managed, an empty
+   line, the marker, one line break) formatted through the real
+   `creation_marker_line` with four marker variants (another time,
+   another date, the D-23 UTC fallback, a western zone) differ as
+   files, reduce to one and the same markerless remainder — the
+   managed text plus the empty line's break; the drop rule removes
+   the marker line alone, and the test pins those remaining bytes
+   exactly — and hash identically.
+5. _Output._ Sixty-four lowercase hex characters, hand-rolled (sixteen
+   lines): a `hex` crate would leave D-017's allow-list, and the
+   spelling is shared by `projects.last_synced_hash` (DB-020) and the
+   BKP-010 backup SHA-256 comparisons.
+
+Testing: nine unit tests plus the doctest — an oracle vector hardcoded
+from an independent Python-hashlib computation over the exact framed
+stream (one value pinning the tag, the field order, the framing and
+every field literal at once), the 64-lowercase-hex format, stability,
+the per-input change matrix (schemes A/B/C; root, base-name and
+scheme-C path variants; each of the four extra fields alone; managed
+text including the empty build and a trailing-newline difference), the
+marker-time non-input proof, and the framing collision pair. Five
+behavior mutations verified the suite bites — dropping the `v1` tag,
+dropping the path field, swapping the extras' order, uppercasing the
+hex alphabet, and removing the length framing each fail the suite,
+with different watches: the unframed and uppercase-hex mutations fail
+their dedicated tests, the extras-order swap fails the oracle and the
+extras change matrix, and the dropped `v1` tag fails the oracle alone
+— the change-matrix tests mutate both sides of their comparisons
+identically, so only the value that pins the exact byte stream catches
+what moves every input's hash the same way.
+
+Boundaries: DB-021's dirty computation and DB-024's `last_synced_hash`
+updates belong to the dirty-flag task; ALG-033's existing-file scanner
+(drop the last marker line, byte-compare the rest) belongs to the
+comparison task — the test-local strip mirror of the drop rule is a
+proof device, not a production seam. No new dependencies (`sha2`
+activated from D-017's list; `serde`/`thiserror` untouched). One
+documented lag, deliberate: the "sha2 stays idle until the build-hash
+task" comments in `lib.rs`/`Cargo.toml` and the lib.rs module index
+now trail the landed module (as they already trail the parallel
+tasks' `marker`/`markers`/`extra_files`) — T-042's zone constraint
+allows exactly one line in lib.rs while neighboring core tasks run,
+so the prose reconciliation belongs to the orchestrator's docs pass
+over all four modules at once.

@@ -31,6 +31,7 @@
 pub mod assignment;
 pub mod body;
 pub mod extra_files;
+pub mod hash;
 pub mod library;
 pub mod marker;
 pub mod markers;
