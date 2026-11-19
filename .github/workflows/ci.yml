@@ -102,23 +102,33 @@ jobs:
       # staging step see the DLL before any test binary executes.
       # The Common-Controls v6 manifest for the Windows test binaries
       # (T-241). tauri-build's RC embed rides embed-resource's
-      # `cargo:rustc-link-arg-bins`, which reaches only [[bin]] targets:
-      # every cargo-test harness exe links with no manifest, binds
-      # comctl32 5.82, and dies at load with STATUS_ENTRYPOINT_NOT_FOUND
-      # (0xc0000139) because tao/tauri statically import the v6-only
-      # TaskDialogIndirect (tauri-apps/tauri#13419).
+      # `cargo:rustc-link-arg-bins`, which reaches only [[bin]] targets —
+      # including the bin's cargo-test harness link: every LIB test exe
+      # links with no manifest, binds comctl32 5.82, and dies at load with
+      # STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) because tao/tauri
+      # statically import the v6-only TaskDialogIndirect
+      # (tauri-apps/tauri#13419).
       #
       # Delivery: RUSTFLAGS link args on the Windows test legs only — the
       # app build (job `build`) and non-Windows legs never see them, and
       # RUSTFLAGS is part of cargo's unit fingerprints, so a restored
       # rust-cache cannot serve manifest-less binaries as fresh. The value
       # is deliberately space-free: cargo word-splits RUSTFLAGS shell-style,
-      # which is what killed the earlier /MANIFESTDEPENDENCY attempt (its
+      # which is what killed the earlier /MANIFESTDEPENDENCY attempt (a
       # quoted value with spaces cannot survive the cargo→rustc hop at
       # all). /MANIFESTINPUT=<path> needs no quoting; the checkout path on
       # GitHub runners contains no spaces, asserted below so a path change
       # fails loudly instead of silently splitting.
-      - name: Embed the Common-Controls v6 manifest into test binaries (Windows)
+      #
+      # /MANIFEST WITHOUT /MANIFEST:EMBED makes link.exe write an EXTERNAL
+      # <exe>.manifest next to every linked exe instead of embedding
+      # RT_MANIFEST. That is what dodges CVT1100 (duplicate resource
+      # MANIFEST/1) on the bin test harness, which already receives
+      # tauri's RC-compiled manifest through resource.lib: per Microsoft's
+      # loader rules the embedded manifest wins and the external file is
+      # ignored there, while the manifest-less lib test exes pick the
+      # external file up and bind Common-Controls v6.
+      - name: Give the test binaries a Common-Controls v6 manifest (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
@@ -129,7 +139,7 @@ jobs:
               exit 1
               ;;
           esac
-          echo "RUSTFLAGS=-C link-arg=/MANIFEST:EMBED -C link-arg=/MANIFESTINPUT:$manifest" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C link-arg=/MANIFEST -C link-arg=/MANIFESTINPUT:$manifest" >> "$GITHUB_ENV"
       - name: Build tests (Windows DLL staging prerequisite)
         if: runner.os == 'Windows'
         run: cargo test --workspace --no-run
@@ -215,6 +225,13 @@ jobs:
           if b'Microsoft.Windows.Common-Controls' in data:
               i = data.index(b'<assembly')
               print('MANIFEST HEAD:', data[i:i+400].decode('ascii', 'replace'))
+          ext = open(lib_exe + '.manifest', 'rb').read() if __import__('os').path.exists(lib_exe + '.manifest') else b''
+          print('EXTERNAL MANIFEST FILE:', bool(ext))
+          if b'Microsoft.Windows.Common-Controls' in ext:
+              i = ext.index(b'<assembly')
+              print('EXTERNAL MANIFEST HEAD:', ext[i:i+400].decode('ascii', 'replace'))
+          elif ext:
+              print('EXTERNAL MANIFEST (no Common-Controls dep!) HEAD:', ext[:400].decode('ascii', 'replace'))
           PY
           echo "--- eunomia-sync build script instructions cargo recorded ---"
           cat target/debug/build/eunomia-sync/*/run/stdout target/debug/build/eunomia-sync-*/output 2>/dev/null | grep -aE "link-arg|MANIFEST" || echo "(no link-arg lines recorded)"
