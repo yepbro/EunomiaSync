@@ -4003,3 +4003,44 @@ workflow job covers them yet. Known
 boundary: whether the suite is green on Windows/macOS is provable only by
 a real run after the push (CI-monitoring rule); the pinned proptest seed
 (D-056) keeps the legs comparable once they run.
+
+### D-061 — Creation-marker formatting in core: decomposed civil fields, no time library, no clock — 2026-11-19
+
+Problem: T-038 formats the ALG-032 marker line
+`<!-- Created by EunomiaSync YYYY-MM-DD HH:MM:SS <IANA name> <offset> -->`
+in `eunomia-core`. Three decisions the spec leaves implicit: (1) which
+types the instant crosses the boundary as — core has no time library
+(jiff is `eunomia-store`'s dependency, D-035, and core's allow-list is
+serde/thiserror/sha2, D-017), so `jiff::Timestamp` cannot be a
+parameter without a DECISIONS-level dependency addition; (2) how the
+UTC fallback of D-23/ALG-032 ("Without an IANA name: `UTC+01:00`")
+reads — as a replacement of the name-and-offset pair or as an extra
+field next to them; (3) the sign of a zero offset.
+
+Solution: `marker::creation_marker_line(time: MarkerTime, iana_zone:
+Option<&str>, offset_minutes: i32) -> String` — plain types only, the
+allow-list untouched. `MarkerTime` is the six civil fields
+(year..second) with pub fields in the crate's domain-type style:
+decomposed integers are the least-coupled honest form (no jiff, no
+preformatted string whose `YYYY-MM-DD HH:MM:SS` shape core could
+neither check nor own), and the zero-padding template then has exactly
+one implementation — this module — instead of one per caller. The
+clock stays out on purpose (ALG-032 takes the time "once per run, at
+the start of the write phase" — the sync pipeline captures it via
+jiff above core and hands the fields down); the function is pure and
+unit-tested with the spec's example as the oracle. Spec-reading
+rulings, pinned by tests: the UTC form replaces the whole
+`<IANA name> <offset>` pair (D-23's `UTC+01:00` is UTC+offset as one
+field — `… 14:03:22 UTC+01:00 -->`, never `UTC+01:00 +01:00`), and a
+zero offset prints `+00:00` (the template's `±hh:mm` always carries
+the sign; RFC 3339 reserves `-00:00` for an _unknown_ offset, which a
+stamped marker never has). Field domains are asserted with the crate's
+broken-invariant panic posture (values arrive from a time library's
+civil accessors and are always in range; month lengths stay the
+calendar's truth, not the marker's); the offset must be whole minutes
+within ±24:00 — no present-day zone exceeds ±14:00, and historical
+sub-minute LMT offsets are inexpressible by design, irrelevant for a
+marker stamped at run time. Consumers (T-039/T-041): resolve the run
+instant once, pass `jiff`'s civil fields + zone name + offset minutes;
+when the zone cannot be resolved, pass `None` and the offset still
+tells the truth.

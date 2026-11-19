@@ -31,6 +31,7 @@
 pub mod assignment;
 pub mod body;
 pub mod library;
+pub mod marker;
 pub mod normalize;
 pub mod project;
 pub mod snapshot;
