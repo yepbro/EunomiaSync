@@ -5076,3 +5076,113 @@ now: `&[Color]` cannot distinguish "active projects' colors" from
 active-colors-only newtype, or a store-side test that the query
 filters `state = 'active'`) belongs to the store task that first
 builds the slice.
+
+### D-078 — The cancelled-CI auto-rerun: workflow_run, a job-level cancelled-only discriminator with a derived-gate carve-out, and an artifact-marker cap — 2026-11-19
+
+Problem: macos arm64 CI legs (build (macos-15), occasionally
+test-matrix (macos-15)) are regularly cancelled by runner capacity
+constraints while the code is green; every incident cost a manual
+`gh run rerun --failed` (runs 44584364443 ×2, 44574620012, 44123571125,
+44147164960). T-242 automates that with two hard requirements: never
+mask real red, and never rerun one commit endlessly.
+
+Solution (ci-rerun.yml + .github/scripts/ci-rerun/decide.py):
+
+- _Trigger_ — `workflow_run: workflows: [CI], types: [completed],
+branches: [main]`: fires exactly once per completed CI run of main
+  (ci.yml pushes are main-only) and hands over the run id; a schedule
+  would need its own state and a race-prone scan. `workflow_run` only
+  runs the default-branch copy of the file, so the live path is
+  untestable pre-merge — hence the workflow_dispatch drill modes
+  (fixture + read-only dry-run over a real run id) and the honest
+  boundary below.
+- _Discriminator_ — job-level only, because the run-level conclusion is
+  unreliable for infra cancels (44123571125 rolled up to "failure",
+  44147164960 to "cancelled"). Rerun iff every non-success job has
+  conclusion `cancelled`, ≥1 cancelled, every job `completed`, and no
+  conclusion outside {success, failure, cancelled} — timing_failure,
+  startup_failure, skipped and friends are never healed. Any real
+  failure is a no-op (red = human). One provably-safe carve-out: the
+  roll-up gate `test` (ci.yml: `if: always()` over
+  needs.test-matrix.result) fails whenever a matrix leg was cancelled
+  even with zero real failures (real shape: 44578261527, where the gate
+  failed at 17:47 after the macos-15 leg was cancelled at 17:47). That
+  derived failure is excused only when every `test-matrix (` leg is
+  success/cancelled with ≥1 cancelled; without it the healer could
+  never heal the test-matrix cancels it exists for. The carve-out fails
+  closed: any leg failure, no cancelled leg, a renamed gate (an unknown
+  failing job is a hard failure), or renamed matrix legs (legs: none)
+  each keep the gate failure "real" — all four paths are unit-tested.
+  Its safety additionally rests on the `test` job staying a pure
+  roll-up; that obligation is recorded as an INVARIANT comment on the
+  job in ci.yml itself, where a future editor would trip over it.
+- _Cap_ — at most 2 auto-reruns per head SHA, counted from artifact
+  markers `ci-rerun-marker-<full sha>`: reruns bump `run_attempt` on
+  the same run row (`gh run list --commit <sha>` returns ONE row) and
+  conflate with the owner's manual reruns, so run history cannot count
+  our reruns. Each heal uploads the marker BEFORE issuing
+  `gh run rerun --failed` — a marker without a rerun wastes one slot
+  (visible, conservative), while a rerun without a marker could exceed
+  the cap. Markers expire after 90 days, far beyond a SHA's CI life.
+- _Blast radius_ — permissions `actions: write` (rerun; same scope
+  reads jobs/artifacts) + `contents: read` (checkout of the script and
+  the main-tip ref lookup); concurrency keyed by the completed run's
+  head SHA, so the self-heal loop AND any same-SHA replay serialize —
+  the marker count -> upload window can never be raced for one SHA;
+  `gh`-side job list is guarded by a total_count-vs-length check
+  (truncation = loud exit 2, never a decision), and the marker counter
+  awk refuses anything but per-line integers (an empty/malformed
+  counter fails the job — the cap must never fail open). The policy
+  lives only in decide.py's `decide()`, unit-tested on 5 fixtures —
+  two of them verbatim per-attempt job lists of run 44584364443
+  (attempt 1 = the derived-gate shape, attempt 2 = the cancelled-only
+  shape) — 18 tests, stdlib unittest, zero dependencies: the same
+  command runs locally and on every invocation of the workflow
+  (immediately after checkout). Python carries no dedicated linter
+  here, deliberately: the scripts are stdlib-only and ~300 LoC total,
+  and the D-041 chain's py_compile plus the unittest import surface
+  already gate what a linter would catch at this size; pulling in
+  ruff/pylint for two files was judged cost without coverage.
+- _Superseded commits_ — a workflow-level precondition outside the
+  pure function: a rerun is issued only while the completed run's head
+  SHA is still the tip of main. ci.yml's own `cancel-in-progress`
+  produces exactly the healable job shape (a push B landing mid-run
+  cancels run A's in-flight legs), and reviving a dead commit would
+  burn the macOS capacity this healer protects. The tip lookup happens
+  in the collect step (contents: read), a mismatch downgrades rerun to
+  noop with an explicit reason line, and a failed lookup fails the job
+  rather than guessing. Residual race (a push landing in the seconds
+  between the tip check and `gh run rerun`): accepted — bounded by the
+  cap, one wasted heal at worst. Known unfixable edge: the API exposes
+  no cancellation actor or reason, so a HUMAN cancelling a still-tip
+  run is indistinguishable from a capacity cancel and will be rerun;
+  the cap is the backstop, and the healer never masks red either way.
+  The downgrade path is drillable post-merge via the dispatch input
+  `force_tip_mismatch` (and was exercised pre-merge by running the
+  decide step's exact bash locally over the derived-gate fixture with
+  TIP_OK=false).
+
+Drill boundary, stated honestly: GitHub refuses to dispatch a workflow
+that exists only on a feature branch (`gh workflow run ci-rerun.yml
+--ref t-242` → "HTTP 404: workflow not found on the default branch" —
+captured verbatim during the T-242 drill), and `workflow_run` likewise
+runs only the default-branch copy, so NO live GitHub-runner execution
+of this file is possible before merge. What WAS verified, locally and
+end-to-end: the exact collect-step bash extracted from the workflow,
+run against the live API in both modes (live-mode shape over green run
+44584364443 → noop "nothing to heal", tip check passing; dry-run mode
+→ real jobs + real marker count 0 via --paginate); decide.py's CLI
+over all five fixtures; 18 unit tests; actionlint 1.7.7 + shellcheck
+clean; prettier/eslint/cargo-fmt/typecheck green. The rerun MECHANISM
+itself is proven by this repo's own history via the per-attempt jobs
+endpoint (GET /actions/runs/<id>/attempts/<n>/jobs): run 44584364443
+attempt 1 ended with build (macos-15) + test-matrix (macos-15)
+cancelled and the gate failed at 18:22 with zero real failures —
+exactly the derived-gate fixture; attempt 2 restarted precisely those
+jobs; attempt 3 restarted the one still-cancelled build with zero
+failed jobs present. NOT verifiable before merge: this workflow's own
+wiring (the workflow_run trigger, the upload-artifact marker path, the
+concurrency group under back-to-back completions). The first real
+cancelled macos leg on main after landing is the live confirmation;
+until then the live path rests on the drilled pieces, the mechanism's
+historical proof, and the discriminator's tests.

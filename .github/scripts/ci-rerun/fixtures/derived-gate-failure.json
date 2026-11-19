@@ -1,0 +1,125 @@
+{
+  "total_count": 12,
+  "jobs": [
+    {
+      "id": 135773183362,
+      "run_id": 44584364443,
+      "run_attempt": 1,
+      "name": "deny",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-19T18:07:08Z",
+      "completed_at": "2026-11-19T18:07:53Z"
+    },
+    {
+      "id": 135773183704,
+      "run_id": 44584364443,
+      "run_attempt": 1,
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-19T18:07:07Z",
+      "completed_at": "2026-11-19T18:08:18Z"
+    },
+    {
+      "id": 135773184040,
+      "run_id": 44584364443,
+      "run_attempt": 1,
+      "name": "build (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-19T18:07:07Z",
+      "completed_at": "2026-11-19T18:08:33Z"
+    },
+    {
+      "id": 135773184118,
+      "run_id": 44584364443,
+      "run_attempt": 1,
+      "name": "build (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-19T18:07:07Z",
+      "completed_at": "2026-11-19T18:09:18Z"
+    },
+    {
+      "id": 135773184126,
+      "run_id": 44584364443,
+      "run_attempt": 1,
+      "name": "test-matrix (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-19T18:07:08Z",
+      "completed_at": "2026-11-19T18:09:01Z"
+    },
+    {
+      "id": 135773184134,
+      "run_id": 44584364443,
+      "run_attempt": 1,
+      "name": "e2e",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-19T18:07:07Z",
+      "completed_at": "2026-11-19T18:07:38Z"
+    },
+    {
+      "id": 135773184207,
+      "run_id": 44584364443,
+      "run_attempt": 1,
+      "name": "build (macos-15-intel)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-19T18:07:09Z",
+      "completed_at": "2026-11-19T18:09:40Z"
+    },
+    {
+      "id": 135773184272,
+      "run_id": 44584364443,
+      "run_attempt": 1,
+      "name": "build (macos-15)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "started_at": "2026-11-19T18:07:05Z",
+      "completed_at": "2026-11-19T18:22:07Z"
+    },
+    {
+      "id": 135773184339,
+      "run_id": 44584364443,
+      "run_attempt": 1,
+      "name": "test-matrix (macos-15)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "started_at": "2026-11-19T18:07:05Z",
+      "completed_at": "2026-11-19T18:22:07Z"
+    },
+    {
+      "id": 135773184378,
+      "run_id": 44584364443,
+      "run_attempt": 1,
+      "name": "test-matrix (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-19T18:07:08Z",
+      "completed_at": "2026-11-19T18:14:02Z"
+    },
+    {
+      "id": 135773184878,
+      "run_id": 44584364443,
+      "run_attempt": 1,
+      "name": "test-matrix (macos-15-intel)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-19T18:07:09Z",
+      "completed_at": "2026-11-19T18:11:03Z"
+    },
+    {
+      "id": 135782675740,
+      "run_id": 44584364443,
+      "run_attempt": 1,
+      "name": "test",
+      "status": "completed",
+      "conclusion": "failure",
+      "started_at": "2026-11-19T18:22:10Z",
+      "completed_at": "2026-11-19T18:22:12Z"
+    }
+  ]
+}

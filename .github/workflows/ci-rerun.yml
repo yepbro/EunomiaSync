@@ -1,0 +1,315 @@
+# CI rerun — auto-heal CI runs that infrastructure cancelled (T-242).
+#
+# Problem: the macos arm64 legs of the CI workflow (build (macos-15),
+# sometimes test-matrix (macos-15)) are regularly cancelled by runner
+# capacity constraints while the code is green. Humans re-ran them by
+# hand every time (precedents: runs 44584364443 — two manual reruns,
+# 44574620012, 44123571125, 44147164960).
+#
+# Construction (why workflow_run and not a schedule): workflow_run fires
+# exactly once per completed CI run of main, hands us the run id in the
+# event payload, and — unlike schedule polling — needs no state of its
+# own. ci.yml's push trigger is main-only, so `workflows: [CI]` +
+# `branches: [main]` below means precisely "a CI run of main completed".
+# The limitation is accepted deliberately: workflow_run only ever runs
+# the copy of this file from the default branch, and workflow_dispatch
+# is subject to the same registration rule (a branch-only workflow is
+# not dispatchable — HTTP 404), so NOTHING here executes on a GitHub
+# runner before this file merges to main; see the drill boundary in
+# DECISIONS.md D-078 for what was verified locally instead. After
+# merge, workflow_dispatch is the manual drill: fixtures plus a
+# read-only dry-run over a real run.
+#
+# Decision policy — lives ONLY in .github/scripts/ci-rerun/decide.py so
+# it is unit-testable (tests + fixtures sit next to it and run as the
+# first step after checkout of every invocation of this workflow):
+#   * rerun IFF every non-success job has conclusion "cancelled", at
+#     least one job is cancelled, no job is incomplete, and no
+#     conclusion outside {success, failure, cancelled} exists
+#     (timing_failure / startup_failure / skipped / ... are never
+#     healed);
+#   * ANY real failure means no-op — red belongs to a human and is
+#     never masked. The run-level conclusion is ignored on purpose:
+#     GitHub reports infra-cancelled runs sometimes as "failure"
+#     (44123571125) and sometimes as "cancelled" (44147164960), so only
+#     per-job conclusions are trustworthy;
+#   * one provably-safe exception: the roll-up gate job "test"
+#     (ci.yml: `if: always()` over needs.test-matrix.result) fails
+#     whenever a matrix leg was cancelled even with zero real failures.
+#     That derived failure is excused only when every test-matrix leg is
+#     success/cancelled with at least one cancelled leg; any real leg
+#     failure blocks the heal, so the exception cannot mask red. The
+#     carve-out's safety additionally rests on ci.yml's `test` job
+#     staying a pure roll-up - guarded by a comment in ci.yml itself.
+#   * a rerun is issued only while the completed run's head SHA is
+#     still the tip of main: ci.yml's own cancel-in-progress produces
+#     the same job shape as a capacity cancel, and a superseded commit
+#     must not be revived (it would burn the very macOS capacity this
+#     healer exists to protect).
+#
+# Cap: at most 2 auto-reruns per commit SHA. Reruns do NOT create new
+# rows in the run list (they bump run_attempt on the same run), so
+# attempt counting cannot distinguish auto-reruns from the owner's
+# manual ones. Instead each auto-rerun first uploads an artifact marker
+# `ci-rerun-marker-<full sha>` (marker BEFORE the rerun: a failed rerun
+# wastes a slot, but the cap can never be exceeded by a lost marker),
+# and the counter below lists repo artifacts and counts markers of this
+# SHA. Markers expire after 90 days — far beyond a SHA's CI lifetime.
+#
+# Execution: `gh run rerun <id> --failed` re-runs the cancelled jobs
+# (plus the derived gate, which then passes). Every decision, and its
+# reason, is printed into the job log and the step summary for audit.
+
+name: CI rerun
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      fixture:
+        description: 'Simulate: decide over this recorded fixture; never issues a rerun'
+        type: choice
+        options:
+          - cancelled-only
+          - has-failure
+          - cap-exhausted
+          - derived-gate-failure
+          - mixed-failure-and-cancels
+          - timing-failure
+        default: cancelled-only
+      dry_run_run_id:
+        description: 'Dry-run: decide over the jobs of this real CI run id (read-only)'
+        type: string
+        default: ''
+      force_tip_mismatch:
+        description: 'Drill: force tip_ok=false to exercise the rerun->noop downgrade'
+        type: boolean
+        default: false
+
+concurrency:
+  # Keyed by the completed run's head SHA: the self-heal loop (same
+  # run, new attempt) AND any same-SHA replay serialize here, so the
+  # marker count -> upload window can never be raced for one SHA.
+  # Dispatch drills (no workflow_run context) key by their own run id.
+  group: ci-rerun-${{ github.event.workflow_run.head_sha || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  auto-rerun:
+    name: auto-rerun cancelled legs
+    # Defense in depth on top of `branches: [main]` above: only CI runs
+    # that came from a push (ci.yml pushes are main-only) are healed;
+    # PR-run completions never reach this job. Dispatch drills always run.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # gh run rerun needs actions:write; the same scope covers reading
+      # runs/jobs/artifacts. contents:read is the checkout of the
+      # decision script. Nothing else is granted.
+      actions: write
+      contents: read
+    steps:
+      - name: Check out the decision script and fixtures
+        uses: actions/checkout@v7
+      - name: Unit-test the decision function on recorded fixtures
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/ci-rerun/test_decide.py
+      - name: Collect the completed run's jobs and the cap counter
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          WR_RUN_ID: ${{ github.event.workflow_run.id }}
+          WR_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          IN_FIXTURE: ${{ inputs.fixture }}
+          IN_DRY_RUN_ID: ${{ inputs.dry_run_run_id }}
+          IN_FORCE_TIP_MISMATCH: ${{ inputs.force_tip_mismatch }}
+        run: |
+          set -euo pipefail
+          jobs_file="$RUNNER_TEMP/jobs.json"
+          mode="live"
+          run_id="$WR_RUN_ID"
+          sha="$WR_HEAD_SHA"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "$IN_DRY_RUN_ID" ]; then
+              mode="dry-run"
+              run_id="$IN_DRY_RUN_ID"
+            else
+              mode="fixture"
+            fi
+          fi
+          reruns=0
+          tip_ok="true"
+          # Drill hook: lets a dispatch exercise the rerun->noop tip
+          # downgrade, which fixture mode alone could never reach.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$IN_FORCE_TIP_MISMATCH" = "true" ]; then
+            tip_ok="false"
+          fi
+          case "$mode" in
+            fixture)
+              fixture_file="$IN_FIXTURE"
+              case "$IN_FIXTURE" in
+                # The cap is state, not a job shape: the cap-exhausted
+                # drill reuses the cancelled-only fixture with the cap
+                # already consumed, so no duplicate fixture drifts.
+                cap-exhausted) reruns=2; fixture_file="cancelled-only" ;;
+                cancelled-only|has-failure|derived-gate-failure|mixed-failure-and-cancels|timing-failure) ;;
+                *) printf 'unknown fixture: %s\n' "$IN_FIXTURE" >&2; exit 2 ;;
+              esac
+              cp -- ".github/scripts/ci-rerun/fixtures/$fixture_file.json" "$jobs_file"
+              run_id="(fixture: $IN_FIXTURE)"
+              ;;
+            live|dry-run)
+              case "$run_id" in
+                ''|*[!0-9]*) printf 'run id must be numeric, got: %s\n' "$run_id" >&2; exit 2 ;;
+              esac
+              if [ "$mode" = "dry-run" ]; then
+                sha="$(gh api "repos/$GH_REPO/actions/runs/$run_id" --jq .head_sha)"
+              fi
+              if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+                printf 'head sha is not a 40-char hex string: %s\n' "$sha" >&2
+                exit 2
+              fi
+              gh api "repos/$GH_REPO/actions/runs/$run_id/jobs?per_page=100" > "$jobs_file"
+              # The cap counter: how many auto-rerun markers exist for
+              # this SHA. gh applies -q per page, so sum the page counts;
+              # the awk refuses anything but per-line integers (an empty
+              # or malformed counter must fail the job, not fail open).
+              pages="$RUNNER_TEMP/artifact-pages.txt"
+              gh api --paginate --method GET \
+                -q '[.artifacts[]? | select(.name == "ci-rerun-marker-'"$sha"'")] | length' \
+                "repos/$GH_REPO/actions/artifacts?per_page=100" > "$pages"
+              reruns="$(awk '
+                /^[0-9]+$/ { s += $1; next }
+                { bad = 1 }
+                END { if (bad || NR == 0) exit 1; printf "%d\n", s }
+              ' "$pages")" || { printf 'cap counter output not parseable\n' >&2; exit 2; }
+              # Superseded commits must not be revived: ci.yml's
+              # cancel-in-progress leaves the same job shape as a
+              # capacity cancel, so gate on the run's SHA still being
+              # main's tip. A failed ref lookup fails the job (loud,
+              # no rerun) rather than guessing.
+              tip="$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)"
+              if [ "$sha" != "$tip" ]; then
+                tip_ok="false"
+                printf 'head sha %s is no longer the tip of main (%s) - superseded commit\n' "$sha" "$tip"
+              fi
+              ;;
+          esac
+          {
+            echo "mode=$mode"
+            echo "run_id=$run_id"
+            echo "head_sha=$sha"
+            echo "rerun_count=$reruns"
+            echo "tip_ok=$tip_ok"
+            echo "jobs_file=$jobs_file"
+          } >> "$GITHUB_OUTPUT"
+          echo "collected: mode=$mode run_id=$run_id head_sha=$sha rerun_count=$reruns tip_ok=$tip_ok"
+      - name: Decide
+        id: decide
+        env:
+          JOBS_FILE: ${{ steps.collect.outputs.jobs_file }}
+          RERUN_COUNT: ${{ steps.collect.outputs.rerun_count }}
+          TIP_OK: ${{ steps.collect.outputs.tip_ok }}
+        run: |
+          set -euo pipefail
+          decision_file="$RUNNER_TEMP/decision.txt"
+          python3 .github/scripts/ci-rerun/decide.py \
+            --jobs "$JOBS_FILE" \
+            --rerun-count "$RERUN_COUNT" \
+            --cap 2 > "$decision_file"
+          cat "$decision_file"
+          action="$(sed -n 's/^ACTION=//p' "$decision_file" | head -n 1)"
+          if [ "$action" != "rerun" ] && [ "$action" != "noop" ]; then
+            echo "decide.py produced no parseable ACTION line" >&2
+            exit 2
+          fi
+          # Workflow-level precondition, deliberately outside the pure
+          # decision function: a superseded commit is not infrastructure
+          # damage, even though ci.yml's cancel-in-progress produces
+          # the identical job shape.
+          if [ "$action" = "rerun" ] && [ "$TIP_OK" != "true" ]; then
+            echo "downgraded: rerun -> noop (head sha is no longer main's tip)"
+            {
+              echo "ACTION=noop"
+              echo "REASON=head sha is no longer the tip of main - superseded by a newer push (ci.yml cancel-in-progress), not infrastructure"
+            } > "$decision_file"
+            cat "$decision_file"
+            action="noop"
+          fi
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+      - name: Write the marker payload
+        if: steps.decide.outputs.action == 'rerun' && steps.collect.outputs.mode == 'live'
+        env:
+          RUN_ID: ${{ steps.collect.outputs.run_id }}
+          HEAD_SHA: ${{ steps.collect.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          printf 'ci-rerun marker: one consumed auto-rerun slot\nrun_id=%s\nhead_sha=%s\nrecorded_at=%s\n' \
+            "$RUN_ID" "$HEAD_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            > "$RUNNER_TEMP/ci-rerun-marker.txt"
+      # The marker is uploaded BEFORE the rerun is issued: a marker
+      # without a rerun wastes one cap slot (visible, conservative),
+      # while a rerun without a marker would let the cap be exceeded.
+      - name: Record the auto-rerun marker (consumes one cap slot)
+        if: steps.decide.outputs.action == 'rerun' && steps.collect.outputs.mode == 'live'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-rerun-marker-${{ steps.collect.outputs.head_sha }}
+          path: ${{ runner.temp }}/ci-rerun-marker.txt
+          retention-days: 90
+          if-no-files-found: error
+      - name: Rerun the cancelled legs
+        if: steps.decide.outputs.action == 'rerun' && steps.collect.outputs.mode == 'live'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ steps.collect.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          gh run rerun "$RUN_ID" --failed
+          echo "rerun issued for run $RUN_ID (only the non-success jobs)"
+      - name: Simulated rerun decision (drill) - never executed outside live mode
+        if: steps.decide.outputs.action == 'rerun' && steps.collect.outputs.mode != 'live'
+        env:
+          MODE: ${{ steps.collect.outputs.mode }}
+        run: |
+          set -euo pipefail
+          echo "SIMULATION: decision was 'rerun', but mode=$MODE never executes gh run rerun."
+      - name: Audit summary
+        if: always()
+        env:
+          MODE: ${{ steps.collect.outputs.mode }}
+          RUN_ID: ${{ steps.collect.outputs.run_id }}
+          HEAD_SHA: ${{ steps.collect.outputs.head_sha }}
+          RERUN_COUNT: ${{ steps.collect.outputs.rerun_count }}
+          TIP_OK: ${{ steps.collect.outputs.tip_ok }}
+          ACTION: ${{ steps.decide.outputs.action }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          reason="unavailable (decide step failed or never ran)"
+          if [ -s "$RUNNER_TEMP/decision.txt" ]; then
+            reason="$(sed -n 's/^REASON=//p' "$RUNNER_TEMP/decision.txt" | head -n 1)"
+          fi
+          {
+            echo "### CI rerun — decision audit"
+            echo "- mode: \`$MODE\` (live = the workflow_run path; fixture/dry-run are drills)"
+            echo "- completed CI run: \`$RUN_ID\`"
+            echo "- head SHA: \`$HEAD_SHA\` (still main's tip: \`$TIP_OK\`)"
+            echo "- auto-reruns of this SHA already recorded: \`$RERUN_COUNT\` (cap 2)"
+            echo "- decision: **$ACTION**"
+            echo "- reason: $reason"
+            case "$RUN_ID" in
+              ''|*[!0-9]*) ;;
+              *) echo "- completed run: $REPO_URL/actions/runs/$RUN_ID" ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"

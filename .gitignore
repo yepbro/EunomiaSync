@@ -53,3 +53,7 @@ Thumbs.db
 
 # Local Netlify folder
 .netlify
+
+# Python bytecode (CI helper scripts)
+__pycache__/
+*.pyc
