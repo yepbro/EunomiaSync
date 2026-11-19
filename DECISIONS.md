@@ -3944,3 +3944,62 @@ and the check is the repo's enforceable contract, while verbatim-ness
 has no enforcement and its only witness — this entry — now records the
 exact deviation. The placeholder values remain owner legal decisions
 recorded on the task card, outside this entry's scope.
+
+### D-060 — CI test matrix on four OS legs behind a stable `test` gate; frontend tests pinned to the Linux leg — 2026-11-19
+
+Problem: REL-001 (P0) and spec §14 require CI on Windows, macOS arm64 and
+x64, and Ubuntu, but the `test` job ran `cargo test --workspace` on Linux
+only — the boundary D-056 recorded as "lands with REL-001's fuller matrix",
+and D-058's dormant non-Linux test pins never executed anywhere. Three
+design questions: matrix the existing `test` job or add a separate matrix
+job; whether every leg needs the Linux job's pnpm/Node setup; and what a
+matrix does to `main`'s branch protection, whose required checks name the
+literal context `test` (verified via the protection API: lint, test, deny,
+e2e, build × 3 legs).
+
+Solution: a new `test-matrix` job (the card's "new test matrix" option)
+runs the four legs `[ubuntu-latest, windows-latest, macos-15,
+macos-15-intel]` with `fail-fast: false` and `timeout-minutes: 45`, and the
+`test` job id becomes a tiny `if: always()` gate that fails unless
+`needs.test-matrix.result == 'success'`. Matrixing `test` itself would have
+renamed its check contexts to `test (ubuntu-latest)` & co and orphaned the
+required context `test` — the first PR would sit on "Expected — Waiting for
+status" forever (round-1 review P0). The gate keeps the documented merge
+gate satisfiable with zero settings churn and survives future leg changes;
+`build (macos-15-intel)` still has to be added to the required list by hand
+(per-leg build contexts cannot be aggregated away without the same rename
+problem) — flagged to the operator at merge time. Per-leg dependencies
+mirror the build matrix's OS-conditional approach: the apt step runs only
+on `runner.os == 'Linux'` (Windows/macOS compile the Tauri stack from
+system libraries, exactly as the build legs already do); pnpm/Node/Vitest
+steps run only on the Linux leg, gated on `runner.os == 'Linux'` rather
+than the label string (a future `ubuntu-22.04` pin must not silently
+switch the frontend tests off), because `cargo test` never invokes Node
+(debug-profile `generate_context!` serves `devUrl`, not `frontendDist`, so
+no `dist/` is needed) and REL-001's frontend stack is platform-independent
+— the Linux leg runs exactly today's sequence of steps.
+`Swatinem/rust-cache@v2` keys per OS automatically, as in the build matrix.
+The build matrix gains `macos-15-intel` for the §14 macOS x64 leg, and
+`timeout-minutes: 60` bounds its hung-leg worst case. Runner facts,
+verified against actions/runner-images#13045, the runner-images README and
+the GitHub runners reference on 2026-11-19: `macos-15-intel` is the macOS
+15 x64 image on the standard free public-repo class (4 CPU / 14 GB RAM;
+the same image's `-large` alias is the paid larger runner, not this
+class); the label is officially available until August 2027, the
+successor `macos-26-intel` already provides the standard x64 image, and
+that 2025 announcement also signaled x86_64's eventual end — watch
+runner-images announcements when planning beyond macos-26 — all encoded
+in a workflow comment
+together with the queue note (Intel legs queue longer; one run now starts
+4 macOS jobs against the free plan's 5 concurrent macOS slots). Spec
+honestly notes: REL-001 says "Ubuntu 22.04" while the matrix keeps
+`ubuntu-latest` (24.04 today), because GitHub's own 22.04 image is in its
+deprecation window — flagged for a future spec revision, not silently
+changed here; REL-001's artifact build stays a debug smoke build (no
+bundled .dmg/.app yet), and its signing, release draft and
+`latest.json` items stay outside CI by design — they belong to the
+release/packaging task that owns the updater keys (D-005), and no
+workflow job covers them yet. Known
+boundary: whether the suite is green on Windows/macOS is provable only by
+a real run after the push (CI-monitoring rule); the pinned proptest seed
+(D-056) keeps the legs comparable once they run.

@@ -45,12 +45,30 @@ jobs:
       - name: TypeScript
         run: pnpm run typecheck
 
-  test:
-    name: test
-    runs-on: ubuntu-latest
+  test-matrix:
+    name: test-matrix (${{ matrix.os }})
+    strategy:
+      # A red leg must not cancel the others: cross-OS failures are the
+      # signal this matrix exists to catch (REL-001, spec §15.5).
+      fail-fast: false
+      matrix:
+        # macos-15 is arm64 (M1); macos-15-intel is the macOS 15 x64
+        # image — the standard free runner class for public repos
+        # (4 CPU / 14 GB RAM). Per actions/runner-images#13045 the
+        # label is available until August 2027; macos-26-intel already
+        # provides the standard x64 successor — migrate before the label
+        # retires (that 2025 announcement also signaled x86_64's
+        # eventual end, so watch runner-images news beyond macos-26).
+        # Intel runners also queue longer than arm64 ones, and one run now
+        # starts 4 macOS jobs against the free plan's 5 concurrent macOS
+        # slots: a queued or slow leg is infrastructure, not a flake.
+        os: [ubuntu-latest, windows-latest, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - name: Install Tauri system dependencies
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev build-essential curl wget file
@@ -58,19 +76,43 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+      # Frontend unit tests stay on the Linux leg only (REL-001 reads the
+      # frontend stack as platform-independent); the other legs run Rust
+      # tests and need neither pnpm nor Node. Gated on runner.os, not the
+      # label string, so a future ubuntu pin cannot switch them off.
       - name: Set up pnpm
+        if: runner.os == 'Linux'
         uses: pnpm/action-setup@v4
       - name: Set up Node.js
+        if: runner.os == 'Linux'
         uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
       - name: Install frontend dependencies
+        if: runner.os == 'Linux'
         run: pnpm install --frozen-lockfile
       - name: Rust tests
         run: cargo test --workspace
       - name: Frontend unit tests
+        if: runner.os == 'Linux'
         run: pnpm run test
+
+  # Stable required-check context: main's branch protection requires a
+  # check literally named "test", while a matrix reports one check per
+  # leg — this gate maps the matrix roll-up back onto that one context.
+  test:
+    name: test
+    needs: test-matrix
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate on every test-matrix leg
+        env:
+          MATRIX_RESULT: ${{ needs.test-matrix.result }}
+        run: |
+          echo "test-matrix roll-up result: $MATRIX_RESULT"
+          test "$MATRIX_RESULT" = "success"
 
   deny:
     name: deny
@@ -103,8 +145,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-15]
+        # macos-15-intel adds the macOS x64 compile leg (spec §14 wants
+        # arm64 and x64 artifacts; the bundled .dmg/.app artifacts arrive
+        # with the release task — this is the x64 build smoke); for the
+        # Intel-label lifecycle see the comment on the test-matrix job
+        # above.
+        os: [ubuntu-latest, windows-latest, macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - name: Set up pnpm
