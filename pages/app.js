@@ -314,25 +314,25 @@
       ? 'No text yet — write the main variant here.'
       : 'Instruction text (Markdown)…'
 
-    const variants = VARIANTS[name] ?? []
-    if (variants.length >= 2) {
-      editVariants.hidden = false
-      editVariants.open = false // collapsed by default every time
-      editVariantsSummary.textContent = `Variants (${variants.length})`
-      editVariantsList.innerHTML = variants
-        .map(
-          (v, i) =>
-            `<div class="variant-item">` +
-            `<label class="variant-name" for="variant-text-${i}">${escapeHtml(v.name)}</label>` +
-            `<textarea id="variant-text-${i}" class="variant-textarea" rows="2">${escapeHtml(v.text)}</textarea>` +
-            `</div>`,
-        )
-        .join('')
-      editLabel.textContent = 'Text'
-    } else {
-      editVariants.hidden = true
-      editLabel.textContent = 'Text (main variant)'
-    }
+    /* The accordion lists every variant the instruction has: mapped ones
+       explicitly; single-variant rows get their "Main" synthesized from
+       the instruction text; badge-less rows have no variants at all */
+    const variantCount = Number(row.querySelector('.chip')?.textContent ?? 0)
+    const variants =
+      VARIANTS[name] ?? (variantCount >= 1 ? [{ name: 'Main', text: editText.value }] : [])
+    editVariants.hidden = variants.length === 0
+    editVariants.open = false // collapsed by default every time
+    editVariantsSummary.textContent = `Variants (${variants.length})`
+    editVariantsList.innerHTML = variants
+      .map(
+        (v, i) =>
+          `<div class="variant-item">` +
+          `<label class="variant-name" for="variant-text-${i}">${escapeHtml(v.name)}</label>` +
+          `<textarea id="variant-text-${i}" class="variant-textarea" rows="2">${escapeHtml(v.text)}</textarea>` +
+          `</div>`,
+      )
+      .join('')
+    editLabel.textContent = variants.length ? 'Text' : 'Text (main variant)'
     editDialog.showModal()
   })
 
