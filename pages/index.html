@@ -11,13 +11,15 @@
   sync summary modal (MAIN-024…031, OUT-009: simulated run with k-of-N
   progress, per-project result table, pending-changes list), app settings
   modal (DEF-001…005: five sections, applies immediately, no Save button),
+  archived projects modal (D-10: list + Restore flow, DB-014/015),
   placeholder modals.
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
   (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-002…007 (scan) +
   PRJ-008…012 (project settings) + § 7.3 LIB-026…027 (instruction
   history) + § 7.5 OUT-009 + § 6.2 run statuses + § 7.2 DEF-001…005
-  (settings, §6.5 keys, §11.3 Ctrl/Cmd+,) + UI-001 (window, pinned
+  (settings, §6.5 keys, §11.3 Ctrl/Cmd+,) + D-10 (archived projects
+  screen, PRJ-013…018 restore, DB-014/015) + UI-001 (window, pinned
   sync panel), UI-021 (light/dark via OS setting), UI-022 (reduced
   motion).
   Tooltips are native `title` attributes; accessible names are real labels.
@@ -3315,7 +3317,13 @@
                   Updates come from GitHub Releases through the signed Tauri updater (UPD-002,
                   D-27).
                 </p>
+                <!-- D-10 screens as link-buttons: "Archived projects…"
+                     opens the archived list directly; "Excluded paths…"
+                     joins this row next to it in a later commit -->
                 <div class="set-buttons">
+                  <button type="button" id="archived-open-btn" class="btn btn-ghost">
+                    Archived projects…
+                  </button>
                   <button
                     type="button"
                     class="btn btn-ghost js-open-dialog"
@@ -3343,6 +3351,53 @@
 
           <div class="modal-actions">
             <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Archived projects (D-10, PRJ-013…018): opened from the settings
+         footer — one row per archived project with a Restore action, in
+         the scan-results row idiom. Archived projects keep their
+         assignments, do not take part in syncs and their folders are not
+         touched (DB-014); adding the folder of an archived project again
+         offers to restore it (DB-015). Rows are rendered by app.js from
+         the demo list; restoring removes the row in memory and never
+         touches the matrix. -->
+      <dialog id="archived-dialog" class="modal modal-lg" aria-labelledby="ar-title">
+        <form method="dialog">
+          <h2 id="ar-title">Archived projects</h2>
+          <p class="modal-text">
+            Archived projects keep their assignments, do not take part in syncs, and their folders
+            are not touched (DB-014).
+          </p>
+
+          <div class="ar-body">
+            <ul id="ar-rows" class="ar-list"></ul>
+            <p id="ar-empty" class="hist-empty" hidden>No archived projects.</p>
+            <p class="ps-hint">
+              If you add the folder of an archived project again, the app offers to restore it
+              (DB-015).
+            </p>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Restore-archived-project confirmation (PRJ-018, D-10): a dedicated
+         dialog — the shared #confirm-dialog is hard-labeled "Delete".
+         Confirming brings the project back active with its assignments and
+         removes its path from the exclusions so a scan finds it again; the
+         demo only removes the row from the in-memory list. -->
+      <dialog id="restore-project-dialog" class="modal" aria-labelledby="ar-restore-title">
+        <form method="dialog">
+          <h2 id="ar-restore-title">Restore project</h2>
+          <p id="ar-restore-text" class="modal-text">Placeholder.</p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="restore" class="btn btn-primary">Restore</button>
           </div>
         </form>
       </dialog>

@@ -5,6 +5,7 @@
    (repository scan modal, NFR-015), PRJ-008…012 (project settings
    modal), § 7.5 OUT-009 + § 6.2 run statuses (sync summary modal,
    MAIN-024…031), § 7.2 DEF-001…005 (app settings modal, §6.5 keys),
+   D-10 (archived projects modal, PRJ-013…018, DB-014/015),
    UI-001, UI-011, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
@@ -2182,7 +2183,7 @@ label.scan-row:hover {
   inline-size: 240px;
 }
 
-/* About / Check for updates */
+/* D-10 screens + About / Check for updates */
 .set-buttons {
   display: flex;
   gap: 10px;
@@ -2191,6 +2192,52 @@ label.scan-row:hover {
 /* Static status line above the footer: hint must not shrink or scroll */
 .modal-lg .set-status {
   flex: none;
+}
+
+/* ----- Archived projects modal (D-10, PRJ-013…018) ------------------------ */
+/* The archived list: one row per archived project in the scan-results
+   row idiom (.scan-row), DB-014 subtitle in the header and a DB-015
+   hint under the list; Restore is confirmed in the small dedicated
+   dialog. The demo list only shrinks, so the dialog sizes to its
+   content instead of the fixed .modal-lg height. */
+
+#archived-dialog form {
+  block-size: auto;
+}
+
+.ar-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+/* `hidden` must win over the flex display above (UI-012 empty state) */
+.ar-list[hidden] {
+  display: none;
+}
+
+.ar-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* "Restore <name>" sits at the end of the row */
+.ar-restore {
+  margin-inline-start: auto;
+}
+
+/* "Archived 3 Nov 2026" / "Found by scan": muted, never wraps */
+.ar-meta {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 /* ----- Motion (UI-022: honor the OS "reduce motion" setting) ------------ */

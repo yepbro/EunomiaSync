@@ -14,6 +14,8 @@
    app settings modal (DEF-001…005: §6.5 SETTINGS demo object, controls
    apply immediately — no Save button, inline range errors, editable
    scan exclusions, toolbar button + Ctrl/Cmd+, per §11.3),
+   archived projects modal (D-10, PRJ-013…018: list with a Restore
+   action confirmed in a dedicated dialog; DB-014/015),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -2547,7 +2549,10 @@
      D-18 (export/import of settings in JSON) has no UI in this
      prototype; sync.skip_identical and ui.language live in SETTINGS
      without a control. "About…" / "Check for updates" open the generic
-     placeholder dialog for now (UPD-001, UPD-005). */
+     placeholder dialog for now (UPD-001, UPD-005); the footer row also
+     holds the D-10 entry buttons — "Archived projects…" opens the
+     archived list directly, "Excluded paths…" joins it in a later
+     commit. */
 
   /* §6.5 defaults (the real app keeps them in the settings table as
      JSON — D-18); key names mirror the table, camelCased */
@@ -2823,6 +2828,112 @@
 
   setExclAddBtn.addEventListener('click', addExclusion)
   setExclInput.addEventListener('input', () => setFieldError(setExclInput, setExclError, ''))
+
+  /* ---------- Archived projects modal (D-10) ------------------------------- */
+  /* The D-10 screen: every archived project with a Restore action.
+     Archived projects keep their assignments, do not take part in syncs
+     and their folders are not touched (DB-014); restoring (PRJ-018)
+     brings the project back active and removes its path from the
+     exclusions so a scan finds it again, and adding an archived folder
+     again offers to restore it (DB-015). The demo state is an in-memory
+     list: restore removes the row and never touches the matrix. */
+
+  /* Demo archived projects; colors are fixed-palette (DB-040) values and
+     addedVia matches the wording of the project settings modal */
+  const ARCHIVED = [
+    {
+      name: 'old-crm',
+      path: '~/projects/legacy/old-crm',
+      color: '#8b5cf6', // Violet
+      archivedAt: '3 Nov 2026',
+      addedVia: 'Found by scan',
+    },
+    {
+      name: 'legacy-parser',
+      path: '~/projects/legacy/legacy-parser',
+      color: '#f59e0b', // Amber
+      archivedAt: '28 Oct 2026',
+      addedVia: 'Manual',
+    },
+    {
+      name: 'wiki-bot',
+      path: '~/projects/apps/wiki-bot',
+      color: '#06b6d4', // Cyan
+      archivedAt: '12 Oct 2026',
+      addedVia: 'Found by scan',
+    },
+  ]
+
+  const arDialog = document.getElementById('archived-dialog')
+  const arList = document.getElementById('ar-rows')
+  const arEmpty = document.getElementById('ar-empty')
+  const arCloseBtn = arDialog.querySelector('button[value="close"]')
+  const arRestoreDialog = document.getElementById('restore-project-dialog')
+  const arRestoreText = document.getElementById('ar-restore-text')
+
+  /* One row per archived project, in the scan-results row idiom; every
+     string goes through escapeHtml. The Restore button repeats the
+     project name for screen readers (identical visible labels). */
+  function renderArchivedRows() {
+    arList.innerHTML = ARCHIVED.map(
+      (p, i) =>
+        '<li class="scan-row">' +
+        `<span class="proj-color" style="--c: ${p.color}" aria-hidden="true"></span>` +
+        `<span class="scan-row-name">${escapeHtml(p.name)}</span>` +
+        `<code class="scan-row-path">${escapeHtml(p.path)}</code>` +
+        `<span class="ar-meta">Archived ${escapeHtml(p.archivedAt)}</span>` +
+        `<span class="ar-meta">${escapeHtml(p.addedVia)}</span>` +
+        '<button type="button" class="btn btn-ghost ar-restore"' +
+        ` data-idx="${i}" aria-label="Restore ${escapeHtml(p.name)}">Restore</button>` +
+        '</li>',
+    ).join('')
+    const empty = ARCHIVED.length === 0
+    arList.hidden = empty
+    arEmpty.hidden = !empty
+  }
+
+  /* Re-render on every open: reopening reflects the current demo state */
+  function openArchivedProjects() {
+    renderArchivedRows()
+    arDialog.showModal()
+    arCloseBtn.focus()
+  }
+
+  /* Entry point: ghost link-button in the settings footer */
+  document.getElementById('archived-open-btn').addEventListener('click', openArchivedProjects)
+
+  arCloseBtn.addEventListener('click', () => {
+    arDialog.close('close')
+  })
+
+  /* Restore (PRJ-018): confirm first in the dedicated small dialog — the
+     shared #confirm-dialog is not reusable, its button is hard-labeled
+     "Delete". Cancel/Esc leave the list untouched. */
+  let pendingArRestore = null
+
+  arList.addEventListener('click', (e) => {
+    const btn = e.target.closest('.ar-restore')
+    if (!btn) return
+    const i = Number(btn.dataset.idx)
+    if (!Number.isInteger(i) || i < 0 || i >= ARCHIVED.length) return
+    const p = ARCHIVED[i]
+    pendingArRestore = i
+    arRestoreText.textContent =
+      `"${p.name}" will be restored. The project comes back active with all its assignments, ` +
+      'and its path is removed from the excluded paths so a scan can find it again.'
+    arRestoreDialog.showModal()
+  })
+
+  arRestoreDialog.addEventListener('close', () => {
+    const i = pendingArRestore
+    pendingArRestore = null
+    if (i === null || arRestoreDialog.returnValue !== 'restore') return
+    ARCHIVED.splice(i, 1)
+    renderArchivedRows()
+    /* The confirmed row is gone from the DOM: keep focus inside the dialog */
+    const nextFocus = arList.querySelector('.ar-restore') ?? arCloseBtn
+    nextFocus.focus()
+  })
 
   /* ---------- Placeholder dialogs (native <dialog>) ------------------------ */
 
