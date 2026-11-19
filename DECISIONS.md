@@ -4634,3 +4634,94 @@ has one — is a heading of level L or higher. Known open item, as in
 D-053/D-062: lib.rs's `//!` module list and ARCHITECTURE.md gain no
 `heading_range` entry — the T-045 brief capped the lib.rs change at
 one `pub mod heading_range;` line while neighbors work in the crate.
+
+### D-071 — The ALG-061 move as a pure cut-insert-renumber over original-list indices — 2026-11-19
+
+Problem: T-046 transcribes ALG-061 ("A move runs in one transaction:
+cut the range, insert it at the target position, renumber `position`
+from 1. Moving one instruction is a special case of a one-item
+range") into eunomia-core, on top of T-045's `heading_range` (D-070).
+Four points the spec fixes only in prose needed an explicit reading:
+what the "target position" names; whether the range's own boundaries
+count as "inside itself" (ALG-060/LIB-034 ban only the inside); where
+DB-005's renumbering lives in types that deliberately carry no
+`position` number (D-042); and how the task's "rejected with
+E_VALIDATION" wording reaches a crate that knows neither `AppError`
+nor the §7.10 registry.
+
+Solution: module `reorder`
+(`crates/eunomia-core/src/reorder.rs`), pure functions over
+`&[LibraryItem]` returning a NEW order (crate style, D-070) — never
+mutation:
+
+- `move_range(items, range, target)` is the ALG-061 primitive over
+  ANY non-empty range (ALG-061's one-instruction move is `i..i+1`,
+  §7.3 "Single instructions can be moved between sections");
+  `move_branch(items, heading_index, target)` and
+  `move_branch_by_id(items, &ItemId, target)` resolve the ALG-060
+  branch inside via `heading_range`/`heading_branch_by_id`, so a
+  caller cannot pass a range that disagrees with the tree.
+- The target is an index into the list BEFORE the move, `0..=len`:
+  every item outside the range that sits before `target` stays before
+  the landed range. It is NOT an index into the post-cut remainder —
+  original-list indexing is what makes "inside its own range"
+  expressible at all (an interior target names a gap between the
+  range's own items), turning D-070's foresight into the plain check
+  `start < target < end`. Under remainder indexing the cut items
+  would not exist to gap apart and the guard would have no input.
+- The boundaries `target == range.start` and `target == range.end`
+  are the range's current place, not its inside: valid moves that
+  change nothing (the same order returns, "renumbered" trivially).
+  Only a strictly interior target is rejected. This fixes the
+  T-046 brief's open question (first/last branch onto itself = no-op).
+- Renumbering (DB-005 "position starting from 1, with no gaps …
+  renumbers the affected range in one transaction"): the returned
+  collection IS the numbering — index `i` is position `i + 1`,
+  `1..=len` by construction; core never mints the number (D-042's
+  no-drift rule). The "one transaction" is the store layer's move
+  command: hand over a slice in library order, write the returned
+  order back as positions in a single transaction (writing only
+  changed rows is that command's latitude — the invariant is over
+  the whole list).
+- `ReorderError` (thiserror, D-062 precedent): `InvalidRange`
+  (empty/past-the-end), `TargetOutOfBounds` (target must be
+  `0..=len`), `TargetInsideMovedRange` (the ALG-060/LIB-034
+  rejection), `Branch(HeadingBranchError)` (transparent). Precedence:
+  range → target bounds → interior, and the branch resolves before
+  the target is looked at (no branch, no range to check against).
+- E_VALIDATION boundary: the registry belongs to src-tauri's
+  `AppError`/`ErrorCode` (D-034); `TargetInsideMovedRange` is the
+  core twin the command layer will map to `E_VALIDATION` — that
+  mapping is a future command-layer task, exactly as D-062 left
+  `E_MARKERS_INVALID`.
+- `Range<usize>` has no `Display`; the interior-target message uses
+  `{range:?}`, which prints `0..4` identically.
+
+lib.rs gains `pub mod reorder;` plus `//!` bullets for `reorder` AND
+`heading_range` — the doc-list entry D-070 left open; T-046's window
+is alone in the crate, so the conflict risk that justified the cap is
+absent. The list still lacks entries for `assembly_b`, `compare`,
+`dirty`, `extra_files`, `hash`, `marker`, `markers`, `target_file`
+(and ARCHITECTURE.md its module map entries): an open item for the
+next task that owns those zones or a docs pass.
+
+Tests: the DoD as unit tests — branch moves down/up/across several
+branches and INTO another branch's section (legal: only the own
+inside is banned) all keep the nested order and answer with a full
+permutation (a `HashMap` multiset check = DB-005's "no gaps, no
+duplicates" over the implied numbering); every interior target of a
+fat branch and of a nested branch is rejected (beginning/middle/end);
+one-item ranges have no inside and move to every target; both
+boundaries of every branch are no-ops; first branch to 0 and last to
+`len` are identity; empty list rejects every range/branch form;
+single-item list; error precedence and pinned messages; the by-id
+form equals the index form and rejects unknown/instruction ids; and
+the T-045 integration — a real `heading_branch` range moves to the
+end and to the top, arrives whole (recomputed by
+`heading_branch_by_id`), and moves back to the exact original order.
+One proptest (256 cases, fixed seed 46 — D-053/D-070 run policy)
+sweeps every heading's branch × every target of random trees (plus
+every one-item range × target): interior targets are rejected, every
+other move is a permutation, the range lands whole and in order, the
+untouched items keep their relative order, and exactly the items the
+target leaves before it precede the landed range.

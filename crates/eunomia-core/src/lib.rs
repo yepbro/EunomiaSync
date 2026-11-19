@@ -27,6 +27,11 @@
 //!   applies to every snapshot text before it reaches a file
 //! - [`body`] — the ALG-020…022 assembly of a project's file body
 //!   from a snapshot (§9.2)
+//! - [`heading_range`] — the ALG-060 branch range of a section
+//!   heading, as an index range over the ordered items
+//! - [`reorder`] — the ALG-061 move: cut a branch (or a one-item
+//!   range), insert it at the target position, renumber `position`
+//!   from 1
 
 pub mod assembly_b;
 pub mod assignment;
@@ -41,5 +46,6 @@ pub mod marker;
 pub mod markers;
 pub mod normalize;
 pub mod project;
+pub mod reorder;
 pub mod snapshot;
 pub mod target_file;
