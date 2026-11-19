@@ -452,6 +452,14 @@
   let pendingDeleteCell = null
   const customTexts = new WeakMap()
 
+  /* Solid icons (Material-style paths), colored via currentColor */
+  const ICONS = {
+    add: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3h2v8h8v2h-8v8h-2v-8H3v-2h8V3z"/></svg>',
+    edit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.03a.996.996 0 0 0 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>',
+    delete:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>',
+  }
+
   function refreshCellIcons(td) {
     const row = td.closest('tr')
     const instr = instructionDisplay(row)
@@ -473,19 +481,20 @@
     if (!box) {
       box = document.createElement('span')
       box.className = 'cell-icons'
-      td.append(box)
+      td.querySelector('.cell-assign')?.append(box)
     }
-    const mk = (cls, title) => {
+    const mk = (kind, title) => {
       const b = document.createElement('button')
       b.type = 'button'
-      b.className = `cell-icon ${cls}`
+      b.className = `cell-icon cell-icon--${kind}`
       b.title = title
       b.setAttribute('aria-label', title)
+      b.innerHTML = ICONS[kind]
       return b
     }
     box.replaceChildren()
     if (isCustom) {
-      const edit = mk('cell-icon--edit', `Edit the custom instruction — ${instr} — ${proj}`)
+      const edit = mk('edit', `Edit the custom instruction — ${instr} — ${proj}`)
       edit.addEventListener('click', () => {
         pendingCustomCell = td
         openEditModal({
@@ -495,7 +504,7 @@
           variants: [],
         })
       })
-      const del = mk('cell-icon--delete', `Delete the custom instruction — ${instr} — ${proj}`)
+      const del = mk('delete', `Delete the custom instruction — ${instr} — ${proj}`)
       del.addEventListener('click', () => {
         pendingDeleteCell = td
         confirmTitle.textContent = 'Delete custom instruction'
@@ -504,7 +513,7 @@
       })
       box.append(edit, del)
     } else {
-      const add = mk('cell-icon--add', `Create a custom instruction — ${instr} — ${proj}`)
+      const add = mk('add', `Create a custom instruction — ${instr} — ${proj}`)
       add.addEventListener('click', () => {
         pendingCustomCell = td
         openEditModal({
@@ -615,6 +624,7 @@
     const btn = document.createElement('button')
     btn.type = 'button'
     btn.className = 'cell-icon cell-icon--edit proj-edit'
+    btn.innerHTML = ICONS.edit
     btn.title = `Edit project — ${proj}`
     btn.setAttribute('aria-label', `Edit project — ${proj}`)
     btn.addEventListener('click', () => {

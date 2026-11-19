@@ -542,8 +542,10 @@ input[type='checkbox']:disabled {
 .cell-icons {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  margin-inline-start: 4px;
+  gap: 4px;
+  margin-inline-start: 6px;
+  block-size: 18px;
+  vertical-align: middle;
 }
 
 .cell-icon {
@@ -552,30 +554,19 @@ input[type='checkbox']:disabled {
   border: 0;
   background: transparent;
   color: var(--text-faint);
-  inline-size: 16px;
-  block-size: 16px;
+  inline-size: 20px;
+  block-size: 20px;
   padding: 0;
   display: inline-grid;
   place-content: center;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 
-.cell-icon::before {
-  font-size: 11px;
-  line-height: 1;
-}
-
-.cell-icon--add::before {
-  content: '+';
-}
-
-.cell-icon--edit::before {
-  content: '✎';
-}
-
-.cell-icon--delete::before {
-  content: '✕';
+.cell-icon svg {
+  inline-size: 14px;
+  block-size: 14px;
+  fill: currentColor;
 }
 
 .cell-icon:hover {
