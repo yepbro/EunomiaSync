@@ -534,6 +534,10 @@ input[type='checkbox']:disabled {
   cursor: default;
 }
 
+.proj-line .cell-icon--edit {
+  margin-inline-start: 3px;
+}
+
 /* Per-project custom instruction icons (add / edit / delete) */
 .cell-icons {
   display: inline-flex;

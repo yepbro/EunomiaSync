@@ -606,6 +606,25 @@
      the changed-state pass runs */
   buildVariantSelects()
 
+  /* Per-project edit icon in the header: opens a placeholder modal only */
+  for (const th of projectHeads) {
+    const proj = th.querySelector('.proj-name')?.textContent.trim() ?? ''
+    const line = th.querySelector('.proj-line')
+    if (!line) continue
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'cell-icon cell-icon--edit proj-edit'
+    btn.title = `Edit project — ${proj}`
+    btn.setAttribute('aria-label', `Edit project — ${proj}`)
+    btn.addEventListener('click', () => {
+      dialogTitle.textContent = `Edit project — ${proj}`
+      dialogText.textContent =
+        'Prototype placeholder: project editing (name, label color, description, sync settings — PRJ-008…) is not implemented in this prototype.'
+      dialog.showModal()
+    })
+    line.append(btn)
+  }
+
   /* Per-project custom instruction icons on every variant cell */
   for (const td of document.querySelectorAll('.matrix tbody td.c-cell')) {
     if (td.querySelector('.variant-select')) refreshCellIcons(td)
