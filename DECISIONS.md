@@ -5632,3 +5632,115 @@ half independently of the first), and the empty-input answer. 4
 command-level tests in `ipc_tests.rs`: the acceptance pair over the
 real mock-IPC envelope, escape-and-render over IPC, the empty
 result, and the registered-exactly-once pin.
+
+### D-084 — Project-folder availability: four metadata probes in `paths`, hand-rolled typed failure, and the no-drive-heuristic contract — 2026-11-19
+
+Problem: T-060 implements §9.4 preflight step 1 (§6.9's project-path row,
+DB-032, D-09): a registered project's folder must be verified available —
+exists, is a directory, is readable, contains `.git` — with every failure
+later mapping to `E_PROJECT_UNAVAILABLE` and the OS code as detail. Four
+points were left open: (1) which `eunomia-fs` module owns the check — the
+four skeleton modules (D-019) name none, and adding a fifth is a
+module-boundary decision; (2) the error type's shape — the crate's pinned
+dependency set (T-003) has no `thiserror`, and pulling one in is a manifest
+decision; (3) how the DB-032 contract "network and removable drives are
+allowed" can be TESTED when a unit test cannot mount an NFS share — an
+assertion that the code "does not look at device numbers" proves nothing on
+its own; (4) what the check promises about races — its probes are separate
+OS calls, and the card mandates a vanished-`.git` test.
+
+Solution: `check_project_available(root: &Path) -> Result<(),
+ProjectUnavailableError>` in `crates/eunomia-fs/src/paths.rs`.
+
+- PLACEMENT: `paths`. The §6.9 row IS a path validation, and the paths
+  module's pinned responsibility (T-003 skeleton docs, lib.rs) is exactly
+  "the path checks used when validating paths that arrive from the UI".
+  `scan` is discovery — ALG-050..054 walk roots and, per ALG-052,
+  DISTINGUISH the `.git`-directory from the `.git`-file form (skipping the
+  file form); availability needs only "there is a `.git` entry", so the
+  distinction stays out. No new module: the D-019 boundary stands, and
+  lib.rs's skeleton sentence ("not implemented yet") was updated — this is
+  the crate's first implementation — while the paths doc keeps the planned
+  canonicalization (DB-030, `dunce`) and SEC-003 work visible.
+  ARCHITECTURE.md's tree stays known-stale on purpose (D-082's posture —
+  it is outside this card's scope and already carries the known-stale
+  marker); lib.rs's module paragraph is the accurate record.
+- FOUR PROBES, TOTAL: `stat` of the root (symlinks followed — a project
+  root that is itself a link checks the repository), `is_dir`, one probe
+  read (`read_dir`'s open is listability, which is what "readable" means
+  for a directory — the stricter of the two readings: a search-only
+  folder (Unix `x` without `r`) is reported unavailable even though
+  named paths inside could be opened, because the app itself lists the
+  folder — the repository scan reads entry names, ALG-054 — rather than
+  poking fixed paths), then `symlink_metadata(<root>/.git)`. ANY `.git` entry
+  counts: a directory, a file (worktree/submodule gitdir pointer), even a
+  symlink — presence, not validity; whether the pointer leads to a healthy
+  gitdir is git's and the later phases' business.
+- CLASSIFICATION: io-backed failures keep an intentionally coarse bucket —
+  `NotFound` → `Missing`, every other OS refusal (denied access on the
+  folder or an ancestor, a dropped drive's EIO/ENODEV, a symlink loop,
+  ENOTDIR) → `NotReadable`, with the `io::Error` itself carried as
+  `source`, so `raw_os_error()`/`ErrorKind` ride along for the app layer's
+  `ErrorDetails::from_io_error` (§10's log facts). `NotADirectory` and
+  `NoGitEntry` carry no io error — no OS call failed. The command layer
+  maps every variant to `E_PROJECT_UNAVAILABLE`; the reasons stay typed so
+  the add-project flow's `E_NOT_A_REPO` can reuse the check. Accessors
+  `io_error()`/`os_code()` expose the details; no `AppError` mapping here
+  (D-062's posture). Write access is deliberately absent: that is
+  `E_NO_WRITE_ACCESS` (§9.4 preflight step 3), a different check.
+- NO-DRIVE-HEURISTIC CONTRACT BY CONSTRUCTION: the four probes are the
+  entire decision — there is deliberately no seam for a drive-type filter
+  to plug into. No device numbers (`MetadataExt::dev`), no mount tables,
+  no volume flags, no path-shape sniffing (`/mnt/…`, `\\UNC\…`): NFS,
+  USB, UNC and tmpfs repositories pass exactly like local ones.
+- THE REMOTE-DRIVE TEST SEAM (why it is not tautological): a unit test
+  cannot mount a network share, so the test pins the contract on the
+  mechanism every "reject non-local volumes" shortcut must consult —
+  mount identity. `/dev/shm` is a separate tmpfs mount with its own
+  `st_dev`; the test stat-compares its device number against the temp
+  dir's, builds a repository fixture there, and requires the PUBLIC check
+  to accept it — a heuristic keyed on device numbers or mount identity
+  would fail this test. It skips loudly when `/dev/shm` is missing or
+  (exotically) sits on the same filesystem as the temp dir. tmpfs is not
+  NFS, and no unit test can make it be; the residual gap is named here
+  rather than papered over. The portable second half pins path-shape
+  blindness with no skip at all: repositories under a `$RECYCLE.BIN/`
+  parent (ALG-051's exclusion names are scan rules, not availability
+  rules) and inside a `mnt/` component must pass.
+- TOCTOU POSTURE, DOCUMENTED NOT PRETENDED: the probes are separate OS
+  calls over a live filesystem; the function reports what they observed
+  at their moment — no snapshot is taken and no atomicity is claimed.
+  The card's vanished-`.git` test pins the flip (present → `Ok`, removed
+  → `NoGitEntry`); availability is recomputed at every startup,
+  window-open and sync (DB-032), so a flip between two checks is simply
+  the next check's verdict. A plain file replacing the folder mid-check
+  surfaces as `NotReadable` carrying ENOTDIR.
+- ERROR TYPE HAND-ROLLED (the D-017 store precedent; the manifest is
+  untouched): `#[derive(Debug)]` enum + `Display` (lowercase, no trailing
+  punctuation) + `std::error::Error` whose `source()` is the carried
+  io error. Tests reuse the already-pinned `tempfile` for fixtures — it
+  was parked for the atomic module, and using it in tests adds nothing to
+  the manifest.
+- PERMISSION TESTS, ROOT-HONEST: the two chmod tests (mode 000 → the
+  listing denied; mode 400 → listing ok but the `.git` stat denied — the
+  two distinct `NotReadable` producers) skip loudly via `eprintln!` when
+  the fixture's owner uid is 0. The uid check is std-only:
+  `MetadataExt::uid()` on our own fixture equals the creating process's
+  effective uid (the store's `running_as_root_is_untestable` precedent);
+  a libc `geteuid` would be a new manifest decision. Mode bits are
+  restored BEFORE the assertions run, so a panic cannot strand an
+  unreadable fixture under TempDir's teardown.
+
+Tests: 13 in `paths.rs` — the happy `.git`-directory; the `.git`-file form
+accepted; a plain file → `NotADirectory` (with `os_code() == None`); a
+missing path → `Missing` (kind `NotFound`, ENOENT = 2 pinned on unix);
+mode-000 → `NotReadable` with EACCES = 13 and mode-400 readable-but-
+unsearchable → `NotReadable` with EACCES = 13 (both root-skipped loudly;
+the mode-400 test first proves the listing still succeeds, so its failure
+can only come from the denied `.git` stat); the vanished `.git` flip; a
+`.git` symlink accepted; a symlinked root checked through (and a dangling
+root link → `Missing`); ENOTDIR = 20 riding in the typed error
+(root-proof); the Display texts and the `source()` chain pinned (exact
+unit-variant texts, io-variant prefixes, `source()` Some/None); the
+cross-filesystem `/dev/shm` acceptance (skip-able, including an unusable
+`/dev/shm`); and the `$RECYCLE.BIN`/`mnt` path-shape acceptance.
