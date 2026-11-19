@@ -306,10 +306,14 @@
     refreshDirtyState()
   })
 
-  /* ---------- Row drag-and-drop between sections (MAIN-018/019) ---------- */
+  /* ---------- Row drag-and-drop between sections (MAIN-015…023) ---------- */
+  /* Instructions move between sections; headings move with their whole
+     content (LIB-032/034). A branch cannot be dropped inside itself, and a
+     heading only lands on headings of the same or a shallower level. */
 
   function initRowDrag() {
     let dragged = null
+    let draggedSectionRows = []
     let dropMark = null
 
     const clearDropMark = () => {
@@ -327,29 +331,49 @@
       return tr
     }
 
-    for (const tr of rows()) {
-      if (!isHeading(tr)) tr.draggable = true
+    /* All rows belonging to the heading's section (heading excluded) */
+    const sectionRowsOf = (headingRow) => {
+      const rowsList = []
+      const level = headingLevel(headingRow)
+      let tr = headingRow.nextElementSibling
+      while (tr && !(tr.classList.contains('row-heading') && headingLevel(tr) <= level)) {
+        rowsList.push(tr)
+        tr = tr.nextElementSibling
+      }
+      return rowsList
     }
+
+    for (const tr of rows()) tr.draggable = true
 
     tbody.addEventListener('dragstart', (e) => {
       const tr = e.target.closest('tr')
-      if (!tr || isHeading(tr) || tr.classList.contains('row-hidden')) return
+      if (!tr || tr.classList.contains('row-hidden')) return
       dragged = tr
+      draggedSectionRows = isHeading(tr) ? sectionRowsOf(tr) : []
       tr.classList.add('dragging')
       e.dataTransfer.effectAllowed = 'move'
-      e.dataTransfer.setData('text/plain', instructionDisplay(tr))
+      e.dataTransfer.setData(
+        'text/plain',
+        isHeading(tr)
+          ? 'Section: ' + tr.querySelector('.hname').textContent.trim()
+          : instructionDisplay(tr),
+      )
     })
 
     tbody.addEventListener('dragend', () => {
       dragged?.classList.remove('dragging')
       dragged = null
+      draggedSectionRows = []
       clearDropMark()
     })
 
     tbody.addEventListener('dragover', (e) => {
       if (!dragged) return
       const target = e.target.closest('tr')
-      if (!target || target === dragged || target.classList.contains('row-hidden')) {
+      const insideSelf = draggedSectionRows.includes(target) || target === dragged
+      const tooDeep =
+        isHeading(dragged) && isHeading(target) && headingLevel(target) > headingLevel(dragged)
+      if (!target || insideSelf || tooDeep || target.classList.contains('row-hidden')) {
         clearDropMark()
         return
       }
@@ -366,8 +390,25 @@
       e.preventDefault()
       const target = e.target.closest('tr')
       clearDropMark()
-      if (!dragged || !target || target === dragged) return
-      if (isHeading(target)) {
+      if (
+        !dragged ||
+        !target ||
+        target === dragged ||
+        draggedSectionRows.includes(target) ||
+        (isHeading(dragged) && isHeading(target) && headingLevel(target) > headingLevel(dragged))
+      ) {
+        dragged?.classList.remove('dragging')
+        dragged = null
+        draggedSectionRows = []
+        applyFilters()
+        return
+      }
+      if (isHeading(dragged)) {
+        /* dropped heading: the whole section follows it */
+        const moving = [dragged, ...draggedSectionRows]
+        if (isHeading(target)) target.before(...moving)
+        else target.after(...moving)
+      } else if (isHeading(target)) {
         /* dropped on a section heading: move to the end of that section */
         tbody.insertBefore(dragged, sectionEndAfter(target))
       } else {
@@ -376,6 +417,7 @@
       }
       dragged.classList.remove('dragging')
       dragged = null
+      draggedSectionRows = []
       applyFilters()
     })
   }
