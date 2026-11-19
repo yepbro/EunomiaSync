@@ -5281,3 +5281,106 @@ lemma; and the new-project composition (validate the name, derive
 the default, validate the label). No proptest, per D-075's
 ruling that these rules are total boundary arithmetic — the
 full scalar scan covers what a random char sample would approximate.
+
+### D-080 — The backup name builders: slug cleaning, hash8 truncation, the project-id gate, and the UTC stamp — 2026-11-19
+
+Problem: T-053 implements spec §7.6's backup row (BKP-001, 002,
+008, 011), §5.5's layout line and SEC-006 as pure string builders
+in `eunomia-core`. The spec fixes the layout
+`backups/<project_id>__<slug>/<file>.<UTC YYYYMMDDTHHMMSSmmmZ>.<hash8>.bak`,
+"slug is the cleaned project name, up to 40 characters" ("the
+main key is `project_id`"), and SEC-006's "Backup paths are built
+from the ID and the cleaned slug, not from arbitrary user strings.
+The target file name is only a value from the enum" — but leaves
+five readings open: (1) the cleaning rules — charset, what happens
+to non-ASCII, and to a name that cleans to nothing; (2) what
+`hash8` is the first 8 of; (3) whether the opaque `ProjectId`
+(D-042: core never validates the UUIDv7 form) may be trusted as a
+path component; (4) which enum supplies the `<file>` name; (5) how
+the stamp crosses core's no-time-library boundary (D-017; D-061
+settled this for ALG-032's marker).
+
+Solution: `eunomia-core/src/backup_name.rs` —
+`project_slug`, `target_file_name`, `backup_dir_name`,
+`backup_file_name`, `backup_relative_path`, all pure (no I/O,
+D-006/D-017: `eunomia-fs` joins the returned §5.5-relative string
+under the data directory and owns SEC-007). The rulings:
+
+- SLUG: ASCII letters (lower-cased) and digits are kept; every
+  MAXIMAL run of any other code point — spaces, punctuation,
+  controls, all non-ASCII — collapses to ONE hyphen; edge hyphens
+  are trimmed; the first 40 CODE POINTS of the cleaned string
+  survive ("up to 40 characters" describes the RESULT — D-079's
+  reading of the same wording in DB-042: clean first, cut second),
+  and a cut landing right after a separator run drops the trailing
+  hyphen it would leave. A result that is empty falls back to the
+  literal `project` — BKP-001's "the main key is `project_id`"
+  makes the slug display sugar, and the fallback is the spec's own
+  common noun, no user bytes. Non-ASCII is DROPPED, not
+  transliterated: the spec owns no transliteration table, and one
+  would be invention ("Проект" → `project`). The output charset is
+  exactly `[a-z0-9-]`, so `.`, `/`, `\`, NUL, `%` and space are
+  unrepresentable and `..` is structurally impossible.
+- SEC-006 reading: the sentence itself names the two blessed
+  sources — "the ID and the cleaned slug" — so the slug IS the
+  permitted derivative it describes; what the rule bars is RAW
+  user text reaching a component and a typed file name. The file
+  name therefore arrives as `(Scheme, BaseName)` and maps onto
+  §5.7's closed list of watched target files: A|B →
+  `AGENTS.md`/`CLAUDE.md` (the `BaseName` literal), C →
+  `<STEM>.project.md` (D-20 — the main file is not edited).
+- HASH8: the first 8 characters of the 64-character LOWERCASE-hex
+  SHA-256 of the backed-up file's content — BKP-010's check value
+  in DB-020's canonical rendering (the same spelling
+  `hash::build_hash` produces). The builders take the FULL digest
+  and truncate internally, so a caller cannot hand-pick the short
+  id and the one format gate (length 64, ASCII lowercase hex) sits
+  next to the truncation it guards; the database row keeps the
+  full digest, the name only needs a readable short id.
+- PROJECT ID: validated non-empty over `[0-9A-Za-z_-]` (bytes:
+  any non-ASCII fails) and refused with the typed
+  `BackupNameError::UnsafeProjectId` — a data condition, not a
+  broken-invariant panic, because the column is opaque TEXT to
+  core (D-042) and a corrupted row must not build a traversal
+  path; dots are outside the charset, so `..` stays impossible in
+  the joined `<id>__<slug>` name (which also always contains the
+  `__` divider, so it can never equal a Windows reserved device
+  word).
+- STAMP: `BackupTime` is D-061's decomposed-civil-fields posture
+  plus a `millisecond` field (domains asserted, panics documented);
+  the format is the template verbatim, uncompressed and
+  zero-padded — 18 digits-plus-`T` characters before the `Z`, 19
+  total, always UTC — chosen by the spec for lexical sorting in a
+  plain directory listing, and distinct from ALG-032's marker
+  format (D-061) and the store's ISO-8601 spelling. Time is a
+  parameter, never a clock.
+
+Path safety is proven, not asserted: the tests drive `../`,
+`..\`, `..`, percent spellings (`%2e%2e%2f` — never decoded),
+NUL, tabs/newlines and Unicode payloads through the builders and
+check the results both by charset and mechanically as
+`std::path::Component` lists — single `Normal` components, the
+whole relative path exactly three; `ParentDir` is unreachable.
+Boundary: no `AppError` mapping in core (D-062's precedent — the
+command layer maps `BackupNameError` to §8 codes when the backup
+pipeline task lands); `lib.rs` gained exactly one
+`pub mod backup_name;` line and ARCHITECTURE.md's already-stale
+tree was deliberately left alone (D-062's known open item).
+
+Tests: 36 in `backup_name.rs` — slug oracles (letters/digits/
+spaces, specials-and-runs collapse, NUL/controls, traversal
+battery, percent literalism, 40-cut at/over the bound,
+clean-then-cut with the trailing-hyphen re-trim, non-ASCII
+dropping, fallback battery, edge trimming, a property battery
+of 20 hostile/ordinary names over the charset/length/shape
+rules, and a full `0..=char::MAX` scalar scan of the charset
+lemma — D-079's posture for total rules); the enum mapping;
+stamp format pins (19 characters, `T` at index 8, zero-padding,
+domain floors/ceilings) and ten `should_panic` domain tests;
+hash8 truncation + nine refused digest shapes + the Display
+pin; the id gate (passing shapes, eleven refused shapes,
+Display); §5.5 whole-path oracles for schemes A and C, the
+hostile-name end-to-end path, the whole hostile battery run
+through the path builder (three `Normal` components each), and
+the length bounds (file = `<file>.19.8.bak` + 3 dots; dir ≤
+36+2+40).

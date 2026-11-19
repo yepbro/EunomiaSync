@@ -48,6 +48,7 @@
 
 pub mod assembly_b;
 pub mod assignment;
+pub mod backup_name;
 pub mod body;
 pub mod color_pick;
 pub mod compare;
