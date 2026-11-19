@@ -4,7 +4,8 @@
    editor modal, LIB-026…027 history modal, D-16), § 7.1 PRJ-002…007
    (repository scan modal, NFR-015), PRJ-008…012 (project settings
    modal), § 7.5 OUT-009 + § 6.2 run statuses (sync summary modal,
-   MAIN-024…031), UI-001, UI-011, UI-021, UI-022, NFR-020.
+   MAIN-024…031), § 7.2 DEF-001…005 (app settings modal, §6.5 keys),
+   UI-001, UI-011, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
 
@@ -2125,6 +2126,71 @@ label.scan-row:hover {
    mode; `hidden` must win over the .btn display */
 #sync-summary-dialog .modal-actions .btn[hidden] {
   display: none;
+}
+
+/* ----- Settings modal (DEF-001…004, §6.5) -------------------------------- */
+/* Five vertical sections in one scrollable body (no tabs): reuses the
+   project settings form idioms (.ps-section/.ps-field/.ps-scheme/
+   .ps-check-row/.ps-hint/.ps-error); only the parts without an existing
+   class are added below. All colors go through theme variables. */
+
+/* The first section sits right under the title — no separator above it */
+.set-body > .ps-section:first-child {
+  border-block-start: 0;
+  padding-block-start: 0;
+}
+
+/* Three limits side by side (history + log sizes) */
+.ps-grid-3 {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+}
+
+/* Number inputs stay compact: the §6.5 ranges are short */
+.set-number {
+  inline-size: 140px;
+}
+
+/* Excluded folder names (D-05): chip rows with a delete icon each */
+.set-excl-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.set-excl-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Delete icon at the 24 px target size (standalone control, unlike the
+   in-cell 20 px cell-icon instances) */
+.set-excl-remove {
+  inline-size: 24px;
+  block-size: 24px;
+}
+
+/* "Add folder name" row */
+.set-excl-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.set-excl-add .ps-input {
+  inline-size: 240px;
+}
+
+/* About / Check for updates */
+.set-buttons {
+  display: flex;
+  gap: 10px;
+}
+
+/* Static status line above the footer: hint must not shrink or scroll */
+.modal-lg .set-status {
+  flex: none;
 }
 
 /* ----- Motion (UI-022: honor the OS "reduce motion" setting) ------------ */

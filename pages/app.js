@@ -11,6 +11,9 @@
    sync summary modal (MAIN-024…031, OUT-009: simulated sync run with
    k-of-N progress and per-project outcomes per §6.2/D-09/SYS-009,
    pending-changes list from the counter chip; MAIN-030 guard),
+   app settings modal (DEF-001…005: §6.5 SETTINGS demo object, controls
+   apply immediately — no Save button, inline range errors, editable
+   scan exclusions, toolbar button + Ctrl/Cmd+, per §11.3),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -2037,6 +2040,7 @@
   const scanAddBtn = document.getElementById('scan-add-btn')
   const scanCancelBtn = document.getElementById('scan-cancel-btn')
   const addProjectBtn = document.getElementById('add-project-btn')
+  const scanConfigEl = document.getElementById('scan-config')
 
   const SCAN_ROOT = '~/projects'
   const SCAN_TICK_MS = 120 // ≤10 progress updates per second (SYS-003)
@@ -2171,9 +2175,12 @@
   }
 
   /* Fresh phase 1: called on open and by "Scan again" — the stopScanTimer
-     guard keeps there from ever being two running timers */
+     guard keeps there from ever being two running timers. The static
+     config line reads the demo SETTINGS so the depth and exclusions
+     edited in the Settings modal (D-04, D-05) show up on the next scan. */
   function startScan() {
     stopScanTimer()
+    scanConfigEl.textContent = `Depth ${SETTINGS.scan.maxDepth} · Excluded: ${SETTINGS.scan.excludeNames.join(', ')}`
     scanIdx = 0
     scanReposFound = 0
     scanFoldersEl.textContent = '0'
@@ -2527,6 +2534,295 @@
   /* No dialog is open during the run itself; make sure no orphan timer
      can re-fire when the page goes away (scan-modal cleanup idiom) */
   window.addEventListener('pagehide', stopSyncTimer)
+
+  /* ---------- Settings modal (DEF-001…004, §6.5) --------------------------- */
+  /* Opened by the toolbar ghost button and Ctrl/Cmd + , (§11.3). Five
+     vertical sections (defaults, backups, scanning, history/logs,
+     updates) instead of tabs. Every control writes into the demo
+     SETTINGS object right away — there is no Save button, settings
+     apply without a restart (DEF-001 AC); changing default.* never
+     touches the existing PROJECTS (DEF-005). Numbers outside their
+     §6.5 range show an inline error and keep the previous value until
+     valid (error, not clamp — the same behavior for every field).
+     D-18 (export/import of settings in JSON) has no UI in this
+     prototype; sync.skip_identical and ui.language live in SETTINGS
+     without a control. "About…" / "Check for updates" open the generic
+     placeholder dialog for now (UPD-001, UPD-005). */
+
+  /* §6.5 defaults (the real app keeps them in the settings table as
+     JSON — D-18); key names mirror the table, camelCased */
+  const SETTINGS = {
+    default: {
+      scheme: 'A',
+      baseName: 'AGENTS.md',
+      extraLocal: false,
+      extraLocalPos: 'end',
+      extraProject: false,
+      extraProjectPos: 'end',
+    },
+    backup: { retention: 10 },
+    sync: { skipIdentical: true },
+    scan: {
+      maxDepth: 6,
+      excludeNames: ['node_modules', 'vendor', '.git', 'dist', 'build', 'target', '.venv'],
+    },
+    history: { maxRevisions: 200 },
+    log: { maxEntries: 10000, maxDays: 180 },
+    ui: { language: 'en' },
+    update: { checkOnStart: true },
+  }
+
+  const settingsDialog = document.getElementById('settings-dialog')
+  const settingsBtn = document.getElementById('settings-btn')
+  const setForm = document.getElementById('set-form')
+  const setSchemes = document.getElementById('set-schemes')
+  const setBaseFile = document.getElementById('set-base-file')
+  const setExtraFiles = document.getElementById('set-extra-files')
+  const setExtraLocal = document.getElementById('set-extra-local')
+  const setExtraLocalPos = document.getElementById('set-extra-local-pos')
+  const setExtraProject = document.getElementById('set-extra-project')
+  const setExtraProjectPos = document.getElementById('set-extra-project-pos')
+  const setExtraLocalName = document.getElementById('set-extra-local-name')
+  const setExtraProjectName = document.getElementById('set-extra-project-name')
+  const setBackupRetention = document.getElementById('set-backup-retention')
+  const setBackupRetentionError = document.getElementById('set-backup-retention-error')
+  const setScanDepth = document.getElementById('set-scan-depth')
+  const setScanDepthError = document.getElementById('set-scan-depth-error')
+  const setHistRevisions = document.getElementById('set-hist-revisions')
+  const setHistRevisionsError = document.getElementById('set-hist-revisions-error')
+  const setLogEntries = document.getElementById('set-log-entries')
+  const setLogEntriesError = document.getElementById('set-log-entries-error')
+  const setLogDays = document.getElementById('set-log-days')
+  const setLogDaysError = document.getElementById('set-log-days-error')
+  const setExclList = document.getElementById('set-excl-list')
+  const setExclInput = document.getElementById('set-excl-input')
+  const setExclAddBtn = document.getElementById('set-excl-add-btn')
+  const setExclError = document.getElementById('set-excl-error')
+  const setUpdateCheck = document.getElementById('set-update-check')
+
+  /* Number fields with §6.5 ranges: invalid input -> inline error, the
+     previous value stays in SETTINGS until the field is valid again */
+  const SET_NUMBER_FIELDS = [
+    {
+      input: setBackupRetention,
+      error: setBackupRetentionError,
+      label: 'Backup limit',
+      min: 1,
+      max: 200,
+      get: () => SETTINGS.backup.retention,
+      set: (n) => (SETTINGS.backup.retention = n),
+    },
+    {
+      input: setScanDepth,
+      error: setScanDepthError,
+      label: 'Scan depth',
+      min: 1,
+      max: 20,
+      get: () => SETTINGS.scan.maxDepth,
+      set: (n) => (SETTINGS.scan.maxDepth = n),
+    },
+    {
+      input: setHistRevisions,
+      error: setHistRevisionsError,
+      label: 'Versions per entity',
+      min: 10,
+      max: 1000,
+      get: () => SETTINGS.history.maxRevisions,
+      set: (n) => (SETTINGS.history.maxRevisions = n),
+    },
+    {
+      input: setLogEntries,
+      error: setLogEntriesError,
+      label: 'Log entries',
+      min: 1000,
+      max: 100000,
+      get: () => SETTINGS.log.maxEntries,
+      set: (n) => (SETTINGS.log.maxEntries = n),
+    },
+    {
+      input: setLogDays,
+      error: setLogDaysError,
+      label: 'Log days',
+      min: 7,
+      max: 3650,
+      get: () => SETTINGS.log.maxDays,
+      set: (n) => (SETTINGS.log.maxDays = n),
+    },
+  ]
+
+  /* Scheme A extras follow the base file name (D-20) and hide for B/C,
+     like in the project settings modal */
+  function updateSetDerivedNames() {
+    const stem = stemOf(setBaseFile.value)
+    setExtraLocalName.textContent = `${stem}.local.md`
+    setExtraProjectName.textContent = `${stem}.project.md`
+  }
+
+  function updateSetSchemeUI() {
+    const scheme = setSchemes.querySelector('input:checked')?.value ?? 'A'
+    setExtraFiles.hidden = scheme !== 'A'
+  }
+
+  function syncSetExtraRows() {
+    setExtraLocalPos.disabled = !setExtraLocal.checked
+    setExtraProjectPos.disabled = !setExtraProject.checked
+  }
+
+  /* Excluded names (D-05): one chip row per name with an accessible
+     remove button; names are user-typed, so they go through escapeHtml */
+  function renderExclList() {
+    setExclList.innerHTML = SETTINGS.scan.excludeNames
+      .map(
+        (name, i) =>
+          '<div class="set-excl-row">' +
+          `<span class="chip">${escapeHtml(name)}</span>` +
+          `<button type="button" class="cell-icon cell-icon--delete set-excl-remove" data-idx="${i}"` +
+          ` title="Remove ${escapeHtml(name)}"` +
+          ` aria-label="Remove ${escapeHtml(name)} from excluded folder names">` +
+          ICONS.delete +
+          '</button>' +
+          '</div>',
+      )
+      .join('')
+  }
+
+  /* Add is validated: trimmed, non-empty (no whitespace-only names), no
+     duplicates; the error clears as soon as the input changes */
+  function addExclusion() {
+    const name = setExclInput.value.trim()
+    if (name === '') {
+      setFieldError(
+        setExclInput,
+        setExclError,
+        'Enter a folder name — empty or whitespace-only names are not allowed.',
+      )
+      return
+    }
+    if (SETTINGS.scan.excludeNames.includes(name)) {
+      setFieldError(setExclInput, setExclError, `"${name}" is already in the excluded list.`)
+      return
+    }
+    SETTINGS.scan.excludeNames.push(name)
+    setExclInput.value = ''
+    setFieldError(setExclInput, setExclError, '')
+    renderExclList()
+    setExclInput.focus()
+  }
+
+  function wireSetNumber({ input, error, label, min, max, set }) {
+    input.addEventListener('input', () => {
+      const raw = input.value.trim()
+      const n = Number(raw)
+      if (raw === '' || !Number.isInteger(n) || n < min || n > max) {
+        setFieldError(input, error, `${label}: an integer from ${min} to ${max} (§6.5).`)
+        return
+      }
+      setFieldError(input, error, '')
+      set(n)
+    })
+  }
+
+  /* Re-sync the controls from SETTINGS on every open: reopening shows the
+     canonical values and drops any invalid text left in a number field */
+  function loadSettingsUI() {
+    for (const input of setSchemes.querySelectorAll('input')) {
+      input.checked = input.value === SETTINGS.default.scheme
+    }
+    setBaseFile.value = SETTINGS.default.baseName
+    setExtraLocal.checked = SETTINGS.default.extraLocal
+    setExtraLocalPos.value = SETTINGS.default.extraLocalPos
+    setExtraProject.checked = SETTINGS.default.extraProject
+    setExtraProjectPos.value = SETTINGS.default.extraProjectPos
+    for (const f of SET_NUMBER_FIELDS) {
+      f.input.value = String(f.get())
+      setFieldError(f.input, f.error, '')
+    }
+    setUpdateCheck.checked = SETTINGS.update.checkOnStart
+    setExclInput.value = ''
+    setFieldError(setExclInput, setExclError, '')
+    updateSetDerivedNames()
+    updateSetSchemeUI()
+    syncSetExtraRows()
+    renderExclList()
+  }
+
+  function openSettings() {
+    loadSettingsUI()
+    settingsDialog.showModal()
+    setSchemes.querySelector('input:checked')?.focus()
+  }
+
+  /* Entry point 1: the toolbar ghost button */
+  settingsBtn.addEventListener('click', openSettings)
+
+  /* Entry point 2 (§11.3): Ctrl/Cmd + , . Ignored while the settings
+     dialog is already open; if another dialog is open, the native
+     <dialog> stacking puts settings on top. */
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.key !== ',') return
+    e.preventDefault()
+    if (!settingsDialog.open) openSettings()
+  })
+
+  /* Close is the only footer action; everything else applied on change */
+  setForm.querySelector('button[value="close"]').addEventListener('click', () => {
+    settingsDialog.close('close')
+  })
+
+  /* Enter in a text field must not close the dialog (the implicit
+     submitter is Close); in the exclusion input it adds the name */
+  setForm.addEventListener('keydown', (e) => {
+    const t = e.target
+    if (e.key !== 'Enter' || t.tagName !== 'INPUT' || t.type === 'radio' || t.type === 'checkbox') {
+      return
+    }
+    e.preventDefault()
+    if (t === setExclInput) addExclusion()
+  })
+
+  /* Defaults: apply on change, never touch existing projects (DEF-005) */
+  for (const input of setSchemes.querySelectorAll('input')) {
+    input.addEventListener('change', () => {
+      SETTINGS.default.scheme = input.value
+      updateSetSchemeUI()
+    })
+  }
+  setBaseFile.addEventListener('change', () => {
+    SETTINGS.default.baseName = setBaseFile.value
+    updateSetDerivedNames()
+  })
+  setExtraLocal.addEventListener('change', () => {
+    SETTINGS.default.extraLocal = setExtraLocal.checked
+    syncSetExtraRows()
+  })
+  setExtraLocalPos.addEventListener('change', () => {
+    SETTINGS.default.extraLocalPos = setExtraLocalPos.value
+  })
+  setExtraProject.addEventListener('change', () => {
+    SETTINGS.default.extraProject = setExtraProject.checked
+    syncSetExtraRows()
+  })
+  setExtraProjectPos.addEventListener('change', () => {
+    SETTINGS.default.extraProjectPos = setExtraProjectPos.value
+  })
+  setUpdateCheck.addEventListener('change', () => {
+    SETTINGS.update.checkOnStart = setUpdateCheck.checked
+  })
+
+  for (const f of SET_NUMBER_FIELDS) wireSetNumber(f)
+
+  /* Exclusion list: remove buttons + add row (button click or Enter) */
+  setExclList.addEventListener('click', (e) => {
+    const btn = e.target.closest('.set-excl-remove')
+    if (!btn) return
+    const i = Number(btn.dataset.idx)
+    if (!Number.isInteger(i) || i < 0 || i >= SETTINGS.scan.excludeNames.length) return
+    SETTINGS.scan.excludeNames.splice(i, 1)
+    renderExclList()
+  })
+
+  setExclAddBtn.addEventListener('click', addExclusion)
+  setExclInput.addEventListener('input', () => setFieldError(setExclInput, setExclError, ''))
 
   /* ---------- Placeholder dialogs (native <dialog>) ------------------------ */
 

@@ -9,13 +9,15 @@
   project settings modal (PRJ-008…012, PRJ-013…018 archive confirm),
   repository scan modal (PRJ-002…007: scripted walk, grouped results),
   sync summary modal (MAIN-024…031, OUT-009: simulated run with k-of-N
-  progress, per-project result table, pending-changes list), placeholder
-  modals.
+  progress, per-project result table, pending-changes list), app settings
+  modal (DEF-001…005: five sections, applies immediately, no Save button),
+  placeholder modals.
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
   (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-002…007 (scan) +
   PRJ-008…012 (project settings) + § 7.3 LIB-026…027 (instruction
-  history) + § 7.5 OUT-009 + § 6.2 run statuses + UI-001 (window, pinned
+  history) + § 7.5 OUT-009 + § 6.2 run statuses + § 7.2 DEF-001…005
+  (settings, §6.5 keys, §11.3 Ctrl/Cmd+,) + UI-001 (window, pinned
   sync panel), UI-021 (light/dark via OS setting), UI-022 (reduced
   motion).
   Tooltips are native `title` attributes; accessible names are real labels.
@@ -68,6 +70,11 @@
 
         <span id="selected-chip" class="selected-chip" hidden></span>
 
+        <!-- Settings (DEF-001…004): ghost button in the right cluster, the
+             other entry point is Ctrl/Cmd + , (§11.3) -->
+        <button id="settings-btn" type="button" class="btn btn-ghost">
+          Settings
+        </button>
         <button id="add-project-btn" type="button" class="btn btn-ghost">
           + Add project
         </button>
@@ -3081,6 +3088,261 @@
           <div class="modal-actions">
             <button value="close" class="btn btn-ghost">Close</button>
             <button type="button" id="ss-run-btn" class="btn btn-primary" hidden>Run sync</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- App settings (DEF-001…004, DEF-005; §6.5 keys and ranges): five
+         vertical sections in one scrollable body — no tabs, unlike the
+         project settings modal. There is no Save button: every control
+         writes into the demo SETTINGS object right away (DEF-001 AC:
+         applies without a restart); a number outside its §6.5 range shows
+         an inline error and keeps the previous value until fixed. Scheme
+         A extra files follow the base name and hide for schemes B/C like
+         in project settings. "About…" / "Check for updates" open the
+         generic placeholder dialog for now (UPD-001, UPD-005). Entry
+         points: the toolbar ghost button and Ctrl/Cmd + , (§11.3). -->
+      <dialog id="settings-dialog" class="modal modal-lg" aria-labelledby="set-title">
+        <form id="set-form" method="dialog" novalidate>
+          <h2 id="set-title">Settings</h2>
+
+          <div class="ps-body set-body">
+            <section class="ps-section" aria-labelledby="set-defaults-title">
+              <h3 class="ps-section-title" id="set-defaults-title">
+                Defaults for new projects
+              </h3>
+
+              <fieldset class="ps-field ps-scheme-set">
+                <legend class="field-label">Scheme</legend>
+                <div id="set-schemes" class="ps-schemes">
+                  <label class="ps-scheme">
+                    <input type="radio" name="set-scheme" value="A" />
+                    <span><strong>A</strong> — full overwrite of the main file</span>
+                  </label>
+                  <label class="ps-scheme">
+                    <input type="radio" name="set-scheme" value="B" />
+                    <span
+                      ><strong>B</strong> — write into a marked area &lt;!-- EUNOMIASYNC:BEGIN
+                      --&gt;…&lt;!-- EUNOMIASYNC:END --&gt;</span
+                    >
+                  </label>
+                  <label class="ps-scheme">
+                    <input type="radio" name="set-scheme" value="C" />
+                    <span
+                      ><strong>C</strong> — separate <code>&lt;STEM&gt;.project.md</code> file;
+                      the app never edits the main file</span
+                    >
+                  </label>
+                </div>
+              </fieldset>
+
+              <div class="ps-field">
+                <label class="field-label" for="set-base-file">Base file name</label>
+                <select id="set-base-file" class="ps-input ps-select">
+                  <option>AGENTS.md</option>
+                  <option>CLAUDE.md</option>
+                </select>
+              </div>
+
+              <div id="set-extra-files" class="ps-field">
+                <span class="field-label">Extra files (scheme A)</span>
+                <div class="ps-extra-row">
+                  <label class="ps-check-row">
+                    <input id="set-extra-local" type="checkbox" />
+                    Include <code id="set-extra-local-name">AGENTS.local.md</code>
+                  </label>
+                  <select
+                    id="set-extra-local-pos"
+                    class="ps-input ps-select ps-pos-select"
+                    aria-label="Position of the local.md line"
+                  >
+                    <option value="start">Start</option>
+                    <option value="end">End</option>
+                  </select>
+                </div>
+                <div class="ps-extra-row">
+                  <label class="ps-check-row">
+                    <input id="set-extra-project" type="checkbox" />
+                    Include <code id="set-extra-project-name">AGENTS.project.md</code>
+                  </label>
+                  <select
+                    id="set-extra-project-pos"
+                    class="ps-input ps-select ps-pos-select"
+                    aria-label="Position of the project.md line"
+                  >
+                    <option value="start">Start</option>
+                    <option value="end">End</option>
+                  </select>
+                </div>
+              </div>
+
+              <p class="ps-hint">
+                Changing the defaults does not affect existing projects (DEF-005).
+              </p>
+            </section>
+
+            <section class="ps-section" aria-labelledby="set-backups-title">
+              <h3 class="ps-section-title" id="set-backups-title">Backups</h3>
+
+              <div class="ps-field">
+                <label class="field-label" for="set-backup-retention">Backups kept per file</label>
+                <input
+                  id="set-backup-retention"
+                  class="ps-input set-number"
+                  type="number"
+                  min="1"
+                  max="200"
+                  step="1"
+                  value="10"
+                  aria-describedby="set-backup-retention-hint set-backup-retention-error"
+                />
+                <p id="set-backup-retention-hint" class="ps-hint">
+                  1–200. Zero is not allowed: writing without a backup is forbidden (BKP-005).
+                  Default 10 per file (D-17).
+                </p>
+                <p id="set-backup-retention-error" class="ps-error" hidden></p>
+              </div>
+            </section>
+
+            <section class="ps-section" aria-labelledby="set-scan-title">
+              <h3 class="ps-section-title" id="set-scan-title">Scanning</h3>
+
+              <div class="ps-field">
+                <label class="field-label" for="set-scan-depth">Maximum folder depth</label>
+                <input
+                  id="set-scan-depth"
+                  class="ps-input set-number"
+                  type="number"
+                  min="1"
+                  max="20"
+                  step="1"
+                  value="6"
+                  aria-describedby="set-scan-depth-hint set-scan-depth-error"
+                />
+                <p id="set-scan-depth-hint" class="ps-hint">1–20 (D-04).</p>
+                <p id="set-scan-depth-error" class="ps-error" hidden></p>
+              </div>
+
+              <div class="ps-field">
+                <span class="field-label" id="set-excl-label">Excluded folder names</span>
+                <div
+                  id="set-excl-list"
+                  class="set-excl-list"
+                  role="group"
+                  aria-labelledby="set-excl-label"
+                ></div>
+                <div class="set-excl-add">
+                  <label class="visually-hidden" for="set-excl-input">
+                    Add a folder name to the exclusion list
+                  </label>
+                  <input
+                    id="set-excl-input"
+                    class="ps-input"
+                    type="text"
+                    autocomplete="off"
+                    maxlength="100"
+                    placeholder="Add folder name…"
+                    aria-describedby="set-excl-error"
+                  />
+                  <button type="button" id="set-excl-add-btn" class="btn btn-ghost">Add</button>
+                </div>
+                <p id="set-excl-error" class="ps-error" hidden></p>
+                <p class="ps-hint">Folders with these names are skipped at any depth (D-05).</p>
+              </div>
+            </section>
+
+            <section class="ps-section" aria-labelledby="set-logs-title">
+              <h3 class="ps-section-title" id="set-logs-title">History and logs</h3>
+
+              <div class="ps-grid ps-grid-3">
+                <div class="ps-field">
+                  <label class="field-label" for="set-hist-revisions">Versions per entity</label>
+                  <input
+                    id="set-hist-revisions"
+                    class="ps-input set-number"
+                    type="number"
+                    min="10"
+                    max="1000"
+                    step="1"
+                    value="200"
+                    aria-describedby="set-hist-revisions-hint set-hist-revisions-error"
+                  />
+                  <p id="set-hist-revisions-hint" class="ps-hint">10–1000.</p>
+                  <p id="set-hist-revisions-error" class="ps-error" hidden></p>
+                </div>
+                <div class="ps-field">
+                  <label class="field-label" for="set-log-entries">Log entries kept</label>
+                  <input
+                    id="set-log-entries"
+                    class="ps-input set-number"
+                    type="number"
+                    min="1000"
+                    max="100000"
+                    step="1"
+                    value="10000"
+                    aria-describedby="set-log-entries-hint set-log-entries-error"
+                  />
+                  <p id="set-log-entries-hint" class="ps-hint">1000–100000.</p>
+                  <p id="set-log-entries-error" class="ps-error" hidden></p>
+                </div>
+                <div class="ps-field">
+                  <label class="field-label" for="set-log-days">Days kept in the log</label>
+                  <input
+                    id="set-log-days"
+                    class="ps-input set-number"
+                    type="number"
+                    min="7"
+                    max="3650"
+                    step="1"
+                    value="180"
+                    aria-describedby="set-log-days-hint set-log-days-error"
+                  />
+                  <p id="set-log-days-hint" class="ps-hint">7–3650.</p>
+                  <p id="set-log-days-error" class="ps-error" hidden></p>
+                </div>
+              </div>
+            </section>
+
+            <section class="ps-section" aria-labelledby="set-updates-title">
+              <h3 class="ps-section-title" id="set-updates-title">Updates and About</h3>
+
+              <div class="ps-field">
+                <label class="ps-check-row">
+                  <input id="set-update-check" type="checkbox" />
+                  Check for updates at startup
+                </label>
+                <p class="ps-hint">
+                  Updates come from GitHub Releases through the signed Tauri updater (UPD-002,
+                  D-27).
+                </p>
+                <div class="set-buttons">
+                  <button
+                    type="button"
+                    class="btn btn-ghost js-open-dialog"
+                    data-dialog-title="About"
+                    data-dialog-text="Version, identifier pro.yepbro.eunomiasync, author and license (UPD-005) — a later stage wires the real window."
+                  >
+                    About…
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-ghost js-open-dialog"
+                    data-dialog-title="Check for updates"
+                    data-dialog-text="Checks GitHub Releases and shows the version and the list of changes (UPD-001) — a later stage wires the real check."
+                  >
+                    Check for updates
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <p class="ps-hint set-status">
+            Settings are applied immediately — there is no Save button.
+          </p>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
           </div>
         </form>
       </dialog>
