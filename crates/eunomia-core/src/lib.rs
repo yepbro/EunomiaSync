@@ -28,6 +28,7 @@
 //! - [`body`] — the ALG-020…022 assembly of a project's file body
 //!   from a snapshot (§9.2)
 
+pub mod assembly_b;
 pub mod assignment;
 pub mod body;
 pub mod extra_files;

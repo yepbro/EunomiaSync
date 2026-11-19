@@ -4320,3 +4320,80 @@ lines, the position matrix, the exactly-one final line break, BOM
 absence, verbatim body splicing, and the five panic postures (B,
 empty marker, marker with `\n`, marker with `\r`, body with a framing
 break) — plus doc tests.
+
+Problem: T-041 turns ALG-031 ("the `managed` block and the marker (by
+the same rules) are inserted between the marker lines. The marker lines
+and everything outside them stay unchanged. The block's line breaks are
+converted to the ones most used in the file (LF on a tie)") into code on
+top of `markers::parse` (D-062). Five points the spec fixes only in
+prose needed an explicit reading: the inserted block's exact layout, where
+scheme B's creation marker lives, what "most used in the file" counts,
+whether the result can be a `String`, and the boundary with the parallel
+A/C builder (T-039).
+
+Solution: `crates/eunomia-core/src/assembly_b.rs` — `assemble(content,
+managed, marker_line) -> Result<String, MarkersError>` (parses through
+T-040 and proxies its error for the pipeline's `E_MARKERS_INVALID`
+mapping) plus the span-taking `splice(content, &MarkerSpan, managed,
+marker_line) -> String` for a caller that already parsed. The readings:
+
+- The splice is exactly D-062's
+  `content[..managed_start] + block + content[managed_end..]`, so the
+  outside — marker lines with their padding, a byte-0 BOM, mixed outside
+  line breaks, a tail without a final break — is copied, never
+  recomputed (T-F12's byte-for-byte criterion, §7.5, D-22).
+- The block's layout is ALG-030's, carried by ALG-031's "by the same
+  rules": `managed⏎⏎marker⏎` when the body has lines, `marker⏎` when it
+  is empty ("the file has only the marker"). OUT-016…018/D-23 fix the
+  marker's place: end of the managed block, before the closing marker —
+  scheme B has no other marker location. The trailing `⏎` is D-062's
+  precondition (the end marker must stay on its own line); every output
+  re-parses with the begin marker unmoved, pinned by tests.
+- "Most used in the file" counts the file's **preserved** breaks —
+  everything outside the marker lines, the marker lines' own
+  terminators included — and excludes the region being replaced: each
+  `\r\n` is one CRLF, each unpaired `\n` one LF, a lone `\r` is
+  content (D-062's `str::lines` semantics); CRLF only on a strict
+  majority, ties and break-less outsides take LF. The exclusion is
+  what the R1 review forced: whole-file counting is not a fixed point
+  — a stale hand-made block's style can outvote the surviving file,
+  flip the chosen style between two syncs of the same build, and make
+  the second sync rewrite an unchanged file (violating D-24's
+  "unchanged", §15.2 T-F9; reproduced on the real functions during
+  review). Counting the preserved outside makes the choice provably
+  stable: the outside never changes, so neither does the style. The
+  managed body's own breaks are converted by a lines()-split +
+  dominant-join, so one trailing break is absorbed, not doubled
+  (`build_body` emits none), and further trailing blank lines are
+  kept as lines.
+- The result is a `String`, losslessly: every splice piece is UTF-8 text
+  and the BOM is the character `\u{feff}`, which `String` carries
+  unchanged; writing the string's bytes reproduces the outside exactly.
+  The raw-bytes `E_NOT_UTF8` check stays upstream in the pipeline
+  (D-062's boundary), as does atomic writing (the file layer).
+- Scheme B has no extra-file reading lines (§7.5 marks them "(A only)";
+  OUT-B names none): the block is the `build_body` body plus the marker
+  line handed in verbatim from `creation_marker_line` — no clock, no
+  formatting, and no overlap with T-039's A/C builder. DB-016's
+  reserved-marker-line policing is likewise not here: a managed body
+  carrying a marker line would make the written file grow a second pair
+  (next sync: T-F4 skip); rejecting that text is the save-time
+  `E_CONTENT_RESERVED` check's job.
+
+Tests: T-F12 verbatim with a fully hardcoded oracle (BOM + CRLF, outside
+byte for byte, output re-parses with the end marker on its computed
+line), CRLF/LF majority and a genuine outside tie that the old block's
+own CRLF cannot tip (the markers' own terminators count — a lesson this
+entry's author relearned three times), first insertion into an empty
+region, whole replacement, empty body, blank-line body, trailing-break
+tolerance, all four parser verdicts proxied, padded markers + BOM
+outside, END without a final break, mixed outside breaks untouched,
+second-sync idempotence plus the R1 regression (a stale LF block in a
+CRLF file chooses CRLF outright, first write already stable), and the
+output's managed region reading back as exactly the block (ALG-033's
+base). The marker-line single-line contract is a release `assert!`
+(matching `marker.rs`'s posture for its inputs' domains), not a
+debug-only check. Known open item, as in D-062: lib.rs's `//!` module
+list and ARCHITECTURE.md still gain no `assembly_b` entry — the T-041
+brief capped the lib.rs change at one `pub mod assembly_b;` line while
+three tasks share that file.
