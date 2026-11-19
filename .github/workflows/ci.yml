@@ -111,12 +111,14 @@ jobs:
       - name: Request the Common-Controls v6 manifest for test binaries (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: >-
-          echo "RUSTFLAGS=-C link-arg=/MANIFEST:EMBED
-          -C link-arg=/MANIFESTDEPENDENCY:type='win32'
-          name='Microsoft.Windows.Common-Controls' version='6.0.0.0'
-          publicKeyToken='6595b64144ccf1df' language='*'
-          processorArchitecture='*'" >> "$GITHUB_ENV"
+        env:
+          MANIFEST_FLAGS: >-
+            -C link-arg=/MANIFEST:EMBED
+            "-C link-arg=/MANIFESTDEPENDENCY:type='win32'
+            name='Microsoft.Windows.Common-Controls' version='6.0.0.0'
+            publicKeyToken='6595b64144ccf1df' language='*'
+            processorArchitecture='*'"
+        run: echo "RUSTFLAGS=$MANIFEST_FLAGS" >> "$GITHUB_ENV"
       - name: Build tests (Windows DLL staging prerequisite)
         if: runner.os == 'Windows'
         run: cargo test --workspace --no-run
