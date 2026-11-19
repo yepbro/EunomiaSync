@@ -2789,3 +2789,151 @@ runs mid-cycle while the retried operation is still in flight); and
 the facade test pins the warn payload. No new dependencies (no
 async-sleep crate, no retry framework — the loop is 30 lines over
 std).
+
+### D-051 — Action-log repository: in-transaction success entries, fail-then-log error entries; a closed typed `details`; the LOG-001…004 action vocabulary — 2026-11-18
+
+Problem: T-026 turns the `action_log` table (schema D-036) into the
+journal service of spec §7.7. Three open questions. (1) Transactional
+semantics — the card says "the entry is written in the same
+transaction as the operation", but LOG-001…004 also names "errors" as
+journaled, and an error usually means the operation's transaction
+_rolled back_: an entry written inside it would vanish with it. (2)
+SEC-008 — `details` is a JSON column, and the acceptance criterion is
+"in details there is no instruction text": the mechanism had to be
+structural (the D-032 facade spirit), not a remembered rule. (3) The
+`action` column is free TEXT in the schema — the closed vocabulary
+LOG-001…004 implies had to be encoded somewhere, with the mapping to
+the requirement's own wording fixed.
+
+Solution: `eunomia_store::action_log`, the second repository after
+`settings` (D-039's shape).
+
+- _Transactional semantics, resolved explicitly._ One function,
+  `insert(&Connection, &LogEntry)`, serves both halves. A successful
+  operation writes its entry **inside the operation's own
+  transaction** (the `settings::set` shape: a single statement that
+  joins the caller's transaction), so an operation that rolls back
+  leaves no entry — the journal must not claim an action that never
+  happened. A _failed_ operation cannot use that transaction (the
+  rollback would erase the entry), so its producer follows
+  **fail-then-log**: let the operation's transaction roll back, then
+  write the entry in the **next** transaction — the same action, now
+  `Level::Error`/`Outcome::Error`, the §10 code in details. The
+  module docs record the pattern; the integration suite pins both
+  halves (a rolled-back operation leaves no entry; the fail-then-log
+  entry survives, and the operation's data change is gone with the
+  success entry). The store API stays executor-agnostic: nothing here
+  knows `Db::run`; the future command tasks apply the pattern at
+  their own `run` boundaries.
+- _SEC-008, structural._ `Details` is a closed enum — `Bulk{changed}`,
+  `File{path}`, `Failure{code, path?}` — whose fields are numbers,
+  paths and a validated newtype; there is no variant accepting free
+  text, so the variant content a failed operation holds in scope has
+  nowhere to go (the `file_event` argument, applied to the database
+  journal). The one string-bearing field, `FailureCode`, is a newtype
+  whose `new` validates the §10 registry shape (`E_` + uppercase
+  alphanumeric groups, single underscores): every instruction-shaped
+  string — prose, lowercase, spaces, markers — fails the shape. Form,
+  not membership: the §10 member list lives in the app layer's
+  `errors.rs` registry (D-034), and duplicating it into the store
+  would create a second source of truth that drifts at the first new
+  code (D-017 keeps the crates decoupled); a new §10 code therefore
+  needs no store change. The acceptance criterion is pinned from
+  three sides: unit tests of the shape check (registry literals
+  accepted, instruction markers rejected), an integration test that
+  builds an entry beside a realistic instruction text and reads the
+  stored cell back marker-free, and the facade test below.
+- _The action vocabulary._ `Action` is a 21-member enum; `as_str` is
+  the `object.verb` lowercase shape the schema suite already pins
+  (`project.added`). The mapping to LOG-001…004's own list is
+  member-by-member and pinned by a unit test that hardcodes the
+  requirement's categories as an oracle: adding/changing/archiving/
+  restoring projects; changing settings; creating/editing/hiding/
+  restoring instructions; creating/editing/restoring variants plus
+  their "hiding" half — for variants that is the §6.4 soft delete
+  (`VariantDeleted`, since variants have no hidden state);
+  assignments (bulk = one entry, the count in `Details::Bulk` — the
+  requirement's own parenthetical); heading operations
+  (created/changed/deleted, §6.4's physical delete); sync runs
+  (`SyncRunFinished`) and their per-project results
+  (`SyncProjectResult`) — the requirement's "and" reads as two
+  entries; backup creation (`BackupCreated`, the BKP-001 target-file
+  copies); errors (`ErrorReported`, e.g. a DB-017 invariant
+  violation). A _failed_ operation deliberately has no member of its
+  own: it is journaled as its own action with `result = error` (the
+  fail-then-log semantics). Reads reject unknown stored actions with
+  the D-039 corrupt-cells policy (`StorageError::ActionLog`) — every
+  writer goes through `insert`, so an unknown member means corruption
+  or version skew, not a value to guess at; the same error covers a
+  non-JSON `details` cell and a vocabulary violation in any other
+  column. The `entity_type` column gets the same treatment: a closed
+  `EntityType` enum (project, instruction, heading, variant,
+  assignment, sync_run, backup, setting), and an `entity_id` without
+  its `entity_type` (or vice versa) fails the read instead of
+  silently dropping the half that exists.
+- _Timestamps and ids._ `insert` stamps `ts` itself with `now_utc()`
+  (DB-002, D-031/D-035) — one timestamp convention regardless of
+  producer, pinned by the round-trip test's shape assertion. The
+  autoincrement id is returned; no UUIDv7 here (the schema's own
+  `INTEGER PRIMARY KEY AUTOINCREMENT`, D-036).
+- _Reads._ `recent(conn, limit)` — newest first, descending id — is
+  the minimal seam: the "Activity" window's filters and pagination
+  (by date, project, type, result) are T-027's and are not designed
+  here; `details` comes back as parsed JSON, because interpreting the
+  payload is the reading task's business. LOG-006's retention
+  (10 000/180 from settings, startup + daily cleanup) is explicitly
+  T-029's: nothing in the module deletes rows.
+- _The tracing mirror._ The card's "duplicated into tracing without
+  content" is one new facade function, `logging::action_logged(&LogEntry)`
+  (D-032's pin keeps tracing macros in `logging.rs` alone), with the
+  decision table split into `mirror_level` for direct testing. Policy,
+  decided by LOG-005 and §10: **everything mirrors except the
+  info+user+non-error shape.** Warn and error entries mirror at their
+  own level regardless of visibility — including `diagnostic` ones,
+  whose only other surface is diagnostics, so not mirroring would
+  leave the database journal as their single home. An info entry
+  mirrors in two cases: `result = error` — §10's "every error is
+  written to the log" must hold even when a producer forgot the
+  documented error-level pairing (the round-1 review's defense
+  suggestion) — and `visibility = diagnostic`, per LOG-005's "only in
+  the file log and in diagnostics". The one unmirrored shape — info +
+  user + ok/skipped — is the "Activity" window's own data (the
+  database journal already holds it, and the per-event facade
+  functions already write the file log's routine lines; mirroring
+  every user entry would double the file's volume with duplicates).
+  The policy lives in the facade, not at callers: they call once per
+  written entry. The mirrored line carries action/result codes,
+  entity type/id, project and sync-run ids — SEC-008's vocabulary;
+  `details` stays in the database alone (its paths and codes are
+  already represented where they matter). No production caller yet:
+  the first command task that writes the journal calls it (the
+  `file_event` tested-today/consumed-later shape), and
+  `db_backup_daily`'s boundary comment is updated to match — the
+  journal exists, but LOG-001…004's "backup creation" is the BKP-001
+  target-file family, not the ERR-001 daily database copy, whose
+  journaling is a visibility decision for the startup-wiring task.
+
+Dependencies: none new — `serde_json` (D-039) and `rusqlite` cover
+everything. Tests: 7 unit (schema CHECK literals as an oracle, the
+LOG-001…004 mapping table with placement, dotted-unique action
+strings, the §10 shape check both ways over the full spec table, the
+canonical details JSON forms, the beside-instruction-text unit pin,
+`LogEntry::new`) and 8 integration over real migrated databases
+(full-field round-trip with the DB-002 `ts`, minimal-entry NULL
+columns, newest-first with limit, the rollback half, the fail-then-log
+half, the visibility pair, the tampered-cell matrix, the
+database-side SEC-008 pin; every test tears its temp directory down),
+plus two facade tests in `logging.rs` (the mirror decision driven
+end-to-end through a real subscriber — every shape mirrored at its
+level, the info+user+ok shape absent, no instruction marker in the
+file — and the `mirror_level` table directly). The round-1 review
+(deepseek-v4.1-flash, APPROVE, no P0/P1) tightened the mirror policy
+(the error-result defense and the diagnostic-info mirror), the
+mapping test (placement, not just coverage), the temp-dir teardown,
+four broken rustdoc lead-ins, and several doc-boundary notes recorded
+above. The round-2 review (hy4-flash-free, APPROVE, no P0/P1) caught
+one real oracle defect in that fix — the §10 sample had transcribed
+`E_NOT_UTF` for the table's `E_NOT_UTF8` and included two §9.2
+`MOVEFILE_*` flag names that are not registry codes — and the oracle
+now carries exactly the table's 22 codes; it also tightened the
+`StorageError::ActionLog` doc to read-path-only wording.

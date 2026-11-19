@@ -372,11 +372,14 @@ pub(crate) fn db_corrupt(error: &AppError) {
 /// copy already exists gets **no** line — that is ERR-001's idempotent
 /// no-op, and a line per restart would only repeat itself.
 ///
-/// Boundary with the future `action_log` service (spec §7.7,
-/// LOG-001..004 records "backup creation"): until that service exists
-/// (T-026), this file-log line is the whole journal of daily-copy
-/// creation; wiring the same event into `action_log` belongs to that
-/// task, which owns its visibility rules (LOG-005).
+/// Boundary with the `action_log` journal (spec §7.7): the journal
+/// service exists (T-026), but LOG-001..004's "backup creation" is
+/// the BKP-001 family — copies of a project's *target file* taken by
+/// sync runs (`backup_records`) — not this ERR-001 database copy, so
+/// this file-log line remains the daily copy's whole journal. Whether
+/// the daily copy also deserves a `diagnostic` journal entry is a
+/// visibility decision (LOG-005) for the task that wires startup
+/// events into the journal.
 pub(crate) fn db_backup_daily(path: &Path) {
     tracing::info!(
         target: "eunomia::db",
@@ -421,6 +424,101 @@ pub(crate) fn db_busy_retry(attempt: usize, pause_ms: u64) {
         pause_ms,
         "database busy; retrying the operation after the pause"
     );
+}
+
+/// An `action_log` entry was written to the database journal (spec
+/// §7.7), duplicated into the file log — the journal's diagnostic
+/// half. The entry itself is the payload: the action code, the result
+/// code, and the object/project/run IDs it carries, all already
+/// curated by the store's typed [`LogEntry`] (SEC-008 — its `details`
+/// is the typed enum that cannot hold instruction text, and this line
+/// does not repeat even that: codes and IDs only).
+///
+/// **What is mirrored, and what is not.** The policy lives here, not
+/// at the callers: they call this once per written entry, and this
+/// function decides.
+///
+/// - `error` and `warn` entries mirror regardless of visibility — a
+///   degradation or failure is what the file log exists for, and a
+///   `diagnostic` one has no other surface (LOG-005: "only in the
+///   file log and in diagnostics").
+/// - An `info` entry mirrors in two cases: `result = error` — §10's
+///   "every error is written to the log" must hold even when a
+///   producer forgot the documented error-level pairing — and
+///   `visibility = diagnostic`, whose only two surfaces are the file
+///   log and diagnostics, so not mirroring would leave the database
+///   journal as the entry's single home.
+/// - The one shape that does **not** mirror: `info` + `user` + a
+///   non-error result. That is the "Activity" window's own data (the
+///   database journal already holds it), and mirroring every one
+///   would double the file's volume with lines the per-event facade
+///   functions (`file_event`, `db_backup_daily`, …) already write.
+///
+/// No production caller exists yet (the first command task that
+/// writes the journal will call it — the `file_event` shape); the
+/// SEC-008 test suite is the consumer that keeps this contract honest
+/// until then. Remove the `allow` when the first task calls this.
+#[allow(dead_code)]
+pub(crate) fn action_logged(entry: &eunomia_store::action_log::LogEntry<'_>) {
+    // The payload block is repeated across the three level arms: the
+    // tracing macro requires a constant level (its callsite caches
+    // the level at compile time), and the house style is one explicit
+    // macro per level — keep the three blocks identical.
+    let entity = entry.entity;
+    match mirror_level(entry) {
+        None => {}
+        Some(tracing::Level::ERROR) => tracing::error!(
+            target: "eunomia::action_log",
+            action = entry.action.as_str(),
+            result = entry.result.as_str(),
+            entity_type = entity.map(|e| e.kind.as_str()).unwrap_or(""),
+            entity_id = entity.map(|e| e.id).unwrap_or(""),
+            project_id = entry.project_id.unwrap_or(""),
+            sync_run_id = entry.sync_run_id.unwrap_or(""),
+            "action-log entry written (mirrored to the file log)"
+        ),
+        Some(tracing::Level::WARN) => tracing::warn!(
+            target: "eunomia::action_log",
+            action = entry.action.as_str(),
+            result = entry.result.as_str(),
+            entity_type = entity.map(|e| e.kind.as_str()).unwrap_or(""),
+            entity_id = entity.map(|e| e.id).unwrap_or(""),
+            project_id = entry.project_id.unwrap_or(""),
+            sync_run_id = entry.sync_run_id.unwrap_or(""),
+            "action-log entry written (mirrored to the file log)"
+        ),
+        // `mirror_level` only ever returns ERROR, WARN or INFO; this
+        // arm is the INFO one (TRACE/DEBUG are never produced).
+        Some(_) => tracing::info!(
+            target: "eunomia::action_log",
+            action = entry.action.as_str(),
+            result = entry.result.as_str(),
+            entity_type = entity.map(|e| e.kind.as_str()).unwrap_or(""),
+            entity_id = entity.map(|e| e.id).unwrap_or(""),
+            project_id = entry.project_id.unwrap_or(""),
+            sync_run_id = entry.sync_run_id.unwrap_or(""),
+            "action-log entry written (mirrored to the file log)"
+        ),
+    }
+}
+
+/// The tracing level an entry mirrors at, or `None` when it does not
+/// — the policy half of [`action_logged`] (see there for the
+/// reasoning; this is the decision table, split out for the test).
+#[allow(dead_code)]
+fn mirror_level(entry: &eunomia_store::action_log::LogEntry<'_>) -> Option<tracing::Level> {
+    use eunomia_store::action_log::{Level, Outcome, Visibility};
+    match (entry.level, entry.visibility, entry.result) {
+        // Failures and degradations always mirror, at their own
+        // level or better.
+        (Level::Error, _, _) | (_, _, Outcome::Error) => Some(tracing::Level::ERROR),
+        (Level::Warn, _, _) => Some(tracing::Level::WARN),
+        // A diagnostic info entry: the file log is one of its only
+        // two surfaces (LOG-005).
+        (Level::Info, Visibility::Diagnostic, _) => Some(tracing::Level::INFO),
+        // The Activity window's own data; not mirrored.
+        (Level::Info, Visibility::User, _) => None,
+    }
 }
 
 /// A recovery operation preserved the damaged database (T-024, §10's
@@ -1163,6 +1261,238 @@ mod tests {
             "the line must name the situation, got: {log}"
         );
         drop(temp);
+    }
+
+    #[test]
+    fn action_log_entries_mirror_by_level_result_and_visibility() {
+        // Arrange: five journal entries the way a future command task
+        // builds them — a routine user action (info, not mirrored), a
+        // diagnostic info entry (mirrored: the file log is one of its
+        // only two surfaces), a diagnostic warn, a failed operation's
+        // fail-then-log error entry, and the defensive case: a failure
+        // whose producer forgot the error-level pairing (info + user +
+        // result=error — still mirrored, at ERROR). All beside a
+        // realistic instruction text that stays in scope throughout.
+        // The error entry carries a typed details payload too; the
+        // mirrored line must not repeat even that (codes and IDs only).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+        let instruction_text = "\
+            SECRET-INSTRUCTION-MARKER: always answer in the user's language.\n\
+            Follow every step of SECRET-RECIPE-4f2a before touching the build.\n\
+            The deployment token is sk-live-9d1e2f3a4b5c.\n";
+        let entity_id = "0193a2aa-6c9e-7c8e-9c6d-1a2b3c4d5e6f";
+        let project_id = "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f";
+        let sync_run_id = "0193a2cc-2222-7333-9c6d-1a2b3c4d5e6f";
+
+        // Act: the journal-write call a command task makes once per
+        // entry; the facade decides what reaches the file.
+        tracing::subscriber::with_default(subscriber, || {
+            use eunomia_store::action_log::{
+                Action, Details, Entity, EntityType, FailureCode, Level, LogEntry, Outcome,
+                Visibility,
+            };
+            let info_user = LogEntry::new(
+                Action::SettingsChanged,
+                Level::Info,
+                Visibility::User,
+                Outcome::Ok,
+            );
+            let info_diagnostic = LogEntry::new(
+                Action::ProjectArchived,
+                Level::Info,
+                Visibility::Diagnostic,
+                Outcome::Ok,
+            );
+            let mut warn_entry = LogEntry::new(
+                Action::SyncProjectResult,
+                Level::Warn,
+                Visibility::Diagnostic,
+                Outcome::Skipped,
+            );
+            warn_entry.entity = Some(Entity {
+                kind: EntityType::Project,
+                id: project_id,
+            });
+            warn_entry.sync_run_id = Some(sync_run_id);
+            let mut error_entry = LogEntry::new(
+                Action::VariantChanged,
+                Level::Error,
+                Visibility::User,
+                Outcome::Error,
+            );
+            error_entry.entity = Some(Entity {
+                kind: EntityType::Variant,
+                id: entity_id,
+            });
+            error_entry.project_id = Some(project_id);
+            error_entry.details = Some(Details::Failure {
+                code: FailureCode::new("E_CONTENT_RESERVED").unwrap(),
+                path: Some(temp.path().join("repo").join("AGENTS.md")),
+            });
+            // The forgotten-pairing case: a failure written at info.
+            let info_failure = LogEntry::new(
+                Action::HeadingChanged,
+                Level::Info,
+                Visibility::User,
+                Outcome::Error,
+            );
+            action_logged(&info_user);
+            action_logged(&info_diagnostic);
+            action_logged(&warn_entry);
+            action_logged(&error_entry);
+            action_logged(&info_failure);
+            let _ = instruction_text;
+        });
+        drop(guard);
+
+        // Assert: everything except the info+user+ok entry is
+        // mirrored, each at the right level (the level word appears
+        // on the fmt line), with codes and IDs only (SEC-008's
+        // allowed vocabulary), and no marker of the instruction
+        // text — or of the details payload — leaked. The entity_id
+        // assertion pins the quoted field value (the fmt layer quotes
+        // string fields), not the bare digits.
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("WARN") && log.contains("ERROR") && log.contains("INFO"),
+            "warn, error and diagnostic-info entries are mirrored, got: {log}"
+        );
+        assert!(
+            log.contains("action=\"sync.project_result\"") && log.contains("result=\"skipped\""),
+            "the warn mirror must carry the action and result codes, got: {log}"
+        );
+        assert!(
+            log.contains(&format!("sync_run_id=\"{sync_run_id}\"")),
+            "the warn mirror must carry the sync-run ID, got: {log}"
+        );
+        assert!(
+            log.contains("action=\"variant.changed\"") && log.contains("result=\"error\""),
+            "the error mirror must carry the action and result codes, got: {log}"
+        );
+        assert!(
+            log.contains(&format!("entity_id=\"{entity_id}\"")),
+            "the error mirror must carry the entity ID, got: {log}"
+        );
+        assert!(
+            log.contains("entity_type=\"variant\""),
+            "the error mirror must carry the entity type code, got: {log}"
+        );
+        assert!(
+            log.contains(&format!("project_id=\"{project_id}\"")),
+            "the error mirror must carry the project ID, got: {log}"
+        );
+        assert!(
+            log.contains("action=\"project.archived\""),
+            "a diagnostic info entry must be mirrored (LOG-005: the file \
+             log is one of its only two surfaces), got: {log}"
+        );
+        assert!(
+            log.contains("action=\"heading.changed\""),
+            "an info entry with result=error must still mirror (the §10 \
+             pairing, defended), got: {log}"
+        );
+        assert!(
+            !log.contains("action=\"settings.changed\""),
+            "an info+user+ok entry must not be mirrored into the file log, got: {log}"
+        );
+        for marker in [
+            "SECRET-INSTRUCTION-MARKER",
+            "SECRET-RECIPE-4f2a",
+            "sk-live-9d1e2f3a4b5c",
+            "always answer in the user's language",
+        ] {
+            assert!(
+                !log.contains(marker),
+                "SEC-008 violation: instruction text leaked into the mirrored \
+                 line (`{marker}`), got: {log}"
+            );
+        }
+        drop(temp);
+    }
+
+    #[test]
+    fn the_mirror_policy_table_is_the_documented_one() {
+        // The decision table, driven directly: every (level,
+        // visibility, result) combination maps to the documented
+        // tracing level or to no line at all.
+        use eunomia_store::action_log::{Action, Level, LogEntry, Outcome, Visibility};
+        let cases: [(Level, Visibility, Outcome, Option<tracing::Level>); 12] = [
+            (
+                Level::Error,
+                Visibility::User,
+                Outcome::Ok,
+                Some(tracing::Level::ERROR),
+            ),
+            (
+                Level::Error,
+                Visibility::Diagnostic,
+                Outcome::Error,
+                Some(tracing::Level::ERROR),
+            ),
+            (
+                Level::Error,
+                Visibility::User,
+                Outcome::Error,
+                Some(tracing::Level::ERROR),
+            ),
+            (
+                Level::Warn,
+                Visibility::User,
+                Outcome::Ok,
+                Some(tracing::Level::WARN),
+            ),
+            (
+                Level::Warn,
+                Visibility::Diagnostic,
+                Outcome::Skipped,
+                Some(tracing::Level::WARN),
+            ),
+            // §10's pairing, defended: a failure written at warn or
+            // info still mirrors at ERROR.
+            (
+                Level::Warn,
+                Visibility::User,
+                Outcome::Error,
+                Some(tracing::Level::ERROR),
+            ),
+            (
+                Level::Info,
+                Visibility::User,
+                Outcome::Error,
+                Some(tracing::Level::ERROR),
+            ),
+            (
+                Level::Info,
+                Visibility::Diagnostic,
+                Outcome::Error,
+                Some(tracing::Level::ERROR),
+            ),
+            (
+                Level::Info,
+                Visibility::Diagnostic,
+                Outcome::Ok,
+                Some(tracing::Level::INFO),
+            ),
+            (
+                Level::Info,
+                Visibility::Diagnostic,
+                Outcome::Skipped,
+                Some(tracing::Level::INFO),
+            ),
+            // The Activity window's own data.
+            (Level::Info, Visibility::User, Outcome::Ok, None),
+            (Level::Info, Visibility::User, Outcome::Skipped, None),
+        ];
+        for (level, visibility, result, expected) in cases {
+            let entry = LogEntry::new(Action::ErrorReported, level, visibility, result);
+            assert_eq!(
+                mirror_level(&entry),
+                expected,
+                "{level:?}/{visibility:?}/{result:?}"
+            );
+        }
     }
 
     #[test]

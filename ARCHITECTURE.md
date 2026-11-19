@@ -373,9 +373,11 @@ logged through the facade (`logging::db_backup_daily_failed`, a
 gets none), and every later command runs normally. The step runs
 synchronously in `setup`, so the first launch of a day pays one
 full-copy `VACUUM INTO` of I/O before the window exists — ERR-001's
-own cost, not a hang. Until the
-`action_log` service lands (spec §7.7 LOG-001..004, T-026), these
-file-log lines are the whole journal of daily-copy creation.
+own cost, not a hang. These
+file-log lines remain the whole journal of daily-copy creation: the
+`action_log` journal exists (T-026), but LOG-001..004's "backup
+creation" is the BKP-001 target-file family, not this database copy
+(see the boundary note on `logging::db_backup_daily`).
 
 **Recovery mode** (spec §10 `E_DB_CORRUPT` row, §7.10 command notes;
 DECISIONS.md D-049): when the startup open fails the quick_check gate,
@@ -443,6 +445,34 @@ never a silent default (the table is machine-written, unlike the
 hand-editable `config.toml`, SYS-012). `default.*` keys are read only
 by project creation; changing them never touches existing projects
 (DEF-005).
+
+The `action_log` table has the journal repository,
+`eunomia_store::action_log` (spec §7.7 LOG-001…005, DECISIONS.md
+D-051): a closed `Action` enum mapped member-by-member onto
+LOG-001…004's own list, `Level`/`Visibility`/`Outcome` matching the
+§6.2 CHECK vocabularies, and a typed `Details` payload (`Bulk`,
+`File`, `Failure`) whose fields are numbers, paths and the
+shape-validated `FailureCode` newtype — SEC-008 is structural: no
+variant of `Details` accepts free text, so instruction content has no
+route into the column, and `FailureCode::new` rejects every
+instruction-shaped string (the form check against the §10 registry
+shape, not the membership — the member list stays in `errors.rs`).
+Transactional semantics, resolved explicitly: a successful operation
+writes its entry inside the operation's own transaction (the
+`settings::set` shape — a rolled-back operation leaves no entry), and
+a failed operation's entry is written **after** the rollback, in the
+next transaction (fail-then-log: the error entry must survive the
+transaction it describes). Reads go through `recent` (newest first;
+the Activity window's filters are T-027's) and fail with
+`StorageError::ActionLog` on any cell outside its vocabulary or a
+non-JSON `details` (the D-039 corrupt-cells policy). The journal is
+mirrored into the file log by one facade function,
+`logging::action_logged` — everything mirrors except the
+info+user+non-error shape, with codes and ids only (the policy
+reasoning lives with the function). LOG-006's
+retention/cleanup is T-029's; nothing in the module deletes rows. No
+producer is wired yet: the first command task that journals its
+actions consumes the repository (the `file_event` tested-today shape).
 
 ## Config
 

@@ -5,6 +5,7 @@
 //! dependency on Tauri so that database logic can be developed and
 //! tested independently of the UI layer (see DECISIONS.md D-010).
 
+pub mod action_log;
 pub mod settings;
 pub mod storage;
 pub mod values;

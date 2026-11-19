@@ -43,6 +43,7 @@ use jiff::Timestamp;
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
+use crate::action_log::ActionLogError;
 use crate::settings::SettingsError;
 
 /// The ordered list of embedded SQL migrations applied by [`run_migrations`].
@@ -143,6 +144,16 @@ pub enum StorageError {
         key: String,
         /// The validation or decoding failure.
         source: SettingsError,
+    },
+    /// Reading an action-log entry failed (spec §7.7): a stored cell
+    /// is outside its closed vocabulary, or a `details` cell is not
+    /// valid JSON — corruption or a row written by a newer app
+    /// version (the D-039 corrupt-cells policy, applied to the
+    /// journal). Only the read path constructs this variant; a
+    /// failing write surfaces as [`StorageError::Sql`].
+    ActionLog {
+        /// The validation or decoding failure.
+        source: ActionLogError,
     },
     /// Setting the required owner-only permissions on the database
     /// file failed (spec §13 SEC-007, Unix): without them the data
@@ -248,6 +259,9 @@ impl fmt::Display for StorageError {
             StorageError::Settings { key, source } => {
                 write!(f, "invalid setting {key}: {source}")
             }
+            StorageError::ActionLog { source } => {
+                write!(f, "invalid action-log entry: {source}")
+            }
             StorageError::Permissions { path, source } => {
                 write!(
                     f,
@@ -268,6 +282,7 @@ impl std::error::Error for StorageError {
             StorageError::JournalMode { .. } => None,
             StorageError::Backup { source, .. } => Some(source),
             StorageError::Settings { source, .. } => Some(source),
+            StorageError::ActionLog { source } => Some(source),
             StorageError::Permissions { source, .. } => Some(source),
         }
     }
