@@ -9,7 +9,12 @@
   own default manifest ships without one - a leading space before the
   `assembly` root element is harmless.
 
-  Embedded into the executable by `src-tauri/build.rs` via
+  Embedded into Windows binaries by `src-tauri/build.rs` (T-241). On
+  Windows+MSVC the linker does it for EVERY linked target of the package
+  (/MANIFESTINPUT with this file), so the cargo-test harness exes get it
+  too; tauri-build's own RC embed is switched off there to avoid a double
+  RT_MANIFEST. On other toolchains (and as this comment's RC caveats
+  assume) it travels the classic route:
   `WindowsAttributes::app_manifest` (tauri-build 2.7.5). That API REPLACES
   tauri-build's default manifest wholesale - the default
   (`windows-app-manifest.xml` inside the tauri-build crate) carries only the
