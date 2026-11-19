@@ -142,35 +142,54 @@ jobs:
             ForEach-Object { Copy-Item $dll.FullName -Destination $_.DirectoryName -Force }
           # T-241: external Common-Controls v6 manifest for every
           # eunomia-sync test exe — ignored where an embedded manifest
-          # exists (bin harness), picked up where none does (lib harness).
-          # cargo 1.100's build-dir layout v2 places test exes in
-          # build/<pkg>/<hash>/out; deps/ covers the pre-1.100 layout.
+          # exists (bin harness), picked up where none does (lib
+          # harness). cargo 1.100's build-dir layout v2 places test
+          # exes in build/<pkg>/<hash>/out; deps/ covers the pre-1.100
+          # layout. Loud, not silent: with no exe found (a cargo
+          # layout change under the floating "stable" toolchain) the
+          # step fails here — without the manifests the lib harnesses
+          # die at load again, and a silent skip would send the next
+          # failure back to square one.
           $manifest = 'src-tauri\windows\app.manifest'
-          Get-ChildItem -Path target\debug\build\eunomia-sync -Recurse -Filter *.exe |
-            Where-Object { $_.FullName -match '\\out\\' } |
-            ForEach-Object { Copy-Item $manifest -Destination "$($_.FullName).manifest" -Force }
-          Get-ChildItem -Path target\debug\deps -Filter 'eunomia_sync*.exe' -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $manifest -Destination "$($_.FullName).manifest" -Force }
+          $exes = @(
+            Get-ChildItem -Path target\debug\build\eunomia-sync -Recurse -Filter *.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\out\\' }
+            Get-ChildItem -Path target\debug\deps -Filter 'eunomia_sync*.exe' -ErrorAction SilentlyContinue
+          )
+          if ($exes.Count -eq 0) {
+            throw "no eunomia-sync test exes found to stage the manifest beside — did cargo's build-dir layout change?"
+          }
+          Write-Host "staging the v6 manifest beside $($exes.Count) test exe(s)"
+          $exes | ForEach-Object { Copy-Item $manifest -Destination "$($_.FullName).manifest" -Force }
       - name: Rust tests
         run: cargo test --workspace
-      # The eunomia-sync lib test exe still dies at startup with
+      # History (T-241): before the manifest staging above, the
+      # eunomia-sync lib test exe died at startup with
       # STATUS_ENTRYPOINT_NOT_FOUND even with our x64 WebView2Loader
-      # staged beside it. Running the exe directly from pwsh surfaces
+      # staged beside it — running the exe directly from pwsh surfaced
       # the loader's exact message ("The procedure entry point X could
-      # not be located in Y") — the diagnosis the cargo runner swallows.
+      # not be located in Y"), the diagnosis the cargo runner swallows.
+      # The kit stays for the next Windows loader failure: it parses
+      # the import table of the built exes, checks both manifest
+      # deliveries, and prints the link args cargo recorded.
       - name: Loader diagnostics for the lib test exe (Windows)
         if: runner.os == 'Windows' && failure()
         shell: bash
         run: |
           python - <<'PY'
-          import struct, glob
+          import os, struct, sys, glob
           def sections(data):
               pe = data.index(b'PE\0\0') + 4
               nsec, = struct.unpack_from('<H', data, pe + 2)
               optsz, = struct.unpack_from('<H', data, pe + 16)
               opt = pe + 20
               magic, = struct.unpack_from('<H', data, opt)
-              dd = opt + (0x60 if magic == 0x10b else 0x70)
+              # Data directory index 1 = import table. The +8 matters:
+              # index 0 (export) sits right before it and reads 0 for
+              # these exes — a refactor that dropped the +8 once made
+              # this step print an empty import list on the exact
+              # failure it exists to diagnose.
+              dd = opt + (0x60 if magic == 0x10b else 0x70) + 8
               rva, = struct.unpack_from('<I', data, dd)
               secs = []
               for i in range(nsec):
@@ -193,6 +212,11 @@ jobs:
                   no = r2o(namerva)
                   dll = data[no:data.index(b'\0', no)].decode()
                   funcs = []
+                  # Bound-import descriptors leave OriginalFirstThunk
+                  # at 0; the bound names then live in FirstThunk
+                  # (descriptor +16).
+                  if thunkrva == 0:
+                      thunkrva, = struct.unpack_from('<I', data, o + 16)
                   if thunkrva:
                       t = r2o(thunkrva)
                       while t:
@@ -207,9 +231,16 @@ jobs:
                   out.append((dll, funcs))
                   o += 20
               return out
-          lib_exe = glob.glob(r'target\debug\build\eunomia-sync\*\out\eunomia_sync_lib-*.exe')[0]
-          store_exe = glob.glob(r'target\debug\build\eunomia-store\*\out\settings-*.exe')[0]
+          def one(pattern):
+              matches = glob.glob(pattern)
+              if not matches:
+                  sys.exit('no file matches ' + pattern + ' - did cargo build-dir layout change?')
+              return matches[0]
+          lib_exe = one(r'target\debug\build\eunomia-sync\*\out\eunomia_sync_lib-*.exe')
+          store_exe = one(r'target\debug\build\eunomia-store\*\out\settings-*.exe')
           lib, store = imports(lib_exe), imports(store_exe)
+          if not lib:
+              sys.exit('import table of ' + lib_exe + ' parsed empty - diagnostic regression (data-directory offset?)')
           print('LIB-TEST imports:', *(d for d, _ in lib), sep='\n  ')
           print('ONLY-IN-LIB (suspects):', *(set(d for d, _ in lib) - set(d for d, _ in store)), sep='\n  ')
           for dll, funcs in lib:
@@ -220,7 +251,7 @@ jobs:
           if b'Microsoft.Windows.Common-Controls' in data:
               i = data.index(b'<assembly')
               print('MANIFEST HEAD:', data[i:i+400].decode('ascii', 'replace'))
-          ext = open(lib_exe + '.manifest', 'rb').read() if __import__('os').path.exists(lib_exe + '.manifest') else b''
+          ext = open(lib_exe + '.manifest', 'rb').read() if os.path.exists(lib_exe + '.manifest') else b''
           print('EXTERNAL MANIFEST FILE:', bool(ext))
           if b'Microsoft.Windows.Common-Controls' in ext:
               i = ext.index(b'<assembly')
