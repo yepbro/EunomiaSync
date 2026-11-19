@@ -12,9 +12,9 @@
 //!
 //! The dependency surface is pinned by the spec (§5.2) and recorded in
 //! DECISIONS.md D-017: `serde` (canonical forms of the domain
-//! vocabulary), `thiserror` (domain error types) and `sha2` (idle
-//! until the build-hash task). Nothing else joins without a
-//! DECISIONS.md entry.
+//! vocabulary), `thiserror` (domain error types) and `sha2` (the
+//! build hash, D-064, and the color tie-break, D-077). Nothing else
+//! joins without a DECISIONS.md entry.
 //!
 //! ## Modules
 //!
@@ -27,6 +27,8 @@
 //!   applies to every snapshot text before it reaches a file
 //! - [`body`] — the ALG-020…022 assembly of a project's file body
 //!   from a snapshot (§9.2)
+//! - [`color_pick`] — the D-29 rule that assigns a new project the
+//!   least-used palette color, hash-tie-broken by project ID
 //! - [`heading_range`] — the ALG-060 branch range of a section
 //!   heading, as an index range over the ordered items
 //! - [`reorder`] — the ALG-061 move: cut a branch (or a one-item
@@ -46,6 +48,7 @@
 pub mod assembly_b;
 pub mod assignment;
 pub mod body;
+pub mod color_pick;
 pub mod compare;
 pub mod dirty;
 pub mod extra_files;

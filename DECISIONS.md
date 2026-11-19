@@ -4996,3 +4996,83 @@ older list's missing entries (markers, marker, assembly_b, compare,
 dirty, extra_files, hash, target_file — D-062's known open item)
 remain untouched: ARCHITECTURE.md, the other half of that
 reconciliation, is outside this task's zone.
+
+### D-077 — The D-29 tie-break: sha256 of the ID, first 8 bytes big-endian, remainder over palette order — 2026-11-19
+
+Problem: T-051 implements the new-project color rule (DB-041 → D-29,
+PRJ-010). D-29 states "The least used palette color among active
+projects; on a tie, chosen by the hash of the project ID
+(deterministic)" — and names nothing else. Three load-bearing thirds
+are unspecified: WHICH hash, HOW the digest folds to a choice, and
+HOW the folded value maps onto the tied candidates. The first half
+carries PRJ-010's acceptance alone (a count-0 color always beats a
+count ≥ 1 color, so twelve consecutive adds from an empty library
+are twelve distinct colors), so the openness touches only the
+tie-break — but an unpinned tie-break is an unpinned test oracle.
+
+Solution: `eunomia_core::color_pick::pick_color(&[Color],
+&ProjectId) -> Color` counts the occupied slice per palette color
+(DB-040 order = `Color::ALL`, T-049/D-075 — the palette is reused,
+not restated), takes the colors at the minimum count as candidates
+in palette order, and folds the identifier to an index among them:
+
+1. _Hash_ — SHA-256 over the ID's UTF-8 bytes. `sha2` is already in
+   core's allow-list (D-017, pinned ahead of exactly such tasks) and
+   already has the D-064 build-hash precedent; a cryptographic hash
+   makes the fold's low bits indifferent to project-name structure.
+2. _Fold_ — the digest's first 8 bytes, big-endian, as one `u64`.
+   Eight bytes dwarf the ≤ 12-way choice; big-endian is pinned for
+   cross-build stability (either byte order works; only writing one
+   down does — the same once-only spirit as D-064's little-endian
+   length framing).
+3. _Mapping_ — `scalar % candidate_count` indexes the candidates in
+   DB-040 palette order. Deterministic by construction, and
+   set-size-relative by nature: two IDs that agree over eleven
+   candidates need not over ten, which is fine — D-29 asks for
+   determinism per decision point, and a pure function delivers
+   exactly that.
+
+The "among ACTIVE projects" filter lives one seam away, in the
+store's query that fills the slice (`WHERE state = 'active'`): the
+`projects.color` column is NOT NULL with no CHECK (§6.2), every
+value parses through `validate_color` (D-075's gate), and DB-014's
+"an archived project … does not take part" therefore reduces to
+"its color stops being passed in" — archiving frees the color as
+the unique count-0 candidate for the next add, restoring re-seats
+it. When all twelve colors are in use, every color ties at the
+minimum and the hash decides among all of them — a repeat, which
+DB-041 explicitly blesses ("color is not the only sign of a
+project", the label rides next to it, NFR-020).
+
+The test oracle is external, not mirror-on-mirror (the D-064 review
+lesson): the FIPS 180-4 published sha256("abc") digest pins the
+whole chain — hash function, byte order, fold width and palette-
+order indexing — in one assertion (`0xba7816bf8f01cfea % 12 == 6`
+→ cyan), and the same published scalar re-folds over a shrunk
+candidate set (`% 11 == 10`). PRJ-010's twelve-in-a-row scenario is
+asserted directly, as are least-count membership, multiset order
+independence, and the archive-frees-the-color seam.
+
+The round-1 review hardened that oracle: ONE vector's remainders
+are coincidentally reproduced by degenerate folds (the abc scalar's
+`%12`/`%11` are also `first-byte % 12`/`first-byte % 11` for
+0xba = 186, and a constant 54 passes everything), so the suite now
+carries the second FIPS 180-4 vector (Appendix B.2, the two-block
+message: `0x248d6a61d20638b8 % 12 == 8` → indigo, which the
+one-byte fold's 36 and the constant 54 both miss) plus a
+many-identifiers spread assertion no constant-scalar implementation
+can satisfy. The same review found and removed the module's one
+restated palette fact — a local `PALETTE_SIZE = 12` constant, now
+sized from `Color::ALL` itself.
+
+Two deliberate lags, recorded per the D-064 precedent: lib.rs's
+"sha2 idle" parenthetical is updated in this task's already-touched
+lib.rs (it had been stale since D-064 landed), while
+ARCHITECTURE.md's workspace-layout module list — incomplete since
+before this task — stays out of T-051's zone and belongs to the
+orchestrator's docs pass. And the active-only seam stays prose for
+now: `&[Color]` cannot distinguish "active projects' colors" from
+"all projects' colors", and making it explicit (an
+active-colors-only newtype, or a store-side test that the query
+filters `state = 'active'`) belongs to the store task that first
+builds the slice.
