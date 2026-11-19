@@ -27,6 +27,9 @@
   const syncBadge = document.querySelector('.syncbar .badge')
   const syncCounterText = document.getElementById('sync-counter-text')
   const hiddenCountChip = document.getElementById('hidden-count')
+  const confirmDialog = document.getElementById('confirm-dialog')
+  const confirmTitle = document.getElementById('confirm-title')
+  const confirmText = document.getElementById('confirm-text')
 
   /* Project columns: skip the pinned checkbox + instruction columns */
   const projectCols = [...document.querySelectorAll('.matrix colgroup col')].slice(2)
@@ -39,6 +42,20 @@
   const headingLevel = (tr) => Number(tr.querySelector('[data-level]').dataset.level)
   const instructionName = (tr) =>
     (tr.querySelector('.name')?.textContent ?? '').trim().toLowerCase()
+  const instructionDisplay = (row) => (row.querySelector('.name')?.textContent ?? '').trim()
+  const instructionText = (row) => {
+    const isEmpty = !!row.querySelector('.name-empty')
+    return isEmpty ? '' : (row.querySelector('.c-name')?.getAttribute('title') ?? '')
+  }
+  /* Text of a cell's currently selected option: the main instruction text
+     for "Default", the mapped variant text otherwise */
+  function optionText(row, option) {
+    if (option === 'Default') return instructionText(row)
+    const mapped = VARIANTS[instructionDisplay(row)]
+    const found = mapped?.find((v) => v.name === option)
+    if (found) return found.text
+    return instructionText(row) + ' Slightly reworded version of the main text.'
+  }
 
   /* Collapsed heading <tr> elements */
   const collapsed = new Set()
@@ -148,7 +165,8 @@
     }
     const checkedChanged = (input.dataset.initial === 'true') !== input.checked
     const variantChanged = !!select && select.dataset.initialVariant !== select.value
-    const changed = checkedChanged || variantChanged
+    const custom = td.dataset.custom === 'true'
+    const changed = custom || checkedChanged || variantChanged
     td.classList.toggle('cell-changed', changed)
     td.title = changed ? 'Assignment changed — will be written on the next sync' : ''
   }
@@ -261,10 +279,12 @@
   function refreshDirtyState() {
     const changed = new Array(projectColsState.length).fill(false)
     for (const input of document.querySelectorAll('.matrix tbody .assign')) {
-      const idx = input.closest('td').cellIndex - 2
+      const td = input.closest('td')
+      const idx = td.cellIndex - 2
       if (idx < 0 || idx >= changed.length) continue
-      const select = input.closest('td').querySelector('.variant-select')
+      const select = td.querySelector('.variant-select')
       const cellChanged =
+        td.dataset.custom === 'true' ||
         (input.dataset.initial === 'true') !== input.checked ||
         (!!select && select.dataset.initialVariant !== select.value)
       changed[idx] = changed[idx] || cellChanged
@@ -374,37 +394,15 @@
         })[ch],
     )
 
-  tbody.addEventListener('click', (e) => {
-    const btn = e.target.closest('.edit-btn')
-    if (!btn) return
-    const row = btn.closest('tr')
-    const name = (row.querySelector('.name')?.textContent ?? '').trim()
-    const isEmpty = !!row.querySelector('.name-empty')
-
-    editTitle.textContent = `Edit instruction — ${name}`
-    editText.value = isEmpty ? '' : (row.querySelector('.c-name')?.getAttribute('title') ?? '')
-    editText.placeholder = isEmpty
-      ? 'No text yet — write the main variant here.'
-      : 'Instruction text (Markdown)…'
-
-    /* The accordion lists every variant the instruction has: mapped ones
-       explicitly; single-variant rows get their "Variant 1" synthesized from
-       the instruction text; badge-less rows have no variants at all */
-    const variantCount = Number(row.querySelector('.chip')?.textContent ?? 0)
-    const mainText = editText.value
-    /* "Variant 1" is the default wording of the main text: nudge it a bit
-       so the variant visibly differs from the field above */
-    const variants = (
-      VARIANTS[name] ?? (variantCount >= 1 ? [{ name: 'Variant 1', text: mainText }] : [])
-    ).map((v) =>
-      v.name === 'Variant 1' && v.text === mainText
-        ? { name: v.name, text: v.text + ' Slightly reworded version of the main text.' }
-        : v,
-    )
-    editVariants.hidden = variants.length === 0
+  function openEditModal({ title, text, placeholder, variants }) {
+    const list = variants ?? []
+    editTitle.textContent = title
+    editText.value = text
+    editText.placeholder = placeholder
+    editVariants.hidden = list.length === 0
     editVariants.open = false // collapsed by default every time
-    editVariantsSummary.textContent = `Variants (${variants.length})`
-    editVariantsList.innerHTML = variants
+    editVariantsSummary.textContent = `Variants (${list.length})`
+    editVariantsList.innerHTML = list
       .map(
         (v, i) =>
           `<div class="variant-item">` +
@@ -414,6 +412,146 @@
       )
       .join('')
     editDialog.showModal()
+  }
+
+  tbody.addEventListener('click', (e) => {
+    const btn = e.target.closest('.edit-btn')
+    if (!btn) return
+    const row = btn.closest('tr')
+    const name = instructionName(row)
+    const mainText = instructionText(row)
+    const isEmpty = !mainText
+
+    /* The accordion lists every variant the instruction has: mapped ones
+       explicitly; single-variant rows get their "Variant 1" synthesized from
+       the instruction text; badge-less rows have no variants at all.
+       "Variant 1" is the default wording of the main text: nudge it a bit
+       so the variant visibly differs from the field above */
+    const variantCount = Number(row.querySelector('.chip')?.textContent ?? 0)
+    const variants = (
+      VARIANTS[name] ?? (variantCount >= 1 ? [{ name: 'Variant 1', text: mainText }] : [])
+    ).map((v) =>
+      v.name === 'Variant 1' && v.text === mainText
+        ? { name: v.name, text: v.text + ' Slightly reworded version of the main text.' }
+        : v,
+    )
+    openEditModal({
+      title: `Edit instruction — ${name}`,
+      text: mainText,
+      placeholder: isEmpty
+        ? 'No text yet — write the main variant here.'
+        : 'Instruction text (Markdown)…',
+      variants,
+    })
+  })
+
+  /* ---------- Per-project custom instructions (cell icons + flows) -------- */
+
+  let pendingCustomCell = null
+  let pendingDeleteCell = null
+  const customTexts = new WeakMap()
+
+  function refreshCellIcons(td) {
+    const row = td.closest('tr')
+    const instr = instructionDisplay(row)
+    const proj =
+      document
+        .querySelectorAll('thead th')
+        [td.cellIndex]?.querySelector('.proj-name')
+        ?.textContent.trim() ?? ''
+    const input = td.querySelector('.assign')
+    const select = td.querySelector('.variant-select')
+    const isCustom = td.dataset.custom === 'true'
+    const columnUnavailable = !!input?.disabled && !isCustom
+
+    let box = td.querySelector('.cell-icons')
+    if (!select || columnUnavailable) {
+      box?.remove()
+      return
+    }
+    if (!box) {
+      box = document.createElement('span')
+      box.className = 'cell-icons'
+      td.append(box)
+    }
+    const mk = (cls, title) => {
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.className = `cell-icon ${cls}`
+      b.title = title
+      b.setAttribute('aria-label', title)
+      return b
+    }
+    box.replaceChildren()
+    if (isCustom) {
+      const edit = mk('cell-icon--edit', `Edit the custom instruction — ${instr} — ${proj}`)
+      edit.addEventListener('click', () => {
+        pendingCustomCell = td
+        openEditModal({
+          title: `Custom instruction — ${instr} — ${proj}`,
+          text: customTexts.get(td) ?? '',
+          placeholder: 'Write the custom instruction text…',
+          variants: [],
+        })
+      })
+      const del = mk('cell-icon--delete', `Delete the custom instruction — ${instr} — ${proj}`)
+      del.addEventListener('click', () => {
+        pendingDeleteCell = td
+        confirmTitle.textContent = 'Delete custom instruction'
+        confirmText.textContent = `Delete the custom instruction for ${instr} — ${proj}? The cell returns to the selected option of the list.`
+        confirmDialog.showModal()
+      })
+      box.append(edit, del)
+    } else {
+      const add = mk('cell-icon--add', `Create a custom instruction — ${instr} — ${proj}`)
+      add.addEventListener('click', () => {
+        pendingCustomCell = td
+        openEditModal({
+          title: `Custom instruction — ${instr} — ${proj}`,
+          text: optionText(row, select.value),
+          placeholder: 'Write the custom instruction text…',
+          variants: [],
+        })
+      })
+      box.append(add)
+    }
+  }
+
+  /* Saving from the custom flow applies the custom text to the cell:
+     the checkbox and the select are disabled while the custom text lives */
+  editDialog.addEventListener('close', () => {
+    const td = pendingCustomCell
+    pendingCustomCell = null
+    if (!td || editDialog.returnValue !== 'save') return
+    const input = td.querySelector('.assign')
+    const select = td.querySelector('.variant-select')
+    customTexts.set(td, editText.value)
+    td.dataset.custom = 'true'
+    input.checked = true
+    input.dataset.initial = 'true'
+    input.disabled = true
+    if (select) {
+      select.dataset.initialVariant = select.value
+      select.disabled = true
+    }
+    refreshCellIcons(td)
+    updateCellState(input)
+    refreshDirtyState()
+  })
+
+  confirmDialog.addEventListener('close', () => {
+    const td = pendingDeleteCell
+    pendingDeleteCell = null
+    if (!td || confirmDialog.returnValue !== 'delete') return
+    delete td.dataset.custom
+    customTexts.delete(td)
+    const input = td.querySelector('.assign')
+    const select = td.querySelector('.variant-select')
+    input.disabled = false
+    if (select) select.disabled = false
+    refreshCellIcons(td)
+    updateCellState(input)
+    refreshDirtyState()
   })
 
   /* ---------- Toolbar wiring ----------------------------------------------- */
@@ -467,6 +605,11 @@
   /* Variant selects are synthesized first so every cell has one before
      the changed-state pass runs */
   buildVariantSelects()
+
+  /* Per-project custom instruction icons on every variant cell */
+  for (const td of document.querySelectorAll('.matrix tbody td.c-cell')) {
+    if (td.querySelector('.variant-select')) refreshCellIcons(td)
+  }
 
   /* Cells seeded in the markup with data-initial get the tint right away,
      and the dirty flags follow from the actual differences */

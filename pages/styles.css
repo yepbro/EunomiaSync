@@ -213,6 +213,15 @@ body {
   border-color: var(--text-faint);
 }
 
+.btn-danger {
+  background: var(--danger);
+  color: #ffffff;
+}
+
+.btn-danger:hover {
+  filter: brightness(0.92);
+}
+
 /* ----- Matrix region (MAIN-010: pinned header row and first columns) ---- */
 
 .matrix-wrap {
@@ -523,6 +532,56 @@ input[type='checkbox']:disabled {
 .variant-select:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+/* Per-project custom instruction icons (add / edit / delete) */
+.cell-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-inline-start: 4px;
+}
+
+.cell-icon {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  inline-size: 16px;
+  block-size: 16px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.cell-icon::before {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.cell-icon--add::before {
+  content: '+';
+}
+
+.cell-icon--edit::before {
+  content: '✎';
+}
+
+.cell-icon--delete::before {
+  content: '✕';
+}
+
+.cell-icon:hover {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.cell-icon--delete:hover {
+  color: var(--danger);
+  background: transparent;
 }
 
 /* ----- Sync panel (MAIN-024…027: pinned below the scroll area) ---------- */
