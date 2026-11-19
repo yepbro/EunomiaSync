@@ -92,6 +92,15 @@ jobs:
       - name: Install frontend dependencies
         if: runner.os == 'Linux'
         run: pnpm install --frozen-lockfile
+      # Tauri's build script drops WebView2Loader.dll into target\debug,
+      # but cargo runs test binaries from target\debug\build\<crate>\out\,
+      # where the DLL is not found (the exe dies at startup with
+      # STATUS_ENTRYPOINT_NOT_FOUND). Adding target\debug to PATH lets
+      # Windows resolve it for every test binary at once.
+      - name: Expose build-dir DLLs to test binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "$env:GITHUB_WORKSPACE\target\debug"
       - name: Rust tests
         run: cargo test --workspace
       - name: Frontend unit tests
