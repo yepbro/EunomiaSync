@@ -4231,3 +4231,92 @@ tasks' `marker`/`markers`/`extra_files`) — T-042's zone constraint
 allows exactly one line in lib.rs while neighboring core tasks run,
 so the prose reconciliation belongs to the orchestrator's docs pass
 over all four modules at once.
+
+### D-065 — Whole-file assembly for schemes A and C: `target_file::build_content`, the scheme gate and the marker-only file — 2026-11-19
+
+Problem: T-039 turns ALG-030 into code — the whole target-file content
+of the full-overwrite schemes (A and C). Four decisions the spec prose
+leaves to the reader: (1) what "parts" are in
+`managed = join(parts, BLANK_LINE)` — is each reading line its own
+part, or is a position's line group one part; (2) whether the
+empty-managed sentence "the file has only the marker" keeps the final
+line break; (3) where the ALG-030 "(A only)" gate on the reading lines
+lives; (4) how scheme B relates to a function named "file content".
+
+Solution: `target_file::build_content(scheme, body: &str,
+extra_lines: &ExtraFileLines, marker_line: &str) -> String` — one
+public function in a new module `target_file` (the §2 glossary's own
+term for "the file that the app writes in the project"; the first
+draft's `assembly` was rejected in review — a near-homograph of the
+pre-existing `assignment` module that would blur imports, greps and
+IDE completion in public API; `file` would suggest I/O in a crate
+that has none, `file_body` collides with §9.2's `body`). The private
+`managed_block` helper owns the join and the gate behind an
+exhaustive `match` on `Scheme`, so a scheme variant added later is a
+compile error here, not a silent fall-in with C.
+
+- _Parts are position groups._ ALG-030 enumerates exactly three parts
+  — the start lines, the body, the end lines. A position's lines form
+  ONE part of adjacent lines (`.project.md` before `.local.md`, §7.5),
+  and only neighbouring parts are separated by one empty line; two
+  start lines are two lines of one block, never two blocks. The
+  D-063 split shape (`ExtraFileLines { start, end }`) maps onto this
+  directly, as D-063 intended.
+- _Empty managed keeps the final line break._ "The file has only the
+  marker" = the marker line WITH its terminating `\n`, no managed
+  block, no leading empty line. Reading: §2 and ALG-033 treat the
+  marker as a line ("the last non-empty line that starts with …"), a
+  line in a D-22 LF file ends in `\n`, and every other file the app
+  writes ends with exactly one line break — the sentence overrides
+  which lines precede the marker, not the marker's own terminator.
+  Pinned by an oracle test; both A and C produce it identically.
+- _The scheme gate is here._ `extra_file_lines` stayed scheme-blind
+  (D-063) precisely so this builder could own the choice: scheme A
+  splices the lines, scheme C drops them even when every option is
+  enabled (the card's criterion; D-20 — the app does not edit a
+  scheme-C main file, and the §7.5 snippet is settings-UI text, not
+  file content). With no reading lines A and C build the byte-identical
+  file; the schemes differ in the target name only, which is the
+  caller's concern.
+- _Scheme B panics._ ALG-031 splices the managed block into an
+  existing marked file — a different builder with different inputs
+  (the existing bytes, the D-19 markers, the line-break conversion),
+  so there is no whole scheme-B file to build; a B here is a caller
+  bug in the crate's broken-invariant panic posture (D-061). The
+  managed-block join lives in the private `managed_block` helper;
+  the scheme-B task can promote it or reimplement it per ALG-031's
+  own tail rules.
+
+The marker arrives as a parameter, never formatted here (ALG-032's
+once-per-run capture is the sync pipeline's clock; D-061), asserted
+non-empty and single-line; the body is asserted free of framing line
+breaks (a leading or trailing `\n` would turn ALG-030's one empty
+line into two) — the two byte-level contracts the file layout depends
+on. Encoding mechanics per D-22: every separator added is `\n`, no
+BOM is ever prepended (a Rust String is UTF-8), and no input text is
+normalized — the body arrived ALG-002-normalized from `build_body`,
+the reading lines are D-21 sentences; an empty body part simply does
+not exist (a whitespace-only body would pass through verbatim, but
+`build_body` cannot produce one).
+
+Note for the ALG-033 task (found in review): this module pins the
+non-empty layout to `<managed>\n\n<marker>\n`. ALG-033 drops "the
+last non-empty line" — the marker line — from the existing file and
+compares "the rest" with the new content byte for byte; dropping only
+the marker text leaves `<managed>\n\n` (or `<managed>\n`), which
+never equals `<managed>`, so the D-24 comparison must either drop the
+separator empty line together with the marker line or drop the marker
+from the new content the same way before comparing. Whatever it
+chooses, the scanner must expect this module's exact tail.
+
+No new dependencies (D-017 untouched). Testing: whole-file oracles
+hardcoded from the spec's own D-21/ALG-032 literals — the full ALG-030
+composition (start/body/end), the adjacent-lines grouping at both
+positions, the empty-body splices, the marker-only file (including
+scheme C with every option enabled and an empty body — where the gate
+and the empty branch meet), the C gate fed through the real
+`extra_file_lines` with everything enabled, the A≡C identity without
+lines, the position matrix, the exactly-one final line break, BOM
+absence, verbatim body splicing, and the five panic postures (B,
+empty marker, marker with `\n`, marker with `\r`, body with a framing
+break) — plus doc tests.

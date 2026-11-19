@@ -38,3 +38,4 @@ pub mod markers;
 pub mod normalize;
 pub mod project;
 pub mod snapshot;
+pub mod target_file;
