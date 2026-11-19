@@ -11,8 +11,9 @@ publish = false
 # pure logic with no I/O — database code lives in `eunomia-store`. `serde`
 # backs the canonical forms of the domain vocabulary (schema §6.2 CHECK
 # literals and §6.5 JSON shapes), `thiserror` the domain error types
-# (`HeadingLevel`/snapshot assembly). `sha2` stays idle until the
-# build-hash task lands. Note: the spec's tech stack (5.3) also names
+# (`HeadingLevel`/snapshot assembly). `sha2` is in use (the build hash,
+# D-064; the color tie-break, D-077; the version snapshots, D-082).
+# Note: the spec's tech stack (5.3) also names
 # `similar` for text diffing, which is outside this allow-list —
 # adopting it (or placing diff elsewhere) is a decision for the diff
 # task, not a silent addition.

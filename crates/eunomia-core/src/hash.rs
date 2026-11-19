@@ -161,8 +161,9 @@ fn flag_bytes(enabled: bool) -> &'static [u8] {
 /// Renders digest bytes as lowercase hexadecimal. Hand-rolled: a `hex`
 /// crate would leave the dependency allow-list pinned by DECISIONS.md
 /// D-017 (serde, thiserror, sha2), and sixteen lines do not justify a
-/// DECISIONS-level addition.
-fn to_lowercase_hex(bytes: &[u8]) -> String {
+/// DECISIONS-level addition. Shared with the version-snapshot module,
+/// whose ALG-070 hashes use the same spelling.
+pub(crate) fn to_lowercase_hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for &byte in bytes {

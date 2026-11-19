@@ -68,3 +68,4 @@ pub mod project_validators;
 pub mod reorder;
 pub mod snapshot;
 pub mod target_file;
+pub mod version_snapshot;

@@ -5384,3 +5384,95 @@ hostile-name end-to-end path, the whole hostile battery run
 through the path builder (three `Normal` components each), and
 the length bounds (file = `<file>.19.8.bak` + 3 dots; dir ≤
 36+2+40).
+
+### D-082 — Version snapshots and hashes: hand-rolled canonical JSON under the allow-list, exclusion by construction — 2026-11-19
+
+Problem: T-055 implements ALG-070 (§9.8) and §7.3's closing sentence in
+`eunomia-core`: an instruction version snapshot stores the name and state, a
+variant version snapshot the name and text, each with its SHA-256. The spec
+left five points open: (1) the exact JSON literal — ALG-070 says "a JSON
+snapshot is built" without pinning keys, field order, or the escaping table;
+(2) which crate emits that JSON — at runtime this normally means `serde_json`,
+but §5.2 pins core to "only `serde`, `sha2`, `thiserror`" (D-017), and D-042
+deliberately kept `serde_json` dev-only; (3) how the main-variant flag and the
+library order stay out of snapshots — §7.3 excludes them, but nothing stopped
+a future caller from threading them in; (4) whether the hash needs D-064-style
+length framing like the build hash; (5) whether the builders take whole domain
+values (`Instruction` carries id, state AND its variant list; `Variant`
+carries an id) or the exact snapshot pieces.
+
+Solution: `crates/eunomia-core/src/version_snapshot.rs` —
+`instruction_snapshot`/`instruction_snapshot_hash`/`variant_snapshot`/
+`variant_snapshot_hash`, pure and total (no I/O, no clock, no panics on any
+`&str`).
+
+- THE DEPENDENCY RULING (the task's open dilemma): §5.2's allow-list and the
+  recorded posture (D-017's manifest comment, D-042's "the runtime allow-list
+  stays serde/sha2/thiserror") make `serde_json` NOT sanctioned as a core
+  runtime dependency — the spec gives a determinate answer, not an ambiguity,
+  so nothing was added to `[dependencies]`. The alternative that remains inside
+  the allow-list is a hand-rolled emitter, and the task brief's own conditional
+  ("hand-rolled string JSON is not acceptable IF serde_json is sanctioned")
+  accepts exactly that when it is not. The emitter is ~25 lines over two fixed
+  two-field shapes — D-064's hand-rolled-hex precedent at JSON scale — and is
+  explicitly NOT a general JSON writer: a third snapshot shape or a wire
+  consumer is a DECISIONS.md event. `serde_json` stays dev-only, where it now
+  does double duty as the tests' byte-compat oracle.
+- CANONICAL JSON pinned: compact (no whitespace), fixed field order —
+  `name`,`state` and `name`,`text`, the §7.3 sentence's own order; keys are
+  the spec's snapshot words: `name` for BOTH the instruction title
+  (`Instruction::title`) and the variant name, `state` carrying
+  `InstructionState::as_str` (the §6.2 CHECK literal — the D-042 serde canon),
+  `text` for `Variant::content` (the §2/DB-006 word, not the Rust field name).
+  String escaping is exactly `serde_json::to_string`'s table (`\"`, `\\`, the
+  five short escapes, other controls as lowercase `\u00xx`, every other code
+  point verbatim in UTF-8), pinned in tests exhaustively over all 32 ASCII
+  control characters plus structural, DEL and non-ASCII samples — so a
+  store-side re-serialization of a stored snapshot with `serde_json` can never
+  produce a different hash. That byte-compat is also why no D-064-style
+  framing is layered on: quoting and commas already make data → JSON
+  injective, where DB-020's plain field concatenation was ambiguous. The hash
+  is plain SHA-256 over the JSON's UTF-8 bytes (ALG-070 names no tag), in the
+  app's 64-character lowercase hex; a future snapshot-format change is a
+  DECISIONS event precisely because stored hashes are compared across app
+  versions (one spurious version per entity would be the price of a silent
+  format drift).
+- EXCLUSION BY CONSTRUCTION: the parameters ARE the snapshot — there is no
+  flag, position, id or variant-list parameter, and `Variant` itself carries
+  no `is_main` field (D-042), so the store's `is_main` column cannot reach a
+  snapshot through this API. Pieces, not domain aggregates: taking
+  `&Instruction` would hand the function three fields it must deliberately
+  ignore and let a future `Instruction` field (a position, say) leak in with
+  one careless edit; taking `&str` pieces plus the `InstructionState` enum
+  (the one parameter where a domain type makes invalid states unrepresentable)
+  pins the snapshot contract to the parameter list itself. Tests pin the
+  consequence from the domain side: two `Variant`s differing in id (the
+  store-side stand-in for the flag, which is unrepresentable) hash identically,
+  and an instruction's variant-list changes cannot move its hash.
+- OWNERSHIP BOUNDARY: the four functions only build and hash — ALG-070's
+  second half (equal hash → no version created, D-16) is the store task's
+  decision over the `revisions` table, not made here; content rules (§6.9
+  lengths, DB-016 reserved lines, DB-006's 262,144 characters) are the store's
+  write boundary, since a snapshot is a faithful record of what is stored,
+  valid or not; no `AppError` mapping in core (D-062's posture).
+  `lib.rs` gained exactly one `pub mod version_snapshot;` line
+  (D-062's precedent); ARCHITECTURE.md's known-stale tree stays untouched.
+  Instead of a second 16-line copy, `hash::to_lowercase_hex` was widened to
+  `pub(crate)` — the renderer and its D-064 rationale travel with it.
+  One note for the ALG-073 History task (LIB-028/029): a snapshot is ONE line
+  of JSON, so its diff with another version's must be computed over the PARSED
+  fields (name/state/text), never over the raw strings — a raw diff degenerates
+  to a single "whole line changed" block. The snapshot reader joins this module
+  then, so one module owns the format's both directions.
+
+Tests: 13 in `version_snapshot.rs` — independent-oracle SHA-256 pins
+(Python `hashlib` over the exact JSON bytes: both instruction states, the
+plain and the empty-text variant); exact canonical-literal pins for both
+shapes; the two acceptance properties (identical data → identical JSON and
+hash; the main flag/identity/variant list provably cannot change a hash);
+per-field triggers (name, state, text — including whitespace-only and
+trailing-newline differences, snapshots being unnormalized); empty text vs a
+space; a hand-written escaping literal (quote, backslash, line break, tab,
+verbatim emoji/Cyrillic) with its oracle hash; the serde_json byte-compat
+battery (all control characters, round-trip parse back to the same pair)
+across both shapes; and the DB-006 boundary text building deterministically.
