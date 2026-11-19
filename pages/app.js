@@ -16,6 +16,8 @@
    scan exclusions, toolbar button + Ctrl/Cmd+, per §11.3),
    archived projects modal (D-10, PRJ-013…018: list with a Restore
    action confirmed in a dedicated dialog; DB-014/015),
+   excluded paths modal (D-10: list with a Remove action confirmed in
+   a dedicated dialog; §6.2 project_exclusions, §6.4 physical delete),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -2551,8 +2553,8 @@
      without a control. "About…" / "Check for updates" open the generic
      placeholder dialog for now (UPD-001, UPD-005); the footer row also
      holds the D-10 entry buttons — "Archived projects…" opens the
-     archived list directly, "Excluded paths…" joins it in a later
-     commit. */
+     archived list directly, "Excluded paths…" opens the exclusions
+     list. */
 
   /* §6.5 defaults (the real app keeps them in the settings table as
      JSON — D-18); key names mirror the table, camelCased */
@@ -2932,6 +2934,105 @@
     renderArchivedRows()
     /* The confirmed row is gone from the DOM: keep focus inside the dialog */
     const nextFocus = arList.querySelector('.ar-restore') ?? arCloseBtn
+    nextFocus.focus()
+  })
+
+  /* ---------- Excluded paths modal (D-10) ---------------------------------- */
+  /* The second D-10 screen: every excluded path with a Remove action.
+     Entries mirror the §6.2 project_exclusions DDL (path, reason IN
+     ('removed_scanned','manual'), created_at): a scanned project that
+     was archived leaves its path here (PRJ-017) and the scan shows such
+     paths in its "Skipped" group (PRJ-002). Removing an entry (§6.4,
+     exclusion_remove) deletes it, so the path is found by a scan again.
+     The demo state is an in-memory list: remove splices the row and
+     never touches the matrix. */
+
+  /* Demo exclusions in DDL shape; the reason labels below carry the
+     meaning, the badge tint only supports them */
+  const EXCLUSIONS = [
+    { path: '~/projects/archive/old-sandbox', reason: 'removed_scanned', addedAt: '5 Nov 2026' },
+    { path: '~/projects/experiments/prototype-v0', reason: 'manual', addedAt: '1 Nov 2026' },
+    { path: '~/vendor-legacy', reason: 'manual', addedAt: '20 Oct 2026' },
+  ]
+
+  /* Human wording per reason (§6.2 enum), in the wording style of the
+     archived modal's "Found by scan" / "Manual" */
+  const EXCLUSION_REASONS = {
+    removed_scanned: 'Removed by archiving',
+    manual: 'Added manually',
+  }
+
+  const exDialog = document.getElementById('exclusions-dialog')
+  const exList = document.getElementById('ex-rows')
+  const exEmpty = document.getElementById('ex-empty')
+  const exCloseBtn = exDialog.querySelector('button[value="close"]')
+  const exRemoveDialog = document.getElementById('remove-exclusion-dialog')
+  const exRemoveText = document.getElementById('ex-remove-text')
+
+  /* One row per excluded path in the archived row idiom (.scan-row +
+     .ar-meta); every string goes through escapeHtml. The Remove button
+     repeats the path for screen readers (identical visible labels). */
+  function renderExclusionRows() {
+    exList.innerHTML = EXCLUSIONS.map(
+      (x, i) =>
+        '<li class="scan-row">' +
+        `<code class="scan-row-path">${escapeHtml(x.path)}</code>` +
+        `<span class="chip ex-reason ex-reason--${escapeHtml(x.reason)}">${escapeHtml(EXCLUSION_REASONS[x.reason] ?? x.reason)}</span>` +
+        `<span class="ar-meta">Added ${escapeHtml(x.addedAt)}</span>` +
+        '<button type="button" class="btn btn-ghost ex-remove"' +
+        ` data-idx="${i}" aria-label="Remove ${escapeHtml(x.path)} from excluded paths">Remove</button>` +
+        '</li>',
+    ).join('')
+    const empty = EXCLUSIONS.length === 0
+    exList.hidden = empty
+    exEmpty.hidden = !empty
+  }
+
+  /* Re-render on every open: reopening reflects the current demo state */
+  function openExcludedPaths() {
+    renderExclusionRows()
+    exDialog.showModal()
+    exCloseBtn.focus()
+  }
+
+  /* Entry point: ghost link-button in the settings footer */
+  document.getElementById('exclusions-open-btn').addEventListener('click', openExcludedPaths)
+
+  exCloseBtn.addEventListener('click', () => {
+    exDialog.close('close')
+  })
+
+  /* Remove (D-10, §6.4): confirm first in the dedicated small dialog —
+     the shared #confirm-dialog is not reusable, its button is
+     hard-labeled "Delete". Cancel/Esc leave the list untouched. */
+  let pendingExRemove = null
+
+  exList.addEventListener('click', (e) => {
+    const btn = e.target.closest('.ex-remove')
+    if (!btn) return
+    const i = Number(btn.dataset.idx)
+    if (!Number.isInteger(i) || i < 0 || i >= EXCLUSIONS.length) return
+    const x = EXCLUSIONS[i]
+    pendingExRemove = i
+    exRemoveText.textContent =
+      `"${x.path}" will be removed from the excluded paths. The path will be found by the scan ` +
+      'again, and its projects can be added as usual.'
+    exRemoveDialog.showModal()
+  })
+
+  exRemoveDialog.addEventListener('close', () => {
+    const i = pendingExRemove
+    pendingExRemove = null
+    if (i === null || exRemoveDialog.returnValue !== 'remove') return
+    EXCLUSIONS.splice(i, 1)
+    renderExclusionRows()
+    /* The confirmed row is gone from the DOM: keep focus inside the
+       dialog on the next row's Remove, else the first remaining one,
+       else Close */
+    const nextFocus =
+      exList.querySelector(`.ex-remove[data-idx="${i}"]`) ??
+      exList.querySelector('.ex-remove') ??
+      exCloseBtn
     nextFocus.focus()
   })
 

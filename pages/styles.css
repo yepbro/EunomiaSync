@@ -5,7 +5,8 @@
    (repository scan modal, NFR-015), PRJ-008…012 (project settings
    modal), § 7.5 OUT-009 + § 6.2 run statuses (sync summary modal,
    MAIN-024…031), § 7.2 DEF-001…005 (app settings modal, §6.5 keys),
-   D-10 (archived projects modal, PRJ-013…018, DB-014/015),
+   D-10 (archived + excluded paths modals, PRJ-013…018, §6.2
+   exclusions, DB-014/015),
    UI-001, UI-011, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
@@ -2238,6 +2239,36 @@ label.scan-row:hover {
   font-size: 11.5px;
   color: var(--text-muted);
   white-space: nowrap;
+}
+
+/* ----- Excluded paths modal (D-10) ---------------------------------------- */
+/* The exclusions list: one row per excluded path in the same row idiom
+   (.scan-row) as the archived modal, reusing .ar-list/.ar-meta/.chip.
+   reason mirrors the §6.2 project_exclusions enum; the badge wording
+   carries the meaning and the tint only supports it. Remove is
+   confirmed in the small dedicated dialog; like the archived list the
+   demo list only shrinks, so the dialog sizes to its content instead
+   of the fixed .modal-lg height. */
+
+#exclusions-dialog form {
+  block-size: auto;
+}
+
+/* "Remove ~/…" sits at the end of the row */
+.ex-remove {
+  margin-inline-start: auto;
+}
+
+/* Reason badge: neutral for "Added manually" (the default .chip look),
+   tinted for "Removed by archiving" — readable without color either way */
+.ex-reason {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ex-reason--removed_scanned {
+  color: var(--accent-strong);
+  border-color: var(--accent);
 }
 
 /* ----- Motion (UI-022: honor the OS "reduce motion" setting) ------------ */

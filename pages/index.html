@@ -12,14 +12,16 @@
   progress, per-project result table, pending-changes list), app settings
   modal (DEF-001…005: five sections, applies immediately, no Save button),
   archived projects modal (D-10: list + Restore flow, DB-014/015),
+  excluded paths modal (D-10: list + Remove flow, §6.2 exclusions),
   placeholder modals.
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
   (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-002…007 (scan) +
   PRJ-008…012 (project settings) + § 7.3 LIB-026…027 (instruction
   history) + § 7.5 OUT-009 + § 6.2 run statuses + § 7.2 DEF-001…005
-  (settings, §6.5 keys, §11.3 Ctrl/Cmd+,) + D-10 (archived projects
-  screen, PRJ-013…018 restore, DB-014/015) + UI-001 (window, pinned
+  (settings, §6.5 keys, §11.3 Ctrl/Cmd+,) + D-10 (archived and
+  excluded-paths screens, PRJ-013…018 restore, exclusion remove,
+  DB-014/015) + UI-001 (window, pinned
   sync panel), UI-021 (light/dark via OS setting), UI-022 (reduced
   motion).
   Tooltips are native `title` attributes; accessible names are real labels.
@@ -3318,11 +3320,14 @@
                   D-27).
                 </p>
                 <!-- D-10 screens as link-buttons: "Archived projects…"
-                     opens the archived list directly; "Excluded paths…"
-                     joins this row next to it in a later commit -->
+                     opens the archived list, "Excluded paths…" opens the
+                     exclusions list -->
                 <div class="set-buttons">
                   <button type="button" id="archived-open-btn" class="btn btn-ghost">
                     Archived projects…
+                  </button>
+                  <button type="button" id="exclusions-open-btn" class="btn btn-ghost">
+                    Excluded paths…
                   </button>
                   <button
                     type="button"
@@ -3398,6 +3403,52 @@
           <div class="modal-actions">
             <button value="cancel" class="btn btn-ghost">Cancel</button>
             <button value="restore" class="btn btn-primary">Restore</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Excluded paths (D-10, §6.2 project_exclusions): opened from the
+         settings footer — one row per excluded path with a Remove action,
+         in the scan-results row idiom. reason mirrors the DDL enum
+         (removed_scanned | manual): a scanned project that was archived
+         leaves its path here (PRJ-017) and the scan shows such paths in
+         its "Skipped" group (PRJ-002). Rows are rendered by app.js from
+         the demo list; removing (§6.4) deletes the entry so the path is
+         found by a scan again — the demo only splices the in-memory list. -->
+      <dialog id="exclusions-dialog" class="modal modal-lg" aria-labelledby="ex-title">
+        <form method="dialog">
+          <h2 id="ex-title">Excluded paths</h2>
+          <p class="modal-text">
+            Paths in this list are skipped by the repository scan. Removing an entry makes the
+            path findable again (D-10).
+          </p>
+
+          <div class="ar-body">
+            <ul id="ex-rows" class="ar-list"></ul>
+            <p id="ex-empty" class="hist-empty" hidden>No excluded paths.</p>
+            <p class="ps-hint">
+              New exclusions appear here when a scanned project is archived (PRJ-017) or when a path
+              is excluded manually.
+            </p>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Remove-excluded-path confirmation (D-10, §6.4): a dedicated
+         dialog — the shared #confirm-dialog is hard-labeled "Delete".
+         Confirming deletes the exclusion, so the path is found by a scan
+         again and its projects can be added as usual. -->
+      <dialog id="remove-exclusion-dialog" class="modal" aria-labelledby="ex-remove-title">
+        <form method="dialog">
+          <h2 id="ex-remove-title">Remove excluded path</h2>
+          <p id="ex-remove-text" class="modal-text">Placeholder.</p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="remove" class="btn btn-primary">Remove</button>
           </div>
         </form>
       </dialog>
