@@ -41,7 +41,8 @@
 //!   heading arrives more than one level deeper, as facts for the
 //!   UI warning icon
 //! - [`project_validators`] — the §6.9 rules of the editable
-//!   project fields: name, label, description, color, file name
+//!   project fields: name, label, description, color, file name,
+//!   and the DB-042 default label derived from a project's name
 //! - [`library_validators`] — the §6.9 rules of the editable library
 //!   fields: instruction and heading names, variant name and text
 

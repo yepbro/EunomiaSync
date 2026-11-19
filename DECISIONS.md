@@ -5186,3 +5186,98 @@ concurrency group under back-to-back completions). The first real
 cancelled macos leg on main after landing is the live confirmation;
 until then the live path rests on the drilled pieces, the mechanism's
 historical proof, and the discriminator's tests.
+
+### D-079 — The DB-042 default label: upper-case-then-slice, the stored (trimmed) name as input, and the derivation/validator split for "an empty label is not allowed" — 2026-11-19
+
+Problem: T-052 implements DB-042 — "The default label is the first up
+to 6 characters of the name, in upper case. An empty label is not
+allowed." The sentence leaves four readings open. (1) ORDER: does "in
+upper case" apply before or after the slice? The spec's own example
+("My Project" → "MY PRO") cannot decide it — ASCII upper-casing is
+length-preserving, both orders give six. (2) UNIT: "characters" as
+code points, bytes or graphemes? (3) INPUT: the raw typed name or the
+stored one? (4) Who enforces the empty prohibition — the derivation
+(erroring on empty input?) or the validator?
+
+Solution: `default_label(name: &str) -> String` in
+`project_validators.rs` (not a new module: the derivation's contract
+is stated in that module's own terms — its input domain is
+`validate_name`'s output, its output obligation is `validate_label`'s
+input; a separate file would split the label story in two):
+
+```rust
+name.trim().chars().flat_map(char::to_uppercase).take(6).collect()
+```
+
+(1) UPPER FIRST, slice second. "Up to 6 characters" describes the
+RESULT — the default label is a thing of at most 6 characters, upper
+case — so the bound must hold after the upper-casing, and
+upper-casing EXPANDS (`"ß".to_uppercase()` = `"SS"`, `"ΐ"` = three code points).
+Slice-first
+lets six name characters surface as up to eighteen label code
+points (`"ΐΐΐΐΐΐ"` → 18, `"ßßßßßß"` → `"SSSSSSSSSSSS"` = 12) — a
+"default" the §6.9 rule and the
+schema's `length(label) BETWEEN 1 AND 6` both reject: an unstorable
+default the spec cannot mean. Upper-then-slice loses nothing of the
+letter — an upper-cased string is its characters' upper-casings
+concatenated, so its first 6 code points are exactly
+slice-then-upper clipped back to 6 (the two orders are extensionally
+identical once the result is clipped, which "up to 6" demands).
+`"straße"` pins the order: → "STRASS" (6), not "STRASSE" (7).
+(2) The unit is the code point (D-075's ruling for the label column,
+SQLite's `length()` on TEXT): `chars()`, `flat_map`, `take` — never a
+byte or grapheme slice. Six astral emoji derive six characters (24
+bytes); a combining mark rides its base letter through the mapping.
+(3) The input is the STORED name — the trimmed string `validate_name`
+returns (its return contract, D-075) — and the function trims its
+input itself, so `default_label(raw)` == `default_label(validated)`
+and a raw caller cannot spend slice budget on edge whitespace
+(`"  My Project"` would otherwise derive `"  MY P"`).
+(4) Derivation produces, validator gates: the function is TOTAL —
+"" (or pure whitespace) in, "" out, no panic, no Result — and for a
+name `validate_name` accepted the derived STRING is never empty (at
+least one code point survives): upper-casing never deletes a
+character or maps it to whitespace or control (a test scanning
+EVERY scalar value pins the lemma against future Unicode tables).
+The result is VISIBLE unless the consumed prefix has NO visible
+character: after the trim the first character is never whitespace,
+but it can be a control, and the rest of the prefix can be
+controls or inner spaces — all invisible (names reserve no control
+rule, D-075, and trim removes only the edges). The "not allowed"
+half of DB-042 stays `validate_label`'s `LabelEmpty`.
+
+Recorded edge, pinned by test: names reserve NO control-character
+rule (D-075), so both of these are legal names whose derived
+defaults the label's own rules reject — "\u{7}abc" derives
+"\u{7}ABC" and fails the control check, while a name whose
+consumed prefix has no visible character — controls only
+("\u{7}") or a control-and-space mix ("\u{7} \u{8}") — derives a
+label rejected as `LabelEmpty` (the verdict DB-042's second
+sentence names). The
+derivation stays literal — filtering would invent a rule DB-042
+does not state — so `validate_label(&default_label(valid_name))` is
+Ok for every name whose first six characters carry no control
+character, and the modal shows the field error for the user to edit
+in the two cases it is not. The edge exists only WHILE names
+reserve no control rule: a future §6.9 name-row change that rejects
+controls dissolves it with no change here. Cf. adjacent field: the
+new-project COLOR needs no such caveat (D-29 picks from the closed
+palette, D-077).
+
+Tests: lengths 1–5 (each pinned) / exactly 6 / longer (DB-042's
+example verbatim); the order pin ("straße" → "STRASS", "ßßßßßß" →
+"SSSSSS", the three-code-point "ΐΐΐΐΐΐ" → six, "ß" → "SS",
+each result re-validated); code points not bytes/graphemes
+("ПРОЕКТ" = 12 bytes / 6 chars, seven emoji → six, "e\u{301}"×4 →
+"E\u{301}"×3); trim-first (padded and Unicode-whitespace edges, ""
+and " " → "" which `validate_label` then rejects); the property
+battery (15 names — Cyrillic, ß, İ, combining marks, emoji, Latin
+accents, padded — each `validate_name`-Ok input deriving a
+`validate_label`-Ok default, trim-neutrality asserted, and the
+100-character name ceiling asserted alongside); the
+control-character counterexamples (the control check; the
+invisible prefix, incl. a control-and-space mix); the full-scan
+lemma; and the new-project composition (validate the name, derive
+the default, validate the label). No proptest, per D-075's
+ruling that these rules are total boundary arithmetic — the
+full scalar scan covers what a random char sample would approximate.

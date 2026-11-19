@@ -1,8 +1,9 @@
 //! Project field validators: the §6.9 rules of the five editable
 //! project fields — name, label, description, color and file name —
 //! that the "Project settings" modal saves in one transaction (spec
-//! §7.1, the PRJ-008, 009, 011, 021 row) and that a new project's
-//! fielded copy carries (PRJ-012).
+//! §7.1, the PRJ-008, 009, 011, 021 row), that a new project's
+//! fielded copy carries (PRJ-012), and the DB-042 default label a
+//! new project's label field starts from ([`default_label`]).
 //!
 //! Each rule is transcribed next to the schema CHECK (§6.2) that
 //! stores the same verdict, so a value that passes here never fails
@@ -82,6 +83,57 @@
 //! them needs a Unicode data crate outside the dependency allow-list
 //! (D-017); that refinement waits for a consumer that needs it.
 //!
+//! # The default label: DB-042's derivation
+//!
+//! "The default label is the first up to 6 characters of the name, in
+//! upper case. An empty label is not allowed." The sentence splits in
+//! two here: the derivation is [`default_label`], the prohibition is
+//! [`validate_label`]'s `LabelEmpty` — the derivation produces, the
+//! validator gates.
+//!
+//! "Up to 6 characters" describes the RESULT — the default label is
+//! a thing of at most 6 characters, upper case — so the bound must
+//! hold AFTER the upper-casing, and the order is upper first, slice
+//! second. The order only shows in Unicode, because upper-casing
+//! EXPANDS: `"ß".to_uppercase()` is `"SS"`, one character becoming
+//! two, and `"ΐ".to_uppercase()` is three code points. Slicing
+//! first would let six name characters surface as up to EIGHTEEN
+//! label code points (`"ΐΐΐΐΐΐ"` → 18, `"ßßßßßß"` → 12,
+//! `"SSSSSSSSSSSS"`) — a "default" the §6.9 rule and the schema's
+//! `length(label) BETWEEN 1 AND 6` both reject, an unstorable
+//! default the spec cannot mean. Upper-then-slice keeps every
+//! result within 6 and loses nothing of the letter: an upper-cased
+//! name is its characters' upper-casings concatenated, so the first
+//! 6 code points of that stream are exactly slice-then-upper
+//! clipped back to 6. The `straße` test pins the order
+//! (`"straße"` → `"STRASS"`, six — not the seven of `"STRASSE"`).
+//!
+//! The unit is the code point (D-075): six `chars()`, not bytes, not
+//! graphemes — `ПРОЕКТ` fits, six astral emoji fit (24 bytes, 6 code
+//! points), and a combining mark rides its base letter. The input is
+//! the NAME as stored — the trimmed string [`validate_name`]
+//! returns — and [`default_label`] trims its input itself, so a raw
+//! caller and the validated pipeline derive the same label.
+//!
+//! The function is total: the empty string (or pure whitespace) in,
+//! the empty string out, no panic. For a name [`validate_name`]
+//! accepted the derived STRING is never empty — at least one code
+//! point always survives — and upper-casing never deletes a visible
+//! character or turns it invisible (a full scan over every scalar
+//! value pins the lemma). The result has a VISIBLE character unless
+//! the consumed prefix has none: after the trim the first character
+//! is never whitespace, but it can be a control, and the rest of
+//! the prefix can be controls or inner spaces — all invisible
+//! (names reserve no control rule, D-075, and trim removes only the
+//! edges). So `"\u{7}"` and `"\u{7} \u{8}"` are legal names whose
+//! derived defaults render nothing and are rejected by
+//! [`validate_label`] as `LabelEmpty`, while `"\u{7}abc"` derives
+//! `"\u{7}ABC"` and fails the control check instead. The derivation
+//! stays literal —
+//! filtering would invent a rule DB-042 does not state — and the
+//! modal shows the field error for the user to edit; both
+//! counterexamples are pinned as the contract's recorded edge.
+//!
 //! # The description: verbatim
 //!
 //! "Up to 1000 characters" with no trim mentioned and no trim in the
@@ -113,11 +165,13 @@
 //! ```
 //! use eunomia_core::project::{BaseName, Color};
 //! use eunomia_core::project_validators::{
-//!     validate_color, validate_description, validate_file_name, validate_label, validate_name,
+//!     default_label, validate_color, validate_description, validate_file_name, validate_label,
+//!     validate_name,
 //! };
 //!
 //! let name = validate_name("  EunomiaSync  ").unwrap(); // trimmed…
 //! assert_eq!(name, "EunomiaSync");
+//! assert_eq!(default_label(&name), "EUNOMI"); // …DB-042's derivation
 //! assert_eq!(validate_label("MY PRO").unwrap(), "MY PRO"); // …case kept
 //! assert_eq!(validate_description("").unwrap(), ""); // empty is legal
 //! assert_eq!(validate_color("teal").unwrap(), Color::Teal);
@@ -295,6 +349,44 @@ pub fn validate_label(label: &str) -> Result<&str, ProjectFieldError> {
     } else {
         Ok(label)
     }
+}
+
+/// Derive a new project's default label from its name (DB-042: "The
+/// default label is the first up to 6 characters of the name, in
+/// upper case. An empty label is not allowed.").
+///
+/// Upper case FIRST, then the first up to 6 CODE POINTS of the
+/// upper-cased stream — the unit of `validate_label` (D-075). The
+/// order is not stylistic: upper-casing expands (`"ß"` → `"SS"`,
+/// `"ΐ"` → three code points), so slicing first could surface up
+/// to 18 code points — a default the §6.9 rule and the schema
+/// CHECK both reject. The input is the name as stored — the
+/// trimmed string [`validate_name`] returns — and this function
+/// trims its input itself, so a raw caller and the validated
+/// pipeline derive the same label. It is total: the empty string
+/// in yields the empty string out (no panic), and for a name
+/// [`validate_name`] accepted the derived string is never empty —
+/// the "not allowed" half of DB-042 is [`validate_label`]'s to
+/// enforce, and it also catches the name whose consumed prefix has
+/// no visible character (module docs).
+///
+/// # Examples
+///
+/// ```
+/// use eunomia_core::project_validators::{default_label, validate_label};
+///
+/// assert_eq!(default_label("My Project"), "MY PRO"); // DB-042's example
+/// assert_eq!(default_label("straße"), "STRASS"); // upper first: 6, not 7
+/// assert_eq!(default_label("  EunomiaSync  "), "EUNOMI"); // trimmed
+/// assert_eq!(default_label(""), ""); // total — validate_label gates this
+/// assert_eq!(validate_label(&default_label("My Project")).unwrap(), "MY PRO");
+/// ```
+pub fn default_label(name: &str) -> String {
+    name.trim()
+        .chars()
+        .flat_map(char::to_uppercase)
+        .take(6)
+        .collect()
 }
 
 /// Validate a project description (§6.9: "up to 1000 characters";
@@ -618,6 +710,215 @@ mod tests {
             validate_label("A\u{7}B").unwrap_err().to_string(),
             "project label contains the control character '\\u{7}' at index 1"
         );
+    }
+
+    // ---- default label: the DB-042 derivation ------------------------------
+
+    #[test]
+    fn default_label_takes_the_first_up_to_six_characters_upper_cased() {
+        // DB-042's own example plus the lengths around it: shorter
+        // than 6 (1..=5), exactly 6, longer — the whole name when it
+        // fits, the first 6 when it does not.
+        assert_eq!(default_label("A"), "A");
+        assert_eq!(default_label("aB"), "AB");
+        assert_eq!(default_label("Abc"), "ABC");
+        assert_eq!(default_label("Abcd"), "ABCD");
+        assert_eq!(default_label("Short"), "SHORT");
+        assert_eq!(default_label("Projec"), "PROJEC"); // 6 exactly
+        assert_eq!(default_label("Проект"), "ПРОЕКТ"); // 6 code points
+        assert_eq!(default_label("My Project"), "MY PRO"); // the example
+        assert_eq!(default_label("EunomiaSync"), "EUNOMI");
+        assert_eq!(default_label("ABCDEF"), "ABCDEF"); // already upper
+        // The name ceiling derives the same six as any longer name.
+        assert_eq!(default_label(&"a".repeat(100)), "AAAAAA");
+    }
+
+    #[test]
+    fn default_label_upper_cases_before_the_slice_the_unicode_pin() {
+        // The order only shows in Unicode: upper-casing EXPANDS
+        // ("ß" → "SS"), so slice-first would return the 7-code-point
+        // "STRASSE" — rejected by §6.9 and the schema CHECK — where
+        // upper-first returns 6. "straße" is the discriminator.
+        assert_eq!(default_label("straße"), "STRASS");
+        // Six ß in the name: twelve code points if sliced first;
+        // six once the upper-cased stream is clipped.
+        assert_eq!(default_label("ßßßßßß"), "SSSSSS");
+        // The worst case the ruling leans on: a character can map
+        // to THREE code points ("ΐ" → "Ι\u{308}\u{301}"), so six of
+        // them slice first to 18 — upper-first keeps six.
+        assert_eq!(
+            default_label("\u{0390}\u{0390}\u{0390}\u{0390}\u{0390}\u{0390}"),
+            "\u{0399}\u{0308}\u{0301}\u{0399}\u{0308}\u{0301}"
+        );
+        assert_eq!(default_label("ß"), "SS"); // an expansion under 6 is legal
+        // …and the pinned results really are labels the app may store.
+        for name in [
+            "straße",
+            "ßßßßßß",
+            "\u{0390}\u{0390}\u{0390}\u{0390}\u{0390}\u{0390}",
+            "ß",
+        ] {
+            let label = default_label(name);
+            assert!(label.chars().count() <= 6);
+            assert!(validate_label(&label).is_ok(), "{label:?}");
+        }
+    }
+
+    #[test]
+    fn default_label_counts_code_points_not_bytes_or_graphemes() {
+        // Six Cyrillic characters are 12 bytes — and a legal label.
+        let label = default_label("проект синхронизации");
+        assert_eq!(label, "ПРОЕКТ");
+        assert_eq!(label.chars().count(), 6);
+        assert_eq!(label.len(), 12);
+        // Astral emoji: one code point and four bytes each — seven
+        // in the name, six out, 24 bytes. A byte slice would keep
+        // one and a half emoji — the assertion below this one is
+        // the grapheme discriminator (each emoji here is one
+        // grapheme per code point and agrees with them).
+        let label =
+            default_label("\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}");
+        assert_eq!(label.chars().count(), 6);
+        assert_eq!(label.len(), 24);
+        assert!(validate_label(&label).is_ok());
+        // A combining mark rides its base letter: "e\u{301}" stays
+        // two code points through the upper-casing ("E\u{301}"),
+        // and the slice cuts at code points — 8 in, 6 out. A
+        // grapheme-count slice would keep all four accents (8 code
+        // points) and fail this assertion.
+        assert_eq!(
+            default_label("e\u{301}e\u{301}e\u{301}e\u{301}"),
+            "E\u{301}E\u{301}E\u{301}"
+        );
+    }
+
+    #[test]
+    fn default_label_reads_the_stored_name_so_it_trims_first() {
+        // The name the app stores is the TRIMMED one
+        // (validate_name's return contract, D-075): the derivation
+        // trims the same way, so a raw caller and the validated
+        // pipeline agree.
+        assert_eq!(default_label("  My Project  "), "MY PRO");
+        assert_eq!(default_label("\u{00A0}Omega\u{3000}"), "OMEGA");
+        // Total: degenerate input yields the empty string — no
+        // panic — and "an empty label is not allowed" stays
+        // validate_label's rule to enforce.
+        assert_eq!(default_label(""), "");
+        assert_eq!(default_label(" "), "");
+        assert_eq!(default_label("   "), "");
+        assert_eq!(
+            validate_label(&default_label("")),
+            Err(ProjectFieldError::LabelEmpty)
+        );
+    }
+
+    #[test]
+    fn default_label_of_a_valid_name_is_a_valid_label() {
+        // The property link: whatever validate_name accepts — whose
+        // first six characters carry no control character, the one
+        // escape recorded below — derives a default that
+        // validate_label accepts: never empty, at most 6, at least
+        // one visible character, no control of its own making.
+        let names = [
+            "A",
+            "aB",
+            "My Project",
+            "EunomiaSync",
+            "  padded  ",
+            "Проект",
+            "проект синхронизации",
+            "straße",
+            "ßßßßßß",
+            "İstanbul",     // 'İ' is already upper; 'i' upper-cases to 'I'
+            "e\u{301}tude", // a combining accent rides along
+            "césar",
+            "naïve résumé",
+            "Órbita",
+            "\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}",
+        ];
+        for name in names {
+            let validated = validate_name(name).unwrap();
+            let label = default_label(name);
+            assert_eq!(label, default_label(&validated)); // trim-neutral
+            let verdict = validate_label(&label);
+            assert!(verdict.is_ok(), "{name:?} → {label:?} → {verdict:?}");
+        }
+        // The name's 100-character ceiling derives the same shape.
+        let label = default_label(&"a".repeat(100));
+        assert_eq!(label, "AAAAAA");
+        assert_eq!(validate_label(&label).unwrap(), "AAAAAA");
+    }
+
+    #[test]
+    fn default_label_counterexamples_controls_in_the_name() {
+        // Names reserve NO control-character rule (D-075), and trim
+        // removes whitespace, not controls — so these names are
+        // valid, and each derived default is rejected by the label's
+        // own rules. The derivation stays literal: filtering would
+        // invent a rule DB-042 does not state. The settings modal
+        // shows the field error and the user edits the label before
+        // the save; pinned here as the contract's recorded edge.
+        //
+        // Edge one: visible content FOLLOWS the control — the label
+        // fails the control check, with the position kept.
+        let name = "\u{7}abc";
+        let validated = validate_name(name).unwrap(); // a legal name
+        let label = default_label(&validated);
+        assert_eq!(label, "\u{7}ABC");
+        assert_eq!(
+            validate_label(&label),
+            Err(ProjectFieldError::LabelControlCharacter {
+                index: 0,
+                character: '\u{7}'
+            })
+        );
+        // Edge two: the consumed prefix has NO visible character —
+        // controls only, or a control-and-space mix (the inner
+        // space survives trim) — the label renders nothing, which
+        // is `LabelEmpty`, the same verdict DB-042's "an empty
+        // label is not allowed" names.
+        for invisible_prefix in ["\u{7}", "\u{7}\u{8}", "\u{7}\u{7}\u{7}", "\u{7} \u{8}"] {
+            assert!(validate_name(invisible_prefix).is_ok()); // legal names
+            let label = default_label(invisible_prefix);
+            assert_eq!(label, invisible_prefix); // ≥1 code point, never ""
+            assert_eq!(validate_label(&label), Err(ProjectFieldError::LabelEmpty));
+        }
+    }
+
+    #[test]
+    fn upper_casing_never_deletes_or_hides_a_visible_character() {
+        // The lemma the never-empty property rests on, checked over
+        // EVERY scalar value: a character that is neither control
+        // nor whitespace upper-cases to at least one character, and
+        // every character it upper-cases to is itself neither
+        // control nor whitespace. If a future Unicode table ever
+        // broke it, this pin — not a user's project — would say so.
+        for code in 0..=u32::from(char::MAX) {
+            let Some(character) = char::from_u32(code) else {
+                continue;
+            };
+            if is_visible(character) {
+                let mut upper = character.to_uppercase();
+                assert!(upper.next().is_some(), "{character:?} vanishes");
+                for mapped in upper {
+                    assert!(
+                        is_visible(mapped),
+                        "{character:?} upper-cases to invisible {mapped:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_project_composes_its_name_into_the_default_label() {
+        // The PRJ-008 flow for a NEW project: validate the name,
+        // derive the label default, validate the label — one round
+        // trip through this module's own rules.
+        let name = validate_name("  EunomiaSync  ").unwrap();
+        let label = default_label(&name);
+        assert_eq!(label, "EUNOMI");
+        assert_eq!(validate_label(&label).unwrap(), "EUNOMI");
     }
 
     // ---- description: 0 / 1000 / 1001, verbatim ---------------------------
