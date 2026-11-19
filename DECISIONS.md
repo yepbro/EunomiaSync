@@ -4044,3 +4044,44 @@ marker stamped at run time. Consumers (T-039/T-041): resolve the run
 instant once, pass `jiff`'s civil fields + zone name + offset minutes;
 when the zone cannot be resolved, pass `None` and the offset still
 tells the truth.
+
+### D-063 — Scheme-A extra-file reading lines: `extra_files::extra_file_lines`, position-split output — 2026-11-19
+
+Problem: T-037 needed the scheme-A "read this file" lines (spec §7.5,
+D-01, D-21, OUT-A-001…004) as a pure core function over the T-033
+domain types. Three design questions: the output shape for the
+by-scheme builder (T-039, ALG-030 splices the body BETWEEN the start
+and end lines, so one interleaved `Vec<String>` would force the builder
+to re-split by position); whether the function should consult
+`ProjectWriteSettings::scheme`; and how to keep the two same-type
+`ExtraFile` arguments from being swapped silently.
+
+Solution: `extra_files::extra_file_lines(base_name, extra_project,
+extra_local) -> ExtraFileLines { start: Vec<String>, end: Vec<String> }`
+— the split the consumer needs is the type itself, each list already in
+the §7.5 order (`.project.md` before `.local.md` when both share a
+position; implemented by visiting the project pair first). The line is
+the D-21 sentence verbatim with `<file>` bound to
+`<STEM>.project.md` / `<STEM>.local.md`. A disabled option contributes
+nothing; its position is ignored while `enabled` is false, mirroring
+`project::ExtraFile`. The function is deliberately scheme-blind:
+ALG-030 marks the reading lines "(A only)", and the by-scheme builder
+owns that gate — passing `&ProjectWriteSettings` would have dragged the
+scheme question into a pure shaping step. The swap risk is covered by
+tests, not types: the arguments are ordered project-then-local to match
+the §7.5 tie order (the reverse of `ProjectWriteSettings`' field
+order), and the oracle tests use four distinct hardcoded D-21 literals,
+so an internal swap of the two pairs fails them; a caller that swaps
+the two arguments still compiles — T-039's own tests own that check.
+`ExtraFileLines` derives
+no serde: it is a build artifact, not domain vocabulary, and D-017's
+dependency surface is untouched. Testing: the card's full acceptance
+matrix is exhaustively enumerated — enabled/disabled ×2 and start/end
+×2 for both stems, 16 combinations per stem (32 cases) — against the
+hardcoded literals, plus scenario tests for the tie, the split and the
+disabled rules, plus doc tests.
+
+Boundary: ALG-030's `join(parts, BLANK_LINE)`, the creation marker and
+the scheme gate stay with the by-scheme builder (T-039); the §7.5 hint
+about `.local.md` and Git and the scheme-C snippet (same D-21 sentence,
+§7.5) are UI concerns.
