@@ -624,11 +624,21 @@ pub(crate) fn stage_copy(source: &Path, db_path: &Path) -> Result<(), RecoveryEr
         source: source_error,
     })?;
     secure_owner_only(&staging)?;
-    let file = std::fs::File::open(&staging).map_err(|source_error| RecoveryError::Io {
-        op: "sync",
-        path: staging.clone(),
-        source: source_error,
-    })?;
+    // The durability fsync goes through a write handle: Windows'
+    // FlushFileBuffers requires GENERIC_WRITE and fails with
+    // ERROR_ACCESS_DENIED (os error 5) on the read-only handle
+    // `File::open` yields, while Unix fsyncs read-only descriptors
+    // fine — the T-017 open-handle review's Windows arm. The handle
+    // only flushes; nothing is written through it, so the staged
+    // bytes are untouched.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&staging)
+        .map_err(|source_error| RecoveryError::Io {
+            op: "sync",
+            path: staging.clone(),
+            source: source_error,
+        })?;
     file.sync_all().map_err(|source_error| RecoveryError::Io {
         op: "sync",
         path: staging.clone(),
