@@ -4045,6 +4045,52 @@ instant once, pass `jiff`'s civil fields + zone name + offset minutes;
 when the zone cannot be resolved, pass `None` and the offset still
 tells the truth.
 
+### D-062 — Scheme-B marker parser in eunomia-core: padding class, byte-0 BOM, lines()-CR semantics, error precedence, and the E_MARKERS_INVALID boundary — 2026-11-19
+
+Problem: T-040 (`markers::parse`) transcribes spec §7.5/D-19 ("exactly one
+pair, each on its own line, spaces at the ends allowed"), but four points the
+spec fixes only in prose needed an explicit reading before they could be
+coded and tested, plus one boundary against the app error registry.
+
+Solution: `crates/eunomia-core/src/markers.rs` records the readings in its
+module docs and this entry pins them:
+
+- "Spaces at the ends" = ASCII space and tab, either side, nothing else
+  (editor indentation). Other ASCII whitespace (`\f`, `\v`) and Unicode
+  spaces (NBSP …) are content: a line carrying them is not a marker line.
+- CRLF files are first-class (D-22 keeps the file's line breaks outside the
+  block): lines are split with `str::lines()` semantics — on `\n`, with a
+  `\r` directly before it belonging to the terminator; a lone `\r` anywhere
+  else (including the last line of a file without a final `\n`) is content.
+- A BOM at byte 0 is an encoding artifact, not line 1's content (the only
+  place it can precede the begin marker; D-22 lets scheme-B files keep it).
+  A BOM anywhere else is content and blocks marker recognition on its line.
+  All span offsets stay absolute, so the BOM survives the ALG-031 splice.
+- A marker written inside a longer line — before text, after text, or
+  both markers on one line — is _not_ a marker line ("each on its own
+  line"): the file is judged on its marker lines only, so a valid pair
+  plus an inline mention (prose quoting the markers) stays valid; the
+  mention is content.
+- Failure classification precedence when several rules fail at once:
+  duplicates outrank a missing half, which outranks reversed order — the
+  `DuplicateMarkers` variant carries begin/end counts, so no fact is lost.
+- Boundary: `E_MARKERS_INVALID` lives in the §7.10 `AppError` registry
+  (src-tauri `errors.rs`, D-034). Core's `MarkersError` (one variant per
+  §7.5 failure) deliberately does not know it; the sync pipeline (§9.4
+  phase 1 step 4, which also owns the upstream `E_NOT_UTF8` check over the
+  raw bytes) does the mapping in a later task. DB-016's reserved-marker-line
+  validation reuses `classify_line` without dragging the registry in.
+
+The parser returns `MarkerSpan { begin_line, end_line, managed_start,
+managed_end }` — 1-based line numbers for diagnostics, absolute byte offsets
+as the ALG-031 splice points (T-041) and the ALG-033 hash base. Known
+open item: lib.rs's `//!` module list and ARCHITECTURE.md's `eunomia-core`
+module enumeration both intentionally did not gain a `markers` entry (the
+T-040 brief capped the lib.rs change at exactly one `pub mod markers;` line,
+to keep three parallel tasks out of one doc block; T-035 updated
+ARCHITECTURE.md for `body.rs` in its own commit, but that file was outside
+this task's zone); reconcile both lists when those files are next free.
+
 ### D-063 — Scheme-A extra-file reading lines: `extra_files::extra_file_lines`, position-split output — 2026-11-19
 
 Problem: T-037 needed the scheme-A "read this file" lines (spec §7.5,

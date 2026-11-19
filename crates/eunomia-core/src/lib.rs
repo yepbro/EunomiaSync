@@ -33,6 +33,7 @@ pub mod body;
 pub mod extra_files;
 pub mod library;
 pub mod marker;
+pub mod markers;
 pub mod normalize;
 pub mod project;
 pub mod snapshot;
