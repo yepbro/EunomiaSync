@@ -4321,6 +4321,8 @@ absence, verbatim body splicing, and the five panic postures (B,
 empty marker, marker with `\n`, marker with `\r`, body with a framing
 break) — plus doc tests.
 
+### D-069 — Scheme-B file assembly in eunomia-core: ALG-030's layout inside the splice, dominant line breaks counted over the preserved outside, String output — 2026-11-19
+
 Problem: T-041 turns ALG-031 ("the `managed` block and the marker (by
 the same rules) are inserted between the marker lines. The marker lines
 and everything outside them stay unchanged. The block's line breaks are
