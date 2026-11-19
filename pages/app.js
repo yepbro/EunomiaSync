@@ -18,6 +18,9 @@
    action confirmed in a dedicated dialog; DB-014/015),
    excluded paths modal (D-10: list with a Remove action confirmed in
    a dedicated dialog; §6.2 project_exclusions, §6.4 physical delete),
+   activity modal (§7.7 LOG-001…006: user-visible entries only, live
+   date/project/type/result filters, bulk ops logged with a change
+   count),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -3035,6 +3038,263 @@
       exCloseBtn
     nextFocus.focus()
   })
+
+  /* ---------- Activity modal (LOG-001…006) ---------------------------------- */
+  /* The §7.7 action-log window: user-visible entries only (LOG-005 —
+     diagnostic records go to the tracing file log), newest first, with
+     live filters by date, project, type and result (§7.7 UI row). An
+     entry mirrors LOG-004's fields: time, operation type, object and
+     result, plus the project and target path for file writes (the path
+     is derived from PROJECTS via targetPathOf at render time). Bulk
+     assignment ops log a single entry with the change count (LOG-004);
+     the E_* codes repeat the sync summary demo. The filter choices are
+     pure view state — the demo array never changes, and the selects keep
+     their values across reopenings within the session. */
+
+  const ACTIVITY = [
+    /* Sync run of today, 14:32 — the one the sync bar counts as the last
+       successful sync (LOG-007); run started → backup → write → finish */
+    { minutesBack: 3, type: 'sync', action: 'Sync run started', project: null, result: 'ok' },
+    {
+      minutesBack: 2,
+      type: 'backups',
+      action: 'Backup created — AGENTS.md',
+      project: 'EunomiaSync',
+      file: true,
+      result: 'ok',
+    },
+    {
+      minutesBack: 1,
+      type: 'sync',
+      action: 'Target file written',
+      project: 'EunomiaSync',
+      file: true,
+      result: 'ok',
+    },
+    {
+      minutesBack: 0,
+      type: 'sync',
+      action: 'Sync run finished — status: success',
+      project: null,
+      result: 'ok',
+    },
+    /* Assignments: bulk ops log one entry with the change count (LOG-004) */
+    {
+      minutesBack: 45,
+      type: 'assignments',
+      action: 'Bulk assign — 12 assignments changed (“Naming conventions”)',
+      project: null,
+      result: 'ok',
+    },
+    {
+      minutesBack: 200,
+      type: 'assignments',
+      action: 'Assigned variant “Conventional Commits” to “Commit messages”',
+      project: 'docktree',
+      result: 'ok',
+    },
+    /* Sync run of yesterday (finished 20:43) — partial: skips and
+       failures do not stop it (D-09); per-project results carry the
+       sync summary codes */
+    {
+      minutesBack: 1073,
+      type: 'sync',
+      action: 'File write skipped',
+      code: 'E_MARKERS_INVALID',
+      project: 'quotameter',
+      file: true,
+      result: 'skipped',
+    },
+    {
+      minutesBack: 1072,
+      type: 'sync',
+      action: 'File write skipped',
+      code: 'E_PROJECT_UNAVAILABLE',
+      project: 'utils/deja-vu',
+      file: true,
+      result: 'skipped',
+    },
+    {
+      minutesBack: 1071,
+      type: 'sync',
+      action: 'File write failed',
+      code: 'E_FILE_LOCKED',
+      project: 'sandbox-cf',
+      file: true,
+      result: 'error',
+    },
+    {
+      minutesBack: 1070,
+      type: 'sync',
+      action: 'Target file written',
+      project: 'task-id-mcp',
+      file: true,
+      result: 'ok',
+    },
+    {
+      minutesBack: 1069,
+      type: 'sync',
+      action: 'Sync run finished — status: partial (2 skipped, 1 failed)',
+      project: null,
+      result: 'ok',
+    },
+    /* Library: instructions and variants, headings */
+    {
+      minutesBack: 1552,
+      type: 'library',
+      action: 'Added variant “Bug-first” to “Bug-driven development”',
+      project: null,
+      result: 'ok',
+    },
+    {
+      minutesBack: 2772,
+      type: 'library',
+      action: 'Edited instruction “Dependency audit”',
+      project: null,
+      result: 'ok',
+    },
+    {
+      minutesBack: 4532,
+      type: 'library',
+      action: 'Renamed heading “Git and branches” → “Git Workflow”',
+      project: null,
+      result: 'ok',
+    },
+    {
+      minutesBack: 6062,
+      type: 'library',
+      action: 'Moved heading “Communication” under “General”',
+      project: null,
+      result: 'ok',
+    },
+    {
+      minutesBack: 7127,
+      type: 'library',
+      action: 'Deleted variant “Old wording” of “Commit messages”',
+      project: null,
+      result: 'ok',
+    },
+    {
+      minutesBack: 8402,
+      type: 'library',
+      action: 'Restored instruction “Secrets handling”',
+      project: null,
+      result: 'ok',
+    },
+    {
+      minutesBack: 8900,
+      type: 'library',
+      action: 'Hid instruction “Secrets handling”',
+      project: null,
+      result: 'ok',
+    },
+    { minutesBack: 24752, type: 'library', action: 'Created instruction “Dependency audit”', project: null, result: 'ok' },
+    /* Projects: added (manual / scan), settings, archived, restored */
+    { minutesBack: 9992, type: 'projects', action: 'Added project moli (manual)', project: 'moli', result: 'ok' },
+    {
+      minutesBack: 11227,
+      type: 'projects',
+      action: 'Added project sandbox-cf (found by scan)',
+      project: 'sandbox-cf',
+      result: 'ok',
+    },
+    {
+      minutesBack: 12012,
+      type: 'projects',
+      action: 'Changed project settings — quotameter (target file CLAUDE.md)',
+      project: 'quotameter',
+      result: 'ok',
+    },
+    { minutesBack: 14332, type: 'projects', action: 'Restored project old-site', project: 'old-site', result: 'ok' },
+    { minutesBack: 23360, type: 'projects', action: 'Archived project old-crm', project: 'old-crm', result: 'ok' },
+  ]
+
+  /* Human labels per entry type; the values double as the Type filter's
+     option values */
+  const ACT_TYPES = {
+    projects: 'Projects',
+    library: 'Library',
+    assignments: 'Assignments',
+    sync: 'Sync',
+    backups: 'Backups',
+  }
+
+  const actDialog = document.getElementById('activity-dialog')
+  const actTable = document.querySelector('#activity-dialog .act-table')
+  const actRowsBody = document.getElementById('act-rows')
+  const actEmpty = document.getElementById('act-empty')
+  const actFilterDate = document.getElementById('act-filter-date')
+  const actFilterProject = document.getElementById('act-filter-project')
+  const actFilterType = document.getElementById('act-filter-type')
+  const actFilterResult = document.getElementById('act-filter-result')
+
+  /* Project filter options mirror the toolbar's demo projects */
+  for (const name of projectNames) {
+    const opt = document.createElement('option')
+    opt.textContent = name
+    actFilterProject.append(opt)
+  }
+
+  /* UTC+3 calendar day of a demo stamp, e.g. "19 Nov 2026" — the unit the
+     Date filter compares in (the demo clock is fixed to UTC+3) */
+  function actDay(minutesBack) {
+    const d = new Date(HIST_NOW_MS - minutesBack * 60000 + 180 * 60000)
+    return `${d.getUTCDate()} ${MONTHS_SHORT[d.getUTCMonth()]} ${d.getUTCFullYear()}`
+  }
+
+  const ACT_TODAY = actDay(0)
+
+  /* The four filters combine; "today" compares calendar days, "7d" is a
+     rolling window of 7 × 24 h. Newest first, like the history panel. */
+  function renderActivity() {
+    const date = actFilterDate.value // all | 7d | today
+    const project = actFilterProject.value // all | demo project name
+    const type = actFilterType.value // all | ACT_TYPES key
+    const result = actFilterResult.value // all | ok | skipped | error
+
+    const visible = ACTIVITY.filter((e) => {
+      if (date === 'today' && actDay(e.minutesBack) !== ACT_TODAY) return false
+      if (date === '7d' && e.minutesBack > 7 * 1440) return false
+      if (project !== 'all' && e.project !== project) return false
+      if (type !== 'all' && e.type !== type) return false
+      if (result !== 'all' && e.result !== result) return false
+      return true
+    }).sort((a, b) => a.minutesBack - b.minutesBack)
+
+    actRowsBody.innerHTML = visible
+      .map((e) => {
+        const path = e.file && e.project ? targetPathOf(e.project) : null
+        const objectCell =
+          (e.project ? escapeHtml(e.project) : '—') +
+          (path ? `<code class="act-path">${escapeHtml(path)}</code>` : '')
+        const code = e.code ? ` <span class="chip act-code">${escapeHtml(e.code)}</span>` : ''
+        return (
+          '<tr>' +
+          `<td class="hist-when">${histStamp(e.minutesBack)}</td>` +
+          `<td class="act-action"><span class="chip act-type">${ACT_TYPES[e.type]}</span>${escapeHtml(e.action)}${code}</td>` +
+          `<td class="act-object">${objectCell}</td>` +
+          `<td class="hist-op-cell"><span class="chip hist-op act-res act-res--${e.result}">${e.result}</span></td>` +
+          '</tr>'
+        )
+      })
+      .join('')
+
+    actTable.hidden = visible.length === 0
+    actEmpty.hidden = visible.length !== 0
+  }
+
+  /* Filters apply live on change; reopening keeps the last choice */
+  for (const sel of [actFilterDate, actFilterProject, actFilterType, actFilterResult]) {
+    sel.addEventListener('change', renderActivity)
+  }
+
+  function openActivity() {
+    renderActivity()
+    actDialog.showModal()
+  }
+
+  /* Entry point: the toolbar ghost button (left of Settings) */
+  document.getElementById('activity-btn').addEventListener('click', openActivity)
 
   /* ---------- Placeholder dialogs (native <dialog>) ------------------------ */
 

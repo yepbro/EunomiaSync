@@ -13,6 +13,8 @@
   modal (DEF-001…005: five sections, applies immediately, no Save button),
   archived projects modal (D-10: list + Restore flow, DB-014/015),
   excluded paths modal (D-10: list + Remove flow, §6.2 exclusions),
+  activity modal (§7.7 LOG-001…006: user entries only, live
+  date/project/type/result filters),
   placeholder modals.
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
@@ -21,9 +23,9 @@
   history) + § 7.5 OUT-009 + § 6.2 run statuses + § 7.2 DEF-001…005
   (settings, §6.5 keys, §11.3 Ctrl/Cmd+,) + D-10 (archived and
   excluded-paths screens, PRJ-013…018 restore, exclusion remove,
-  DB-014/015) + UI-001 (window, pinned
-  sync panel), UI-021 (light/dark via OS setting), UI-022 (reduced
-  motion).
+  DB-014/015) + § 7.7 LOG-001…006 (activity modal) + UI-001 (window,
+  pinned sync panel), UI-021 (light/dark via OS setting), UI-022
+  (reduced motion).
   Tooltips are native `title` attributes; accessible names are real labels.
 -->
 <html lang="en">
@@ -73,6 +75,12 @@
         <span class="spacer"></span>
 
         <span id="selected-chip" class="selected-chip" hidden></span>
+
+        <!-- Activity (§7.7 UI row): ghost button in the right cluster, left
+             of Settings per the spec toolbar sketch -->
+        <button id="activity-btn" type="button" class="btn btn-ghost">
+          Activity
+        </button>
 
         <!-- Settings (DEF-001…004): ghost button in the right cluster, the
              other entry point is Ctrl/Cmd + , (§11.3) -->
@@ -3449,6 +3457,82 @@
           <div class="modal-actions">
             <button value="cancel" class="btn btn-ghost">Cancel</button>
             <button value="remove" class="btn btn-primary">Remove</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Activity (§7.7 LOG-001…006, UI row): the action-log window.
+         User entries only (LOG-005 — diagnostic records go to the tracing
+         file log), newest first, with live filters by date, project, type
+         and result; an empty filtered result shows the UI-012 message.
+         Rows are rendered by app.js from the demo ACTIVITY array: each
+         entry carries time, operation type, object and result, the change
+         count for a bulk assignment op (LOG-004) and, for file writes,
+         the target path under the project. The LOG-006 limits are quoted
+         in the hint above the table. -->
+      <dialog id="activity-dialog" class="modal modal-lg" aria-labelledby="act-title">
+        <form method="dialog">
+          <h2 id="act-title">Activity</h2>
+          <p class="modal-text act-subtitle">
+            User-visible actions; diagnostic entries go only to the file log (LOG-005).
+          </p>
+
+          <div class="act-filters">
+            <label class="visually-hidden" for="act-filter-date">Filter activity by date</label>
+            <select id="act-filter-date">
+              <option selected value="all">All time</option>
+              <option value="7d">Last 7 days</option>
+              <option value="today">Today</option>
+            </select>
+
+            <label class="visually-hidden" for="act-filter-project">Filter activity by project</label>
+            <select id="act-filter-project">
+              <option selected value="all">All projects</option>
+            </select>
+
+            <label class="visually-hidden" for="act-filter-type">Filter activity by type</label>
+            <select id="act-filter-type">
+              <option selected value="all">All types</option>
+              <option value="projects">Projects</option>
+              <option value="library">Library</option>
+              <option value="assignments">Assignments</option>
+              <option value="sync">Sync</option>
+              <option value="backups">Backups</option>
+            </select>
+
+            <label class="visually-hidden" for="act-filter-result">Filter activity by result</label>
+            <select id="act-filter-result">
+              <option selected value="all">All results</option>
+              <option value="ok">ok</option>
+              <option value="skipped">skipped</option>
+              <option value="error">error</option>
+            </select>
+          </div>
+
+          <p class="ps-hint act-limits">
+            Limits: 10,000 entries or 180 days, cleaned at startup and once a day (LOG-006).
+          </p>
+
+          <div class="act-body">
+            <table class="hist-table act-table">
+              <caption class="visually-hidden">
+                Activity log: time, action, project or path, result
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col" class="act-col-when">Time</th>
+                  <th scope="col">Action</th>
+                  <th scope="col">Project / path</th>
+                  <th scope="col" class="act-col-res">Result</th>
+                </tr>
+              </thead>
+              <tbody id="act-rows"></tbody>
+            </table>
+            <p id="act-empty" class="hist-empty" hidden>Nothing matches the current filters.</p>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
           </div>
         </form>
       </dialog>

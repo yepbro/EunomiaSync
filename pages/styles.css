@@ -6,8 +6,8 @@
    modal), § 7.5 OUT-009 + § 6.2 run statuses (sync summary modal,
    MAIN-024…031), § 7.2 DEF-001…005 (app settings modal, §6.5 keys),
    D-10 (archived + excluded paths modals, PRJ-013…018, §6.2
-   exclusions, DB-014/015),
-   UI-001, UI-011, UI-021, UI-022, NFR-020.
+   exclusions, DB-014/015), § 7.7 LOG-001…006 (activity modal),
+   UI-001, UI-011, UI-012, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
 
@@ -125,12 +125,15 @@ body {
 }
 
 /* ----- Toolbar (D-14, UI: search + project filter + "Show hidden") ----- */
+/* Sized so the right cluster (Activity + Settings + the two add buttons,
+   labels never wrapped) fits the UI-001 minimum width of 960px: the
+   search input is the flex victim and may shrink to its small floor. */
 
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 10px 14px;
+  gap: 10px;
+  padding: 10px 12px;
   background: var(--surface);
   border-block-end: 1px solid var(--border);
   flex: none;
@@ -165,11 +168,19 @@ body {
 
 .toolbar input[type='search'] {
   flex: 0 1 300px;
-  min-inline-size: 160px;
+  min-inline-size: 110px;
 }
 
 .toolbar select {
   max-inline-size: 180px;
+}
+
+/* Toolbar buttons keep their labels on one line (the Activity button
+   joined the right cluster) and never compress below their text */
+.toolbar .btn {
+  white-space: nowrap;
+  flex: none;
+  padding-inline: 8px;
 }
 
 .toggle {
@@ -2269,6 +2280,111 @@ label.scan-row:hover {
 .ex-reason--removed_scanned {
   color: var(--accent-strong);
   border-color: var(--accent);
+}
+
+/* ----- Activity modal (LOG-001…006) --------------------------------------- */
+/* The action-log window: fixed-height body with an internal scroll (the
+   history-modal idiom — .hist-table is reused), a compact filter row in
+   the toolbar-control idiom and one row per user-visible entry (LOG-005:
+   diagnostic entries go only to the file log). Result badges extend the
+   hist-op idiom — the result is always readable as text, the tint is a
+   secondary cue mixed from the theme vars (NFR-020). */
+
+.act-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* The toolbar-select idiom, repeated outside .toolbar */
+.act-filters select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  min-block-size: 28px;
+  max-inline-size: 180px;
+}
+
+/* Everything but the scrolling body stays fixed in the modal-lg form */
+.modal-lg .act-subtitle,
+.modal-lg .act-filters,
+.modal-lg .act-limits {
+  flex: none;
+}
+
+.modal-lg .act-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+
+.act-col-when {
+  inline-size: 168px;
+}
+
+.act-col-res {
+  inline-size: 76px;
+}
+
+.act-action {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Operation-type chip in front of the action text */
+.act-type {
+  margin-inline-end: 6px;
+}
+
+/* Error-code chip after the action text (the sync summary's .ss-code
+   idiom) */
+.act-code {
+  margin-inline-start: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.act-object {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Target path of a file write (LOG-004), below the project name */
+.act-path {
+  display: block;
+  margin-block-start: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Result badges: ok in the accent tint, skipped in warning, error in
+   danger — the same mixes as the history op badges */
+.act-res {
+  font-weight: 600;
+}
+
+.act-res--ok {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.act-res--skipped {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+.act-res--error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
 }
 
 /* ----- Motion (UI-022: honor the OS "reduce motion" setting) ------------ */
