@@ -125,7 +125,7 @@ jobs:
       # not be located in Y") — the diagnosis the cargo runner swallows.
       - name: Loader diagnostics for the lib test exe (Windows)
         if: runner.os == 'Windows' && failure()
-        shell: pwsh
+        shell: bash
         run: |
           python - <<'PY'
           import struct, glob
