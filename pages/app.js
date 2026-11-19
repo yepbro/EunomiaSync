@@ -518,7 +518,8 @@
   }
 
   /* Saving from the custom flow applies the custom text to the cell:
-     the checkbox and the select are disabled while the custom text lives */
+     the select is disabled (there is nothing left to pick) while the
+     checkbox stays enabled — the custom instruction can be toggled */
   editDialog.addEventListener('close', () => {
     const td = pendingCustomCell
     pendingCustomCell = null
@@ -529,7 +530,6 @@
     td.dataset.custom = 'true'
     input.checked = true
     input.dataset.initial = 'true'
-    input.disabled = true
     if (select) {
       select.dataset.initialVariant = select.value
       select.disabled = true
