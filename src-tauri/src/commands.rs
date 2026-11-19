@@ -1,7 +1,9 @@
 //! The IPC commands (spec §7.10) — the recovery-screen group of the
-//! System module (D-009) plus the History module's `activity_list`
-//! (T-027): `app_open_data_folder`, `db_backups_list`,
-//! `db_restore_backup`, `db_recreate`, `activity_list`.
+//! System module (D-009), the History module's `activity_list`
+//! (T-027) and the Settings module's `settings_get`/`settings_set`
+//! (T-030): `app_open_data_folder`, `db_backups_list`,
+//! `db_restore_backup`, `db_recreate`, `activity_list`,
+//! `settings_get`, `settings_set`.
 //!
 //! Every command returns `Result<T, AppError>` (§7.10) and is generic
 //! over the Tauri runtime — the documented tauri-specta shape for
@@ -17,6 +19,12 @@
 //! (D-037) over the journal the action-log repository owns (D-051),
 //! with LOG-005's visibility rule enforced at this boundary — user
 //! entries by default, `diagnostic` only when explicitly requested.
+//! The settings commands (§6.5, §7.2 DEF-001…005) are the first
+//! journaling producers: `settings_set` writes its `settings.changed`
+//! entries (LOG-001…004) inside the operation's own transaction
+//! (D-051), and both commands validate through the store's single
+//! settings parse (D-039) — every rejection is `E_VALIDATION` naming
+//! the key, the sent value and the reason.
 //!
 //! # Lifecycle (the honest boundary this task fixes, DECISIONS.md
 //! T-024)
@@ -53,7 +61,11 @@ use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use crate::logging;
 use crate::recovery::{self, DbBackupInfo};
 
-use eunomia_store::action_log::{Action, ActionLogError, ActivityQuery, Outcome, Visibility};
+use eunomia_store::action_log::{
+    Action, ActionLogError, ActivityQuery, Entity, EntityType, Level, LogEntry, Outcome,
+    Visibility, insert,
+};
+use eunomia_store::settings::{SettingKey, SettingValue, SettingsError};
 use eunomia_store::storage::StorageError;
 
 /// Serializes the two destructive recovery commands against each
@@ -476,15 +488,13 @@ pub(crate) async fn activity_list<R: Runtime>(
         .inspect_err(logging::activity_list_failed)
 }
 
-/// The body of [`activity_list`], split from the command wrapper the
-/// same edge logs every failure of (see there).
-async fn activity_list_impl<R: Runtime>(
-    app: AppHandle<R>,
-    query: ActivityListQuery,
-) -> Result<ActivityPage, AppError> {
-    let validated = validated_activity_query(query)?;
-    let database = app
-        .try_state::<Db>()
+/// The managed [`Db`] every database command needs, with the honest
+/// no-database answer (recovery mode): the recorded D-037 fallback
+/// with a diagnostic naming the state — not a panic, and not a
+/// pretend-empty result (an empty page, default settings) that would
+/// lie about the journal/the settings table being empty.
+fn managed_db<R: Runtime>(app: &AppHandle<R>) -> Result<Db, AppError> {
+    app.try_state::<Db>()
         .map(|state| state.inner().clone())
         .ok_or_else(|| {
             let mut error = AppError::new(ErrorCode::DbLocked);
@@ -494,8 +504,17 @@ async fn activity_list_impl<R: Runtime>(
                 os_message: Some("no database is running (recovery mode?)".to_owned()),
             });
             error
-        })?;
-    database
+        })
+}
+
+/// The body of [`activity_list`], split from the command wrapper the
+/// same edge logs every failure of (see there).
+async fn activity_list_impl<R: Runtime>(
+    app: AppHandle<R>,
+    query: ActivityListQuery,
+) -> Result<ActivityPage, AppError> {
+    let validated = validated_activity_query(query)?;
+    managed_db(&app)?
         .run(move |transaction| {
             eunomia_store::action_log::list(transaction, &validated)
                 .map(ActivityPage::from_store)
@@ -709,12 +728,364 @@ fn corrupt_cell_diagnostic(corrupt: &ActionLogError) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Settings (T-030, §7.10 Settings module, §6.5, §7.2 DEF-001…005,
+// LOG-001…004)
+// ---------------------------------------------------------------------------
+
+/// One setting on the `settings_get`/`settings_set` wire: the §6.5
+/// dotted key plus the value as canonical JSON text (`"C"`, `10`,
+/// `{"enabled":true,"position":"end"}`, `["node_modules","vendor"]`).
+///
+/// The wire stays string-shaped on purpose — the D-052 `details`
+/// decision applied to the thirteen §6.5 keys: keys are parsed at this
+/// boundary through the store's `SettingKey::from_key` and values
+/// through `SettingValue::from_json` (D-039's single validation path),
+/// so the store remains the one owner of the key list and the value
+/// shapes, and no specta enum mirrors them on this side (a second
+/// vocabulary to keep in sync for no behavioral gain; the
+/// `specta/serde_json` feature stays disabled). Parsing the JSON text
+/// stays the frontend's choice, exactly like a `details` cell.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct SettingItem {
+    /// The §6.5 dotted key (`scan.max_depth`).
+    pub(crate) key: String,
+    /// The value as canonical JSON text — the exact form stored and
+    /// re-read (§6.5: values live in the `value` column as JSON).
+    pub(crate) value: String,
+}
+
+/// One entry of the `settings_set` changes list. `deny_unknown_fields`
+/// (the [`ActivityListQuery`] rule): a typo'd field name fails the
+/// deserialization loudly instead of silently sending a value-less
+/// key.
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SettingChange {
+    /// The §6.5 dotted key to change.
+    pub(crate) key: String,
+    /// The new value as canonical JSON text (the form
+    /// [`SettingItem::value`] carries).
+    pub(crate) value: String,
+}
+
+/// Shapes one store key/value pair into its wire form.
+fn setting_item((key, value): (SettingKey, SettingValue)) -> SettingItem {
+    SettingItem {
+        key: key.as_str().to_owned(),
+        value: serde_json::to_string(&value.to_json())
+            .expect("a serde_json::Value always serializes"),
+    }
+}
+
+/// Reads every §6.5 setting with its default applied (spec §7.10
+/// Settings module `settings_get`; the §7.2 window opens on this map).
+///
+/// The response is a **list in §6.5 table order** — the order the
+/// store's `get_all` pins — not a JSON object: an object would impose
+/// its own key order (sorted or arbitrary) on the Settings window's
+/// sections. The query runs through [`Db::run`] like every database
+/// command (D-037), so a value committed by a later `settings_set` is
+/// what the next `settings_get` returns — the §7.2 "applies without a
+/// restart" mechanism: nothing between the screen and the table caches
+/// settings (the future scanner reads through this same repository
+/// path, T-012/D-032's honest-boundary adaptation).
+///
+/// A successful read is never journaled and gets no routine log line
+/// (the `activity_list` rationale: reading is not an event); failures
+/// reach the log with their §10 code
+/// ([`logging::settings_get_failed`]).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn settings_get<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<SettingItem>, AppError> {
+    settings_get_impl(app)
+        .await
+        .inspect_err(logging::settings_get_failed)
+}
+
+/// The body of [`settings_get`], split so one logging edge covers every
+/// failure path (the `activity_list` shape).
+async fn settings_get_impl<R: Runtime>(app: AppHandle<R>) -> Result<Vec<SettingItem>, AppError> {
+    managed_db(&app)?
+        .run(|transaction| {
+            eunomia_store::settings::get_all(transaction)
+                .map(|all| all.into_iter().map(setting_item).collect::<Vec<_>>())
+                .map_err(settings_cell_to_app_error)
+        })
+        .await
+}
+
+/// Applies a partial settings update atomically (spec §7.10 Settings
+/// module `settings_set`; §6.9: "the whole operation runs in one
+/// transaction"): the changes list carries **only the changed keys**
+/// — the Settings screen's dirty set — and either every key applies or
+/// none does. One key per call was rejected: the screen's Save would
+/// be N transactions, and a failure mid-save would leave the screen
+/// half applied. The response is the fresh full map (the same list
+/// [`settings_get`] returns, read inside the same transaction), so the
+/// saving screen gets the applied state without a second round trip.
+///
+/// Validation is the repository's, reached from the boundary (D-039's
+/// single path): every rejection is `E_VALIDATION` naming the key, the
+/// sent value and the reason, and nothing is executed for a list with
+/// any invalid entry. Each changed key writes one `settings.changed`
+/// journal entry (LOG-001…004) **inside the operation's transaction**
+/// (D-051): a rolled-back save leaves no entry claiming it happened —
+/// the entry names the key through its entity (the store's designated
+/// carrier for "which setting"), and no value travels (keys are
+/// identifiers, not content — SEC-008's structural line; the count is
+/// the number of entries).
+///
+/// Failures reach the log with their §10 code
+/// ([`logging::settings_set_failed`]); the journal entries themselves
+/// are the success record — a successful save adds no routine file-log
+/// line (the info+user+ok mirror policy, D-051).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn settings_set<R: Runtime>(
+    app: AppHandle<R>,
+    changes: Vec<SettingChange>,
+) -> Result<Vec<SettingItem>, AppError> {
+    settings_set_impl(app, changes)
+        .await
+        .inspect_err(logging::settings_set_failed)
+}
+
+/// The body of [`settings_set`], split so one logging edge covers every
+/// failure path (see there).
+async fn settings_set_impl<R: Runtime>(
+    app: AppHandle<R>,
+    changes: Vec<SettingChange>,
+) -> Result<Vec<SettingItem>, AppError> {
+    let validated = validated_settings_changes(changes)?;
+    let database = managed_db(&app)?;
+    database
+        .run(move |transaction| {
+            for (key, value) in &validated {
+                eunomia_store::settings::set(transaction, *key, value.clone())
+                    .map_err(settings_write_to_app_error)?;
+                // LOG-001…004 ("changing settings"), inside the
+                // operation's own transaction (D-051): one entry per
+                // changed key, its entity id the dotted key — the
+                // store's own designated id shape for a settings
+                // entry, which carries *which* setting changed; the
+                // closed `Details` enum (D-051) has no keys-list
+                // variant, and a value would be content, not an
+                // identifier — so no details. The store is frozen for
+                // this task's window (T-029 owns it), and per-key
+                // entries are bounded by the vocabulary itself
+                // (≤ 13), which is why no `Bulk` count is needed.
+                let mut entry = LogEntry::new(
+                    Action::SettingsChanged,
+                    Level::Info,
+                    Visibility::User,
+                    Outcome::Ok,
+                );
+                entry.entity = Some(Entity {
+                    kind: EntityType::Setting,
+                    id: key.as_str(),
+                });
+                insert(transaction, &entry).map_err(activity_log_to_app_error)?;
+                // The journal call maps through the action-log
+                // mapper, not the settings one: the two error
+                // families are not interchangeable, and the
+                // action-log mapper keeps a hypothetical `ActionLog`
+                // failure out of the settings fallback's
+                // `other.to_string()` (whose `Display` can embed
+                // stored text — SEC-008's os_message surface).
+                // The D-051 mirror contract: one call per written
+                // entry — a no-op for this info+user+ok shape (the
+                // journal already holds it; `mirror_level` decides),
+                // and the single place a future level/visibility
+                // change would pick up its mirroring.
+                logging::action_logged(&entry);
+            }
+            // The applied state, read in the same transaction: the
+            // answer describes exactly what committed.
+            eunomia_store::settings::get_all(transaction)
+                .map(|all| all.into_iter().map(setting_item).collect::<Vec<_>>())
+                .map_err(settings_cell_to_app_error)
+        })
+        .await
+}
+
+/// Validates the wire changes into typed pairs — the boundary parse of
+/// untrusted input, all of it through the store's own single
+/// validation path (D-039): an unknown key, a duplicate key, value
+/// text that is not JSON, and every §6.5 type/range/member/shape
+/// violation are `E_VALIDATION` naming the key, the sent value and the
+/// reason, with nothing executed (the store's own `set` re-validation
+/// is the defense-in-depth twin — see
+/// [`settings_write_to_app_error`]). A valid list is bounded by the
+/// vocabulary: at most thirteen distinct keys, so nothing a caller
+/// sends can make the write loop unbounded.
+fn validated_settings_changes(
+    changes: Vec<SettingChange>,
+) -> Result<Vec<(SettingKey, SettingValue)>, AppError> {
+    if changes.is_empty() {
+        // The loud choice (the D-039/D-052 explicit-over-silent
+        // policy): an empty save that "succeeds" would hide a frontend
+        // bug that computes the dirty set as always-empty — the
+        // screen must call only when something changed.
+        return Err(rejected_setting(
+            "changes",
+            "",
+            "at least one change is required",
+        ));
+    }
+    let mut validated: Vec<(SettingKey, SettingValue)> = Vec::with_capacity(changes.len());
+    for change in &changes {
+        let Some(key) = SettingKey::from_key(&change.key) else {
+            return Err(rejected_setting(
+                &change.key,
+                &change.value,
+                "unknown setting key (spec 6.5)",
+            ));
+        };
+        if validated.iter().any(|(seen, _)| *seen == key) {
+            // A JSON object would collapse duplicates silently
+            // (last-wins); the list shape makes them visible, and
+            // visible means rejected.
+            return Err(rejected_setting(
+                &change.key,
+                &change.value,
+                "the same key appears more than once",
+            ));
+        }
+        let json: serde_json::Value = serde_json::from_str(&change.value).map_err(|error| {
+            rejected_setting(
+                &change.key,
+                &change.value,
+                &format!("the value is not valid JSON ({error})"),
+            )
+        })?;
+        let value = SettingValue::from_json(key, &json)
+            .map_err(|source| rejected_setting(key.as_str(), &change.value, &source.to_string()))?;
+        validated.push((key, value));
+    }
+    Ok(validated)
+}
+
+/// A `settings_set` input rejection: `E_VALIDATION` with the setting
+/// key, the sent value and the reason as params — the T-027
+/// field/value/reason shape, with the key as the failed "field" (for a
+/// settings change the "where" of UI-011 *is* the setting key; the
+/// value is the caller's own input echoed back, never stored data).
+fn rejected_setting(key: &str, value: &str, reason: &str) -> AppError {
+    let mut error = AppError::new(ErrorCode::Validation);
+    error.params.insert("key".to_owned(), key.to_owned());
+    error.params.insert("value".to_owned(), value.to_owned());
+    error.params.insert("reason".to_owned(), reason.to_owned());
+    error
+}
+
+/// Maps a store failure of the `settings_set` **write** path onto the
+/// §7.10 wire. A `Settings` rejection here is the store-contract twin
+/// of the command's own validation (normally pre-empted: `set`
+/// validates the same value through the same parse before writing —
+/// see [`validated_settings_changes`]), so it stays `E_VALIDATION`;
+/// the unreachable twin carries `key`+`reason` only — the store's
+/// error does not hold the sent value, and the pre-empting path is
+/// the one that adds it (a frontend message interpolating `value`
+/// never sees this shape). SQLite failures go through the shared base
+/// classifier (a constraint abort — the rollback path's staged
+/// failure — is `E_VALIDATION` with the SQLite facts in `details`).
+/// `pub(crate)` in the `activity_log_to_app_error` shape: the IPC
+/// tests map their store errors through it too, and the unit tests
+/// drive its arms directly.
+pub(crate) fn settings_write_to_app_error(error: StorageError) -> AppError {
+    match error {
+        StorageError::Settings { key, source } => {
+            let mut app_error = AppError::new(ErrorCode::Validation);
+            app_error.params.insert("key".to_owned(), key);
+            app_error
+                .params
+                .insert("reason".to_owned(), source.to_string());
+            app_error
+        }
+        StorageError::Sql(source) => db::sqlite_error_to_app_error(source),
+        other => storage_fallback(other),
+    }
+}
+
+/// Maps a store failure of a settings **read** (`settings_get`, and
+/// the `get_all` tail of `settings_set`): a `Settings` error on a read
+/// is a stored cell outside its contract — corruption, not caller
+/// input. `E_VALIDATION` would tell the user to fix their input (the
+/// lie the T-027 review rejected for journal cells) and `E_DB_CORRUPT`
+/// is the other lie D-037 already rejected (one bad cell must not
+/// force the destructive recovery screen), so this is the recorded
+/// fallback with its own diagnostic label — class-only text, never the
+/// stored value or key (the T-027 round-2 rule: a tampered cell is
+/// arbitrary database text, and `params`/`os_message` are exactly the
+/// surfaces the log line and the localized message read).
+/// `pub(crate)` for the same reason as
+/// [`settings_write_to_app_error`].
+pub(crate) fn settings_cell_to_app_error(error: StorageError) -> AppError {
+    match error {
+        StorageError::Settings { source, .. } => {
+            let mut app_error = AppError::new(ErrorCode::DbLocked);
+            app_error.details = Some(ErrorDetails {
+                os_code: None,
+                os_kind: Some("SettingsCorrupt".to_owned()),
+                os_message: Some(settings_corrupt_diagnostic(&source)),
+            });
+            app_error
+        }
+        StorageError::Sql(source) => db::sqlite_error_to_app_error(source),
+        other => storage_fallback(other),
+    }
+}
+
+/// The shared unreachable-fallback arm of the two settings mappers
+/// (the `activity_log_to_app_error` `other` arm, same label): the
+/// settings calls only produce `Settings`/`Sql` failures today, but
+/// the store's error enum is wider, and the honest wire answer for an
+/// unreachable variant is the recorded D-037 fallback with the family
+/// name (the log target and the producing command distinguish the
+/// reader from the writer).
+fn storage_fallback(other: StorageError) -> AppError {
+    let mut app_error = AppError::new(ErrorCode::DbLocked);
+    app_error.details = Some(ErrorDetails {
+        os_code: None,
+        os_kind: Some("StorageError".to_owned()),
+        os_message: Some(other.to_string()),
+    });
+    app_error
+}
+
+/// The fixed-text diagnostic of a corrupt settings cell for
+/// [`settings_cell_to_app_error`]: the failure class only, **never the
+/// stored value or key** — `SettingsError`'s own `Display` embeds both
+/// (the rejected number, the offending member, the problem string),
+/// and a tampered cell is arbitrary database text (the
+/// [`corrupt_cell_diagnostic`] rule, applied to the settings table).
+fn settings_corrupt_diagnostic(source: &SettingsError) -> String {
+    match source {
+        SettingsError::Json(_) => "a stored settings value cell is not valid JSON".to_owned(),
+        SettingsError::Type { .. } => {
+            "a stored settings value cell is the wrong JSON type".to_owned()
+        }
+        SettingsError::Range { .. } => {
+            "a stored settings value cell is outside its key's range".to_owned()
+        }
+        SettingsError::Member { .. } => {
+            "a stored settings value cell is outside its key's vocabulary".to_owned()
+        }
+        SettingsError::Shape { .. } => {
+            "a stored settings value cell has the wrong object shape".to_owned()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The seam tests of the pure mappings — the opener mapping and
-    //! the `activity_list` store-error mapping are pure, so they are
-    //! tested directly; the opener call itself is the recorded
-    //! untestable seam (module docs).
+    //! the `activity_list`/settings store-error mappings are pure, so
+    //! they are tested directly; the opener call itself is the
+    //! recorded untestable seam (module docs).
 
     use super::*;
     use crate::errors::ErrorCode;
@@ -839,5 +1210,105 @@ mod tests {
             details.os_message.as_deref(),
             Some("a stored ts cell is not the DB-002 timestamp shape")
         );
+    }
+
+    #[test]
+    fn a_settings_write_rejection_maps_to_validation_naming_the_key() {
+        // Arrange: the store's own rejection of a write value — the
+        // defense-in-depth twin of the command's validation (normally
+        // pre-empted by `validated_settings_changes`).
+        let stored = StorageError::Settings {
+            key: "scan.max_depth".to_owned(),
+            source: SettingsError::Range {
+                value: 21,
+                min: 1,
+                max: 20,
+            },
+        };
+
+        // Act
+        let app_error = settings_write_to_app_error(stored);
+
+        // Assert: the honest E_VALIDATION — the write path's Settings
+        // failures are about the caller's value — naming the key and
+        // the reason (the command's own validation adds the sent
+        // value).
+        assert_eq!(app_error.code, ErrorCode::Validation);
+        assert_eq!(app_error.message_key, "errors.validation");
+        assert_eq!(
+            app_error.params.get("key").map(String::as_str),
+            Some("scan.max_depth")
+        );
+        assert!(
+            app_error
+                .params
+                .get("reason")
+                .is_some_and(|reason| reason.contains("21")),
+            "the reason carries the store's own wording, got: {:?}",
+            app_error.params
+        );
+    }
+
+    #[test]
+    fn corrupt_settings_cells_map_to_class_only_diagnostics() {
+        // Every SettingsError class a stored cell can fail with: the
+        // answer is the D-037 fallback with a fixed, class-only
+        // diagnostic — never E_VALIDATION (the §10 row would blame the
+        // user's input for database corruption) and never the stored
+        // value or key in params or os_message (a tampered cell is
+        // arbitrary database text; SEC-008's surfaces are exactly
+        // those two).
+        let cases: [(SettingsError, &str); 5] = [
+            (
+                SettingsError::Json(serde_json::from_str::<()>("nope").expect_err("must error")),
+                "a stored settings value cell is not valid JSON",
+            ),
+            (
+                SettingsError::Type {
+                    expected: "integer",
+                    found: "string",
+                },
+                "a stored settings value cell is the wrong JSON type",
+            ),
+            (
+                SettingsError::Range {
+                    value: 9999,
+                    min: 1,
+                    max: 20,
+                },
+                "a stored settings value cell is outside its key's range",
+            ),
+            (
+                SettingsError::Member {
+                    found: "Q".to_owned(),
+                },
+                "a stored settings value cell is outside its key's vocabulary",
+            ),
+            (
+                SettingsError::Shape {
+                    problem: "unknown field \"payload\"".to_owned(),
+                },
+                "a stored settings value cell has the wrong object shape",
+            ),
+        ];
+        for (source, expected) in cases {
+            let app_error = settings_cell_to_app_error(StorageError::Settings {
+                key: "tampered.key".to_owned(),
+                source,
+            });
+            assert_eq!(app_error.code, ErrorCode::DbLocked);
+            assert_eq!(app_error.message_key, "errors.db_locked");
+            assert!(
+                app_error.params.is_empty(),
+                "no stored cell travels in params"
+            );
+            let details = app_error.details.expect("the details carry the cause");
+            assert_eq!(details.os_kind.as_deref(), Some("SettingsCorrupt"));
+            assert_eq!(
+                details.os_message.as_deref(),
+                Some(expected),
+                "the diagnostic names the class only, never the stored value"
+            );
+        }
     }
 }

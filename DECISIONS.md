@@ -3201,3 +3201,149 @@ and dropping the empty-text guard (3). Round-1 review
 (deepseek-v4.1-flash, APPROVE, no P0/P1) added the scheme/setting
 identity test, the single `level` binding, and the linear-cost doc
 note; round-2 review (hy4-flash-free, APPROVE) found nothing further.
+
+### D-055 — `settings_get`/`settings_set`: string-shaped wire, partial atomic save, per-key journal entries in the operation's transaction — 2026-11-18
+
+Problem: T-030 turns the §7.10 Settings module (`settings_get`,
+`settings_set`) into commands over the D-039 repository. Open
+questions: how the thirteen keys and their seven value shapes reach
+TypeScript without duplicating the store's types (the store has no
+specta dependency, D-017); whether `settings_set` updates one key or
+a set per call (§7.10 names no argument shape); what the
+`settings.changed` journal entry carries (LOG-001…004) when `Details`
+is closed at three variants (D-051) and the store crate is frozen in
+this task's window (T-029 owns it); and how the DEF-001…005
+acceptance criteria ("applies without a restart", "default.* changes
+no existing project") are proven when the scanner and the project
+commands do not exist yet.
+
+Solution, five decisions:
+
+- _Wire DTO: dotted keys + canonical JSON text, no type duplication._
+  Keys travel as their §6.5 dotted strings, parsed at the boundary
+  through `SettingKey::from_key`; values travel as canonical JSON
+  **text**, parsed at the boundary and validated through
+  `SettingValue::from_json` — D-039's single validation path, so the
+  store stays the one owner of the vocabulary. Mirroring the keys or
+  the value enum in a src-tauri specta type was rejected for the
+  D-052 reason (a second list to keep in sync for no behavioral
+  gain), and `serde_json::Value` on the wire stays impossible by the
+  same entry's recorded choice (`specta/serde_json` deliberately
+  disabled — the `details`-as-text precedent). The response is a
+  **list in §6.5 table order** (the store's `get_all` order), not a
+  JSON object: an object would impose sorted or arbitrary key order
+  on the Settings window's sections.
+- _Granularity: one call saves the screen's whole dirty set._ The
+  changes list carries only the changed keys; everything applies in
+  one `Db::run` transaction (§6.9: "the whole operation runs in one
+  transaction" — the settings-save shape D-039's module docs
+  anticipated). One key per call was rejected: the screen's Save
+  would be N transactions, and a failure mid-save would leave the
+  screen half applied. Validation is validate-all-first (unknown key,
+  duplicate key, non-JSON value text, every §6.5
+  type/range/member/shape violation → `E_VALIDATION` with
+  key/value/reason params, the T-027 field/value/reason shape with
+  the setting key as the failed field), then the store's own `set`
+  re-validation as the defense-in-depth twin. An **empty list is
+  rejected**, not treated as a no-op: an empty save that "succeeds"
+  would hide a frontend bug that computes the dirty set as
+  always-empty (the loud-choice policy). A valid list is bounded by
+  the vocabulary itself — at most thirteen distinct keys, the 14th is
+  unknown and any repeat is a duplicate — so the write loop cannot be
+  made unbounded. The response is the fresh full map read in the same
+  transaction: the saving screen gets the applied state without a
+  second round trip. A resent unchanged value is **not** filtered out
+  (round-1 review question, recorded): comparing against the current
+  row would need a raw-row seam the store does not expose (`get`
+  applies defaults, and treating "no row + value equals the default"
+  as a no-op would unpin the user's explicit choice against a future
+  default change), and the caller sends the dirty set by contract — a
+  saved key that changed nothing is a caller anomaly the journal
+  honestly shows as the save operation it was. `Db::run`'s busy-retry
+  cannot double-journal: the failed attempt rolls back its entries
+  before the replay.
+- _Journal: one `settings.changed` entry per changed key, entity id
+  the dotted key, no details._ The store's `Entity` type documents
+  "the dotted key for a settings entry" as the settings entity id —
+  the designed carrier of _which_ setting changed; `Details` is
+  closed (Bulk/File/Failure, D-051) and the store is not this task's
+  to extend, so no keys-list variant exists; a single `Bulk`-count
+  entry would lose the which-keys fact. Per-key entries record
+  exactly that, carry no value (keys are identifiers, not content —
+  SEC-008's structural line; the count is the entry count, bounded by
+  13), and the `insert` runs inside the operation's own transaction
+  (D-051): a rolled-back save leaves no entry claiming it happened —
+  pinned through the real command by a staged `RAISE(ABORT)` trigger
+  that kills the second key's journal insert after the first key's
+  set and entry both succeeded (constraint abort → base classifier →
+  `E_VALIDATION`; both keys and the entry gone). Each entry also goes
+  through `logging::action_logged` — the D-051 "call once per written
+  entry" contract's first production caller (a no-op for the
+  info+user+ok mirror shape).
+- _Corrupt cells: read failures are corruption, write failures are
+  input._ `StorageError::Settings` on a read (`settings_get`, and the
+  `get_all` tail of `settings_set`) is a stored cell outside its
+  contract — the D-052 corrupt-cell rule, applied to the settings
+  table: the recorded D-037 fallback with a `SettingsCorrupt`
+  diagnostic, empty params, and class-only `os_message`
+  (`SettingsError`'s own `Display` embeds the stored value and key,
+  so the diagnostic is a fixed per-class text). On the write path the
+  same error can only be about the caller's value (`set` validates
+  before writing), so it stays `E_VALIDATION` — the store-contract
+  twin of the command's own validation. §10 error logging rides two
+  new facade functions (`logging::settings_get_failed`/
+  `settings_set_failed`, the `activity_list_failed` shape — a minimal
+  additive edit to `logging.rs`, outside this task's named zones but
+  required by the D-032 facade rule and §10's every-error line;
+  flagged to the operator). A successful read logs nothing; a
+  successful save's record is its journal entries.
+- _Acceptance criteria, honestly adapted (no scanner, no project
+  commands yet)._ "Applies without a restart" (DEF-001…004) is proven
+  the T-012/D-032 way: `settings_set` → a **new** `settings_get` call
+  over the same session's `Db` returns the new value — nothing
+  between the boundary and the table caches settings, and the future
+  scanner reading through the same repository path inherits the
+  guarantee (pinned end to end over IPC). "Changing `default.*` does
+  not affect existing projects" (DEF-005/PRJ-012) is pinned at the
+  IPC level in D-039's store-suite shape: a real `projects` row
+  seeded directly over the executor (no project command exists — the
+  recorded boundary) survives a change of all four `default.*` keys
+  with its scheme/base name/extra-file columns untouched and the row
+  count unchanged; the structural half is that the settings path can
+  only address the thirteen §6.5 keys (unknown-key rejection) and
+  writes only `settings`/`action_log` rows.
+
+Testing: two unit tests for the mapping seams (the write twin's
+`E_VALIDATION`, the five-class corrupt-cell matrix with class-only
+diagnostics), ten IPC tests over the mock runtime (§6.5 defaults
+in table order as canonical JSON text — hardcoded spec-literal
+oracle; the set→get round trip with the per-key journal; both
+inclusive bounds of every ranged key; the nine-case rejection
+envelope; all-or-nothing on a rejected list; the trigger-staged
+rollback proof; the DEF-005 project pin over all six scheme/base
+name/extra-file columns; the corrupt-cell fallback for both commands;
+the no-database answers; the registration pin), one facade test for
+the two §10 failure lines, plus the regenerated `src/bindings.ts`. No
+new dependencies.
+
+The round-1 review (deepseek-v4.1-flash, APPROVE, no P0/P1) tightened
+six edges, all fixed in the same commit: the DEF-005 pin now asserts
+all six project columns (not three of six); the two §10 failure
+facades gained their end-to-end line test (the per-facade pattern the
+other commands follow); the journal `insert` failure maps through
+`action_log_to_app_error`, not the settings fallback — the settings
+catch-all's `other.to_string()` would carry a hypothetical `ActionLog`
+failure's stored text into `os_message` (SEC-008; unreachable today
+because `insert` yields `Sql` only, but the two error families are
+not interchangeable); the unreachable fallback's `os_kind` is the
+plain family name `"StorageError"` (the `activity_log_to_app_error`
+precedent, not a per-callsite suffix); and two doc truths (the
+`journal_entries` helper's phantom `limit`; the store-twin envelope's
+two-param shape). The resent-unchanged-value question was recorded as
+the decision above instead of a code change. The round-2 review
+(hy4-flash-free, APPROVE, no P0/P1/P2) re-verified the round-1 fixes
+and the zone boundaries, and caught the one stale half of the
+`action_logged` consumption: the facade's own "no production caller
+yet" doc paragraph and the two dead `#[allow(dead_code)]` attributes
+(`action_logged`, `mirror_level`) — removed, the doc now names
+`settings_set` as the first producer.

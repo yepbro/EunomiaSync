@@ -32,6 +32,14 @@
 //! card's acceptance criterion), the §7.10 error envelope of a
 //! rejected filter, and the honest answer when no database is
 //! running.
+//!
+//! The `settings_get`/`settings_set` tests use the same healthy-app
+//! shape and pin the Settings contract (§7.10, §6.5, DEF-001…005,
+//! LOG-001…004): the §6.5 defaults in table order, the
+//! applies-without-a-restart round trip, the E_VALIDATION envelope of
+//! every rejected change, the in-transaction journal (D-051) with its
+//! rollback proof, the DEF-005 pin over a seeded project row, and the
+//! corrupt-cell and no-database answers.
 
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -871,4 +879,622 @@ fn a_tampered_ts_cell_answers_the_fallback_envelope_not_validation() {
     // Windows teardown rule: the app's managed `Db` closes first.
     drop(app);
     drop(temp);
+}
+
+// ---------------------------------------------------------------------------
+// `settings_get` / `settings_set` (T-030, §7.10 Settings module,
+// §6.5/§7.2 DEF-001…005, LOG-001…004)
+// ---------------------------------------------------------------------------
+
+/// A mock app in the healthy state the settings commands serve: both
+/// commands registered and a real `Db` managed over a fresh temp root
+/// (the `activity_app` shape).
+fn settings_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::settings_get,
+            crate::commands::settings_set
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    (temp, app)
+}
+
+/// Invokes `settings_get` over the app's `main` webview.
+fn invoke_settings_get(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+) -> Result<Vec<crate::commands::SettingItem>, serde_json::Value> {
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request("settings_get", serde_json::json!({})),
+    );
+    match response {
+        Ok(payload) => Ok(payload
+            .deserialize::<Vec<crate::commands::SettingItem>>()
+            .expect("the success payload must deserialize into the DTO")),
+        Err(error) => Err(error),
+    }
+}
+
+/// Invokes `settings_set` with `changes` over the app's `main` webview
+/// (the wire body's `changes` argument).
+fn invoke_settings_set(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    changes: serde_json::Value,
+) -> Result<Vec<crate::commands::SettingItem>, serde_json::Value> {
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request("settings_set", serde_json::json!({ "changes": changes })),
+    );
+    match response {
+        Ok(payload) => Ok(payload
+            .deserialize::<Vec<crate::commands::SettingItem>>()
+            .expect("the success payload must deserialize into the DTO")),
+        Err(error) => Err(error),
+    }
+}
+
+/// Reads the journal's newest entries (up to 100) through the
+/// `Db::run` executor — the assertions' window into what a command
+/// journaled.
+fn journal_entries(database: &crate::db::Db) -> Vec<eunomia_store::action_log::LogRecord> {
+    tauri::async_runtime::block_on(database.run(|tx| {
+        eunomia_store::action_log::recent(tx, 100)
+            .map_err(crate::commands::activity_log_to_app_error)
+    }))
+    .expect("reading the journal through the executor must work")
+}
+
+/// One setting's value from a settings map, panicking with the map on
+/// a missing key (the map always holds all thirteen).
+fn value_of<'a>(items: &'a [crate::commands::SettingItem], key: &str) -> &'a str {
+    items
+        .iter()
+        .find(|item| item.key == key)
+        .unwrap_or_else(|| panic!("the map must contain {key}: {items:?}"))
+        .value
+        .as_str()
+}
+
+#[test]
+fn settings_get_serves_the_spec_defaults_in_table_order_over_ipc() {
+    // Arrange: a fresh database — the settings table has zero rows, so
+    // every answer is a §6.5 default applied by the read.
+    let (temp, app) = settings_app();
+    let webview = main_webview(&app);
+
+    // Act
+    let items = invoke_settings_get(&webview).expect("the read must succeed");
+
+    // Assert: all thirteen §6.5 keys, in table order, with their
+    // defaults as canonical JSON text — hardcoded spec literals, an
+    // oracle independent of the production constants (the D-039 test
+    // split, applied to the wire).
+    let expected: [(&str, &str); 13] = [
+        ("default.scheme", "\"A\""),
+        ("default.base_name", "\"AGENTS.md\""),
+        (
+            "default.extra_local",
+            "{\"enabled\":false,\"position\":\"end\"}",
+        ),
+        (
+            "default.extra_project",
+            "{\"enabled\":false,\"position\":\"end\"}",
+        ),
+        ("backup.retention", "10"),
+        ("sync.skip_identical", "true"),
+        ("scan.max_depth", "6"),
+        (
+            "scan.exclude_names",
+            "[\"node_modules\",\"vendor\",\".git\",\"dist\",\"build\",\"target\",\".venv\"]",
+        ),
+        ("history.max_revisions", "200"),
+        ("log.max_entries", "10000"),
+        ("log.max_days", "180"),
+        ("ui.language", "\"en\""),
+        ("update.check_on_start", "true"),
+    ];
+    assert_eq!(items.len(), expected.len());
+    for (item, (key, value)) in items.iter().zip(expected) {
+        assert_eq!(item.key, key, "§6.5 table order");
+        assert_eq!(item.value, value, "the canonical JSON default of {key}");
+    }
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn settings_set_applies_without_a_restart_and_journals_each_changed_key() {
+    // Arrange
+    let (temp, app) = settings_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+
+    // Act: a partial update — two of the thirteen keys.
+    let applied = invoke_settings_set(
+        &webview,
+        serde_json::json!([
+            { "key": "scan.max_depth", "value": "9" },
+            { "key": "ui.language", "value": "\"cs\"" },
+        ]),
+    )
+    .expect("the save must succeed");
+
+    // Assert (1): the response is the fresh full map — the changed
+    // keys applied, everything else at its default, §6.5 table order.
+    assert_eq!(applied.len(), 13);
+    assert_eq!(value_of(&applied, "scan.max_depth"), "9");
+    assert_eq!(value_of(&applied, "ui.language"), "\"cs\"");
+    assert_eq!(value_of(&applied, "backup.retention"), "10");
+
+    // Assert (2): DEF-001…004's "each setting applies without a
+    // restart", honestly adapted (no scanner exists yet — the
+    // T-012/D-032 precedent): the NEXT read — a new command call over
+    // the same session's `Db` — returns the new values. The mechanism
+    // the criterion stands on is exactly this: every reader goes
+    // through the repository to the table, nothing caches in between,
+    // so the future scanner's "next scan takes the new depth" follows
+    // from the same read path this pins.
+    let items = invoke_settings_get(&webview).expect("the read must succeed");
+    assert_eq!(value_of(&items, "scan.max_depth"), "9");
+    assert_eq!(value_of(&items, "ui.language"), "\"cs\"");
+
+    // Assert (3): LOG-001…004 — one `settings.changed` entry per
+    // changed key, Info/User/Ok, the dotted key as the setting entity
+    // id, no details (no value travels; SEC-008). `recent` is newest
+    // first, so the last-written entry (ui.language) comes first.
+    let entries = journal_entries(&database);
+    assert_eq!(entries.len(), 2, "one entry per changed key");
+    for (entry, key) in entries.iter().zip(["ui.language", "scan.max_depth"]) {
+        assert_eq!(entry.action.as_str(), "settings.changed");
+        assert_eq!(entry.level.as_str(), "info");
+        assert_eq!(entry.visibility.as_str(), "user");
+        assert_eq!(entry.result.as_str(), "ok");
+        assert_eq!(
+            entry
+                .entity
+                .as_ref()
+                .map(|(kind, id)| (kind.as_str(), id.as_str())),
+            Some(("setting", key)),
+            "the entry names the changed key through its entity"
+        );
+        assert!(
+            entry.details.is_none(),
+            "no setting value travels into the journal"
+        );
+    }
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn settings_set_accepts_the_inclusive_range_bounds_over_ipc() {
+    // The §6.5 ranges are inclusive — both bounds of every ranged key
+    // apply over the real command (the D-039 store suite pins the same
+    // fact at the repository seam with one-past rejections; this pins
+    // the wire half).
+    let (temp, app) = settings_app();
+    let webview = main_webview(&app);
+    for (key, low, high) in [
+        ("backup.retention", "1", "200"),
+        ("scan.max_depth", "1", "20"),
+        ("history.max_revisions", "10", "1000"),
+        ("log.max_entries", "1000", "100000"),
+        ("log.max_days", "7", "3650"),
+    ] {
+        for bound in [low, high] {
+            invoke_settings_set(
+                &webview,
+                serde_json::json!([{ "key": key, "value": bound }]),
+            )
+            .unwrap_or_else(|error| panic!("{key}={bound} is inside the range: {error}"));
+        }
+    }
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn settings_set_rejects_invalid_changes_with_the_spec_ten_error_envelope() {
+    // Every rejection is the §7.10 AppError shape (code, message_key,
+    // params naming the key/value/reason, null details) — the D-034
+    // pin shape, applied to the settings contract: the §6.5 ranges
+    // (one past each side of scan.max_depth), the types, the closed
+    // vocabularies (case-sensitive), the extra-file shape, unknown
+    // keys, duplicates, non-JSON value text, and the empty list.
+    let (temp, app) = settings_app();
+    let webview = main_webview(&app);
+    let cases: [(&str, serde_json::Value); 9] = [
+        (
+            "an unknown key",
+            serde_json::json!([{ "key": "scan.depth", "value": "3" }]),
+        ),
+        (
+            "a duplicate key",
+            serde_json::json!([
+                { "key": "scan.max_depth", "value": "3" },
+                { "key": "scan.max_depth", "value": "4" },
+            ]),
+        ),
+        (
+            "value text that is not JSON",
+            serde_json::json!([{ "key": "scan.max_depth", "value": "six" }]),
+        ),
+        (
+            "a string where an integer belongs",
+            serde_json::json!([{ "key": "scan.max_depth", "value": "\"6\"" }]),
+        ),
+        (
+            "one below the range",
+            serde_json::json!([{ "key": "scan.max_depth", "value": "0" }]),
+        ),
+        (
+            "one above the range",
+            serde_json::json!([{ "key": "scan.max_depth", "value": "21" }]),
+        ),
+        (
+            "a case-wrong enum member",
+            serde_json::json!([{ "key": "default.scheme", "value": "\"a\"" }]),
+        ),
+        (
+            "an extra-file object missing a field",
+            serde_json::json!([{ "key": "default.extra_local", "value": "{\"enabled\":true}" }]),
+        ),
+        ("an empty changes list", serde_json::json!([])),
+    ];
+    for (label, changes) in cases {
+        let error = invoke_settings_set(&webview, changes)
+            .err()
+            .unwrap_or_else(|| panic!("{label} must be rejected"));
+        assert_eq!(
+            error["code"],
+            serde_json::json!("E_VALIDATION"),
+            "{label}: {error}"
+        );
+        assert_eq!(
+            error["message_key"],
+            serde_json::json!("errors.validation"),
+            "{label}: {error}"
+        );
+        for key in ["key", "value", "reason"] {
+            assert!(
+                error["params"]
+                    .get(key)
+                    .is_some_and(|value| !value.is_null()),
+                "{label}: the params must name {key}, got {error}"
+            );
+        }
+        assert_eq!(
+            error["details"],
+            serde_json::json!(null),
+            "{label}: {error}"
+        );
+    }
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_rejected_settings_set_writes_nothing() {
+    // The all-or-nothing half of §6.9 at the IPC boundary: a list with
+    // any invalid entry writes nothing at all — not the valid entries'
+    // settings rows, and no journal entry claiming a change.
+    let (temp, app) = settings_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+
+    // Act: scan.max_depth=15 is valid, backup.retention=0 is not.
+    let error = invoke_settings_set(
+        &webview,
+        serde_json::json!([
+            { "key": "scan.max_depth", "value": "15" },
+            { "key": "backup.retention", "value": "0" },
+        ]),
+    )
+    .expect_err("the list with an invalid entry must be rejected");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(
+        error["params"]["key"],
+        serde_json::json!("backup.retention"),
+        "the rejection names the offending key, not the valid one"
+    );
+
+    // Assert: the valid entry's key stayed at its default, and the
+    // journal is empty.
+    let items = invoke_settings_get(&webview).expect("the read must succeed");
+    assert_eq!(value_of(&items, "scan.max_depth"), "6");
+    assert_eq!(value_of(&items, "backup.retention"), "10");
+    assert!(
+        journal_entries(&database).is_empty(),
+        "a rejected save journals nothing"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_failed_settings_set_rolls_back_its_journal_entries() {
+    // D-051's in-transaction semantics, proven through the real
+    // command: the journal entry shares the operation's transaction,
+    // so a failure AFTER a set and its entry both succeeded rolls both
+    // back — the journal must not claim a change that never committed.
+    // The failure is staged deterministically inside the database: a
+    // trigger that rejects exactly the second key's journal insert
+    // (RAISE(ABORT) → SQLITE_CONSTRAINT → the shared base classifier's
+    // E_VALIDATION with the SQLite facts in details).
+    let (temp, app) = settings_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    // One committed change first — the baseline the rollback must
+    // restore to (and its journal entry must stay).
+    invoke_settings_set(
+        &webview,
+        serde_json::json!([{ "key": "scan.max_depth", "value": "9" }]),
+    )
+    .expect("the baseline save must succeed");
+    assert_eq!(journal_entries(&database).len(), 1);
+    // Stage the trigger through the executor (the same connection the
+    // command uses).
+    tauri::async_runtime::block_on(database.run(|tx| {
+        tx.execute_batch(
+            "CREATE TRIGGER reject_language_journal BEFORE INSERT ON action_log
+             WHEN NEW.entity_id = 'ui.language'
+             BEGIN SELECT RAISE(ABORT, 'test: reject'); END;",
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("staging the trigger must work");
+
+    // Act: scan.max_depth=12 applies and journals; then ui.language
+    // applies, and its journal insert aborts the whole transaction.
+    let error = invoke_settings_set(
+        &webview,
+        serde_json::json!([
+            { "key": "scan.max_depth", "value": "12" },
+            { "key": "ui.language", "value": "\"cs\"" },
+        ]),
+    )
+    .expect_err("the staged abort must fail the save");
+    assert_eq!(
+        error["code"],
+        serde_json::json!("E_VALIDATION"),
+        "the constraint abort maps through the base classifier: {error}"
+    );
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("ConstraintViolation"),
+        "the SQLite facts travel in details: {error}"
+    );
+
+    // Assert: BOTH keys are back — the set that had already succeeded
+    // (scan.max_depth) and the one whose journal insert aborted
+    // (ui.language) — and the journal still holds exactly the
+    // baseline's one entry: the rolled-back entry vanished with the
+    // rolled-back set.
+    let items = invoke_settings_get(&webview).expect("the read must succeed");
+    assert_eq!(value_of(&items, "scan.max_depth"), "9");
+    assert_eq!(value_of(&items, "ui.language"), "\"en\"");
+    let entries = journal_entries(&database);
+    assert_eq!(entries.len(), 1, "only the baseline entry survived");
+    assert_eq!(
+        entries[0].entity.as_ref().map(|(_, id)| id.as_str()),
+        Some("scan.max_depth")
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn changing_default_settings_never_touches_existing_projects() {
+    // DEF-005/PRJ-012 at the IPC boundary, in the D-039 store-suite
+    // shape: a real project row (seeded directly — no project command
+    // exists yet, the boundary this test records) survives a change of
+    // all four `default.*` settings untouched. The second half of the
+    // boundary is structural: `settings_set` only ever addresses the
+    // thirteen §6.5 keys (the unknown-key rejection), and the settings
+    // path writes only `settings` and `action_log` rows.
+    let (temp, app) = settings_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let project_id = eunomia_store::values::new_id();
+    let seeded_id = project_id.clone();
+    let seeded_at = eunomia_store::values::now_utc();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.execute(
+            "INSERT INTO projects (id, path, path_key, name, label, color, added_via,
+                                   sort_order, scheme, base_name, created_at, updated_at)
+             VALUES (?1, ?2, ?2, 'Kept project', 'KEPT', 'teal', 'manual',
+                     1, 'C', 'CLAUDE.md', ?3, ?3)",
+            rusqlite::params![seeded_id, "/tmp/eunomia-test-project", seeded_at],
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("seeding the project row must work");
+    let webview = main_webview(&app);
+
+    // Act: change all four `default.*` settings away from the
+    // project's own values.
+    invoke_settings_set(
+        &webview,
+        serde_json::json!([
+            { "key": "default.scheme", "value": "\"B\"" },
+            { "key": "default.base_name", "value": "\"AGENTS.md\"" },
+            { "key": "default.extra_local", "value": "{\"enabled\":true,\"position\":\"start\"}" },
+            { "key": "default.extra_project", "value": "{\"enabled\":true,\"position\":\"start\"}" },
+        ]),
+    )
+    .expect("changing the defaults must succeed");
+
+    // Assert: the project row is unchanged — its own scheme, base name
+    // and all four extra-file columns, and the same single row.
+    let expected_id = project_id;
+    let (
+        scheme,
+        base_name,
+        local_enabled,
+        local_pos,
+        project_enabled,
+        project_pos,
+        project_count,
+    ): (String, String, i64, String, i64, String, i64) =
+        tauri::async_runtime::block_on(database.run(move |tx| {
+            tx.query_row(
+                "SELECT scheme, base_name, extra_local_enabled,
+                        extra_local_position, extra_project_enabled,
+                        extra_project_position,
+                        (SELECT COUNT(*) FROM projects)
+                 FROM projects WHERE id = ?1",
+                rusqlite::params![expected_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .map_err(crate::db::sqlite_error_to_app_error)
+        }))
+        .expect("re-reading the project row must work");
+    assert_eq!(scheme, "C");
+    assert_eq!(base_name, "CLAUDE.md");
+    assert_eq!(local_enabled, 0);
+    assert_eq!(local_pos, "end");
+    assert_eq!(project_enabled, 0);
+    assert_eq!(project_pos, "end");
+    assert_eq!(project_count, 1, "no project rows were created or changed");
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_corrupt_settings_cell_answers_the_fallback_envelope_not_validation() {
+    // The corrupt-cells wire contract (the D-052 T-027 round-2 rule,
+    // applied to the settings table): a stored value cell outside its
+    // contract is database corruption, NOT caller input — both the
+    // read command and the save command's final map fail with the
+    // recorded D-037 fallback, a `SettingsCorrupt` diagnostic, empty
+    // params, and class-only `os_message` (a tampered cell is
+    // arbitrary database text; params and os_message feed the log line
+    // and the localized message).
+    let (temp, app) = settings_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    invoke_settings_set(
+        &webview,
+        serde_json::json!([{ "key": "scan.max_depth", "value": "9" }]),
+    )
+    .expect("the baseline save must succeed");
+    tauri::async_runtime::block_on(database.run(|tx| {
+        tx.execute(
+            "UPDATE settings SET value = 'not json' WHERE key = 'scan.max_depth'",
+            [],
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("tampering the value cell through the executor must work");
+
+    // The read command.
+    let error = invoke_settings_get(&webview).expect_err("a corrupt cell must fail the read");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(error["message_key"], serde_json::json!("errors.db_locked"));
+    assert_eq!(
+        error["params"],
+        serde_json::json!({}),
+        "no raw cell travels"
+    );
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("SettingsCorrupt")
+    );
+    assert_eq!(
+        error["details"]["os_message"],
+        serde_json::json!("a stored settings value cell is not valid JSON"),
+        "the diagnostic names the class only, never the stored value"
+    );
+
+    // The save command's final map fails the same way — its read half
+    // uses the read mapping (a healthy key cannot be saved past a
+    // corrupt sibling).
+    let error = invoke_settings_set(
+        &webview,
+        serde_json::json!([{ "key": "ui.language", "value": "\"cs\"" }]),
+    )
+    .expect_err("the save's final map must fail on the corrupt cell");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("SettingsCorrupt")
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn settings_commands_answer_honestly_without_a_database() {
+    // Recovery mode (no `Db` managed): the Settings window cannot be
+    // served, and the honest answer for both commands is the recorded
+    // fallback with a diagnostic naming the state — not a panic, and
+    // not the §6.5 defaults pretending to be the user's settings.
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::settings_get,
+            crate::commands::settings_set
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    let webview = main_webview(&app);
+    let error = invoke_settings_get(&webview).expect_err("the read without a database must fail");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(error["message_key"], serde_json::json!("errors.db_locked"));
+    assert!(
+        error["details"]["os_kind"] == serde_json::json!("NoDatabase"),
+        "the diagnostic names the state, got {error}"
+    );
+    let error = invoke_settings_set(
+        &webview,
+        serde_json::json!([{ "key": "ui.language", "value": "\"cs\"" }]),
+    )
+    .expect_err("the save without a database must fail");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert!(
+        error["details"]["os_kind"] == serde_json::json!("NoDatabase"),
+        "the diagnostic names the state, got {error}"
+    );
+}
+
+#[test]
+fn the_settings_commands_are_registered_with_the_specta_builder() {
+    // The §7.10 Settings-module names, each registered exactly once —
+    // without this pin, dropping a registration would leave
+    // `export_bindings_are_up_to_date` green while it silently rewrote
+    // the committed bindings without the command (the D-034
+    // wiring-pin rationale).
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    for name in ["settings_get", "settings_set"] {
+        assert_eq!(
+            lib.matches(&format!("commands::{name}")).count(),
+            1,
+            "lib.rs must register the `{name}` command exactly once (§7.10, D-009)"
+        );
+    }
 }

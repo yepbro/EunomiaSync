@@ -57,6 +57,54 @@ export const commands = {
 	 *  managed.
 	 */
 	dbRecreate: (options?: InvokeOptions) => __TAURI_INVOKE<null>("db_recreate", undefined, options),
+	/**
+	 *  Reads every §6.5 setting with its default applied (spec §7.10
+	 *  Settings module `settings_get`; the §7.2 window opens on this map).
+	 * 
+	 *  The response is a **list in §6.5 table order** — the order the
+	 *  store's `get_all` pins — not a JSON object: an object would impose
+	 *  its own key order (sorted or arbitrary) on the Settings window's
+	 *  sections. The query runs through [`Db::run`] like every database
+	 *  command (D-037), so a value committed by a later `settings_set` is
+	 *  what the next `settings_get` returns — the §7.2 "applies without a
+	 *  restart" mechanism: nothing between the screen and the table caches
+	 *  settings (the future scanner reads through this same repository
+	 *  path, T-012/D-032's honest-boundary adaptation).
+	 * 
+	 *  A successful read is never journaled and gets no routine log line
+	 *  (the `activity_list` rationale: reading is not an event); failures
+	 *  reach the log with their §10 code
+	 *  ([`logging::settings_get_failed`]).
+	 */
+	settingsGet: (options?: InvokeOptions) => __TAURI_INVOKE<SettingItem[]>("settings_get", undefined, options),
+	/**
+	 *  Applies a partial settings update atomically (spec §7.10 Settings
+	 *  module `settings_set`; §6.9: "the whole operation runs in one
+	 *  transaction"): the changes list carries **only the changed keys**
+	 *  — the Settings screen's dirty set — and either every key applies or
+	 *  none does. One key per call was rejected: the screen's Save would
+	 *  be N transactions, and a failure mid-save would leave the screen
+	 *  half applied. The response is the fresh full map (the same list
+	 *  [`settings_get`] returns, read inside the same transaction), so the
+	 *  saving screen gets the applied state without a second round trip.
+	 * 
+	 *  Validation is the repository's, reached from the boundary (D-039's
+	 *  single path): every rejection is `E_VALIDATION` naming the key, the
+	 *  sent value and the reason, and nothing is executed for a list with
+	 *  any invalid entry. Each changed key writes one `settings.changed`
+	 *  journal entry (LOG-001…004) **inside the operation's transaction**
+	 *  (D-051): a rolled-back save leaves no entry claiming it happened —
+	 *  the entry names the key through its entity (the store's designated
+	 *  carrier for "which setting"), and no value travels (keys are
+	 *  identifiers, not content — SEC-008's structural line; the count is
+	 *  the number of entries).
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::settings_set_failed`]); the journal entries themselves
+	 *  are the success record — a successful save adds no routine file-log
+	 *  line (the info+user+ok mirror policy, D-051).
+	 */
+	settingsSet: (changes: SettingChange[], options?: InvokeOptions) => __TAURI_INVOKE<SettingItem[]>("settings_set", { changes }, options),
 };
 
 /* Types */
@@ -562,4 +610,45 @@ export type ErrorDetails_Serialize = {
 	 *  localized message (NFR-006).
 	 */
 	os_message: string | null,
+};
+
+/**
+ *  One entry of the `settings_set` changes list. `deny_unknown_fields`
+ *  (the [`ActivityListQuery`] rule): a typo'd field name fails the
+ *  deserialization loudly instead of silently sending a value-less
+ *  key.
+ */
+export type SettingChange = {
+	/**  The §6.5 dotted key to change. */
+	key: string,
+	/**
+	 *  The new value as canonical JSON text (the form
+	 *  [`SettingItem::value`] carries).
+	 */
+	value: string,
+};
+
+/**
+ *  One setting on the `settings_get`/`settings_set` wire: the §6.5
+ *  dotted key plus the value as canonical JSON text (`"C"`, `10`,
+ *  `{"enabled":true,"position":"end"}`, `["node_modules","vendor"]`).
+ * 
+ *  The wire stays string-shaped on purpose — the D-052 `details`
+ *  decision applied to the thirteen §6.5 keys: keys are parsed at this
+ *  boundary through the store's `SettingKey::from_key` and values
+ *  through `SettingValue::from_json` (D-039's single validation path),
+ *  so the store remains the one owner of the key list and the value
+ *  shapes, and no specta enum mirrors them on this side (a second
+ *  vocabulary to keep in sync for no behavioral gain; the
+ *  `specta/serde_json` feature stays disabled). Parsing the JSON text
+ *  stays the frontend's choice, exactly like a `details` cell.
+ */
+export type SettingItem = {
+	/**  The §6.5 dotted key (`scan.max_depth`). */
+	key: string,
+	/**
+	 *  The value as canonical JSON text — the exact form stored and
+	 *  re-read (§6.5: values live in the `value` column as JSON).
+	 */
+	value: string,
 };

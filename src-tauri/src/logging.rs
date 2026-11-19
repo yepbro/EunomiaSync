@@ -454,11 +454,12 @@ pub(crate) fn db_busy_retry(attempt: usize, pause_ms: u64) {
 ///   would double the file's volume with lines the per-event facade
 ///   functions (`file_event`, `db_backup_daily`, …) already write.
 ///
-/// No production caller exists yet (the first command task that
-/// writes the journal will call it — the `file_event` shape); the
-/// SEC-008 test suite is the consumer that keeps this contract honest
-/// until then. Remove the `allow` when the first task calls this.
-#[allow(dead_code)]
+/// The first production caller is `settings_set` (T-030), which
+/// journals its `settings.changed` entries inside the operation's
+/// transaction and calls this once per entry — the info+user+ok shape
+/// it writes today is the unmirrored one, so the mirror arms first
+/// serve a future producer that writes warn/error/diagnostic
+/// entries.
 pub(crate) fn action_logged(entry: &eunomia_store::action_log::LogEntry<'_>) {
     // The payload block is repeated across the three level arms: the
     // tracing macro requires a constant level (its callsite caches
@@ -505,7 +506,6 @@ pub(crate) fn action_logged(entry: &eunomia_store::action_log::LogEntry<'_>) {
 /// The tracing level an entry mirrors at, or `None` when it does not
 /// — the policy half of [`action_logged`] (see there for the
 /// reasoning; this is the decision table, split out for the test).
-#[allow(dead_code)]
 fn mirror_level(entry: &eunomia_store::action_log::LogEntry<'_>) -> Option<tracing::Level> {
     use eunomia_store::action_log::{Level, Outcome, Visibility};
     match (entry.level, entry.visibility, entry.result) {
@@ -540,6 +540,44 @@ pub(crate) fn activity_list_failed(error: &AppError) {
         os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
         os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
         "the activity list query failed"
+    );
+}
+
+/// The `settings_get` command failed (T-030, §10's rule that every
+/// error reaches the log with its code): the payload is the error's
+/// own §7.10 vocabulary, in the `activity_list_failed` shape. `error`
+/// level: the Settings window cannot open on defaults it cannot trust,
+/// and the log line is the failure's durable half. A *successful* read
+/// deliberately logs nothing — reading settings is not an event (the
+/// `activity_list_failed` rationale).
+pub(crate) fn settings_get_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::settings",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "the settings read failed"
+    );
+}
+
+/// The `settings_set` command failed (T-030, §10's every-error rule):
+/// the payload is the error's own §7.10 vocabulary, in the
+/// `activity_list_failed` shape. `error` level, and deliberately not
+/// accompanied by any journal entry: the operation's transaction
+/// rolled back (D-051), so no `settings.changed` entry exists for a
+/// failed save — this line is the failure's only durable record, which
+/// is exactly why the §10 rule matters here.
+pub(crate) fn settings_set_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::settings",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "the settings save failed"
     );
 }
 
@@ -1800,6 +1838,58 @@ mod tests {
         assert!(
             log.contains("the activity list query failed"),
             "the line must say what failed, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn failed_settings_commands_log_their_code_params_and_os_facts() {
+        // The two settings commands' §10 lines (T-030): every error
+        // reaches the log with its code — the same payload shape as
+        // the `activity_list` failure line, so one test drives both
+        // facades: a validation rejection (the save path's shape —
+        // key/value/reason params) through `settings_set_failed`, and
+        // a corrupt-cell fallback (the read path's shape — the
+        // `SettingsCorrupt` OS facts) through `settings_get_failed`.
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut rejected = AppError::new(crate::errors::ErrorCode::Validation);
+        rejected
+            .params
+            .insert("key".to_owned(), "scan.max_depth".to_owned());
+        rejected.params.insert("value".to_owned(), "21".to_owned());
+        rejected.params.insert(
+            "reason".to_owned(),
+            "21 is outside the range 1..=20".to_owned(),
+        );
+        let mut corrupt = AppError::new(crate::errors::ErrorCode::DbLocked);
+        corrupt.details = Some(crate::errors::ErrorDetails {
+            os_code: None,
+            os_kind: Some("SettingsCorrupt".to_owned()),
+            os_message: Some("a stored settings value cell is not valid JSON".to_owned()),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            settings_get_failed(&corrupt);
+            settings_set_failed(&rejected);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("code=\"E_DB_LOCKED\"") && log.contains("SettingsCorrupt"),
+            "the read line must carry its code and diagnostic, got: {log}"
+        );
+        assert!(
+            log.contains("code=\"E_VALIDATION\"")
+                && log.contains("scan.max_depth")
+                && log.contains("21"),
+            "the save line must carry the rejection's key/value, got: {log}"
+        );
+        assert!(
+            log.contains("the settings read failed") && log.contains("the settings save failed"),
+            "each command's line must say what failed, got: {log}"
         );
         drop(temp);
     }

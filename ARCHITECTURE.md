@@ -101,8 +101,12 @@ Rust commands are registered through `tauri-specta`:
    History module's `activity_list` (T-027): the "Activity" window's
    filtered, paginated journal query over the `Db::run` executor, with
    LOG-005's visibility rule (user entries by default, `diagnostic`
-   only on the explicit `include_diagnostic` request). Every further
-   command name is fixed by §7.10 and belongs to its own task.
+   only on the explicit `include_diagnostic` request) — and the
+   Settings module's `settings_get`/`settings_set` (T-030): the
+   §6.5 settings map read/written atomically through the store's
+   single validation path, each changed key journaled
+   `settings.changed` inside the operation's own transaction. Every
+   further command name is fixed by §7.10 and belongs to its own task.
 3. On debug builds the specta `Builder` exports `src/bindings.ts`
    (`specta_typescript::Typescript`). The file is **committed** so the
    frontend type-checks and lints without a Rust toolchain; it is excluded
@@ -456,7 +460,22 @@ an explicit `StorageError::Settings` when a stored cell is corrupt —
 never a silent default (the table is machine-written, unlike the
 hand-editable `config.toml`, SYS-012). `default.*` keys are read only
 by project creation; changing them never touches existing projects
-(DEF-005).
+(DEF-005). The Settings module's IPC commands (T-030,
+DECISIONS.md D-055) serve this repository through the `Db::run`
+executor: `settings_get` answers the full map in §6.5 table order
+(defaults applied), `settings_set` applies a partial update — the
+screen's dirty set — atomically in one transaction, validating every
+key/value through the store's own parse and rejecting anything
+invalid with `E_VALIDATION` naming the key, the sent value and the
+reason. The wire DTO stays string-shaped (dotted key + canonical JSON
+text; the `details` precedent) — no type duplication, and
+`specta/serde_json` stays disabled. Every changed key writes one
+`settings.changed` journal entry inside the operation's transaction
+(LOG-001…004, D-051), its entity id the dotted key and no value in
+the payload. "Applies without a restart" (DEF-001…004) holds by
+construction — no layer caches settings, so the next reader (the
+`settings_get` round trip today, the future scanner through the same
+repository) sees the committed value.
 
 The `action_log` table has the journal repository,
 `eunomia_store::action_log` (spec §7.7 LOG-001…005, DECISIONS.md
@@ -494,9 +513,13 @@ mirrored into the file log by one facade function,
 `logging::action_logged` — everything mirrors except the
 info+user+non-error shape, with codes and ids only (the policy
 reasoning lives with the function). LOG-006's
-retention/cleanup is T-029's; nothing in the module deletes rows. No
-producer is wired yet: the first command task that journals its
-actions consumes the repository (the `file_event` tested-today shape).
+retention/cleanup is T-029's; nothing in the module deletes rows. The
+first producer is wired (T-030): `settings_set` writes its
+`settings.changed` entries through `insert` inside the operation's
+transaction and mirrors them through `logging::action_logged` (a
+no-op for the info+user+ok shape, per the policy above); the
+fail-then-log half stays with the first operation that fails after
+writing.
 
 ## Config
 
