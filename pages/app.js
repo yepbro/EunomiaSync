@@ -371,9 +371,7 @@
       if (!dragged) return
       const target = e.target.closest('tr')
       const insideSelf = draggedSectionRows.includes(target) || target === dragged
-      const tooDeep =
-        isHeading(dragged) && isHeading(target) && headingLevel(target) > headingLevel(dragged)
-      if (!target || insideSelf || tooDeep || target.classList.contains('row-hidden')) {
+      if (!target || insideSelf || target.classList.contains('row-hidden')) {
         clearDropMark()
         return
       }
@@ -390,13 +388,7 @@
       e.preventDefault()
       const target = e.target.closest('tr')
       clearDropMark()
-      if (
-        !dragged ||
-        !target ||
-        target === dragged ||
-        draggedSectionRows.includes(target) ||
-        (isHeading(dragged) && isHeading(target) && headingLevel(target) > headingLevel(dragged))
-      ) {
+      if (!dragged || !target || target === dragged || draggedSectionRows.includes(target)) {
         dragged?.classList.remove('dragging')
         dragged = null
         draggedSectionRows = []
@@ -404,10 +396,28 @@
         return
       }
       if (isHeading(dragged)) {
-        /* dropped heading: the whole section follows it */
+        /* dropped heading: the whole section follows it. On a heading of the
+           same level it becomes a preceding sibling (levels unchanged); on
+           any other heading it nests as the target's last subsection and the
+           levels of the moved rows follow the new depth */
         const moving = [dragged, ...draggedSectionRows]
-        if (isHeading(target)) target.before(...moving)
-        else target.after(...moving)
+        if (isHeading(target) && headingLevel(target) === headingLevel(dragged)) {
+          target.before(...moving)
+        } else if (isHeading(target)) {
+          const delta = headingLevel(target) + 1 - headingLevel(dragged)
+          const boundary = sectionEndAfter(target)
+          for (const row of moving) {
+            const styleEl = isHeading(row) ? row.querySelector('[data-level]') : row
+            const depth = Number(styleEl.style.getPropertyValue('--depth') || 0) + delta
+            styleEl.style.setProperty('--depth', String(depth))
+            if (isHeading(row)) {
+              row.querySelector('[data-level]').dataset.level = String(headingLevel(row) + delta)
+            }
+          }
+          boundary.before(...moving)
+        } else {
+          target.after(...moving)
+        }
       } else if (isHeading(target)) {
         /* dropped on a section heading: move to the end of that section */
         tbody.insertBefore(dragged, sectionEndAfter(target))
