@@ -678,6 +678,12 @@ input[type='checkbox']:disabled {
   background-color: var(--cell-changed);
 }
 
+/* Unassigned cell: everything but the checkbox is hidden */
+.matrix tbody td.c-cell.cell-unchecked .variant-select,
+.matrix tbody td.c-cell.cell-unchecked .cell-icons {
+  display: none;
+}
+
 /* Hidden instructions (LIB-005…007): dimmed + dashed "hidden" chip */
 .row-hidden .name {
   color: var(--text-muted);

@@ -168,6 +168,7 @@
     const custom = td.dataset.custom === 'true'
     const changed = custom || checkedChanged || variantChanged
     td.classList.toggle('cell-changed', changed)
+    td.classList.toggle('cell-unchecked', !input.checked)
     td.title = changed ? 'Assignment changed — will be written on the next sync' : ''
   }
 
