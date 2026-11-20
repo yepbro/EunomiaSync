@@ -22,6 +22,9 @@
 //! - `fault_injection` — spec 15.1's failure points for tests,
 //!   behind the non-default `fault-injection` feature (absent from
 //!   release builds by construction; see its docs)
+//! - `temp_repos` — self-cleaning temporary `.git` repository roots
+//!   for the §12.2 benchmark data sets (fixture tooling, not product
+//!   flow; task T-136)
 //!
 //! The module boundaries above are the crate's public contract
 //! (DECISIONS.md D-019): implementing tasks fit their code into the
@@ -44,4 +47,5 @@ pub mod paths;
 pub mod scan;
 pub mod scan_classify;
 pub mod temp_files;
+pub mod temp_repos;
 pub mod write_access;

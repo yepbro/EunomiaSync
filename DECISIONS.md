@@ -8982,3 +8982,108 @@ Round 2 (hy4-flash-free) verified every round-1 fix in code and approved;
 its P2 (the extra-hint shape must reject unknown fields like
 `extra_file_from_json`, not silently drop them) and P3 (integer
 `limit`/`offset`) were applied before the final amend.
+
+### D-109 — The §12.2 data set generator: repository-driven fill in one transaction, determinism defined over a stabilized view, and the two-crate split (store fill / fs temp Git roots) — 2026-11-20
+
+Problem: T-136 needs the M and L benchmark databases of spec §12.2
+(M: 50 projects, 200 instructions; L: 500 projects, 1,000
+instructions, 100 headings, 3 variants per instruction, 100,000
+assignments — the confirmed upper-limit scenario) plus the temporary
+Git folders the future sync benchmarks will write into, produced
+deterministically for T-137+. Open questions: where the generator
+lives (the store cannot create folders, the fs crate cannot write
+rows, and no new crate/dependency edge is allowed); what
+determinism can even mean when the repositories own the id and
+timestamp columns (UUIDv7 `new_id`, wall-clock `now_utc` — D-031);
+how the L assignments spread; and what "generate again into the same
+database" means.
+
+Solution: two modules, one per crate, composed by the benchmark
+consumer.
+
+- **Store side — `eunomia_store::data_sets`.** `DataSetSpec`
+  (projects / headings / instructions / variants-per-instruction /
+  assignments-per-project) with the consts `M` and `L` carrying
+  §12.2's exact numbers (M: 50/0/200/1/40 → 2,000 assignments; L:
+  500/100/1000/3/200 → 100,000). `generate(&mut Connection, &spec,
+&[ProjectRoot])` fills an **empty** database through the
+  repositories' own create methods only — `projects::create`,
+  `create_item`, `create_variant`, `assign` — inside one transaction
+  it owns: the standalone-connection seam for benchmarks and
+  fixtures, which is why it takes `&mut Connection` and cannot be
+  composed under `Db::run` (D-037's executor composition stays the
+  app layer's). Integrity is the repositories' guarantee, not a
+  generator re-implementation: dense `position`/`sort_order` come
+  from the append semantics, DB-010 from the constructive
+  main-variant rules, D-02 from `assign`. Typed refusals before the
+  first write: `NotEmpty`, `NotEnoughRoots`,
+  `AssignmentsPerProjectTooHigh`, `InstructionsRequired`,
+  `VariantsRequired`; repository/transaction failures roll the whole
+  run back (empty database → a retry converges: the idempotency
+  semantics are "fresh fixture or rejection", not merge — pinned by
+  a duplicate-path-key rollback test).
+- **Determinism = the stabilized view.** No RNG exists to seed —
+  every value is a pure function of the profile counts and the row
+  ordinal. The contract is defined over what the generator cannot
+  control stripped away: `stabilized(conn, base)` reads the ALG-001
+  collections back through the repositories with ids mapped to
+  creation ordinals, timestamps dropped, and the base prefix
+  stripped **by component count** (components split on `/` and `\`,
+  empties ignored) from both `path` and `path_key`. Component
+  counting — not text-prefix matching — is what makes the rule
+  platform-true: DB-030's keying re-spells separators, NFC and case
+  (folded keys on Windows/macOS) but never changes component
+  structure, so one count strips both columns everywhere (round-1
+  review's P1: a single text prefix silently never matches a folded
+  `path_key`). Two runs with the same profile and equally named
+  roots produce **equal stabilized views** while their raw ids
+  differ — pinned as the falsifiable determinism test, with folded
+  key spellings in the fixture roots and both the negative half
+  (without `base`, the views differ: the stripping is part of the
+  definition) and a unit pin of the strip's spelling-agnosticism.
+- **The L spread.** Project `p`, assignment `k` → instruction
+  `(37·p + k) mod 1000`, variant `(p + k) mod 3`. Distinctness needs
+  no coprimality (round-2 review's correction: `k < 200 ≤ 1000`
+  alone makes the k-window injective, so no stride check exists);
+  37 is purely the spread constant — a hop big enough that
+  consecutive projects' windows interleave across the whole library
+  instead of stacking into bands. Coverage: all 1,000 instructions
+  appear, ≈100 assignments each (90–110 exactly, by the formula).
+  The closed form is recomputed in the tests by hand — never through
+  the module's helpers — over all 100,000 L pairs and all 2,000 M
+  pairs. Layout: headings partition the instructions into near-equal
+  consecutive groups (exactly 10×100 for L; the 4/3/3 remainder
+  branch and the empty-heading edge pinned separately), heading
+  levels cycle `2..=6`, all rows active (§12.2 measures the plain
+  upper-limit scenario). Variant names run `Main`, `Compact`,
+  `Detailed`, then numbered `Alternative 03`… — distinct NOCASE
+  names for any variant count (a cycling scheme would collide on the
+  §6.9 active-sibling uniqueness). Variant texts are sized for
+  §12.2's sync premise (≈52 characters average → a fully assigned
+  set-L project builds ≈10 KB). `set L` also reads back through
+  `build_snapshot::read` — the whole ALG-001 graph validates, so
+  T-137 benchmarks start from a snapshot the sync pipeline accepts.
+- **fs side — `eunomia_fs::temp_repos`.** `TempRepos::create(count,
+label)` lays out `<tempdir>/<label>/repo-<i:04>` with a minimal but
+  real `.git` (`HEAD`, `config`, `objects/`, `refs/` — git's own
+  validity set; the scan's ALG-052 probe and `git rev-parse` both
+  accept it), canonical paths + DB-030 keys ready for
+  `ProjectRoot`, auto-removed with the guard (the crate's idle
+  `tempfile` dependency's first staging use). Labels are validated as
+  one safe component (no separators, no `..`) so nothing escapes the
+  guard's cleanup. The two crates keep no edge between them —
+  benchmarks compose (`TempRepos` → roots → `generate`), the store
+  stays filesystem-free, fs stays database-free. Group directory
+  stored canonical (macOS `/var` → `/private/var`), roots always
+  canonical so `path`/`path_key`/scan root spellings agree.
+
+Tests: 5 unit + 7 integration in `tests/data_sets.rs` (M sizes,
+invariants and stabilized collections with M's distribution; L
+sizes/distribution/snapshot — the one heavy L fill, ≈25 s in a debug
+build; determinism both halves with folded key spellings; typed
+rejections writing nothing; heading layout edges 4/3/3 and 1/1/1/0/0
+with variant names beyond the third; the duplicate-key mid-fill
+rollback; stabilized corrupt-cell propagation through the
+`ignore_check_constraints` seam) and 2 unit + 4 integration in
+`tests/temp_repos.rs` (naming, unsafe labels, layout, canonical
+keys, the scan finding every root, teardown, empty fixture).

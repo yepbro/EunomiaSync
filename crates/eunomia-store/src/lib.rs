@@ -7,6 +7,7 @@
 
 pub mod action_log;
 pub mod build_snapshot;
+pub mod data_sets;
 pub mod library;
 pub mod library_versions;
 pub mod projects;
