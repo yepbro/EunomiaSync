@@ -12,6 +12,8 @@
    UPD-001…005 (About modal: info rows, license expander, simulated
    update check, REL-004), DB-041/042 (project labels in the column
    headers), MAIN-006 (#text-tooltip: instruction text, 400 ms delay),
+   MAIN-012…014 / LIB-005…007 (hide/restore instruction: .hide-btn eye
+   buttons, #hide-dialog confirm),
    UI-001, UI-011, UI-012, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
@@ -518,6 +520,35 @@ body {
 }
 
 .edit-btn:hover {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+/* Hide/restore instruction button (MAIN-012…014): same box as the edit
+   pencil, a Material eye-off / eye glyph injected by app.js */
+.hide-btn {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  inline-size: 24px;
+  block-size: 24px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex: none;
+}
+
+.hide-btn svg {
+  inline-size: 14px;
+  block-size: 14px;
+  fill: currentColor;
+}
+
+.hide-btn:hover {
   color: var(--accent-strong);
   background: var(--accent-soft);
 }

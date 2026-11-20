@@ -23,7 +23,10 @@
   label next to the color dot, the full name only in the tooltip and
   a visually-hidden span for screen readers),
   instruction text tooltip (MAIN-006: the row text lives in data-text,
-  shown by one reusable #text-tooltip after a 400 ms delay).
+  shown by one reusable #text-tooltip after a 400 ms delay),
+  hide/restore instruction from the matrix (MAIN-012…014, LIB-005…007:
+  eye-off button per instruction row, #hide-dialog confirm, restore
+  without confirmation while "Show hidden" is on).
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
   (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-002…007 (scan) +
@@ -2652,6 +2655,24 @@
           <div class="modal-actions">
             <button value="cancel" class="btn btn-ghost">Cancel</button>
             <button value="delete" class="btn btn-danger">Delete</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Hide-instruction confirmation (MAIN-012…014, LIB-005, UI-010): a
+         dedicated dialog — the shared #confirm-dialog is hard-labeled
+         "Delete". Confirming marks the row hidden in memory: assignments
+         are kept and files change only after the next sync. -->
+      <dialog id="hide-dialog" class="modal" aria-labelledby="hide-title">
+        <form method="dialog">
+          <h2 id="hide-title">Hide instruction</h2>
+          <p class="modal-text">
+            The instruction will be excluded from built files. Assignments are kept; files change
+            only after the next sync.
+          </p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="hide" class="btn btn-primary">Hide</button>
           </div>
         </form>
       </dialog>

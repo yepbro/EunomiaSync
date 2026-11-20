@@ -31,6 +31,9 @@
    label by the color dot, name in the tooltip),
    instruction text tooltip (MAIN-006: one reusable #text-tooltip, the
    first 600 characters of the row's data-text after a 400 ms delay),
+   hide/restore instruction from the matrix (MAIN-012…014, LIB-005…007:
+   eye-off button per row, dedicated confirm dialog, restore without
+   confirmation while "Show hidden" is on),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -556,6 +559,85 @@
     if (nowCollapsed) collapsed.add(heading)
     else collapsed.delete(heading)
     heading.querySelector('.caret-btn').setAttribute('aria-expanded', String(!nowCollapsed))
+    applyFilters()
+  })
+
+  /* ---------- Hide / restore instruction from the matrix (MAIN-012…014,
+     LIB-005…007, UI-010) ---------------------------------------------- */
+  /* Every instruction row carries an eye-off button next to the edit
+     pencil. Hiding asks in a dedicated dialog (the shared #confirm-dialog
+     is hard-labeled "Delete"), then marks the row row-hidden with the
+     dashed "hidden" chip — assignments are kept and nothing is written
+     until the next sync. Restoring (visible while "Show hidden" is on)
+     needs no confirmation (LIB-007). In-memory only, like the whole demo. */
+
+  const hideDialog = document.getElementById('hide-dialog')
+  let pendingHideRow = null
+
+  function setHiddenCount() {
+    hiddenCountChip.textContent = String(
+      document.querySelectorAll('.matrix tbody .row-hidden').length,
+    )
+  }
+
+  /* The dashed chip matches the static hidden-row markup; the button in
+     the same slot flips between hide (eye-off) and restore (eye) */
+  function refreshRowHiddenState(row) {
+    const hidden = row.classList.contains('row-hidden')
+    const name = instructionDisplay(row)
+    let chip = row.querySelector('.hidden-chip')
+    if (hidden && !chip) {
+      chip = document.createElement('span')
+      chip.className = 'hidden-chip'
+      chip.textContent = 'hidden'
+      row.querySelector('.name-wrap').append(chip)
+    } else if (!hidden && chip) {
+      chip.remove()
+    }
+    const btn = row.querySelector('.hide-btn')
+    if (btn) {
+      btn.innerHTML = hidden ? ICONS.eye : ICONS.hide
+      const label = hidden ? `Restore instruction ${name}` : `Hide instruction ${name}`
+      btn.title = label
+      btn.setAttribute('aria-label', label)
+    }
+  }
+
+  function initHideButtons() {
+    for (const tr of rows()) {
+      if (isHeading(tr)) continue
+      const wrap = tr.querySelector('.name-wrap')
+      if (!wrap) continue
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'hide-btn'
+      wrap.querySelector('.edit-btn')?.after(btn)
+      refreshRowHiddenState(tr)
+    }
+  }
+
+  tbody.addEventListener('click', (e) => {
+    const btn = e.target.closest('.hide-btn')
+    if (!btn) return
+    const row = btn.closest('tr')
+    if (row.classList.contains('row-hidden')) {
+      row.classList.remove('row-hidden')
+      refreshRowHiddenState(row)
+      setHiddenCount()
+      applyFilters()
+      return
+    }
+    pendingHideRow = row
+    hideDialog.showModal()
+  })
+
+  hideDialog.addEventListener('close', () => {
+    const row = pendingHideRow
+    pendingHideRow = null
+    if (!row || hideDialog.returnValue !== 'hide') return
+    row.classList.add('row-hidden')
+    refreshRowHiddenState(row)
+    setHiddenCount()
     applyFilters()
   })
 
@@ -1442,6 +1524,10 @@
     delete:
       '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>',
     main: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>',
+    /* Eye / eye-off (Material "visibility" / "visibility_off" round):
+       the hide and restore commands of MAIN-012…014, LIB-005…007 */
+    hide: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5c2.76 0 5 2.24 5 5 0 .51-.1 1-.24 1.46l3.06 3.06c1.39-1.23 2.49-2.77 3.18-4.53C21.27 7.11 17 4 12 4c-1.27 0-2.49.2-3.64.57l2.17 2.17c.47-.14.96-.24 1.47-.24zM2.71 3.16c-.39.39-.39 1.02 0 1.41l1.97 1.97C3.06 7.83 1.77 9.53 1 11.5 2.73 15.89 7 19 12 19c1.52 0 2.97-.3 4.31-.82l2.72 2.72c.39.39 1.02.39 1.41 0 .39-.39.39-1.02 0-1.41L4.13 3.16c-.39-.39-1.03-.39-1.42 0zM12 16.5c-2.76 0-5-2.24-5-5 0-.77.18-1.5.49-2.14l1.57 1.57c-.03.18-.06.37-.06.57 0 1.66 1.34 3 3 3 .2 0 .38-.03.57-.07L14.14 16c-.65.32-1.37.5-2.14.5zm2.97-5.33c-.15-1.4-1.25-2.49-2.64-2.64l2.64 2.64z"/></svg>',
+    eye: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4C7 4 2.73 7.11 1 11.5 2.73 15.89 7 19 12 19s9.27-3.11 11-7.5C21.27 7.11 17 4 12 4zm0 12.5c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>',
     /* Toolbar buttons (Activity, Settings): Material-style solid glyphs,
        14px, filled with currentColor like the cell icons */
     activity:
@@ -3804,6 +3890,9 @@
   /* Instruction text tooltip (MAIN-006) */
   initTextTooltip()
 
+  /* Hide/restore buttons on every instruction row (MAIN-012…014) */
+  initHideButtons()
+
   /* Toolbar icon buttons (Activity, Settings): glyphs from the ICONS
      idiom; the accessible names and tooltips live in the markup */
   document.getElementById('activity-btn').innerHTML = ICONS.activity
@@ -3841,9 +3930,7 @@
   }
 
   /* "Show hidden" badge: how many instructions are hidden */
-  hiddenCountChip.textContent = String(
-    document.querySelectorAll('.matrix tbody .row-hidden').length,
-  )
+  setHiddenCount()
 
   applyColumnFilter()
   applyFilters()
