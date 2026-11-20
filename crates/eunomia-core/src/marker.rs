@@ -28,14 +28,14 @@
 //!
 //! ALG-032 says the time "is taken once per run, at the start of the
 //! write phase, and is the same for all projects" — that capture is
-//! the sync pipeline's job, not this function's. [`creation_marker_line`]
-//! is a pure formatter: the instant, the zone and the offset are all
-//! inputs. This crate also has no time library on purpose (DECISIONS.md
-//! D-017: the dependency allow-list is `serde`, `thiserror`, `sha2`;
-//! `jiff` joined the graph for `eunomia-store`, D-035), so the instant
-//! crosses the boundary already decomposed into the six civil fields
-//! the marker prints, plus the IANA name and the offset in minutes.
-//! The spec's `YYYY-MM-DD HH:MM:SS` zero-padding then has exactly one
+//! [`marker_clock`](crate::marker_clock)'s job, not this function's
+//! (it is the crate's one clock read: `jiff`, whose edge extends
+//! D-017's allow-list — see there and DECISIONS.md D-104).
+//! [`creation_marker_line`] stays a pure formatter: the instant, the
+//! zone and the offset are all inputs, crossing the boundary already
+//! decomposed into the six civil fields the marker prints, plus the
+//! IANA name and the offset in minutes. The spec's
+//! `YYYY-MM-DD HH:MM:SS` zero-padding then has exactly one
 //! implementation — this one — instead of one per caller.
 //!
 //! # Boundary
@@ -49,10 +49,10 @@
 /// The local wall-clock time a marker line stamps (spec §9.3, ALG-032).
 ///
 /// The six fields of `YYYY-MM-DD HH:MM:SS`, decomposed — the shape a
-/// time library's civil accessors hand out. `eunomia-core` has no time
-/// library (D-017's allow-list; `jiff` is the store layer's dependency,
-/// D-035), so the caller resolves the run's instant into local civil
-/// fields once and passes them in; this crate never touches a clock.
+/// time library's civil accessors hand out. The fields arrive
+/// resolved by one: `marker_clock` produces them from `jiff`
+/// (D-104's edge on top of D-017's allow-list); this type itself is a
+/// plain record with no clock of its own.
 ///
 /// The field domains are checked by [`creation_marker_line`]; month
 /// lengths are not. A day of 31 is accepted in any month — whether

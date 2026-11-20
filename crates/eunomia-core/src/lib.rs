@@ -1,20 +1,26 @@
 //! Core library for EunomiaSync.
 //!
-//! Pure application logic with no input or output of its own: the
-//! domain vocabulary of the app and the immutable build snapshot live
-//! here, and the markdown, diff, sync, and watch logic will join them
-//! in later tasks. This crate knows neither SQLite nor the file system
-//! nor Tauri (spec §5.2; DECISIONS.md D-006, D-010): database access
-//! lives in `eunomia-store`, file-system access in `eunomia-fs`, and
-//! the Tauri command layer in `src-tauri`. The store layer assembles
-//! [`snapshot::BuildSnapshot`] (spec §9.1, ALG-001) in one read
-//! transaction and hands it over for building.
+//! Pure application logic with no application input or output of its
+//! own: the domain vocabulary of the app and the immutable build
+//! snapshot live here, and the markdown, diff, sync, and watch logic
+//! will join them in later tasks. This crate knows neither SQLite nor
+//! the file system nor Tauri (spec §5.2; DECISIONS.md D-006, D-010):
+//! database access lives in `eunomia-store`, file-system access in
+//! `eunomia-fs`, and the Tauri command layer in `src-tauri`. The store
+//! layer assembles [`snapshot::BuildSnapshot`] (spec §9.1, ALG-001)
+//! in one read transaction and hands it over for building. One
+//! environment read exists by decision (D-104, an exemption to §5.2's
+//! no-I/O rule recorded there): the creation-marker clock in
+//! [`marker_clock`] reads the process clock and the system time zone
+//! database — environment inputs, not application data, and confined
+//! to that module's single capture function.
 //!
 //! The dependency surface is pinned by the spec (§5.2) and recorded in
 //! DECISIONS.md D-017: `serde` (canonical forms of the domain
 //! vocabulary), `thiserror` (domain error types) and `sha2` (the
-//! build hash, D-064, and the color tie-break, D-077). Nothing else
-//! joins without a DECISIONS.md entry.
+//! build hash, D-064, and the color tie-break, D-077). `jiff` joined
+//! for the creation-marker clock (ALG-032's once-per-run capture,
+//! D-104). Nothing else joins without a DECISIONS.md entry.
 //!
 //! ## Modules
 //!
@@ -61,6 +67,7 @@ pub mod levels;
 pub mod library;
 pub mod library_validators;
 pub mod marker;
+pub mod marker_clock;
 pub mod markers;
 pub mod normalize;
 pub mod project;

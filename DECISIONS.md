@@ -8437,3 +8437,136 @@ base_name)`, so scheme C probes `<STEM>.project.md` and stays silent
   control-named `.git` folder through the dialog seam and asserts the
   envelope names the `label` field with the derived spelling, leaving
   the database untouched.
+
+### D-104 — The marker clock in core: jiff's tz features turn on, the UTC-name ruling, and a pure instant+zone seam — 2026-11-20
+
+Problem: T-111 gives the ALG-032 marker its "now": local time and
+zone, taken "once per run, at the start of the write phase, the same
+for all projects", with D-23's `UTC±hh:mm` form when no IANA name is
+available. Four decisions the card leaves implicit: (1) the card's
+chrono + iana-time-zone wording is pre-migration text — D-035 replaced
+chrono with jiff 1.x and predicted "jiff's tz features stay off until
+the creation-marker task needs them (that task turns on what it
+uses)"; (2) which jiff features that is, given core's D-017
+allow-list posture (a manifest change needs a record); (3) what
+"without an IANA name" means exactly — jiff reports `UTC` itself as a
+name, and system-detection failure degrades to a nameless
+`Etc/Unknown` that behaves like UTC; (4) how to test a clock at all —
+the system time and zone are not test inputs.
+
+Solution: `marker_clock` in eunomia-core. `MarkerClock` holds the
+three things the marker prints — `MarkerTime` (D-061's decomposed
+civil fields), `Option<String>` IANA name, `i32` offset minutes —
+with private fields: they are one observation, and public fields
+would let a caller stamp one zone's wall clock with another zone's
+offset. Two constructors: `from_instant(Timestamp, TimeZone)` is the
+pure seam every test drives (fixed RFC 3339 instants, explicitly
+built zones — named via `TimeZone::get`, fixed via
+`Offset::to_time_zone`, POSIX via `TimeZone::posix`, jiff's
+`Etc/Unknown` via `TimeZone::unknown()`); `now_marker_clock()` is
+that seam at `Timestamp::now()` + `TimeZone::system()`, the one
+clock read of the run. `marker_line()` delegates to
+`creation_marker_line`, so the template keeps its single owner
+(D-061) and the "same marker for every file" property is type-level:
+one immutable capture, identical lines on every ask (pinned by
+tests, including through `clone`).
+
+Dependency shape (the D-035 turn-on, in core this time):
+`jiff = { version = "1", default-features = false, features =
+["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }` —
+`tz-system` for system-zone detection (TZ env var, /etc/localtime,
+Windows registry), `tzdb-zoneinfo` for the Unix tzdb
+(/usr/share/zoneinfo), `tzdb-bundle-platform` because Windows has no
+system tzdb (jiff target-gates the bundle to Windows, so Linux/macOS
+compile none of it). `tz-fat`/`tzdb-concatenated`/`logging`/`perf-inline`
+stay off — outside this need. iana-time-zone never enters: jiff's
+native IANA support is exactly why spec 5.3 dropped it (already
+reflected in the tech table). Lockfile: two new rows,
+jiff-tzdb 1.0.0 and jiff-tzdb-platform 1.0.0 (Unlicense OR MIT),
+Windows-only edges that stay unused rows on Unix — D-035's
+chrono-under-serde_with posture; `windows-link` was already in the
+graph. `cargo deny check` green (advisories/bans/licenses/sources).
+
+Spec-reading rulings, pinned by tests: (1) a machine actually set to
+UTC stamps the name-and-offset form `UTC +00:00` — "UTC" is an IANA
+identifier and D-23's compact form is for a zone whose name is
+_unknown_; (2) jiff's `Etc/Unknown` fallback (detection failed)
+reports no name and offsets zero, so the marker degrades honestly to
+`UTC+00:00` instead of failing the run; (3) the offset is the one in
+force at the captured instant (DST honored — the fall-back pair
+2026-10-25 02:30+02:00/02:30+01:00 Europe/Berlin is an oracle), and
+sub-second instants truncate (MarkerTime is second-granular); (4) a
+sub-minute zone offset (only a POSIX rule or a synthetic fixed zone
+can produce one today) truncates toward zero, never rounds; (5) a
+zone beyond the marker's own ±24:00 domain (jiff reaches ±25:59)
+panics at `marker_line()` — marker.rs's broken-invariant posture,
+unreachable from real IANA zones (±14:00 max).
+
+Round-1 review (deepseek-v4.1-flash) — APPROVED with 5×P2/4×P3, all
+taken. What they changed:
+
+- **The §5.2 exemption, said out loud (P2-2).** `marker_clock` is the
+  first core module whose production path reads the environment (the
+  process clock via `jiff`, the system tzdb via `TimeZone::system`) —
+  a reversal of D-061's "the clock stays out of core / the sync
+  pipeline captures it via jiff above core", which D-104's first
+  draft did not own. Kept in core (the task card assigns the capture
+  here and scoped the jiff edge to this crate's manifest; moving
+  `now_marker_clock` to `src-tauri` would put the marker's clock read
+  in the shell layer against D-010's thin-shell rule) and recorded as
+  an exemption: clock and system tzdb are environment inputs, not
+  application data; the read lives in one function
+  (`now_marker_clock`); every test drives the pure seam instead.
+  D-061's consumer note is amended by this entry: the capture is core
+  code (`marker_clock`), not "above core".
+- **The environment can name a zone beyond the marker's own domain
+  (P2-5).** `TZ=AAA-24:59:59BBB,M3.2.0,M11.1.0` is a legal POSIX rule
+  (verified: jiff parses it, offset 1499 min) that made
+  `marker_line()` panic via `now_marker_clock()` — a run aborted over
+  a stamp. `now_marker_clock` now guards: an out-of-domain capture
+  re-resolves the _same_ instant (one clock read, never two) against
+  jiff's nameless `Etc/Unknown`, degrading the marker to the honest
+  `UTC+00:00` form. The panic posture stays for the pure seam
+  (`from_instant` with a synthetic ≥24h zone), per marker.rs.
+- **Criterion test made falsifiable (P2-3).** "One capture → every
+  ask identical" over immutable fields is a tautology; the test now
+  pins that `marker_line()` is exactly `creation_marker_line` over the
+  three published accessors across every zone shape (named, UTC,
+  fixed, POSIX, unknown) — the property that makes the identity mean
+  anything. The many-files-one-capture oracle stays with the
+  write-phase consumer.
+- **Day-rollover fixtures (P2-4).** Tokyo (`2026-11-17T23:30Z` →
+  `2026-11-18 08:30 +09:00`) and Honolulu (`T05:00Z` → `2026-11-16
+19:00 -10:00`) pin that the _date_ comes from the zone's calendar;
+  every earlier fixture shared UTC's date, so a UTC-date
+  implementation was green.
+- **Stale docs (P2-1).** marker.rs's "this crate has no time library"
+  and lib.rs's dependency enumeration were false as of the edge; both
+  reworded (D-017's list is extended by D-104). The spec's §5.2
+  module table still reads "only serde, sha2, thiserror" for
+  eunomia-core — that row is spec text outside this task's file scope
+  (docs/spec.md is not in the T-111 change scope; owner ruling
+  precedents c22cc46/f3db54f apply); left for the orchestrator.
+- **Naming honesty (P3-1/3-2/3-3/3-4).** "Canonicalized" overstated —
+  jiff reports the loaded identifier (case-normalized, aliases kept:
+  `Etc/UTC` stamps `Etc/UTC +00:00`, now pinned by a test); the
+  case-insensitive `TimeZone::get` trick left the tests (not a
+  documented jiff guarantee); the sub-minute truncation test asserts
+  full lines (wall clock and offset pinned together — the seconds the
+  offset drops do survive in the wall clock, so "never overstates"
+  wording is gone); and the capture moment is documented as §9.4's
+  Phase 0 (content build), with ALG-032's "start of the write phase"
+  quoted as the looser wording of the same moment.
+
+Round-2 review (hy4-flash-free) — APPROVED, no P0/P1/P2. It verified
+all nine round-1 fixes against the diff (no regressions), audited all
+tests for falsifiability ("no oracle that would pass under a
+UTC-date, real-clock, wrong-offset, second-clock-read or
+wrong-formatter implementation"), checked jiff 1.0.1's API against
+the vendored sources, and ran the crate suite, clippy and
+`cargo deny check` itself — all green. Its one P3 (low confidence,
+taken): the guard's exact ±24:00 pass-through boundary was not pinned
+— a `<=`→`<` regression would silently degrade a legal ±24:00 zone.
+Now pinned by
+`the_run_guard_passes_exactly_twenty_four_hours_through` (both signs,
+plus the full `2026-11-18 13:03:22 UTC+24:00` line a whole day over).

@@ -20,6 +20,18 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2"
+# The creation-marker clock (ALG-032: time "taken once per run"; DECISIONS.md
+# entry for this task). jiff is the project time library (D-035 replaced
+# chrono); this is the D-035-predicted feature turn-on for the marker task:
+# `tz-system` detects the system zone (TZ env var, /etc/localtime, Windows
+# registry), `tzdb-zoneinfo` reads the Unix tzdb (/usr/share/zoneinfo),
+# `tzdb-bundle-platform` embeds a tzdb on Windows only — jiff target-gates
+# it, so Linux/macOS builds compile none of it (the two lock entries it
+# adds, jiff-tzdb/jiff-tzdb-platform 1.0.0, stay unused rows on Unix, the
+# D-035 lockfile posture; windows-link was already in the graph). Outside
+# this module's need: no new crate enters core (spec 5.3 dropped
+# iana-time-zone for jiff's built-in IANA support).
+jiff = { version = "1", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 
 [dev-dependencies]
 # Property tests of the body builder (spec 15.1 names them for random
