@@ -125,13 +125,13 @@ The UI does not access the file system. Rust does all file and database operatio
 
 ### 5.2. Modules
 
-| Module (crate)  | Responsibility                                                                                              | Dependencies                                                                                                                        |
-| --------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `eunomia-core`  | Domain types, text build, rendering schemes A/B/C, marker parser, build hash, validators                    | only `serde`, `sha2`, `thiserror`                                                                                                   |
-| `eunomia-store` | DB schema, migrations, repositories, transactions                                                           | `rusqlite`, `core`                                                                                                                  |
-| `eunomia-fs`    | Repository scan, path canonicalization, backup and copy checks, atomic write, retries, target-file watching | `ignore`/`walkdir`, `tempfile`, `dunce`, `notify-debouncer-full`, `unicode-normalization`, `unicode-case-mapping`, `rustix`, `core` |
-| `eunomia-app`   | Services (sync, watch, dirty-tracker), Tauri commands and events, app state                                 | the other crates, `tauri`                                                                                                           |
-| `ui/`           | Vue app, Pinia stores, i18n, matrix, modal windows                                                          | Vue, Pinia, Tailwind                                                                                                                |
+| Module (crate)  | Responsibility                                                                                              | Dependencies                                                                                                                                                      |
+| --------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `eunomia-core`  | Domain types, text build, rendering schemes A/B/C, marker parser, build hash, validators                    | only `serde`, `sha2`, `thiserror`                                                                                                                                 |
+| `eunomia-store` | DB schema, migrations, repositories, transactions                                                           | `rusqlite`, `core`                                                                                                                                                |
+| `eunomia-fs`    | Repository scan, path canonicalization, backup and copy checks, atomic write, retries, target-file watching | `ignore`/`walkdir`, `tempfile`, `dunce`, `notify-debouncer-full`, `unicode-normalization`, `unicode-case-mapping`, `rustix`, `windows-sys` (Windows only), `core` |
+| `eunomia-app`   | Services (sync, watch, dirty-tracker), Tauri commands and events, app state                                 | the other crates, `tauri`                                                                                                                                         |
+| `ui/`           | Vue app, Pinia stores, i18n, matrix, modal windows                                                          | Vue, Pinia, Tailwind                                                                                                                                              |
 
 Rule: `core` does no input/output and is tested without the file system or the database.
 
