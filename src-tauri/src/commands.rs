@@ -2,11 +2,12 @@
 //! System module (D-009), the History module's `activity_list`
 //! (T-027), the Settings module's `settings_get`/`settings_set`
 //! (T-030), the System module's `app_info` (T-031), the Library
-//! module's `markdown_preview` (T-056) and the Projects module's
-//! `projects_list` (T-072): `app_open_data_folder`,
+//! module's `markdown_preview` (T-056), the Projects module's
+//! `projects_list` (T-072) and the System module's
+//! `dialog_pick_folder` (T-073): `app_open_data_folder`,
 //! `db_backups_list`, `db_restore_backup`, `db_recreate`,
 //! `activity_list`, `settings_get`, `settings_set`, `app_info`,
-//! `markdown_preview`, `projects_list`.
+//! `markdown_preview`, `projects_list`, `dialog_pick_folder`.
 //!
 //! Every command returns `Result<T, AppError>` (§7.10) and is generic
 //! over the Tauri runtime — the documented tauri-specta shape for
@@ -68,6 +69,7 @@ use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use crate::logging;
 use crate::markdown;
 use crate::recovery::{self, DbBackupInfo};
+use crate::session_paths;
 
 use eunomia_fs::paths::ProjectUnavailableError;
 use eunomia_store::action_log::{
@@ -503,7 +505,9 @@ pub(crate) async fn activity_list<R: Runtime>(
 /// with a diagnostic naming the state — not a panic, and not a
 /// pretend-empty result (an empty page, default settings) that would
 /// lie about the journal/the settings table being empty.
-fn managed_db<R: Runtime>(app: &AppHandle<R>) -> Result<Db, AppError> {
+/// `pub(crate)`: the SEC-003 check (`session_paths::validate_ui_path`)
+/// shares the same honest answer for its repository half.
+pub(crate) fn managed_db<R: Runtime>(app: &AppHandle<R>) -> Result<Db, AppError> {
     app.try_state::<Db>()
         .map(|state| state.inner().clone())
         .ok_or_else(|| {
@@ -631,8 +635,11 @@ fn validated_activity_query(query: ActivityListQuery) -> Result<ActivityQuery, A
 /// An `activity_list` input rejection: `E_VALIDATION` with the field,
 /// the offending value and the reason as params (UI-011's "where" for
 /// a rejected filter; the default `errors.validation` key, the same
-/// shape the recovery commands' rejections use).
-fn rejected_field(field: &str, value: &str, reason: &str) -> AppError {
+/// shape the recovery commands' rejections use). `pub(crate)`: the
+/// SEC-003 check (`session_paths::rejected_ui_path`) builds its
+/// rejection through this one builder — a single copy of the wire
+/// shape (the `managed_db` reuse pattern).
+pub(crate) fn rejected_field(field: &str, value: &str, reason: &str) -> AppError {
     let mut error = AppError::new(ErrorCode::Validation);
     error.params.insert("field".to_owned(), field.to_owned());
     error.params.insert("value".to_owned(), value.to_owned());
@@ -1582,6 +1589,166 @@ pub(crate) fn app_info_impl<R: Runtime>(app: &AppHandle<R>, uid: u32) -> Result<
     })
 }
 
+// ---------------------------------------------------------------------------
+// `dialog_pick_folder` (T-073, §7.10 System module, §5.6 SEC-001/SEC-003,
+// §5.3, D-009)
+// ---------------------------------------------------------------------------
+
+/// Opens the system folder picker from Rust (§7.10 System module
+/// `dialog_pick_folder`, the D-009 fixed name; §5.6) and remembers
+/// the picked folder for the session: the answer is the picked path
+/// in its canonical form (DB-030 — the form the future
+/// `project_add_manual`/`scan_start` will register and probe), or
+/// `None` when the user cancelled, in which case nothing is
+/// remembered.
+///
+/// SEC-001: the dialog plugin is invoked from this Rust command only
+/// — the webview holds no `dialog:` permission
+/// (`capabilities/default.json` stays plugin-free), so this command
+/// is the single path from the UI to the native picker. That is
+/// exactly what lets SEC-003 work: every folder the UI may later name
+/// passed through here (and landed in the session allowlist) or is a
+/// registered project — [`session_paths::validate_ui_path`] enforces
+/// the pair for every path the UI sends.
+///
+/// The plugin call is the one untestable seam here (it opens a real
+/// desktop dialog; the same treatment `app_open_data_folder` gives
+/// its opener call): the whole flow lives in
+/// [`dialog_pick_folder_with`] behind the `pick` parameter, the
+/// production seam is [`plugin_pick_folder`], and the wiring is
+/// pinned textually (the registration pin in `ipc_tests.rs`).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn dialog_pick_folder<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Option<String>, AppError> {
+    dialog_pick_folder_with(app, plugin_pick_folder::<R>)
+        .await
+        .inspect_err(logging::dialog_pick_folder_failed)
+}
+
+/// The body of [`dialog_pick_folder`], split so the one logging edge
+/// covers every failure path (the `activity_list` shape) and so the
+/// tests drive the whole flow with their own `pick` closure (the
+/// plugin seam, module docs above).
+///
+/// The picker parks its calling thread for as long as the dialog is
+/// open, and canonicalizing the fresh pick is a metadata walk — both
+/// are blocking work and run on the blocking pool (SYS-001), never on
+/// an async worker. The pick is canonicalized **before** it is
+/// remembered and answered, so the allowlist only ever holds canonical
+/// forms (SEC-003 compares canonical to canonical); a pick whose
+/// folder vanished in that window is
+/// [`picked_folder_vanished`]'s typed answer, and nothing is
+/// remembered for it.
+pub(crate) async fn dialog_pick_folder_with<R, F>(
+    app: AppHandle<R>,
+    pick: F,
+) -> Result<Option<String>, AppError>
+where
+    R: Runtime,
+    F: FnOnce(&AppHandle<R>) -> Result<Option<PathBuf>, AppError> + Send + 'static,
+{
+    let session_owner = app.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        let picked = pick(&app)?;
+        match picked {
+            None => Ok(None),
+            Some(raw) => eunomia_fs::paths::canonicalize(&raw)
+                .map(Some)
+                .map_err(|source| picked_folder_vanished(&raw, &source)),
+        }
+    })
+    .await
+    .map_err(db::join_failure_to_app_error)??;
+    let Some(canonical) = picked else {
+        // Cancel: the allowlist must not grow, and the honest answer
+        // to the UI is "nothing was picked" (§7.10: "nothing on
+        // cancel").
+        return Ok(None);
+    };
+    session_paths::remember_pick(&session_owner, canonical.clone())?;
+    Ok(Some(canonical.display().to_string()))
+}
+
+/// The production picker seam: the dialog plugin's Rust-side API
+/// (SEC-001 — never the webview's), `blocking_pick_folder`, mapped
+/// onto the command's internal `Option<PathBuf>` answer. The plugin
+/// answer's `FilePath` is converted with `into_path()` (a `file://`
+/// URL spelling becomes the path it names; desktop pickers answer
+/// plain paths, the conversion is the documented safety net), and a
+/// conversion failure takes the [`dialog_error_to_app_error`]
+/// fallback. The plugin requires being registered
+/// (`tauri_plugin_dialog::init()` in `lib.rs`, pinned by
+/// `config_tests.rs`) — an unregistered call would panic in the
+/// plugin's state lookup, which is why this seam is never driven in
+/// tests.
+#[cfg(desktop)]
+fn plugin_pick_folder<R: Runtime>(app: &AppHandle<R>) -> Result<Option<PathBuf>, AppError> {
+    use tauri_plugin_dialog::DialogExt;
+    match app.dialog().file().blocking_pick_folder() {
+        None => Ok(None),
+        Some(picked) => picked
+            .into_path()
+            .map(Some)
+            .map_err(|error| dialog_error_to_app_error(&error.to_string())),
+    }
+}
+
+/// The non-desktop twin of [`plugin_pick_folder`] (the
+/// `running_as_root` platform-twin pattern): the plugin's folder
+/// picker is a desktop API (`#[cfg(desktop)]` on the crate method),
+/// and every build this app ships is desktop (the single-instance
+/// plugin is desktop-gated the same way). The twin keeps the command
+/// compilable for a hypothetical mobile target and answers the
+/// recorded fallback instead of opening anything.
+#[cfg(not(desktop))]
+fn plugin_pick_folder<R: Runtime>(_app: &AppHandle<R>) -> Result<Option<PathBuf>, AppError> {
+    Err(dialog_error_to_app_error(
+        "the system folder picker is not available on this platform",
+    ))
+}
+
+/// Maps a dialog-plugin failure to the §7.10 wire form — the
+/// `opener_error_to_app_error` shape: the §10 registry has no
+/// "dialog failed" code, so the failure lands on the recorded D-037
+/// fallback (the least harmful effect — the user retries the button)
+/// with the plugin's own text in `details`. Takes the rendered text
+/// (not a typed plugin error) because the only reachable typed error
+/// is `tauri_plugin_fs::Error` — the plugin re-exports the type from
+/// `tauri-plugin-fs`, and naming it would add a direct
+/// `tauri-plugin-fs` edge this command does not need.
+/// `pub(crate)` for the seam's tests, the opener mapping's shape.
+pub(crate) fn dialog_error_to_app_error(error_text: &str) -> AppError {
+    let mut app_error = AppError::new(ErrorCode::DbLocked);
+    app_error.details = Some(ErrorDetails {
+        os_code: None,
+        os_kind: Some("DialogError".to_owned()),
+        os_message: Some(error_text.to_owned()),
+    });
+    app_error
+}
+
+/// The §10 mapping for a pick whose folder cannot be canonicalized:
+/// the dialog only returns existing folders, so this is the race
+/// where the folder moved, was deleted or lost read access between
+/// the pick and the bookkeeping — §10's `E_PROJECT_UNAVAILABLE` row
+/// ("The project folder moved, was deleted, or cannot be read") is
+/// exactly the fact. The picked path travels in `params` (SEC-008:
+/// paths may) and the OS refusal in `details`
+/// ([`AppError::with_os_error`], §10's first-class log fact). Nothing
+/// is remembered for a vanished pick.
+fn picked_folder_vanished(
+    picked: &Path,
+    source: &eunomia_fs::paths::CanonicalizeError,
+) -> AppError {
+    let mut app_error = AppError::new(ErrorCode::ProjectUnavailable);
+    app_error
+        .params
+        .insert("path".to_owned(), picked.display().to_string());
+    app_error.with_os_error(source.io_error())
+}
+
 #[cfg(test)]
 mod tests {
     //! The seam tests of the pure mappings — the opener mapping and
@@ -1591,6 +1758,55 @@ mod tests {
 
     use super::*;
     use crate::errors::ErrorCode;
+
+    #[test]
+    fn a_dialog_failure_maps_to_the_fallback_code_with_its_text() {
+        // Arrange: the seam takes the plugin error's rendered text
+        // (the `tauri-plugin-fs` error type is not nameable without a
+        // new dependency edge — see `dialog_error_to_app_error`).
+
+        // Act
+        let app_error = dialog_error_to_app_error("failed to convert file URL to path");
+
+        // Assert: the D-037 fallback code, its default key, and the
+        // plugin's own text in `details` (nothing free-text in
+        // params) — the opener mapping's shape.
+        assert_eq!(app_error.code, ErrorCode::DbLocked);
+        assert_eq!(app_error.message_key, "errors.db_locked");
+        assert!(app_error.params.is_empty());
+        let details = app_error.details.expect("the details carry the cause");
+        assert_eq!(details.os_kind.as_deref(), Some("DialogError"));
+        assert_eq!(
+            details.os_message.as_deref(),
+            Some("failed to convert file URL to path")
+        );
+    }
+
+    #[test]
+    fn a_vanished_pick_maps_to_project_unavailable_with_the_os_facts() {
+        // Arrange: a real canonicalization failure over a path that
+        // does not exist — the only shape the pick bookkeeping can
+        // fail with (the dialog returns existing folders; this is the
+        // vanish race).
+        let vanished = Path::new("/definitely/not/here/eunomia-t073");
+        let source = eunomia_fs::paths::canonicalize(vanished)
+            .expect_err("a missing path must fail canonicalization");
+
+        // Act
+        let app_error = picked_folder_vanished(vanished, &source);
+
+        // Assert: §10's E_PROJECT_UNAVAILABLE row, the picked path in
+        // params (SEC-008: paths may), and the OS refusal in details.
+        assert_eq!(app_error.code, ErrorCode::ProjectUnavailable);
+        assert_eq!(app_error.message_key, "errors.project_unavailable");
+        assert_eq!(
+            app_error.params.get("path").map(String::as_str),
+            Some("/definitely/not/here/eunomia-t073")
+        );
+        let details = app_error.details.expect("the OS refusal travels");
+        assert!(details.os_code.is_some(), "the raw OS code is present");
+        assert!(details.os_message.is_some());
+    }
 
     #[test]
     fn an_opener_failure_maps_to_the_fallback_code_with_its_text() {

@@ -7788,3 +7788,137 @@ it independently re-ran six mutants in a scratch copy (all die),
 re-measured the test counts (13 new / 39 total / 37 on Linux legs),
 and confirmed the root-skip is the documented house precedent, not
 evasion.
+
+### D-100 — `dialog_pick_folder` and the SEC-003 session allowlist — 2026-11-20
+
+Problem: T-073 turns §7.10's System-module `dialog_pick_folder`
+(D-009's fixed name) into the first Rust-side use of the dialog
+plugin, and §5.6 SEC-003 ("a path must be a registered project or
+must have been picked in the system dialog in this session") into
+code. Five points were open: (1) where the "picked this session"
+list lives and who owns it; (2) what "the path matches" means —
+raw text, canonical form, or the DB-030 `path_key`; (3) which error
+a non-allowlisted path gets, and which one a pick whose folder
+vanished between the dialog and the bookkeeping gets; (4) how the
+native dialog is tested without opening one; (5) whether the picker
+works in recovery mode (no `Db` managed).
+
+Solution: `session_paths.rs` (new module) + the command in
+`commands.rs`, registered in `collect_commands!`.
+
+- _The session list is managed state, not a static._
+  `SessionPaths(Mutex<Vec<PathBuf>>)` holds the canonical forms of
+  this process's picks — managed by `setup` before anything that can
+  fail, so the picker answers in any mode. A `LazyLock` static was
+  rejected because the IPC tests need per-app isolation (one test's
+  pick must not validate in another's app). `std::sync::Mutex`, the
+  inverse of D-037's async-mutex reasoning: the guard is held for a
+  vector lookup/insert, never across an await or I/O; poison is
+  recovered (`into_inner`) — the list is plain data. Duplicates
+  collapse; there is deliberately no `clear` — a session is one app
+  process, the process exit is the clear.
+- _Matching is canonical-form equality; both halves go through
+  DB-030's identity._ The UI path is canonicalized with
+  `eunomia_fs::paths::canonicalize` (DB-030, read-only reuse — the
+  crates untouched), so DB-031's aliasing (a symlink and its target
+  are one folder) falls out before any comparison, and an aliased
+  spelling of a pick (`…/sub/../picked`, or a real symlink) validates.
+  Both halves then key the canonical form with
+  `eunomia_fs::paths::path_key` — ONE folding rule (the round-1
+  review finding: a byte-exact session half beside a folded project
+  half would reject a case/NFD-differing spelling of a pick that the
+  project half accepts — safe, but inconsistent). Inherited edge,
+  recorded by the round-2 review: on a case-SENSITIVE volume under a
+  case-FOLDING rule (macOS APFS), a never-picked sibling differing
+  only in case folds onto a picked folder's key — DB-030's own
+  semantics question (the registered-project half shares it), not a
+  T-073 seam; `crates/**` is frozen for this task, so any tightening
+  belongs to a store/fs-side task. The
+  registered-project half asks
+  `eunomia_store::projects::find_by_path_key` — DB-015 keeps the key
+  unique across active AND archived rows, and an archived project is
+  still a registered project. The boundary is the exact folder:
+  a subfolder of a registered project, or of a pick, is NOT its
+  folder (SEC-003 allowlists folders, not trees). That exact-folder
+  rule binds UI-typed paths only: when `scan_start`/`scan_commit`/
+  `project_relink` land, folders the app itself discovered inside an
+  allowlisted root must not silently widen SEC-003 — that task adds
+  them through a deliberate, recorded rule (the round-1 P3 note).
+- _Two different rejections._ A path on neither half is
+  `E_VALIDATION` in the settings shape (`field`/`value`/`reason`,
+  value = the caller's own input echoed back — SEC-008 respected); a
+  path that cannot canonicalize gets the SAME rejection, not an OS
+  error: the dialog only returns existing folders and the repository
+  only stores canonical paths, so such a path cannot be on either
+  allowlist — "not allowlisted" is the honest answer whatever the OS
+  reason. A pick whose folder vanished between the dialog answer and
+  the bookkeeping is the other story: §10's `E_PROJECT_UNAVAILABLE`
+  row is exactly that fact, with the picked path in `params` and the
+  OS refusal in `details` — the first production consumer of
+  `AppError::with_os_error` (its dead-code allow removed).
+- _The dialog itself is an injected seam._ The command's whole flow
+  lives in `dialog_pick_folder_with(app, pick)`; production wires
+  `plugin_pick_folder` (`app.dialog().file().blocking_pick_folder()`,
+  SEC-001 — the webview has no `dialog:` permission, which is what
+  lets this command be the single UI road to the picker). The plugin
+  call parks its thread for as long as the dialog is open, so it —
+  and the fresh pick's canonicalization — run in `spawn_blocking`
+  (SYS-001). The pick is canonicalized BEFORE it is remembered and
+  answered, so the allowlist only holds canonical forms and the wire
+  answer is the canonical path string (DB-030 — the form the future
+  `project_add_manual`/`scan_start` will register); cancel answers
+  `None` and grows nothing. The plugin call is the recorded
+  untestable seam (the `app_open_data_folder` opener treatment); the
+  wiring is pinned by the registration test. A `dialog_error_to_app_error`
+  fallback (the opener mapping's shape) takes the plugin error's
+  rendered text — the only reachable typed error is
+  `tauri_plugin_fs::Error`, not nameable without adding a
+  `tauri-plugin-fs` edge this command does not need; no new §10 code
+  was introduced. The non-desktop twin of the picker answers the
+  fallback (the plugin's folder picker is a desktop API; the
+  `running_as_root` platform-twin pattern).
+- _The check is session-first on purpose._
+  `session_paths::validate_ui_path(app, path) -> Result<PathBuf,
+AppError>` is the reusable boundary the upcoming path-consuming
+  commands call; it returns the canonical form so a consumer never
+  canonicalizes twice. The session half is consulted BEFORE the
+  database half: the pick side needs no `Db`, so a picked folder
+  validates in recovery mode too, where the picker itself still
+  works. A path on neither half in that mode answers the recorded
+  `NoDatabase` fallback (the honest state answer — every real
+  consumer needs the database for its own operation and fails before
+  validation would run). The command's failures log through a new
+  `logging::dialog_pick_folder_failed` facade edge (§10's every-error
+  rule); a successful pick logs nothing — the allowlist is
+  in-memory bookkeeping, and the future `project.added` journal entry
+  is the flow's real event.
+- _Tests._ 9 IPC-suite tests over the mock runtime (the command
+  driven through the picker seam, the check driven directly — it is
+  a library function consumed by future commands, not a command):
+  the card's criterion (an existing unpicked unregistered folder and
+  a non-canonicalizable path both rejected with the full
+  `E_VALIDATION` envelope), the session half end to end (canonical
+  answer, dedupe, validation, dot-segment and real-symlink aliases
+  passing, the pick's subfolder rejected — the session-side twin of
+  the project boundary, pinned by the round-1 review), the empty and
+  blank path rejections, the project half (active + archived passing,
+  the subfolder boundary), cancel (null, nothing remembered), the
+  vanish race (`E_PROJECT_UNAVAILABLE` + OS facts), the
+  recovery-mode ordering, the missing-state honesty fallbacks, and
+  the registration pin; the logging edge has its facade test
+  (`the_dialog_failure_line_carries_the_code_and_payload`);
+  2 unit tests pin the session state, 2 the command's error
+  mappings. `src/bindings.ts` regenerated (`dialogPickFolder`:
+  `Promise<string | null>`).
+- _Known limitation, recorded against D-086._ The wire answer is the
+  canonical path as a lossy `String`: a pick whose folder name is not
+  valid UTF-8 (possible on Linux) reaches the UI with U+FFFD
+  placeholders and can never validate on the way back — the picker
+  succeeds, the folder stays unusable. D-086 left the non-UTF-8
+  policy to the add/scan seam; whichever task builds that seam either
+  rejects non-UTF-8 picks loudly there or widens the answer, and this
+  entry is the pointer. The criterion test pins the rejection at the
+  library boundary (`validate_ui_path`) because no registered command
+  takes a folder path yet — the first consuming command
+  (`project_add_manual`) must add the IPC-level twin (the round-1
+  P3 note).

@@ -313,8 +313,8 @@ impl AppError {
     /// the portable kind, the message) to the error — the §10 requirement
     /// that an OS error reaches the UI and the log with its code. Which
     /// `ErrorCode` the failure maps to stays the caller's decision (see
-    /// the module docs for why there is no `From`).
-    #[allow(dead_code)] // consumed by the first fallible command task; tested today
+    /// the module docs for why there is no `From`). Consumed by
+    /// `dialog_pick_folder`'s vanish-race mapping since T-073 (D-100).
     pub(crate) fn with_os_error(mut self, error: &std::io::Error) -> Self {
         self.details = Some(ErrorDetails::from_io_error(error));
         self

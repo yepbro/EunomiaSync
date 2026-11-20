@@ -737,6 +737,30 @@ pub(crate) fn data_folder_open_failed(error: &AppError) {
     );
 }
 
+/// The `dialog_pick_folder` command failed (T-073, §10's every-error
+/// rule): the payload is the error's own §7.10 vocabulary, in the
+/// `activity_list_failed` shape — a vanished pick carries
+/// `E_PROJECT_UNAVAILABLE` with the picked path in `params` and the
+/// OS refusal in `details`; a plugin failure carries the fallback
+/// code with the plugin's text. `error` level: the folder picker is
+/// the only road into the add-project flow, and the log line is the
+/// failure's durable half. A *successful* pick deliberately logs
+/// nothing: the session allowlist is in-memory bookkeeping, not an
+/// event the journal or the file log records (reading the journal to
+/// log the picker would be the `activity_list` self-feed, and the
+/// future `project.added` entry covers the flow's real event).
+pub(crate) fn dialog_pick_folder_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::system",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "the folder picker command failed"
+    );
+}
+
 /// A file operation on a project's library file — the SEC-008 core
 /// event. The upcoming variant, sync and backup tasks log through this
 /// helper: it takes the operation code, the file's path and the numeric
@@ -1988,6 +2012,44 @@ mod tests {
         assert!(
             log.contains("the app_info command failed"),
             "the line must say what failed, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_dialog_failure_line_carries_the_code_and_payload() {
+        // The picker command's §10 edge: a vanish-race failure
+        // (E_PROJECT_UNAVAILABLE, the picked path in params, the OS
+        // refusal in details) reaches the log line with its code
+        // literal — the `app_info_failed` pin shape, applied to the
+        // T-073 command. A successful pick logs nothing; that half is
+        // structural (no tracing call exists on the success path).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut vanished = AppError::new(crate::errors::ErrorCode::ProjectUnavailable);
+        vanished
+            .params
+            .insert("path".to_owned(), "/repos/gone".to_owned());
+        let vanished = vanished.with_os_error(&std::io::Error::from_raw_os_error(2));
+
+        tracing::subscriber::with_default(subscriber, || {
+            dialog_pick_folder_failed(&vanished);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("code=\"E_PROJECT_UNAVAILABLE\""),
+            "the line must carry its code literal, got: {log}"
+        );
+        assert!(
+            log.contains("the folder picker command failed"),
+            "the line must say what failed, got: {log}"
+        );
+        assert!(
+            log.contains("/repos/gone") && log.contains("os_code=Some(2)"),
+            "the params and the OS refusal travel on the line (SEC-008: paths may), got: {log}"
         );
         drop(temp);
     }

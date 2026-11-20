@@ -43,6 +43,12 @@ pub(crate) mod recovery;
 // (D-037); every later command task extends this module.
 pub(crate) mod commands;
 
+// The SEC-003 session allowlist and the reusable UI-path check (spec
+// §5.6, T-073): the "picked in this session" half of the trust rule
+// behind `dialog_pick_folder`, and the validator the upcoming
+// path-consuming commands call at their boundary.
+pub(crate) mod session_paths;
+
 // The Markdown preview renderer (spec §7.10 Library module
 // `markdown_preview`, §5.3, SEC-005, D-15; T-056): pulldown-cmark
 // parse → raw-HTML escape → ammonia sanitize, editor-facing only —
@@ -68,9 +74,10 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // `activity_list` (T-027), the Settings module's
         // `settings_get`/`settings_set` (T-030), the System
         // module's `app_info` (T-031), the Library module's
-        // `markdown_preview` (T-056) and the Projects module's
-        // `projects_list` (T-072). Every later command
-        // task (dialog, library, …) lists its own §7.10 names here.
+        // `markdown_preview` (T-056), the Projects module's
+        // `projects_list` (T-072) and the System module's
+        // `dialog_pick_folder` (T-073). Every later command
+        // task (library, …) lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
         // commands that take an `AppHandle`), so the registration pins
         // the concrete runtime of the shipped app; `markdown_preview`
@@ -82,6 +89,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::db_backups_list::<tauri::Wry>,
             commands::db_restore_backup::<tauri::Wry>,
             commands::db_recreate::<tauri::Wry>,
+            commands::dialog_pick_folder::<tauri::Wry>,
             commands::markdown_preview,
             commands::projects_list::<tauri::Wry>,
             commands::settings_get::<tauri::Wry>,
@@ -113,8 +121,8 @@ pub fn run() {
     // Rust only — the webview gets neither their JavaScript packages nor
     // any `opener:`/`dialog:`/`updater:` permission, so their commands are
     // unreachable from the UI. `capabilities/default.json` stays
-    // plugin-free and only application commands (later
-    // `dialog_pick_folder`, `app_open_data_folder`, `update_*`) cross the
+    // plugin-free and only application commands (`dialog_pick_folder`,
+    // `app_open_data_folder`, later `update_*`) cross the
     // IPC boundary. `config_tests.rs` pins the exact plugin set and the
     // registration order below.
     let tauri_builder = tauri::Builder::default();
@@ -142,8 +150,8 @@ pub fn run() {
         }));
 
     // `dialog` (SEC-001, SEC-003): the native folder picker runs in Rust
-    // behind the `dialog_pick_folder` app command (upcoming task), so the
-    // picked path can be tracked per session and every other path stays
+    // behind the `dialog_pick_folder` app command (T-073), so the
+    // picked path is tracked per session and every other path stays
     // registered-project-only. The webview has no `dialog:` permission.
     let tauri_builder = tauri_builder.plugin(tauri_plugin_dialog::init());
 
@@ -196,6 +204,14 @@ pub fn run() {
             // resolver call) is what keeps the IPC tests on temp
             // roots instead of the real user data directory.
             app.manage(data_dirs::DataRoot(data_dir.clone()));
+
+            // The SEC-003 session allowlist (§5.6, T-073): the folders
+            // the user picks in the system dialog this session. Also
+            // managed before anything that could fail — the state is
+            // infallible, and `dialog_pick_folder` must answer in any
+            // mode (recovery included: no database is involved in
+            // opening a picker).
+            app.manage(session_paths::SessionPaths::new());
 
             // Machine-level config (spec §5.8, SYS-011…013): read or
             // create `config.toml` from the data directory — before

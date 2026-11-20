@@ -76,6 +76,32 @@ export const commands = {
 	 */
 	dbRecreate: (options?: InvokeOptions) => __TAURI_INVOKE<null>("db_recreate", undefined, options),
 	/**
+	 *  Opens the system folder picker from Rust (§7.10 System module
+	 *  `dialog_pick_folder`, the D-009 fixed name; §5.6) and remembers
+	 *  the picked folder for the session: the answer is the picked path
+	 *  in its canonical form (DB-030 — the form the future
+	 *  `project_add_manual`/`scan_start` will register and probe), or
+	 *  `None` when the user cancelled, in which case nothing is
+	 *  remembered.
+	 * 
+	 *  SEC-001: the dialog plugin is invoked from this Rust command only
+	 *  — the webview holds no `dialog:` permission
+	 *  (`capabilities/default.json` stays plugin-free), so this command
+	 *  is the single path from the UI to the native picker. That is
+	 *  exactly what lets SEC-003 work: every folder the UI may later name
+	 *  passed through here (and landed in the session allowlist) or is a
+	 *  registered project — [`session_paths::validate_ui_path`] enforces
+	 *  the pair for every path the UI sends.
+	 * 
+	 *  The plugin call is the one untestable seam here (it opens a real
+	 *  desktop dialog; the same treatment `app_open_data_folder` gives
+	 *  its opener call): the whole flow lives in
+	 *  [`dialog_pick_folder_with`] behind the `pick` parameter, the
+	 *  production seam is [`plugin_pick_folder`], and the wiring is
+	 *  pinned textually (the registration pin in `ipc_tests.rs`).
+	 */
+	dialogPickFolder: (options?: InvokeOptions) => __TAURI_INVOKE<string | null>("dialog_pick_folder", undefined, options),
+	/**
 	 *  Renders the editor's Markdown into sanitized preview HTML with the
 	 *  Markdown warnings alongside (§7.10 Library module `markdown_preview`,
 	 *  the D-009 name registry; SEC-005, D-15, §7.3 LIB-002/009…016).

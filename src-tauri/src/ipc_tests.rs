@@ -72,6 +72,21 @@
 //! column-field set including the D-09 unavailable flag + reason, the
 //! empty-database answer, the no-database honesty pin, the
 //! corrupt-cell fallback envelope, and the registration pin.
+//!
+//! The `dialog_pick_folder` tests (T-073, §7.10 System module, §5.6
+//! SEC-001/SEC-003) drive the command body through its picker seam
+//! (`dialog_pick_folder_with`) — the plugin call itself opens a real
+//! desktop dialog and is the recorded untestable seam (the
+//! `app_open_data_folder` treatment), pinned as wiring by the
+//! registration test. The SEC-003 check (`validate_ui_path`) is
+//! driven directly: it is the reusable boundary the upcoming
+//! path-consuming commands call, not a command of its own. Together
+//! they pin the card's criterion — a path from nowhere is rejected —
+//! plus both allowlist halves (session pick, registered project in
+//! either state), the canonical-form matching (an aliased spelling of
+//! a pick passes), the exact-folder boundary (a project's subfolder
+//! is NOT the project), cancel (null, nothing remembered), the
+//! vanish race, and the honest no-database/missing-state answers.
 
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -2499,5 +2514,428 @@ fn the_markdown_preview_command_is_registered_with_the_specta_builder() {
         lib.matches("commands::markdown_preview").count(),
         1,
         "lib.rs must register the `markdown_preview` command exactly once (§7.10)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `dialog_pick_folder` + the SEC-003 check (T-073, §7.10 System
+// module, §5.6 SEC-001/SEC-003, D-009)
+// ---------------------------------------------------------------------------
+
+/// A mock app in the healthy state the picker and the SEC-003 check
+/// serve: a real `Db` over a fresh temp root and the session allowlist
+/// managed — the state the `setup` hook produces on a normal launch.
+/// No command needs registration: the tests drive the command body
+/// (`dialog_pick_folder_with`) and the validator directly, because the
+/// production picker seam opens a real desktop dialog (module docs).
+fn sec003_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    app.manage(crate::session_paths::SessionPaths::new());
+    (temp, app)
+}
+
+/// Drives `dialog_pick_folder_with` over `app` with a test picker
+/// answer — the seam the plugin half cannot be (module docs). Errors
+/// are serialized into the same JSON value shape the IPC error
+/// assertions read.
+fn pick_folder_via_dialog(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    picker_answer: Result<Option<std::path::PathBuf>, crate::errors::AppError>,
+) -> Result<Option<String>, serde_json::Value> {
+    match tauri::async_runtime::block_on(crate::commands::dialog_pick_folder_with(
+        app.handle().clone(),
+        move |_app| picker_answer,
+    )) {
+        Ok(picked) => Ok(picked),
+        Err(error) => Err(serde_json::to_value(&error).expect("AppError must serialize")),
+    }
+}
+
+/// Drives the SEC-003 check (`validate_ui_path`) over `app`, in the
+/// same JSON-error shape.
+fn validate_ui_path_over(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    path: &str,
+) -> Result<std::path::PathBuf, serde_json::Value> {
+    match tauri::async_runtime::block_on(crate::session_paths::validate_ui_path(app.handle(), path))
+    {
+        Ok(canonical) => Ok(canonical),
+        Err(error) => Err(serde_json::to_value(&error).expect("AppError must serialize")),
+    }
+}
+
+/// How many folders this app's session allowlist holds.
+fn session_len(app: &tauri::App<tauri::test::MockRuntime>) -> usize {
+    app.state::<crate::session_paths::SessionPaths>()
+        .inner()
+        .len()
+}
+
+/// Seeds one project whose stored identity is the REAL canonical
+/// identity of `repo` — the SEC-003 project half looks the folder up
+/// by the key computed from the UI path, so unlike the T-072 column
+/// fixtures (display-only keys) this seeding must register the key the
+/// validator computes. Returns the row id.
+fn seed_registered_project(
+    database: &crate::db::Db,
+    repo: &std::path::Path,
+    name: &'static str,
+    label: &'static str,
+    color: &'static str,
+) -> String {
+    let path = repo.display().to_string();
+    let path_key = eunomia_fs::paths::canonical_path_key(repo)
+        .expect("the freshly created repository folder must canonicalize");
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        let new = column_project(&path, &path_key, name, label, color);
+        eunomia_store::projects::create(tx, &new)
+            .map(|project| project.id)
+            .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("seeding a project through the repository must work")
+}
+
+#[test]
+fn a_foreign_path_is_rejected_by_the_sec003_check() {
+    // The card's acceptance criterion, driven at the boundary the
+    // future path-consuming commands will call: a path that was NOT
+    // picked in the dialog this session and is NOT a registered
+    // project is rejected — whether the folder exists on disk (a
+    // neighbor anyone could name) or not at all (a path that cannot
+    // canonicalize cannot be on either allowlist: the dialog only
+    // returns existing folders, the repository only stores canonical
+    // paths). The rejection is the §7.10 E_VALIDATION envelope naming
+    // the field, the sent value and the reason.
+    let (temp, app) = sec003_app();
+    let foreign = temp.path().join("foreign");
+    std::fs::create_dir_all(&foreign).expect("the foreign fixture folder must be creatable");
+    assert_eq!(session_len(&app), 0, "nothing was picked in this session");
+
+    for (label, sent) in [
+        ("an existing unpicked folder", foreign.display().to_string()),
+        (
+            "a path that cannot canonicalize",
+            "/definitely/not/here/eunomia-t073".to_owned(),
+        ),
+    ] {
+        let error = validate_ui_path_over(&app, &sent)
+            .err()
+            .unwrap_or_else(|| panic!("{label} must be rejected"));
+        assert_eq!(
+            error["code"],
+            serde_json::json!("E_VALIDATION"),
+            "{label}: {error}"
+        );
+        assert_eq!(
+            error["message_key"],
+            serde_json::json!("errors.validation"),
+            "{label}: {error}"
+        );
+        assert_eq!(
+            error["params"],
+            serde_json::json!({
+                "field": "path",
+                "value": sent,
+                "reason": "must be a registered project or a folder picked in the \
+                           dialog this session (SEC-003)",
+            }),
+            "{label}: the params name the field, the sent value and the reason"
+        );
+        assert_eq!(
+            error["details"],
+            serde_json::json!(null),
+            "{label}: {error}"
+        );
+    }
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_picked_folder_is_remembered_and_passes_the_check() {
+    // The session half of SEC-003 end to end: the dialog answer is
+    // canonicalized, remembered (duplicates collapse), returned to the
+    // UI as the canonical path, and validates — including through an
+    // aliased spelling, because the check compares canonical forms.
+    // The alias has two grades: a dot-segment spelling (`…/sub/../
+    // picked`, resolved by the canonicalization itself) and, where
+    // the platform can create one, a real symlink — DB-031's rule
+    // (a link and its target are one folder) exercised by the
+    // filesystem feature it names.
+    let (temp, app) = sec003_app();
+    let picked = temp.path().join("picked");
+    std::fs::create_dir_all(&picked).expect("the picked fixture folder must be creatable");
+    std::fs::create_dir_all(temp.path().join("sub"))
+        .expect("the alias intermediate folder must be creatable");
+    let canonical = eunomia_fs::paths::canonicalize(&picked)
+        .expect("the fresh fixture folder must canonicalize");
+
+    // Act: the user picks the folder — twice, to pin the dedupe.
+    let first = pick_folder_via_dialog(&app, Ok(Some(picked.clone())))
+        .expect("the pick must succeed")
+        .expect("a completed pick answers a path");
+    pick_folder_via_dialog(&app, Ok(Some(picked.clone()))).expect("the second pick must succeed");
+
+    // Assert: the answer is the canonical form, the list holds ONE
+    // entry, and the exact folder validates.
+    assert_eq!(first, canonical.display().to_string());
+    assert_eq!(session_len(&app), 1, "a repeated pick is one entry");
+    let validated = validate_ui_path_over(&app, &picked.display().to_string())
+        .expect("a picked folder passes the SEC-003 check");
+    assert_eq!(validated, canonical);
+
+    // A dot-segment spelling canonicalizes onto the same folder and
+    // passes too.
+    let dot_alias = temp.path().join("sub").join("..").join("picked");
+    let via_dots = validate_ui_path_over(&app, &dot_alias.display().to_string())
+        .expect("a dot-segment alias of a pick is the picked folder");
+    assert_eq!(via_dots, canonical);
+
+    // A real symlink is the same folder by DB-031 — tested where the
+    // platform can create one unprivileged (the `not_readable`
+    // fixture's cfg twin).
+    #[cfg(unix)]
+    {
+        let link = temp.path().join("link-to-picked");
+        std::os::unix::fs::symlink(&picked, &link).expect("the symlink fixture must be creatable");
+        let via_link = validate_ui_path_over(&app, &link.display().to_string())
+            .expect("a symlink to a picked folder is the picked folder (DB-031)");
+        assert_eq!(via_link, canonical);
+    }
+
+    // The boundary the project half pins for its rows holds for the
+    // session half too: a pick allowlists the exact folder, never the
+    // tree below it — a subfolder of the pick is rejected, exactly
+    // like a stranger.
+    let inner = picked.join("inner");
+    std::fs::create_dir_all(&inner).expect("the subfolder fixture must be creatable");
+    let error = validate_ui_path_over(&app, &inner.display().to_string())
+        .expect_err("a subfolder of a pick is not the pick");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn an_empty_or_blank_path_is_rejected_not_matched_loudly() {
+    // The degenerate inputs of a path field: an empty string and a
+    // blank one. Neither can canonicalize onto an allowlisted folder
+    // (canonicalize refuses them), so both are the same E_VALIDATION
+    // rejection — never a panic, and never a silent wildcard match an
+    // empty-key comparison might produce.
+    let (temp, app) = sec003_app();
+    for sent in ["", " "] {
+        let error = validate_ui_path_over(&app, sent)
+            .err()
+            .unwrap_or_else(|| panic!("{sent:?} must be rejected"));
+        assert_eq!(error["code"], serde_json::json!("E_VALIDATION"), "{error}");
+        assert_eq!(
+            error["params"]["value"],
+            serde_json::json!(sent),
+            "the sent value travels back: {error}"
+        );
+    }
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_registered_projects_folder_passes_the_check() {
+    // The registered-project half of SEC-003: the repository's own
+    // identity lookup (DB-015, active AND archived — an archived
+    // project is still registered) answers for the exact folder, and
+    // only for the exact folder: a subfolder of a registered project
+    // is NOT the project (SEC-003 allowlists folders, not trees).
+    let (temp, app) = sec003_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let alpha = repo_dir(temp.path(), "alpha");
+    seed_registered_project(&database, &alpha, "Alpha", "ALP", "red");
+    let beta = repo_dir(temp.path(), "beta");
+    let beta_id = seed_registered_project(&database, &beta, "Beta", "BET", "green");
+    // Beta is archived — §6.4 keeps the row, and DB-015 keeps the key
+    // unique across both states.
+    let beta_for_archive = beta_id.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::projects::archive(tx, &beta_for_archive)
+            .map(|_| ())
+            .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("archiving through the repository must work");
+
+    // The active project's folder validates.
+    let validated = validate_ui_path_over(&app, &alpha.display().to_string())
+        .expect("a registered project's folder passes the SEC-003 check");
+    assert_eq!(
+        validated,
+        eunomia_fs::paths::canonicalize(&alpha).expect("the fixture must canonicalize")
+    );
+    // The archived project's folder validates the same way.
+    validate_ui_path_over(&app, &beta.display().to_string())
+        .expect("an archived project is still a registered project");
+    // A subfolder of the registered project does not.
+    let inner = alpha.join("inner");
+    std::fs::create_dir_all(&inner).expect("the subfolder fixture must be creatable");
+    let error = validate_ui_path_over(&app, &inner.display().to_string())
+        .expect_err("a subfolder of a project is not the project");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    // And the session list stayed empty — registering is not picking.
+    assert_eq!(session_len(&app), 0);
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_cancelled_pick_answers_null_and_remembers_nothing() {
+    // §7.10: "returns the picked path (nothing on cancel)". The
+    // nothing is observable twice — the UI answer is null, and the
+    // session allowlist did not grow.
+    let (temp, app) = sec003_app();
+    let answer = pick_folder_via_dialog(&app, Ok(None)).expect("a cancelled pick is not an error");
+    assert_eq!(answer, None, "cancel answers null, not an empty string");
+    assert_eq!(
+        session_len(&app),
+        0,
+        "a cancelled pick is remembered for nobody"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_vanished_pick_answers_project_unavailable() {
+    // The vanish race the command documents: the dialog answered a
+    // folder that cannot be canonicalized afterwards — the typed
+    // E_PROJECT_UNAVAILABLE envelope with the picked path in params
+    // and the OS refusal in details, and nothing remembered.
+    let (temp, app) = sec003_app();
+    let vanished = temp.path().join("never-created");
+    let error = pick_folder_via_dialog(&app, Ok(Some(vanished.clone())))
+        .expect_err("a vanished pick must fail honestly");
+    assert_eq!(error["code"], serde_json::json!("E_PROJECT_UNAVAILABLE"));
+    assert_eq!(
+        error["message_key"],
+        serde_json::json!("errors.project_unavailable")
+    );
+    assert_eq!(
+        error["params"]["path"],
+        serde_json::json!(vanished.display().to_string())
+    );
+    assert!(
+        error["details"]["os_code"].is_number(),
+        "the OS refusal travels in details: {error}"
+    );
+    assert_eq!(
+        session_len(&app),
+        0,
+        "nothing is remembered for a vanished pick"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_session_half_answers_without_a_database() {
+    // Recovery mode (no `Db` managed): the picker still works — it
+    // needs no database — and the session half of the check still
+    // answers for what was picked. A path on NEITHER half gets the
+    // honest no-database fallback (the documented ordering), not a
+    // validation rejection: every real consumer of the check needs
+    // the database for its own operation.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(crate::session_paths::SessionPaths::new());
+    let picked = temp.path().join("picked");
+    std::fs::create_dir_all(&picked).expect("the picked fixture folder must be creatable");
+    let foreign = temp.path().join("foreign");
+    std::fs::create_dir_all(&foreign).expect("the foreign fixture folder must be creatable");
+
+    let answer = pick_folder_via_dialog(&app, Ok(Some(picked.clone())))
+        .expect("the picker works without a database")
+        .expect("the pick answered a path");
+    assert_eq!(
+        answer,
+        eunomia_fs::paths::canonicalize(&picked)
+            .expect("the fixture must canonicalize")
+            .display()
+            .to_string()
+    );
+    validate_ui_path_over(&app, &picked.display().to_string())
+        .expect("the session half needs no database");
+    let error = validate_ui_path_over(&app, &foreign.display().to_string())
+        .expect_err("a path on neither half must fail");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("NoDatabase"),
+        "the honest state answer, got {error}"
+    );
+}
+
+#[test]
+fn the_missing_session_state_answers_the_honest_fallback() {
+    // The uninitialized-app bug the state helpers answer honestly
+    // (the `data_root` pattern): a database without the session
+    // allowlist — `setup` manages the allowlist before anything that
+    // could fail, so this state cannot occur in a real launch. Both
+    // the pick bookkeeping and the check answer the recorded fallback
+    // with a diagnostic naming the state, never a panic.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    let picked = temp.path().join("picked");
+    std::fs::create_dir_all(&picked).expect("the picked fixture folder must be creatable");
+
+    let error = pick_folder_via_dialog(&app, Ok(Some(picked.clone())))
+        .expect_err("the pick bookkeeping must fail without the allowlist state");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("SessionPathsMissing"),
+        "the diagnostic names the state, got {error}"
+    );
+    let error = validate_ui_path_over(&app, &picked.display().to_string())
+        .expect_err("the check must fail without the allowlist state");
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("SessionPathsMissing")
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_dialog_pick_folder_command_is_registered_with_the_specta_builder() {
+    // The §7.10 System-module name (D-009's fixed registry), registered
+    // exactly once (the D-034 wiring-pin rationale) — the bindings
+    // carry `dialogPickFolder` to the frontend through it.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("commands::dialog_pick_folder").count(),
+        1,
+        "lib.rs must register the `dialog_pick_folder` command exactly once (§7.10, D-009)"
     );
 }
