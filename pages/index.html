@@ -18,7 +18,10 @@
   help modal (HLP-001…005: two-pane FAQ, article list + client-side
   search with <mark> highlights, toolbar "?" button + F1 per §11.3),
   about modal (UPD-005, REL-004: product info rows, dependency-license
-  demo list, simulated two-phase update check).
+  demo list, simulated two-phase update check),
+  project labels in the column headers (DB-041/042: a 1–6 character
+  label next to the color dot, the full name only in the tooltip and
+  a visually-hidden span for screen readers).
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
   (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-002…007 (scan) +
@@ -154,7 +157,8 @@
               >
                 <span class="proj-line">
                   <span class="proj-color" style="--c: #10b981" aria-hidden="true"></span>
-                  <span class="proj-name">EunomiaSync</span>
+                  <span class="proj-label">EUNOMI</span>
+                  <span class="proj-name visually-hidden">EunomiaSync</span>
                 </span>
                 <span class="proj-sub st-dirty"
                   ><span class="dot" aria-hidden="true"></span>unsynced changes</span
@@ -168,7 +172,8 @@
               >
                 <span class="proj-line">
                   <span class="proj-color" style="--c: #3b82f6" aria-hidden="true"></span>
-                  <span class="proj-name">yepbro/site</span>
+                  <span class="proj-label">YEPBR</span>
+                  <span class="proj-name visually-hidden">yepbro/site</span>
                 </span>
                 <span class="proj-sub">19 Nov, 09:14</span>
               </th>
@@ -180,7 +185,8 @@
               >
                 <span class="proj-line">
                   <span class="proj-color" style="--c: #8b5cf6" aria-hidden="true"></span>
-                  <span class="proj-name">quotameter</span>
+                  <span class="proj-label">QUOTA</span>
+                  <span class="proj-name visually-hidden">quotameter</span>
                 </span>
                 <span class="proj-sub st-warn">
                   <svg class="ic" viewBox="0 0 16 16" aria-hidden="true">
@@ -210,7 +216,8 @@
               >
                 <span class="proj-line">
                   <span class="proj-color" style="--c: #f59e0b" aria-hidden="true"></span>
-                  <span class="proj-name">task-id-mcp</span>
+                  <span class="proj-label">TASK-</span>
+                  <span class="proj-name visually-hidden">task-id-mcp</span>
                 </span>
                 <span class="proj-sub st-dirty"
                   ><span class="dot" aria-hidden="true"></span>unsynced changes</span
@@ -224,7 +231,8 @@
               >
                 <span class="proj-line">
                   <span class="proj-color" style="--c: #14b8a6" aria-hidden="true"></span>
-                  <span class="proj-name">utils/deja-vu</span>
+                  <span class="proj-label">UTILS</span>
+                  <span class="proj-name visually-hidden">utils/deja-vu</span>
                 </span>
                 <span class="proj-sub st-off">
                   <svg class="ic" viewBox="0 0 16 16" aria-hidden="true">
@@ -254,7 +262,8 @@
               >
                 <span class="proj-line">
                   <span class="proj-color" style="--c: #ec4899" aria-hidden="true"></span>
-                  <span class="proj-name">docktree</span>
+                  <span class="proj-label">DOCKT</span>
+                  <span class="proj-name visually-hidden">docktree</span>
                 </span>
                 <span class="proj-sub st-dirty"
                   ><span class="dot" aria-hidden="true"></span>unsynced changes</span
@@ -268,7 +277,8 @@
               >
                 <span class="proj-line">
                   <span class="proj-color" style="--c: #6366f1" aria-hidden="true"></span>
-                  <span class="proj-name">moli</span>
+                  <span class="proj-label">MOLI</span>
+                  <span class="proj-name visually-hidden">moli</span>
                 </span>
                 <span class="proj-sub st-dirty"
                   ><span class="dot" aria-hidden="true"></span>unsynced changes</span
@@ -282,7 +292,8 @@
               >
                 <span class="proj-line">
                   <span class="proj-color" style="--c: #64748b" aria-hidden="true"></span>
-                  <span class="proj-name">sandbox-cf</span>
+                  <span class="proj-label">SANDB</span>
+                  <span class="proj-name visually-hidden">sandbox-cf</span>
                 </span>
                 <span class="proj-sub st-warn">
                   <svg class="ic" viewBox="0 0 16 16" aria-hidden="true">

@@ -27,6 +27,8 @@
    F1 per §11.3),
    about modal (UPD-001…005, REL-004: product info rows, dependency-
    license demo list, simulated deterministic two-phase update check),
+   project labels in the column headers (DB-041/042: 1–6 character
+   label by the color dot, name in the tooltip),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -1529,7 +1531,7 @@
     [
       {
         name: 'EunomiaSync',
-        label: 'ES',
+        label: 'EUNOMI',
         color: '#10b981',
         description: 'The app itself, syncing these instructions into its own AGENTS.md.',
         path: '/home/brooks/projects/business/EunomiaSync',
@@ -1545,7 +1547,7 @@
       },
       {
         name: 'yepbro/site',
-        label: 'SITE',
+        label: 'YEPBR',
         color: '#3b82f6',
         description: 'Marketing site repo; agent rules live in the marked area of AGENTS.md.',
         path: '/home/brooks/projects/yepbro/site',
@@ -1561,7 +1563,7 @@
       },
       {
         name: 'quotameter',
-        label: 'QM',
+        label: 'QUOTA',
         color: '#8b5cf6',
         description: 'Metering dashboard; the target file is CLAUDE.md here.',
         path: '/home/brooks/projects/business/quotameter',
@@ -1577,7 +1579,7 @@
       },
       {
         name: 'task-id-mcp',
-        label: 'TIM',
+        label: 'TASK-',
         color: '#f59e0b',
         description: 'Task numbering MCP service (Docker, autostart).',
         path: '/home/brooks/projects/utils/task-id-mcp',
@@ -1593,7 +1595,7 @@
       },
       {
         name: 'utils/deja-vu',
-        label: 'DV',
+        label: 'UTILS',
         color: '#14b8a6',
         description: 'Past-session memory search; the folder is currently unavailable.',
         path: '/home/brooks/projects/utils/deja-vu',
@@ -1609,7 +1611,7 @@
       },
       {
         name: 'docktree',
-        label: 'DT',
+        label: 'DOCKT',
         color: '#ec4899',
         description: 'Container layout helper; instructions go to a separate project file.',
         path: '/home/brooks/projects/tools/docktree',
@@ -1641,7 +1643,7 @@
       },
       {
         name: 'sandbox-cf',
-        label: 'SB',
+        label: 'SANDB',
         color: '#64748b',
         description: 'Cloudflare experiments sandbox; the target file is not created yet.',
         path: '/home/brooks/projects/labs/sandbox-cf',
@@ -1881,6 +1883,7 @@
     const p = PROJECTS.get(psCurrentName)
     if (!p) return
     const name = psName.value.trim()
+    const oldName = psCurrentName
     p.name = name
     p.label = psLabel.value.trim()
     p.description = psDescription.value
@@ -1891,17 +1894,23 @@
     p.extraLocalPos = psExtraLocalPos.value
     p.extraProject = psExtraProject.checked
     p.extraProjectPos = psExtraProjectPos.value
-    if (name !== psCurrentName) {
-      PROJECTS.delete(psCurrentName)
+    if (name !== oldName) {
+      PROJECTS.delete(oldName)
       PROJECTS.set(name, p)
       psCurrentName = name
     }
-    /* Live header update: color dot, name and the pencil tooltip; the th
-       title (state + sync time) stays as-is */
+    /* Live header update: color dot, visible label (DB-041) and the
+       pencil tooltip. The full name is not on the visible line anymore:
+       it lives in the screen-reader span and in the tooltips (th title
+       state + sync time, pencil labels), so a rename updates those too. */
     const th = p.editBtn?.closest('th')
     if (th) {
       th.querySelector('.proj-color')?.style.setProperty('--c', p.color)
       th.querySelector('.proj-name').textContent = name
+      th.querySelector('.proj-label').textContent = p.label
+      if (name !== oldName && th.title.startsWith(oldName)) {
+        th.title = name + th.title.slice(oldName.length)
+      }
       p.editBtn.title = `Edit project — ${name}`
       p.editBtn.setAttribute('aria-label', `Edit project — ${name}`)
     }

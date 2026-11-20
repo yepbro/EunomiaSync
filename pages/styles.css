@@ -10,7 +10,8 @@
    § 7.8 HLP-001…005 (help modal: two-pane FAQ, article list +
    client-side search with <mark> highlights, §11.3 F1), § 7.9
    UPD-001…005 (About modal: info rows, license expander, simulated
-   update check, REL-004),
+   update check, REL-004), DB-041/042 (project labels in the column
+   headers),
    UI-001, UI-011, UI-012, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
@@ -359,7 +360,9 @@ body {
   block-size: 28px;
 }
 
-/* ----- Project column headers (MAIN-028: state as icon + text) ----------
+/* ----- Project column headers (MAIN-028: state as icon + text; DB-041/042:
+     a 1–6 character label next to the color, the full name only in the
+     tooltip — kept also as a visually-hidden span for screen readers) ----
      NB: `th` must keep its table-cell display (flex on the cell itself
      breaks the table layout); the inner spans provide the two lines. --- */
 
@@ -384,6 +387,19 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
+}
+
+/* Short 1–6 character label next to the color dot (DB-041/042): the
+   full name moved to the th tooltip; the ~52px cap is the hint of the
+   6-character label limit */
+.proj-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  max-inline-size: 52px;
 }
 
 .proj-sub {
