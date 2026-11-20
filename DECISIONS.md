@@ -8286,3 +8286,154 @@ macro are meant to turn it red). The brace form is the same macro,
 rustfmt-stable, and not a spelling the pin matches; the reason is
 stated at both call sites. (The paren form of the panic-message
 strings is unaffected — only the macro-invocation spelling matters.)
+
+### D-103 — `project_add_manual`: the repo-root offer behind a confirm flag, typed non-add outcomes instead of error codes, the pre-generated D-29 tie-break id, and the §6.9 write warning as response data — 2026-11-20
+
+Problem: T-074 turns §7.10's `project_add_manual` into the first
+path-consuming command (PRJ-001/003/004/010/012, scenario S1). Six
+points were open: (1) what PRJ-003's "the app offers the repository
+root" means on the wire — a silent re-registration of a folder the
+user did not pick, or a response the UI turns into a question; (2)
+which §10 code a duplicate add is — or whether it is an error at all
+(the card says a typed "message", not a 500-shaped refusal); (3)
+D-29's tie-break hashes "the project ID", but the store's `create`
+mints the row id internally and `crates/**` is frozen; (4) where
+§6.9's add-time write-access warning lives, given the check runs
+before any target file exists; (5) how a confirmed offer can pass
+SEC-003 when the offered root is app-derived, not dialog-picked
+(D-100's exact-folder rule); (6) the wire shape of a response with
+four meanings.
+
+Solution: `project_add_manual(path, accept_repo_root: Option<bool>)
+-> ProjectAddResult` in `commands.rs`, registered in
+`collect_commands!`, plus a `logging::project_add_failed` facade edge
+(the follow-up D-096 recorded for the Projects module's write
+commands).
+
+- _The offer is a response, confirmed by re-sending the pick._ A
+  subfolder pick answers the `"repo_root_offered"` arm with the
+  canonical root `find_git_root` resolved (nearest root wins, D-06)
+  and writes nothing; the UI's confirm re-sends the SAME picked path
+  with `accept_repo_root: true`, and the command re-derives the root
+  before adding. That keeps SEC-003's letter intact — the allowlist
+  still holds exactly what the dialog chose, no app-derived path is
+  remembered (D-100's rule that discovered folders must not silently
+  widen the allowlist), and the confirm is idempotent (a replay hits
+  the duplicate path). A silent auto-add was rejected: registering a
+  different folder than the one the user picked is exactly the
+  surprise G5-style consent exists for.
+- _Non-add outcomes are typed answers, not error codes._
+  `duplicate_active` (the "message is shown" case) and
+  `archived_duplicate` (the restore offer, carrying the id T-109's
+  `project_restore` will take) are success-shaped results: §10 has no
+  duplicate row, the DB-015 conflict is a fact about the user's
+  folder, and an error envelope would invite a "fix your input"
+  message for a correct input (the D-096 refusal-not-500 shape). The
+  duplicate check runs inside the operation's own transaction
+  (`find_by_path_key`, either state), so the create cannot race past
+  it (one connection, D-037); the refusal writes nothing — no row, no
+  journal entry, the card's "the DB did not change" pinned by test.
+- _The root lookup keeps D-090's split._ `NoGitEntry` is `E_NOT_A_REPO`
+  (§10's row); a refused probe or canonicalization is
+  `E_PROJECT_UNAVAILABLE` with the walked path in `params` and the OS
+  refusal in `details` — "could not check" is not "checked and
+  absent", and the user actions differ.
+- _The name/label derivation and its recorded edge._ The name defaults
+  to the root's folder name through `validate_name` (§6.9: trim, 1–100
+  code points), the label to `default_label` + `validate_label`
+  (DB-042). The `project_validators` counterexample — a control-
+  character prefix deriving an unstorable label — surfaces as an
+  `E_VALIDATION` field envelope, and the filesystem root itself (no
+  file name) answers the same way: the app cannot register a nameless
+  row the schema CHECKs would reject.
+- _One transaction: duplicate check, defaults copy, color, create,
+  journal (D-051)._ Everything the operation writes happens in one
+  `Db::run`: the DB-015 check, the four `default.*` reads (PRJ-012:
+  the copy is atomic with the create — a concurrent `settings_set`
+  cannot split them), the D-29 color over the ACTIVE projects'
+  colors, `create` (the repository appends `sort_order`), and the
+  `project.added` entry — info/user/ok, entity project, no details
+  (paths ride `Details::File` for file writes only). The
+  `E_SYNC_RUNNING` guard of SYS-005 does not apply: that rule lists
+  the project-_editing_ commands and no sync writer exists yet.
+- _The D-29 tie-break id is a pre-generated sibling._ `create` mints
+  its own row id and the store is frozen, so the tie-break hashes a
+  fresh UUIDv7 generated in the transaction. Both ids are fresh at
+  decision time — a re-add gets a new row id either way, which is the
+  determinism D-29's parenthetical asks of a decision point — and the
+  divergence is confined to the full-palette tie (≥12 active
+  projects). If the store ever grows an id-taking create, wiring the
+  row's own id in is a one-line change the color tests would not
+  notice (they pin the count-0 rule, not tie values).
+- _The write-access warning is response data, post-commit._ §6.9:
+  "Write access is checked when adding (warning)" — the probe
+  (`check_write_access` over the root's future target file) runs
+  AFTER the transaction on the blocking pool (a dead drive delays
+  only this response, never the one database lock — the D-096 probe
+  order), and the D-094 verdicts travel as
+  `write_access_warning: "folder_not_writable" | "file_read_only"`
+  on the added answer; the project stays registered. A refused probe
+  answers `None` — "could not check" is not "no rights" (D-090), and
+  the sync preflight re-checks where a refusal is an
+  `E_NO_WRITE_ACCESS` skip.
+- _The response is a discriminant struct, not a tagged enum._
+  `ProjectAddResult { outcome, project?, offered_root?, existing? }`
+  in the `ActivityEntry` house shape: closed vocabularies as strings,
+  wire primitives only, the arms as `Option` fields (no DB type
+  crosses the boundary). `sort_order` is a saturating `u32` (the
+  D-049 specta rule). `eunomia-core` joined `src-tauri/Cargo.toml`
+  for `pick_color` and the validators — an edge, not a version (the
+  D-096 `eunomia-fs` precedent), flagged to the orchestrator because
+  the manifest sits at the task's scope edge.
+- _Tests._ 10 IPC-suite tests over the mock runtime (picks through
+  the real T-073 dialog seam, real `.git` fixtures, seeding through
+  the repositories): the card's four AC cases by name — repository
+  root (every field: canonical path, name, DB-042 label, palette
+  color, defaults, sort_order 1→2, a different color on the second
+  add by D-29's count-0 rule, the exact one-entry journal),
+  subfolder (the offer writes nothing; the confirm registers the
+  root; the nearest-root rule over nested repositories), adding
+  again (the duplicate message and the archive offer with the
+  database proven unchanged), non-Git folder (the full `E_NOT_A_REPO`
+  envelope) — plus the SEC-003 gate ordering (an unpicked REAL
+  repository answers the gate's `E_VALIDATION`, never `E_NOT_A_REPO`
+  or an add; the lossy U+FFFD input is D-100's IPC-level twin), the
+  PRJ-012 copy from changed `default.*`, both §6.9 warning classes
+  over read-only fixtures (root-gated on the folder arm, the D-088
+  posture), the honest no-database answer, and the registration pin;
+  4 unit tests pin the pure seams (the two lookup mappings, the
+  derived-name edges, the warning classes). `src/bindings.ts`
+  regenerated: `projectAddManual`,
+  `ProjectAddResult`/`AddedProject`/`ExistingProject`.
+- _Round-1 review fixes (deepseek-v4.1-flash; 3×P2, 6×P3, all
+  applied)._ (1) The write-access probe now targets the file the
+  project's scheme actually writes — `target_file_name(scheme,
+base_name)`, so scheme C probes `<STEM>.project.md` and stays silent
+  about a main file it never touches (was: `base_name`, mis-targeting
+  every scheme-C project both ways); pinned by two scheme-C fixtures
+  (read-only target warns, read-only main file does not). (2) The
+  D-100 non-UTF-8 seam resolved at this command: `validate_ui_path`'s
+  canonicalize-failure rejection names the encoding ("the folder name
+  is not valid UTF-8 … rename the folder") when the sent text carries
+  U+FFFD, instead of the false "not picked" sentence for a folder that
+  WAS picked — and the earlier synthetic U+FFFD test arm (a path that
+  never existed, vacuously passing) is replaced by a real Linux
+  non-UTF-8 fixture driven through the dialog seam. (3) The stale
+  `#[allow(dead_code)]` and "no production caller" note dropped from
+  `validate_ui_path` — this command is that caller. Plus the P3s: a
+  `DuplicatePathKey` from `create` (the unreachable race) now
+  converges to the typed duplicate answer instead of the
+  read-command fallback under a retry-inviting code; PRJ-012's DEF-005
+  half is pinned (re-seeded defaults leave the stored row unchanged);
+  the confirm replay and the inner-root-picked-directly branches are
+  pinned; `logging::project_add_failed` has its facade test;
+  `managed_db` resolves before the offer branch so recovery mode
+  answers `NoDatabase` consistently for a subfolder pick too; the
+  canonicalization comment no longer overstates the gate's guarantee.
+- _Round-2 review (hy4-flash-free: 0×P0/P1/P2, 1×P3, applied)._ The
+  command's `E_VALIDATION` arm for D-079's counterexample — a legal
+  repository name whose DB-042 derivation is an unstorable label —
+  was implemented but unpinned; a Unix-gated IPC test now drives a
+  control-named `.git` folder through the dialog seam and asserts the
+  envelope names the `label` field with the derived spelling, leaving
+  the database untouched.

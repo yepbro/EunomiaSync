@@ -87,6 +87,23 @@
 //! a pick passes), the exact-folder boundary (a project's subfolder
 //! is NOT the project), cancel (null, nothing remembered), the
 //! vanish race, and the honest no-database/missing-state answers.
+//!
+//! The `project_add_manual` tests (T-074, §7.10 Projects module, §7.1
+//! PRJ-001/003/004/010/012, scenario S1) drive the add flow end to
+//! end over the mock runtime: the picks go through the T-073 dialog
+//! seam (so SEC-003's session half is the real production path), the
+//! repositories are real `.git` fixtures, and the seeding helpers of
+//! the sections above write through the repositories the command
+//! itself uses. The card's four acceptance cases are pinned by name —
+//! repository root, subfolder (the PRJ-003 offer plus its
+//! `accept_repo_root` confirm, and the nearest-root rule), adding
+//! again (the duplicate message and the archive-restore offer, with
+//! the database proven unchanged), and the non-Git folder
+//! (`E_NOT_A_REPO`) — plus the SEC-003 gate ordering (a foreign
+//! folder never reaches the `.git` check), the PRJ-012 copy from
+//! changed `default.*` settings, the §6.9 write-access warning over
+//! read-only fixtures, the honest no-database answer, and the
+//! registration pin.
 
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -2937,5 +2954,745 @@ fn the_dialog_pick_folder_command_is_registered_with_the_specta_builder() {
         lib.matches("commands::dialog_pick_folder").count(),
         1,
         "lib.rs must register the `dialog_pick_folder` command exactly once (§7.10, D-009)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `project_add_manual` (T-074, §7.10 Projects module, §7.1
+// PRJ-001/003/004/010/012, §6.9, §8 S1, §5.6 SEC-003, DB-015/DB-030/
+// DB-042, D-07/D-08/D-29)
+// ---------------------------------------------------------------------------
+
+/// A mock app with `project_add_manual` registered over a fresh
+/// database and the SEC-003 session allowlist managed — the
+/// healthy-app state the add flow serves (the `sec003_app` shape plus
+/// the command).
+fn add_manual_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::project_add_manual
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    app.manage(crate::session_paths::SessionPaths::new());
+    (temp, app)
+}
+
+/// Invokes `project_add_manual` with the given picked `path` and the
+/// `acceptRepoRoot` wire value (`null` omitted is the plain call),
+/// deserializing the success payload into the typed DTO.
+fn invoke_project_add_manual(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    path: &str,
+    accept_repo_root: serde_json::Value,
+) -> Result<crate::commands::ProjectAddResult, serde_json::Value> {
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request(
+            "project_add_manual",
+            serde_json::json!({ "path": path, "acceptRepoRoot": accept_repo_root }),
+        ),
+    );
+    match response {
+        Ok(payload) => Ok(payload
+            .deserialize::<crate::commands::ProjectAddResult>()
+            .expect("the success payload must deserialize into the DTO")),
+        Err(error) => Err(error),
+    }
+}
+
+/// The pick half of every add test: the folder goes through the real
+/// dialog seam (`dialog_pick_folder_with`), so the session allowlist
+/// holds exactly what a production pick would leave — the canonical
+/// form the SEC-003 gate then accepts.
+fn pick_folder(app: &tauri::App<tauri::test::MockRuntime>, folder: &std::path::Path) -> String {
+    pick_folder_via_dialog(app, Ok(Some(folder.to_path_buf())))
+        .expect("the pick must succeed")
+        .expect("a completed pick answers a path")
+}
+
+/// Every project row, read through the repository the command writes
+/// (the seeding path's store twin) — what the "database unchanged"
+/// assertions count and inspect.
+fn stored_projects(database: &crate::db::Db) -> Vec<eunomia_store::projects::Project> {
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::projects::list(tx, eunomia_store::projects::ListScope::All)
+            .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("reading the projects through the repository must work")
+}
+
+/// Archives a project through the repository (§6.4) — the state the
+/// DB-015 restore offer answers from.
+fn archive_project(database: &crate::db::Db, id: String) {
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::projects::archive(tx, &id)
+            .map(|_| ())
+            .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("archiving through the repository must work")
+}
+
+/// Seeds one §6.5 setting through the store — the PRJ-012 test
+/// changes the `default.*` keys the new project copies.
+fn seed_setting(
+    database: &crate::db::Db,
+    key: eunomia_store::settings::SettingKey,
+    value: eunomia_store::settings::SettingValue,
+) {
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        // The closure is `FnMut` (the executor may replay it on a busy
+        // retry, D-050), so the value is cloned per attempt rather
+        // than consumed.
+        eunomia_store::settings::set(tx, key, value.clone())
+            .map_err(crate::commands::settings_write_to_app_error)
+    }))
+    .expect("seeding a setting through the store must work");
+}
+
+#[test]
+fn project_add_manual_registers_a_repository_root_with_all_fields_and_the_journal() {
+    // AC case 1 of the card ("repository root"): a picked repository
+    // root is registered with every field the entry carries — the
+    // canonical path (DB-030), the folder-name display name (S1), the
+    // DB-042 label, a palette color by D-29, `added_via = manual`, the
+    // appended sort_order, the §6.5 default write settings (PRJ-012)
+    // — and exactly one `project.added` journal entry (LOG-001…004,
+    // D-051). A second add appends (sort_order 2) and, by D-29's
+    // count-0 rule, lands on a different color.
+    let (temp, app) = add_manual_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let repo = repo_dir(temp.path(), "eunomia-repo");
+    let picked = pick_folder(&app, &repo);
+
+    let result = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect("adding a repository root must succeed");
+    assert_eq!(result.outcome, "added");
+    assert!(result.offered_root.is_none() && result.existing.is_none());
+    let first = result.project.expect("the added arm carries the project");
+    assert_eq!(
+        first.path,
+        repo.canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(first.name, "eunomia-repo");
+    assert_eq!(first.label, "EUNOMI", "DB-042: the first six upper-cased");
+    let palette: Vec<&str> = eunomia_core::project::Color::ALL
+        .iter()
+        .map(|color| color.as_str())
+        .collect();
+    assert!(palette.contains(&first.color.as_str()), "{}", first.color);
+    assert_eq!(first.added_via, "manual");
+    assert_eq!(first.sort_order, 1, "the first row appends at 1");
+    // PRJ-012/§6.5: the four write settings, straight from the
+    // untouched defaults.
+    assert_eq!(first.scheme, "A");
+    assert_eq!(first.base_name, "AGENTS.md");
+    assert!(!first.extra_local_enabled);
+    assert_eq!(first.extra_local_position, "end");
+    assert!(!first.extra_project_enabled);
+    assert_eq!(first.extra_project_position, "end");
+    // The writable fixture carries no §6.9 warning.
+    assert_eq!(first.write_access_warning, None);
+
+    // The journal: exactly one entry, the flow's own event.
+    let entries = journal_entries(&database);
+    assert_eq!(entries.len(), 1, "one add, one entry");
+    assert_eq!(entries[0].action.as_str(), "project.added");
+    assert_eq!(entries[0].level.as_str(), "info");
+    assert_eq!(entries[0].visibility.as_str(), "user");
+    assert_eq!(entries[0].result.as_str(), "ok");
+    assert_eq!(
+        entries[0]
+            .entity
+            .as_ref()
+            .map(|(kind, id)| (kind.as_str(), id.as_str())),
+        Some(("project", first.id.as_str()))
+    );
+    assert_eq!(entries[0].project_id.as_deref(), Some(first.id.as_str()));
+
+    // A second repository appends and takes a different color (the
+    // count-0 candidates are every color but the first one's).
+    let second_repo = repo_dir(temp.path(), "beta");
+    let second_picked = pick_folder(&app, &second_repo);
+    let second = invoke_project_add_manual(&webview, &second_picked, serde_json::json!(null))
+        .expect("the second add must succeed")
+        .project
+        .expect("the added arm carries the project");
+    assert_eq!(second.sort_order, 2);
+    assert_ne!(second.color, first.color, "D-29: a still-unused color wins");
+    assert_eq!(journal_entries(&database).len(), 2);
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_new_project_copies_its_write_settings_from_the_changed_defaults() {
+    // PRJ-012/DEF-005: "For a new project, values are copied from the
+    // default settings" — the copy reads whatever `default.*` holds
+    // at the add, not the §6.5 table constants (which AC case 1
+    // already pinned).
+    let (temp, app) = add_manual_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    use eunomia_store::settings::{
+        BaseName, ExtraFile, Position, Scheme, SettingKey, SettingValue,
+    };
+    seed_setting(
+        &database,
+        SettingKey::DefaultScheme,
+        SettingValue::Scheme(Scheme::B),
+    );
+    seed_setting(
+        &database,
+        SettingKey::DefaultBaseName,
+        SettingValue::BaseName(BaseName::ClaudeMd),
+    );
+    seed_setting(
+        &database,
+        SettingKey::DefaultExtraLocal,
+        SettingValue::ExtraFile(ExtraFile {
+            enabled: true,
+            position: Position::Start,
+        }),
+    );
+    seed_setting(
+        &database,
+        SettingKey::DefaultExtraProject,
+        SettingValue::ExtraFile(ExtraFile {
+            enabled: true,
+            position: Position::End,
+        }),
+    );
+
+    let repo = repo_dir(temp.path(), "custom-defaults");
+    let picked = pick_folder(&app, &repo);
+    let project = invoke_project_add_manual(&main_webview(&app), &picked, serde_json::json!(null))
+        .expect("the add must succeed")
+        .project
+        .expect("the added arm carries the project");
+
+    assert_eq!(project.scheme, "B");
+    assert_eq!(project.base_name, "CLAUDE.md");
+    assert!(project.extra_local_enabled);
+    assert_eq!(project.extra_local_position, "start");
+    assert!(project.extra_project_enabled);
+    assert_eq!(project.extra_project_position, "end");
+
+    // PRJ-012's second clause (AC = DEF-005's): changing the defaults
+    // does NOT change existing projects — the row keeps its copied
+    // values after the same keys move again.
+    seed_setting(
+        &database,
+        SettingKey::DefaultScheme,
+        SettingValue::Scheme(Scheme::A),
+    );
+    seed_setting(
+        &database,
+        SettingKey::DefaultBaseName,
+        SettingValue::BaseName(BaseName::AgentsMd),
+    );
+    let stored = stored_projects(&database);
+    assert_eq!(stored.len(), 1, "the add created exactly one row");
+    assert_eq!(
+        stored[0].scheme.as_str(),
+        "B",
+        "the copy is a copy, not a link"
+    );
+    assert_eq!(stored[0].base_name.as_str(), "CLAUDE.md");
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn project_add_manual_offers_the_repository_root_for_a_picked_subfolder() {
+    // AC case 2 of the card ("subfolder"): a subfolder pick answers
+    // the PRJ-003 offer — the repository root, nothing written — and
+    // the confirm call re-sends the SAME picked path with
+    // `acceptRepoRoot: true`, which registers the root (the offer is
+    // a question, not a silent re-registration of another folder).
+    let (temp, app) = add_manual_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let repo = repo_dir(temp.path(), "monorepo");
+    let subfolder = repo.join("packages").join("inner");
+    std::fs::create_dir_all(&subfolder).expect("the subfolder fixture must be creatable");
+    let picked = pick_folder(&app, &subfolder);
+
+    let offered = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect("the subfolder call is a typed answer, not an error");
+    assert_eq!(offered.outcome, "repo_root_offered");
+    assert_eq!(
+        offered.offered_root.as_deref(),
+        Some(repo.canonicalize().unwrap().display().to_string().as_str())
+    );
+    assert!(offered.project.is_none() && offered.existing.is_none());
+    // The offer wrote nothing: no row, no journal entry.
+    assert_eq!(stored_projects(&database).len(), 0);
+    assert_eq!(journal_entries(&database).len(), 0);
+
+    // The confirm: same picked path, the flag set — the root is
+    // re-derived and registered.
+    let confirmed = invoke_project_add_manual(&webview, &picked, serde_json::json!(true))
+        .expect("the confirmed add must succeed");
+    assert_eq!(confirmed.outcome, "added");
+    assert_eq!(
+        confirmed.project.as_ref().expect("the added arm").path,
+        repo.canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(confirmed.project.as_ref().unwrap().name, "monorepo");
+
+    // The confirm is idempotent (D-103's claim, pinned): a replayed
+    // confirm converges on the typed duplicate answer, not a second
+    // row — the root the replay re-derives is already registered.
+    let replayed = invoke_project_add_manual(&webview, &picked, serde_json::json!(true))
+        .expect("a replayed confirm is a typed answer");
+    assert_eq!(replayed.outcome, "duplicate_active");
+    assert_eq!(
+        replayed.existing.expect("the duplicate names the row").id,
+        confirmed.project.as_ref().unwrap().id
+    );
+    assert_eq!(stored_projects(&database).len(), 1);
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_root_offer_targets_the_nearest_repository() {
+    // D-06 via PRJ-003: nested regular repositories are separate
+    // projects, and `find_git_root` answers the NEAREST root — a
+    // folder inside an inner repository is offered the inner root,
+    // never the outer one; and the inner repository picked AT its own
+    // root is added directly (no offer of the outer repository) —
+    // D-06's "registered as separate projects" half.
+    let (temp, app) = add_manual_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let outer = repo_dir(temp.path(), "outer");
+    let inner = repo_dir(&outer, "inner");
+    let deep = inner.join("src").join("deep");
+    std::fs::create_dir_all(&deep).expect("the deep fixture must be creatable");
+    let picked = pick_folder(&app, &deep);
+
+    let offered = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect("the deep subfolder is a typed offer");
+    assert_eq!(
+        offered.offered_root.as_deref(),
+        Some(inner.canonicalize().unwrap().display().to_string().as_str()),
+        "the nearest .git wins, not the outer repository's"
+    );
+
+    // The inner repository picked at its own root: `root == picked`,
+    // so no offer — the row lands directly (its own project, separate
+    // from the outer repository's).
+    let inner_picked = pick_folder(&app, &inner);
+    let added = invoke_project_add_manual(&webview, &inner_picked, serde_json::json!(null))
+        .expect("a repository root picked at itself is added directly");
+    assert_eq!(added.outcome, "added");
+    assert_eq!(
+        added.project.as_ref().expect("the added arm").path,
+        inner.canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(stored_projects(&database).len(), 1);
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn project_add_manual_answers_the_duplicate_message_and_the_archive_offer() {
+    // AC case 3 of the card ("adding again"): an active project with
+    // the same path_key answers the typed duplicate message, an
+    // archived one answers the restore offer (DB-015/PRJ-001) — both
+    // without an error envelope, and with the database provably
+    // unchanged (no new row, no new journal entry).
+    let (temp, app) = add_manual_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let repo = repo_dir(temp.path(), "twice");
+    let picked = pick_folder(&app, &repo);
+    let first = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect("the first add must succeed")
+        .project
+        .expect("the added arm carries the project")
+        .id;
+    let rows_after_add = stored_projects(&database).len();
+    let journal_after_add = journal_entries(&database).len();
+
+    // The active duplicate: the message, the existing row's identity,
+    // nothing changed.
+    let duplicate = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect("a duplicate is a typed answer, not an error");
+    assert_eq!(duplicate.outcome, "duplicate_active");
+    let existing = duplicate.existing.expect("the duplicate arm names the row");
+    assert_eq!(existing.id, first);
+    assert_eq!(existing.state, "active");
+    assert_eq!(
+        existing.path,
+        repo.canonicalize().unwrap().display().to_string()
+    );
+    assert!(duplicate.project.is_none() && duplicate.offered_root.is_none());
+    assert_eq!(stored_projects(&database).len(), rows_after_add);
+    assert_eq!(journal_entries(&database).len(), journal_after_add);
+
+    // The archived duplicate: the restore offer (the future
+    // `project_restore`, T-109, takes the carried id).
+    archive_project(&database, first.clone());
+    let archived = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect("an archived duplicate is a typed offer, not an error");
+    assert_eq!(archived.outcome, "archived_duplicate");
+    let existing = archived.existing.expect("the offer names the row");
+    assert_eq!(existing.id, first);
+    assert_eq!(existing.state, "archived");
+    assert_eq!(stored_projects(&database).len(), rows_after_add);
+    assert_eq!(journal_entries(&database).len(), journal_after_add);
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_folder_whose_derived_default_label_is_unstorable_is_rejected_naming_the_label() {
+    // D-079's recorded counterexample, at the command boundary: names
+    // reserve no control-character rule, so a repository folder named
+    // with a leading control character is a LEGAL name whose DB-042
+    // derivation ("\u{7}REPO") is a label §6.9 rejects — the command's
+    // honest answer is the E_VALIDATION envelope naming the LABEL
+    // field, not a panic and not a stored row (the round-2 review
+    // finding: the branch was implemented but unpinned). Unix-gated:
+    // the fixture needs a control character in a directory name.
+    #[cfg(unix)]
+    {
+        let (temp, app) = add_manual_app();
+        let database = app.state::<crate::db::Db>().inner().clone();
+        let webview = main_webview(&app);
+        let repo = temp.path().join("\u{7}repo");
+        std::fs::create_dir_all(repo.join(".git"))
+            .expect("the control-named repository fixture must be creatable");
+        let picked = pick_folder(&app, &repo);
+
+        let error = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+            .expect_err("an unstorable derived label must be rejected");
+        assert_eq!(error["code"], serde_json::json!("E_VALIDATION"), "{error}");
+        assert_eq!(
+            error["params"]["field"],
+            serde_json::json!("label"),
+            "the failed field is the derived label, not the name"
+        );
+        assert_eq!(error["params"]["value"], serde_json::json!("\u{7}REPO"));
+        assert_eq!(stored_projects(&database).len(), 0);
+        assert_eq!(journal_entries(&database).len(), 0);
+        // Windows teardown rule: the app's managed `Db` closes first.
+        drop(app);
+        drop(temp);
+    }
+}
+
+#[test]
+fn project_add_manual_rejects_a_folder_outside_any_repository_with_e_not_a_repo() {
+    // AC case 4 of the card ("non-Git folder"): a picked folder with
+    // no `.git` in itself or any ancestor is §10's `E_NOT_A_REPO` —
+    // the full envelope (code, default key, the picked path in
+    // params, no details: a fact about the tree, not an OS failure) —
+    // and nothing reaches the database.
+    let (temp, app) = add_manual_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let plain = temp.path().join("plain");
+    std::fs::create_dir_all(&plain).expect("the plain fixture must be creatable");
+    let picked = pick_folder(&app, &plain);
+
+    let error = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect_err("a folder outside any repository must be rejected");
+    assert_eq!(error["code"], serde_json::json!("E_NOT_A_REPO"), "{error}");
+    assert_eq!(error["message_key"], serde_json::json!("errors.not_a_repo"));
+    assert_eq!(
+        error["params"],
+        serde_json::json!({ "path": picked }),
+        "the picked path is the §10 log line's subject"
+    );
+    assert_eq!(error["details"], serde_json::json!(null));
+    assert_eq!(stored_projects(&database).len(), 0);
+    assert_eq!(journal_entries(&database).len(), 0);
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_foreign_path_is_rejected_before_the_repository_checks_run() {
+    // SEC-003 as the input gate (§5.6): a path that was neither picked
+    // this session nor is a registered project is rejected with
+    // `E_VALIDATION` BEFORE the flow runs — proven here by sending a
+    // REAL repository folder unpicked: the answer is the gate's
+    // rejection, not `E_NOT_A_REPO`'s and not an add.
+    let (temp, app) = add_manual_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let never_picked_repo = repo_dir(temp.path(), "unpicked-repo");
+
+    // A real repository folder this session never picked: the answer
+    // is the gate's rejection, not `E_NOT_A_REPO`'s and not an add —
+    // which also proves the ordering (the gate runs before the `.git`
+    // walk).
+    let error = invoke_project_add_manual(
+        &webview,
+        &never_picked_repo.display().to_string(),
+        serde_json::json!(null),
+    )
+    .expect_err("a path from nowhere must be rejected");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"), "{error}");
+    assert_eq!(
+        error["params"]["field"],
+        serde_json::json!("path"),
+        "the SEC-003 rejection names the field"
+    );
+    assert!(
+        error["params"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("SEC-003")),
+        "the rejection names the policy, got: {error}"
+    );
+    assert_eq!(stored_projects(&database).len(), 0);
+    assert_eq!(journal_entries(&database).len(), 0);
+
+    // D-100's recorded non-UTF-8 seam, at the IPC level its note
+    // assigned to this command: a folder whose name is not valid
+    // UTF-8 IS picked (the allowlist holds the real bytes), but the
+    // lossy answer string names no real folder — the honest rejection
+    // names the encoding, never the allowlist. Linux-only: only Linux
+    // filesystems accept the invalid-byte name (the `temp_files`
+    // platform posture).
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let raw = OsStr::from_bytes(b"repo\xff");
+        let non_utf8 = temp.path().join(raw);
+        std::fs::create_dir_all(non_utf8.join(".git"))
+            .expect("the non-UTF-8 repository fixture must be creatable");
+        // The pick goes through the real dialog seam: the bookkeeping
+        // canonicalizes and remembers the REAL bytes, and the answer
+        // is the lossy display string the UI would hold.
+        let lossy = pick_folder(&app, &non_utf8);
+        assert!(
+            lossy.contains('\u{FFFD}'),
+            "the fixture is lossy on the wire"
+        );
+        let error = invoke_project_add_manual(&webview, &lossy, serde_json::json!(null))
+            .expect_err("a lossy spelling names no real folder");
+        assert_eq!(error["code"], serde_json::json!("E_VALIDATION"), "{error}");
+        assert!(
+            error["params"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("UTF-8")),
+            "the rejection names the encoding, not the allowlist, got: {error}"
+        );
+    }
+    assert_eq!(stored_projects(&database).len(), 0);
+    assert_eq!(journal_entries(&database).len(), 0);
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_read_only_repository_is_added_with_the_write_access_warning() {
+    // §6.9's project-path row: "Write access is checked when adding
+    // (warning)" — the D-094 verdicts travel on the added answer and
+    // the project STAYS registered. Both warning classes: an existing
+    // read-only target file (T-F5's fact, portable), and (Unix, not
+    // under root) a folder that refuses new files.
+    let (temp, app) = add_manual_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+
+    // The read-only target file: the probe answers FileReadOnly.
+    let file_repo = repo_dir(temp.path(), "ro-file");
+    std::fs::write(file_repo.join("AGENTS.md"), b"hand-written")
+        .expect("the fixture file must be creatable");
+    let mut perms = std::fs::metadata(file_repo.join("AGENTS.md"))
+        .expect("the fixture file must be statable")
+        .permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(file_repo.join("AGENTS.md"), perms)
+        .expect("marking the fixture read-only must work");
+    let picked = pick_folder(&app, &file_repo);
+    let project = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect("a read-only target file is a warning, not a rejection")
+        .project
+        .expect("the added arm carries the project");
+    assert_eq!(
+        project.write_access_warning.as_deref(),
+        Some("file_read_only")
+    );
+    assert_eq!(stored_projects(&database).len(), 1, "the project is added");
+
+    // The unwritable folder: the probe answers FolderNotWritable.
+    // Mode bits are not enforced for root, so the precondition is
+    // checked first (the D-088/D-094 test posture).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let folder_repo = repo_dir(temp.path(), "ro-folder");
+        let untestable = std::fs::metadata(&folder_repo).is_ok_and(|metadata| metadata.uid() == 0);
+        if untestable {
+            eprintln!(
+                "skipping the folder_not_writable arm: running as root — \
+                 mode bits are not enforced, the precondition cannot be \
+                 set up"
+            );
+        } else {
+            std::fs::set_permissions(&folder_repo, std::fs::Permissions::from_mode(0o555))
+                .expect("removing the write bits must work");
+            let picked = pick_folder(&app, &folder_repo);
+            let result = invoke_project_add_manual(&webview, &picked, serde_json::json!(null));
+            // Restore even when the assertions below panic, so
+            // TempDir's teardown can remove the directory.
+            std::fs::set_permissions(&folder_repo, std::fs::Permissions::from_mode(0o755))
+                .expect("restoring mode bits must work");
+            let project = result
+                .expect("an unwritable folder is a warning, not a rejection")
+                .project
+                .expect("the added arm carries the project");
+            assert_eq!(
+                project.write_access_warning.as_deref(),
+                Some("folder_not_writable")
+            );
+        }
+    }
+
+    // Scheme C targets `<STEM>.project.md`, never the main file
+    // (D-20): the probe must warn about a read-only
+    // `AGENTS.project.md` and stay SILENT about a read-only
+    // `AGENTS.md` the app will never write (the round-1 review
+    // finding — probing the row's `base_name` mis-targets every
+    // scheme-C project).
+    {
+        use eunomia_store::settings::{Scheme, SettingKey, SettingValue};
+        seed_setting(
+            &database,
+            SettingKey::DefaultScheme,
+            SettingValue::Scheme(Scheme::C),
+        );
+        let scheme_c_repo = repo_dir(temp.path(), "scheme-c");
+        std::fs::write(
+            scheme_c_repo.join("AGENTS.md"),
+            b"hand-written, never touched",
+        )
+        .expect("the main-file fixture must be creatable");
+        let mut perms = std::fs::metadata(scheme_c_repo.join("AGENTS.md"))
+            .expect("the main-file fixture must be statable")
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(scheme_c_repo.join("AGENTS.md"), perms)
+            .expect("marking the main file read-only must work");
+        std::fs::write(scheme_c_repo.join("AGENTS.project.md"), b"the real target")
+            .expect("the target fixture must be creatable");
+        let mut perms = std::fs::metadata(scheme_c_repo.join("AGENTS.project.md"))
+            .expect("the target fixture must be statable")
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(scheme_c_repo.join("AGENTS.project.md"), perms)
+            .expect("marking the target read-only must work");
+        let picked = pick_folder(&app, &scheme_c_repo);
+        let project = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+            .expect("the scheme-C add must succeed")
+            .project
+            .expect("the added arm carries the project");
+        assert_eq!(
+            project.write_access_warning.as_deref(),
+            Some("file_read_only"),
+            "the warning targets AGENTS.project.md, the file scheme C writes"
+        );
+
+        // The complement: a read-only MAIN file under scheme C warns
+        // about nothing — the app never writes it.
+        let quiet_repo = repo_dir(temp.path(), "scheme-c-quiet");
+        std::fs::write(quiet_repo.join("AGENTS.md"), b"hand-written, never touched")
+            .expect("the main-file fixture must be creatable");
+        let mut perms = std::fs::metadata(quiet_repo.join("AGENTS.md"))
+            .expect("the main-file fixture must be statable")
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(quiet_repo.join("AGENTS.md"), perms)
+            .expect("marking the main file read-only must work");
+        let picked = pick_folder(&app, &quiet_repo);
+        let project = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+            .expect("the scheme-C add must succeed")
+            .project
+            .expect("the added arm carries the project");
+        assert_eq!(
+            project.write_access_warning, None,
+            "a read-only main file is not scheme C's target"
+        );
+    }
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn project_add_manual_answers_honestly_without_a_database() {
+    // Recovery mode: the picker still works and the session half still
+    // validates a picked folder (D-100's ordering), but every real
+    // consumer needs the database — the honest answer is the recorded
+    // `NoDatabase` fallback, not a pretend empty result.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::project_add_manual
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(crate::session_paths::SessionPaths::new());
+    let repo = repo_dir(temp.path(), "recovery-repo");
+    let picked = pick_folder(&app, &repo);
+    let webview = main_webview(&app);
+
+    let error = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect_err("the add flow needs the database");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"), "{error}");
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("NoDatabase"),
+        "the honest state answer"
+    );
+    // Windows teardown rule: nothing managed needs closing, but the
+    // shape stays uniform.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_project_add_manual_command_is_registered_with_the_specta_builder() {
+    // The §7.10 Projects-module name (D-009's fixed registry),
+    // registered exactly once (the D-034 wiring-pin rationale) — the
+    // bindings carry `projectAddManual` to the frontend through it.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("commands::project_add_manual").count(),
+        1,
+        "lib.rs must register the `project_add_manual` command exactly once (§7.10, D-009)"
     );
 }

@@ -26,6 +26,13 @@ eunomia-store = { path = "../crates/eunomia-store" }
 # member (its tempfile dependency is already resolved workspace-wide
 # for src-tauri's dev-dependencies) — this adds an edge, not a version.
 eunomia-fs = { path = "../crates/eunomia-fs" }
+# The new-project composition of `project_add_manual` (commands.rs,
+# T-074): `eunomia_core::color_pick::pick_color` (D-29) and the
+# `project_validators` (default_label/DB-042, §6.9) — read-only reuse,
+# the crate itself untouched. Not a new crate in the graph:
+# eunomia-core is a workspace member already built through eunomia-fs
+# — this adds an edge, not a version (the D-096 eunomia-fs precedent).
+eunomia-core = { path = "../crates/eunomia-core" }
 # The DB executor (db.rs, D-037) owns rusqlite types directly — the
 # connection behind the mutex and the transaction it hands to
 # operations. Not a new crate in the graph: rusqlite 0.41 is already

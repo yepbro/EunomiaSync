@@ -149,25 +149,28 @@ impl SessionPaths {
 /// (`crate::db::Db::run`, D-037) like every database access. The
 /// session-list lock is never held across either.
 ///
-/// No production caller exists yet — the path-consuming commands
-/// (`project_add_manual`, `scan_start`, …) are upcoming tasks; the
-/// IPC suite is the consumer that keeps this boundary honest until
-/// they land. Remove the `allow` when the first of them calls this
-/// (the `file_event` shape).
-#[allow(dead_code)]
+/// The first production caller is `project_add_manual` (T-074), which
+/// calls this as its input gate before anything else; the upcoming
+/// `scan_start`/`project_relink` follow.
 pub(crate) async fn validate_ui_path<R: Runtime>(
     app: &AppHandle<R>,
     path: &str,
 ) -> Result<PathBuf, AppError> {
     // Canonicalize off the async workers (SYS-001): resolving a path
     // is a metadata syscall per component, and a dead mount must not
-    // stall an async worker.
+    // stall an async worker. A path that cannot be canonicalized gets
+    // the rejection its TEXT deserves: a lossy U+FFFD spelling names
+    // no real folder (D-100's recorded non-UTF-8 cost — the honest
+    // reason names the encoding, not the allowlist, since the folder
+    // may genuinely have been picked; the round-1 review finding),
+    // every other unresolvable path was never picked and is not a
+    // registered project's canonical form.
     let sent = PathBuf::from(path);
     let canonical =
         tauri::async_runtime::spawn_blocking(move || eunomia_fs::paths::canonicalize(&sent))
             .await
             .map_err(crate::db::join_failure_to_app_error)?
-            .map_err(|_| rejected_ui_path(path))?;
+            .map_err(|_| rejected_unresolvable_ui_path(path))?;
     // The session half first (no database involved — see the module
     // docs for why that order matters in recovery mode).
     if managed_session(app)?.contains(&canonical) {
@@ -236,6 +239,34 @@ fn rejected_ui_path(path: &str) -> AppError {
         path,
         "must be a registered project or a folder picked in the dialog this session (SEC-003)",
     )
+}
+
+/// The rejection for a path that cannot be resolved at all (the
+/// canonicalize-failure half of [`validate_ui_path`]): the recorded
+/// D-100 non-UTF-8 seam, resolved at its first consuming command
+/// (T-074, the round-1 review finding). The picker remembers the REAL
+/// canonical bytes of a pick but answers their lossy `display()` form,
+/// so a folder whose name is not valid UTF-8 comes back as a U+FFFD
+/// spelling that names no real folder — for a folder the user did
+/// just pick, the plain SEC-003 sentence would be false and
+/// unactionable. The honest reason names the encoding and the fix
+/// (rename); a path with no replacement character was never picked
+/// and keeps the SEC-003 reason. A folder legitimately NAMED with a
+/// U+FFFD scalar resolves fine (the bytes match), so this arm is
+/// reached only by the lossy spellings — the one case where the
+/// distinction between "not allowlisted" and "unrepresentable"
+/// matters.
+fn rejected_unresolvable_ui_path(path: &str) -> AppError {
+    if path.contains('\u{FFFD}') {
+        crate::commands::rejected_field(
+            "path",
+            path,
+            "the folder name is not valid UTF-8: the UI's lossy spelling names no real \
+             folder, so the project cannot be registered (rename the folder)",
+        )
+    } else {
+        rejected_ui_path(path)
+    }
 }
 
 #[cfg(test)]

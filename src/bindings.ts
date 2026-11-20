@@ -129,6 +129,71 @@ export const commands = {
 	 */
 	markdownPreview: (text: string, options?: InvokeOptions) => __TAURI_INVOKE<MarkdownPreview>("markdown_preview", { text }, options),
 	/**
+	 *  Registers the folder the user picked in the system dialog as a
+	 *  project (§7.10 Projects module `project_add_manual`, the D-009
+	 *  fixed name; §7.1 PRJ-001; scenario S1).
+	 * 
+	 *  `path` is the folder the UI's `dialog_pick_folder` answer named,
+	 *  and the command's first act is the SEC-003 gate on it —
+	 *  [`session_paths::validate_ui_path`], the T-073/D-100 boundary: a
+	 *  path that neither canonicalizes onto a registered project nor onto
+	 *  a folder picked in this session is rejected with `E_VALIDATION`
+	 *  before anything else runs (a foreign folder never reaches the
+	 *  `.git` check, the database, or the disk probes).
+	 * 
+	 *  The spec flow, in order (S1: "pick a folder, `.git` check,
+	 *  duplicate check, create the entry with default settings and a
+	 *  color by D-29"):
+	 * 
+	 *  1. **Repository root** (PRJ-003/D-08, blocking pool):
+	 *     [`eunomia_fs::paths::find_git_root`] from the canonical pick —
+	 *     a subfolder resolves to its repository's canonical root
+	 *     (nearest root wins, D-06). A folder outside any repository is
+	 *     §10's `E_NOT_A_REPO`; a probe the OS refused is
+	 *     `E_PROJECT_UNAVAILABLE` with the OS facts ("could not check" is
+	 *     not "not a repo", D-090).
+	 *  2. **The root offer** (PRJ-003): when the picked folder is a
+	 *     subfolder and `accept_repo_root` is not `Some(true)`, the answer
+	 *     is the `"repo_root_offered"` arm — the app *offers* the root,
+	 *     it does not silently register a different folder than the one
+	 *     the user picked. Nothing is written. The UI's confirm re-sends
+	 *     the same picked path with the flag; the root is re-derived
+	 *     (idempotent converge), so SEC-003's allowlist is never widened
+	 *     with an app-derived path (D-100).
+	 *  3. **Fields** (§6.9): the name defaults to the root's folder name
+	 *     (`validate_name`) and the label to DB-042's derivation of it
+	 *     (`default_label`, then `validate_label` — the recorded edge
+	 *     where a control-character prefix derives an unstorable label is
+	 *     an `E_VALIDATION` naming the field, not a panic).
+	 *  4. **One transaction** (D-037, D-051, §6.9 "the whole operation
+	 *     runs in one transaction"): the DB-015 duplicate check
+	 *     (`find_by_path_key`, either state — active answers the
+	 *     `"duplicate_active"` message, archived the
+	 *     `"archived_duplicate"` restore offer; both typed answers, no
+	 *     error, nothing written); the four write settings copied from
+	 *     `default.*` (PRJ-012/DEF-005); the D-29 color over the ACTIVE
+	 *     projects' colors; `create` (the repository appends `sort_order`);
+	 *     and the `project.added` journal entry (LOG-001…004,
+	 *     info/user/ok, entity project) **inside the same transaction** —
+	 *     a rolled-back add leaves no entry claiming it happened. The
+	 *     `E_SYNC_RUNNING` guard of SYS-005 does not apply: that rule
+	 *     lists the project-*editing* commands, and no sync writer exists
+	 *     yet; the guard joins with the sync-run task.
+	 *  5. **Write-access warning** (§6.9, T-063/D-094): after the commit,
+	 *     [`eunomia_fs::write_access::check_write_access`] over the
+	 *     root's future target file, on the blocking pool (never inside
+	 *     the transaction — a dead drive must not hold the one database
+	 *     lock, the D-096 probe-order rule). The verdict travels as the
+	 *     response's `write_access_warning`; the project stays added.
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::project_add_failed`]); the three typed non-add
+	 *  outcomes log nothing (nothing happened), and a successful add is
+	 *  the journal entry itself (the D-051 mirror policy — info+user+ok
+	 *  is not mirrored to the file log).
+	 */
+	projectAddManual: (path: string, acceptRepoRoot: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<ProjectAddResult_Serialize>("project_add_manual", { path, acceptRepoRoot }, options),
+	/**
 	 *  Lists the projects for the main window's columns and the "Archived
 	 *  projects" screen (§7.10 Projects module `projects_list`; §7.1; the
 	 *  §7.4 MAIN-028 column fields).
@@ -459,6 +524,194 @@ export type ActivityPage_Serialize = {
 	 *  `u32::MAX`).
 	 */
 	total: number,
+};
+
+/**
+ *  The created project on the `"added"` arm of [`ProjectAddResult`]:
+ *  the column fields `projects_list` serves plus the write settings
+ *  the row copied from `default.*` (PRJ-012) — the "Project settings"
+ *  modal (S1) opens on exactly these facts, and the path is included
+ *  because PRJ-008 shows it read-only there. No store type crosses the
+ *  boundary (the `ProjectColumnEntry` rule): the closed vocabularies
+ *  travel in their stored spellings (`"A"`, `"AGENTS.md"`,
+ *  `"manual"`).
+ */
+export type AddedProject = AddedProject_Serialize | AddedProject_Deserialize;
+
+/**
+ *  The created project on the `"added"` arm of [`ProjectAddResult`]:
+ *  the column fields `projects_list` serves plus the write settings
+ *  the row copied from `default.*` (PRJ-012) — the "Project settings"
+ *  modal (S1) opens on exactly these facts, and the path is included
+ *  because PRJ-008 shows it read-only there. No store type crosses the
+ *  boundary (the `ProjectColumnEntry` rule): the closed vocabularies
+ *  travel in their stored spellings (`"A"`, `"AGENTS.md"`,
+ *  `"manual"`).
+ */
+export type AddedProject_Deserialize = {
+	/**
+	 *  The row id — the identity every later project command
+	 *  (`project_update`, `project_archive`, …) addresses.
+	 */
+	id: string,
+	/**
+	 *  The canonical repository root (DB-030), the verbatim
+	 *  canonicalize output stored in `projects.path`.
+	 */
+	path: string,
+	/**
+	 *  The display name derived from the root's folder name (§6.9:
+	 *  1–100 after trimming; the modal lets the user edit it,
+	 *  PRJ-008).
+	 */
+	name: string,
+	/**
+	 *  The color-badge label, DB-042's derivation of the name (first
+	 *  up to 6 characters, upper case).
+	 */
+	label: string,
+	/**  The palette member picked by D-29 (stored spelling). */
+	color: string,
+	/**
+	 *  How the project was registered — always `"manual"` here
+	 *  (§6.2; the scan commit is `scan_commit`'s spelling).
+	 */
+	added_via: string,
+	/**
+	 *  The appended position (DB-005: `MAX(sort_order) + 1` over the
+	 *  whole table, the repository's own append), saturated at
+	 *  `u32::MAX` — specta forbids 64-bit integers on the TS wire
+	 *  (the `ActivityEntry.id` decision, D-049).
+	 */
+	sort_order: number,
+	/**
+	 *  The project's own scheme, copied from `default.scheme`
+	 *  (PRJ-012/DEF-005: later default changes never reach it).
+	 */
+	scheme: string,
+	/**
+	 *  The project's own target file, copied from
+	 *  `default.base_name`.
+	 */
+	base_name: string,
+	/**
+	 *  The `AGENTS.local.md` hint flag, copied from
+	 *  `default.extra_local`.
+	 */
+	extra_local_enabled: boolean,
+	/**
+	 *  The `AGENTS.local.md` hint position, copied from
+	 *  `default.extra_local`.
+	 */
+	extra_local_position: string,
+	/**
+	 *  The `AGENTS.project.md` hint flag, copied from
+	 *  `default.extra_project`.
+	 */
+	extra_project_enabled: boolean,
+	/**
+	 *  The `AGENTS.project.md` hint position, copied from
+	 *  `default.extra_project`.
+	 */
+	extra_project_position: string,
+	/**
+	 *  The §6.9 write-access warning — "Write access is checked when
+	 *  adding (warning)": the project IS added; this carries the
+	 *  D-094 verdict class (`folder_not_writable`, `file_read_only`)
+	 *  when the probe refused. `None` when the folder is writable, and
+	 *  deliberately also when the probe could not answer (a refusal is
+	 *  not a rights verdict, D-090) — the sync preflight re-checks
+	 *  before any write (§6.9, error there).
+	 */
+	write_access_warning?: string | null,
+};
+
+/**
+ *  The created project on the `"added"` arm of [`ProjectAddResult`]:
+ *  the column fields `projects_list` serves plus the write settings
+ *  the row copied from `default.*` (PRJ-012) — the "Project settings"
+ *  modal (S1) opens on exactly these facts, and the path is included
+ *  because PRJ-008 shows it read-only there. No store type crosses the
+ *  boundary (the `ProjectColumnEntry` rule): the closed vocabularies
+ *  travel in their stored spellings (`"A"`, `"AGENTS.md"`,
+ *  `"manual"`).
+ */
+export type AddedProject_Serialize = {
+	/**
+	 *  The row id — the identity every later project command
+	 *  (`project_update`, `project_archive`, …) addresses.
+	 */
+	id: string,
+	/**
+	 *  The canonical repository root (DB-030), the verbatim
+	 *  canonicalize output stored in `projects.path`.
+	 */
+	path: string,
+	/**
+	 *  The display name derived from the root's folder name (§6.9:
+	 *  1–100 after trimming; the modal lets the user edit it,
+	 *  PRJ-008).
+	 */
+	name: string,
+	/**
+	 *  The color-badge label, DB-042's derivation of the name (first
+	 *  up to 6 characters, upper case).
+	 */
+	label: string,
+	/**  The palette member picked by D-29 (stored spelling). */
+	color: string,
+	/**
+	 *  How the project was registered — always `"manual"` here
+	 *  (§6.2; the scan commit is `scan_commit`'s spelling).
+	 */
+	added_via: string,
+	/**
+	 *  The appended position (DB-005: `MAX(sort_order) + 1` over the
+	 *  whole table, the repository's own append), saturated at
+	 *  `u32::MAX` — specta forbids 64-bit integers on the TS wire
+	 *  (the `ActivityEntry.id` decision, D-049).
+	 */
+	sort_order: number,
+	/**
+	 *  The project's own scheme, copied from `default.scheme`
+	 *  (PRJ-012/DEF-005: later default changes never reach it).
+	 */
+	scheme: string,
+	/**
+	 *  The project's own target file, copied from
+	 *  `default.base_name`.
+	 */
+	base_name: string,
+	/**
+	 *  The `AGENTS.local.md` hint flag, copied from
+	 *  `default.extra_local`.
+	 */
+	extra_local_enabled: boolean,
+	/**
+	 *  The `AGENTS.local.md` hint position, copied from
+	 *  `default.extra_local`.
+	 */
+	extra_local_position: string,
+	/**
+	 *  The `AGENTS.project.md` hint flag, copied from
+	 *  `default.extra_project`.
+	 */
+	extra_project_enabled: boolean,
+	/**
+	 *  The `AGENTS.project.md` hint position, copied from
+	 *  `default.extra_project`.
+	 */
+	extra_project_position: string,
+	/**
+	 *  The §6.9 write-access warning — "Write access is checked when
+	 *  adding (warning)": the project IS added; this carries the
+	 *  D-094 verdict class (`folder_not_writable`, `file_read_only`)
+	 *  when the probe refused. `None` when the folder is writable, and
+	 *  deliberately also when the probe could not answer (a refusal is
+	 *  not a rights verdict, D-090) — the sync preflight re-checks
+	 *  before any write (§6.9, error there).
+	 */
+	write_access_warning: string | null,
 };
 
 /**
@@ -793,6 +1046,23 @@ export type ErrorDetails_Serialize = {
 };
 
 /**
+ *  The already-registered project of the two duplicate arms (PRJ-001,
+ *  DB-015): what the message names, and the id the archived arm's
+ *  restore offer (the future `project_restore`, T-109) calls back
+ *  with.
+ */
+export type ExistingProject = {
+	/**  The existing row's id. */
+	id: string,
+	/**  Its display name (the duplicate message names the project). */
+	name: string,
+	/**  Its registered canonical path. */
+	path: string,
+	/**  `active` or `archived` — which duplicate arm this is. */
+	state: string,
+};
+
+/**
  *  The `markdown_preview` response (§7.10 Library module): the
  *  sanitized preview HTML plus D-15's non-blocking Markdown warnings.
  *  A named struct since T-056, which carried only `html` in the shape
@@ -863,6 +1133,97 @@ export type MarkdownWarningKind =
  *  LIB-002's named example).
  */
 "unclosed_code_fence";
+
+/**
+ *  The `project_add_manual` response: a typed outcome string plus the
+ *  one payload arm that outcome carries — a struct with a
+ *  discriminant (not a tagged enum) in the `ActivityEntry` house
+ *  shape: closed vocabularies travel as strings, every field is a
+ *  wire primitive, and the arms are `Option` fields the UI switches on
+ *  with its outcome string (the `markdown_preview` DTO precedent for
+ *  "one response, several meanings").
+ */
+export type ProjectAddResult = ProjectAddResult_Serialize | ProjectAddResult_Deserialize;
+
+/**
+ *  The `project_add_manual` response: a typed outcome string plus the
+ *  one payload arm that outcome carries — a struct with a
+ *  discriminant (not a tagged enum) in the `ActivityEntry` house
+ *  shape: closed vocabularies travel as strings, every field is a
+ *  wire primitive, and the arms are `Option` fields the UI switches on
+ *  with its outcome string (the `markdown_preview` DTO precedent for
+ *  "one response, several meanings").
+ */
+export type ProjectAddResult_Deserialize = {
+	/**
+	 *  What the flow answered, one of `"added"`, `"repo_root_offered"`,
+	 *  `"duplicate_active"`, `"archived_duplicate"` (PRJ-001/003/004,
+	 *  DB-015): only failures are `Err` — the three non-add outcomes
+	 *  are typed answers about the user's folder, not errors of the
+	 *  operation (§10 has no code for "already there"; the D-096
+	 *  refusal-not-500 rule).
+	 */
+	outcome: string,
+	/**  The created row — the `"added"` arm only. */
+	project?: AddedProject_Deserialize | null,
+	/**
+	 *  The repository root the app offers instead of the picked
+	 *  subfolder (PRJ-003/D-08), the `"repo_root_offered"` arm only.
+	 *  The confirm call re-sends the SAME picked path with
+	 *  `accept_repo_root: true`; the root is re-derived inside the
+	 *  command, so SEC-003's letter (the picked folder is what the
+	 *  dialog chose) is never widened by an app-derived path
+	 *  (D-100's recorded rule).
+	 */
+	offered_root?: string | null,
+	/**
+	 *  The already-registered project the answer is about — the
+	 *  `"duplicate_active"` and `"archived_duplicate"` arms (the
+	 *  latter is the restore offer: the id is what the future
+	 *  `project_restore` command takes, PRJ-013…018).
+	 */
+	existing?: ExistingProject | null,
+};
+
+/**
+ *  The `project_add_manual` response: a typed outcome string plus the
+ *  one payload arm that outcome carries — a struct with a
+ *  discriminant (not a tagged enum) in the `ActivityEntry` house
+ *  shape: closed vocabularies travel as strings, every field is a
+ *  wire primitive, and the arms are `Option` fields the UI switches on
+ *  with its outcome string (the `markdown_preview` DTO precedent for
+ *  "one response, several meanings").
+ */
+export type ProjectAddResult_Serialize = {
+	/**
+	 *  What the flow answered, one of `"added"`, `"repo_root_offered"`,
+	 *  `"duplicate_active"`, `"archived_duplicate"` (PRJ-001/003/004,
+	 *  DB-015): only failures are `Err` — the three non-add outcomes
+	 *  are typed answers about the user's folder, not errors of the
+	 *  operation (§10 has no code for "already there"; the D-096
+	 *  refusal-not-500 rule).
+	 */
+	outcome: string,
+	/**  The created row — the `"added"` arm only. */
+	project: AddedProject_Serialize | null,
+	/**
+	 *  The repository root the app offers instead of the picked
+	 *  subfolder (PRJ-003/D-08), the `"repo_root_offered"` arm only.
+	 *  The confirm call re-sends the SAME picked path with
+	 *  `accept_repo_root: true`; the root is re-derived inside the
+	 *  command, so SEC-003's letter (the picked folder is what the
+	 *  dialog chose) is never widened by an app-derived path
+	 *  (D-100's recorded rule).
+	 */
+	offered_root: string | null,
+	/**
+	 *  The already-registered project the answer is about — the
+	 *  `"duplicate_active"` and `"archived_duplicate"` arms (the
+	 *  latter is the restore offer: the id is what the future
+	 *  `project_restore` command takes, PRJ-013…018).
+	 */
+	existing: ExistingProject | null,
+};
 
 /**
  *  One project column entry on the `projects_list` wire (§7.4 MAIN-028,

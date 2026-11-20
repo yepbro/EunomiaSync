@@ -75,8 +75,9 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // `settings_get`/`settings_set` (T-030), the System
         // module's `app_info` (T-031), the Library module's
         // `markdown_preview` (T-056), the Projects module's
-        // `projects_list` (T-072) and the System module's
-        // `dialog_pick_folder` (T-073). Every later command
+        // `projects_list` (T-072), the System module's
+        // `dialog_pick_folder` (T-073) and the Projects module's
+        // `project_add_manual` (T-074). Every later command
         // task (library, …) lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
         // commands that take an `AppHandle`), so the registration pins
@@ -91,6 +92,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::db_recreate::<tauri::Wry>,
             commands::dialog_pick_folder::<tauri::Wry>,
             commands::markdown_preview,
+            commands::project_add_manual::<tauri::Wry>,
             commands::projects_list::<tauri::Wry>,
             commands::settings_get::<tauri::Wry>,
             commands::settings_set::<tauri::Wry>,

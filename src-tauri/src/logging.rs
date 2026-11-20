@@ -761,6 +761,33 @@ pub(crate) fn dialog_pick_folder_failed(error: &AppError) {
     );
 }
 
+/// The `project_add_manual` command failed (T-074, §10's every-error
+/// rule): the payload is the error's own §7.10 vocabulary, in the
+/// `dialog_pick_folder_failed` shape — the §10 answers the flow can
+/// reach (the `E_VALIDATION` SEC-003 rejection of a path from nowhere,
+/// `E_NOT_A_REPO` for a folder outside any repository,
+/// `E_PROJECT_UNAVAILABLE` for a refused probe, the `E_VALIDATION`
+/// envelope of a §6.9 field, and the store fallbacks). `error` level:
+/// the log line is the failure's durable half. The typed outcomes that
+/// are NOT failures — the repo-root offer, the duplicate message, the
+/// archive-restore offer — are success-shaped responses and
+/// deliberately log nothing (nothing happened; the journal records
+/// events, and a refusal wrote none), and a *successful* add is the
+/// journal's own `project.added` entry, written inside the operation's
+/// transaction (D-051) — never duplicated into the file log (the
+/// info+user+ok unmirrored shape).
+pub(crate) fn project_add_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::projects",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "adding a project by hand failed"
+    );
+}
+
 /// A file operation on a project's library file — the SEC-008 core
 /// event. The upcoming variant, sync and backup tasks log through this
 /// helper: it takes the operation code, the file's path and the numeric
@@ -2050,6 +2077,44 @@ mod tests {
         assert!(
             log.contains("/repos/gone") && log.contains("os_code=Some(2)"),
             "the params and the OS refusal travel on the line (SEC-008: paths may), got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_project_add_failure_line_carries_the_code_and_payload() {
+        // The add command's §10 edge (T-074): a rejected add — here
+        // §10's `E_NOT_A_REPO` with the picked path in params —
+        // reaches the log line with its code literal, in the
+        // `dialog_pick_folder_failed` shape. The three typed non-add
+        // outcomes (offer, duplicate, archive offer) log nothing;
+        // that half is structural (no tracing call exists on those
+        // paths — they return `Ok` before the logging edge).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut not_a_repo = AppError::new(crate::errors::ErrorCode::NotARepo);
+        not_a_repo
+            .params
+            .insert("path".to_owned(), "/repos/plain".to_owned());
+
+        tracing::subscriber::with_default(subscriber, || {
+            project_add_failed(&not_a_repo);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("code=\"E_NOT_A_REPO\""),
+            "the line must carry its code literal, got: {log}"
+        );
+        assert!(
+            log.contains("adding a project by hand failed"),
+            "the line must say what failed, got: {log}"
+        );
+        assert!(
+            log.contains("/repos/plain") && log.contains("os_code=None"),
+            "the params travel on the line and no OS fact is invented, got: {log}"
         );
         drop(temp);
     }

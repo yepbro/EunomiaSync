@@ -3,11 +3,13 @@
 //! (T-027), the Settings module's `settings_get`/`settings_set`
 //! (T-030), the System module's `app_info` (T-031), the Library
 //! module's `markdown_preview` (T-056), the Projects module's
-//! `projects_list` (T-072) and the System module's
-//! `dialog_pick_folder` (T-073): `app_open_data_folder`,
+//! `projects_list` (T-072), the System module's
+//! `dialog_pick_folder` (T-073) and the Projects module's
+//! `project_add_manual` (T-074): `app_open_data_folder`,
 //! `db_backups_list`, `db_restore_backup`, `db_recreate`,
 //! `activity_list`, `settings_get`, `settings_set`, `app_info`,
-//! `markdown_preview`, `projects_list`, `dialog_pick_folder`.
+//! `markdown_preview`, `projects_list`, `dialog_pick_folder`,
+//! `project_add_manual`.
 //!
 //! Every command returns `Result<T, AppError>` (§7.10) and is generic
 //! over the Tauri runtime — the documented tauri-specta shape for
@@ -71,7 +73,9 @@ use crate::markdown;
 use crate::recovery::{self, DbBackupInfo};
 use crate::session_paths;
 
-use eunomia_fs::paths::ProjectUnavailableError;
+use eunomia_core::project::{Color, ProjectId};
+use eunomia_fs::paths::{NotARepoError, ProjectUnavailableError};
+use eunomia_fs::write_access::WriteAccessError;
 use eunomia_store::action_log::{
     Action, ActionLogError, ActivityQuery, Entity, EntityType, Level, LogEntry, Outcome,
     Visibility, insert,
@@ -1352,6 +1356,598 @@ fn projects_fallback(kind: &str, message: &str) -> AppError {
 }
 
 // ---------------------------------------------------------------------------
+// `project_add_manual` (T-074, §7.10 Projects module, §7.1
+// PRJ-001/003/004/010/012, §6.9, §8 S1, §5.6 SEC-003, DB-015/DB-030/
+// DB-042, D-07/D-08/D-29, LOG-001…004, D-051)
+// ---------------------------------------------------------------------------
+
+/// The `project_add_manual` response: a typed outcome string plus the
+/// one payload arm that outcome carries — a struct with a
+/// discriminant (not a tagged enum) in the `ActivityEntry` house
+/// shape: closed vocabularies travel as strings, every field is a
+/// wire primitive, and the arms are `Option` fields the UI switches on
+/// with its outcome string (the `markdown_preview` DTO precedent for
+/// "one response, several meanings").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct ProjectAddResult {
+    /// What the flow answered, one of `"added"`, `"repo_root_offered"`,
+    /// `"duplicate_active"`, `"archived_duplicate"` (PRJ-001/003/004,
+    /// DB-015): only failures are `Err` — the three non-add outcomes
+    /// are typed answers about the user's folder, not errors of the
+    /// operation (§10 has no code for "already there"; the D-096
+    /// refusal-not-500 rule).
+    pub(crate) outcome: String,
+    /// The created row — the `"added"` arm only.
+    pub(crate) project: Option<AddedProject>,
+    /// The repository root the app offers instead of the picked
+    /// subfolder (PRJ-003/D-08), the `"repo_root_offered"` arm only.
+    /// The confirm call re-sends the SAME picked path with
+    /// `accept_repo_root: true`; the root is re-derived inside the
+    /// command, so SEC-003's letter (the picked folder is what the
+    /// dialog chose) is never widened by an app-derived path
+    /// (D-100's recorded rule).
+    pub(crate) offered_root: Option<String>,
+    /// The already-registered project the answer is about — the
+    /// `"duplicate_active"` and `"archived_duplicate"` arms (the
+    /// latter is the restore offer: the id is what the future
+    /// `project_restore` command takes, PRJ-013…018).
+    pub(crate) existing: Option<ExistingProject>,
+}
+
+impl ProjectAddResult {
+    /// The `"added"` arm around a freshly created row and the §6.9
+    /// write-access warning the post-commit probe answered (if any).
+    fn added(project: &eunomia_store::projects::Project, warning: Option<String>) -> Self {
+        ProjectAddResult {
+            outcome: "added".to_owned(),
+            project: Some(AddedProject::from_store(project, warning)),
+            offered_root: None,
+            existing: None,
+        }
+    }
+
+    /// The `"repo_root_offered"` arm (PRJ-003): nothing was written.
+    fn repo_root_offered(root: &Path) -> Self {
+        ProjectAddResult {
+            outcome: "repo_root_offered".to_owned(),
+            project: None,
+            offered_root: Some(root.display().to_string()),
+            existing: None,
+        }
+    }
+
+    /// The duplicate arms (PRJ-001, DB-015): the row the picked
+    /// repository's key already belongs to — active is the "message is
+    /// shown" case, archived is the "offer to restore" case; the
+    /// stored `state` cell tells the two apart. Nothing was written.
+    fn duplicate_of(existing: &eunomia_store::projects::Project) -> Self {
+        ProjectAddResult {
+            outcome: match existing.state {
+                ProjectState::Active => "duplicate_active",
+                ProjectState::Archived => "archived_duplicate",
+            }
+            .to_owned(),
+            project: None,
+            offered_root: None,
+            existing: Some(ExistingProject {
+                id: existing.id.clone(),
+                name: existing.name.clone(),
+                path: existing.path.clone(),
+                state: existing.state.as_str().to_owned(),
+            }),
+        }
+    }
+}
+
+/// The created project on the `"added"` arm of [`ProjectAddResult`]:
+/// the column fields `projects_list` serves plus the write settings
+/// the row copied from `default.*` (PRJ-012) — the "Project settings"
+/// modal (S1) opens on exactly these facts, and the path is included
+/// because PRJ-008 shows it read-only there. No store type crosses the
+/// boundary (the `ProjectColumnEntry` rule): the closed vocabularies
+/// travel in their stored spellings (`"A"`, `"AGENTS.md"`,
+/// `"manual"`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct AddedProject {
+    /// The row id — the identity every later project command
+    /// (`project_update`, `project_archive`, …) addresses.
+    pub(crate) id: String,
+    /// The canonical repository root (DB-030), the verbatim
+    /// canonicalize output stored in `projects.path`.
+    pub(crate) path: String,
+    /// The display name derived from the root's folder name (§6.9:
+    /// 1–100 after trimming; the modal lets the user edit it,
+    /// PRJ-008).
+    pub(crate) name: String,
+    /// The color-badge label, DB-042's derivation of the name (first
+    /// up to 6 characters, upper case).
+    pub(crate) label: String,
+    /// The palette member picked by D-29 (stored spelling).
+    pub(crate) color: String,
+    /// How the project was registered — always `"manual"` here
+    /// (§6.2; the scan commit is `scan_commit`'s spelling).
+    pub(crate) added_via: String,
+    /// The appended position (DB-005: `MAX(sort_order) + 1` over the
+    /// whole table, the repository's own append), saturated at
+    /// `u32::MAX` — specta forbids 64-bit integers on the TS wire
+    /// (the `ActivityEntry.id` decision, D-049).
+    pub(crate) sort_order: u32,
+    /// The project's own scheme, copied from `default.scheme`
+    /// (PRJ-012/DEF-005: later default changes never reach it).
+    pub(crate) scheme: String,
+    /// The project's own target file, copied from
+    /// `default.base_name`.
+    pub(crate) base_name: String,
+    /// The `AGENTS.local.md` hint flag, copied from
+    /// `default.extra_local`.
+    pub(crate) extra_local_enabled: bool,
+    /// The `AGENTS.local.md` hint position, copied from
+    /// `default.extra_local`.
+    pub(crate) extra_local_position: String,
+    /// The `AGENTS.project.md` hint flag, copied from
+    /// `default.extra_project`.
+    pub(crate) extra_project_enabled: bool,
+    /// The `AGENTS.project.md` hint position, copied from
+    /// `default.extra_project`.
+    pub(crate) extra_project_position: String,
+    /// The §6.9 write-access warning — "Write access is checked when
+    /// adding (warning)": the project IS added; this carries the
+    /// D-094 verdict class (`folder_not_writable`, `file_read_only`)
+    /// when the probe refused. `None` when the folder is writable, and
+    /// deliberately also when the probe could not answer (a refusal is
+    /// not a rights verdict, D-090) — the sync preflight re-checks
+    /// before any write (§6.9, error there).
+    pub(crate) write_access_warning: Option<String>,
+}
+
+impl AddedProject {
+    /// Shapes a stored row into its wire form around the probe's
+    /// warning.
+    fn from_store(project: &eunomia_store::projects::Project, warning: Option<String>) -> Self {
+        AddedProject {
+            id: project.id.clone(),
+            path: project.path.clone(),
+            name: project.name.clone(),
+            label: project.label.clone(),
+            color: project.color.clone(),
+            added_via: project.added_via.as_str().to_owned(),
+            sort_order: u32::try_from(project.sort_order).unwrap_or(u32::MAX),
+            scheme: project.scheme.as_str().to_owned(),
+            base_name: project.base_name.as_str().to_owned(),
+            extra_local_enabled: project.extra_local.enabled,
+            extra_local_position: project.extra_local.position.as_str().to_owned(),
+            extra_project_enabled: project.extra_project.enabled,
+            extra_project_position: project.extra_project.position.as_str().to_owned(),
+            write_access_warning: warning,
+        }
+    }
+}
+
+/// The already-registered project of the two duplicate arms (PRJ-001,
+/// DB-015): what the message names, and the id the archived arm's
+/// restore offer (the future `project_restore`, T-109) calls back
+/// with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct ExistingProject {
+    /// The existing row's id.
+    pub(crate) id: String,
+    /// Its display name (the duplicate message names the project).
+    pub(crate) name: String,
+    /// Its registered canonical path.
+    pub(crate) path: String,
+    /// `active` or `archived` — which duplicate arm this is.
+    pub(crate) state: String,
+}
+
+/// Registers the folder the user picked in the system dialog as a
+/// project (§7.10 Projects module `project_add_manual`, the D-009
+/// fixed name; §7.1 PRJ-001; scenario S1).
+///
+/// `path` is the folder the UI's `dialog_pick_folder` answer named,
+/// and the command's first act is the SEC-003 gate on it —
+/// [`session_paths::validate_ui_path`], the T-073/D-100 boundary: a
+/// path that neither canonicalizes onto a registered project nor onto
+/// a folder picked in this session is rejected with `E_VALIDATION`
+/// before anything else runs (a foreign folder never reaches the
+/// `.git` check, the database, or the disk probes).
+///
+/// The spec flow, in order (S1: "pick a folder, `.git` check,
+/// duplicate check, create the entry with default settings and a
+/// color by D-29"):
+///
+/// 1. **Repository root** (PRJ-003/D-08, blocking pool):
+///    [`eunomia_fs::paths::find_git_root`] from the canonical pick —
+///    a subfolder resolves to its repository's canonical root
+///    (nearest root wins, D-06). A folder outside any repository is
+///    §10's `E_NOT_A_REPO`; a probe the OS refused is
+///    `E_PROJECT_UNAVAILABLE` with the OS facts ("could not check" is
+///    not "not a repo", D-090).
+/// 2. **The root offer** (PRJ-003): when the picked folder is a
+///    subfolder and `accept_repo_root` is not `Some(true)`, the answer
+///    is the `"repo_root_offered"` arm — the app *offers* the root,
+///    it does not silently register a different folder than the one
+///    the user picked. Nothing is written. The UI's confirm re-sends
+///    the same picked path with the flag; the root is re-derived
+///    (idempotent converge), so SEC-003's allowlist is never widened
+///    with an app-derived path (D-100).
+/// 3. **Fields** (§6.9): the name defaults to the root's folder name
+///    (`validate_name`) and the label to DB-042's derivation of it
+///    (`default_label`, then `validate_label` — the recorded edge
+///    where a control-character prefix derives an unstorable label is
+///    an `E_VALIDATION` naming the field, not a panic).
+/// 4. **One transaction** (D-037, D-051, §6.9 "the whole operation
+///    runs in one transaction"): the DB-015 duplicate check
+///    (`find_by_path_key`, either state — active answers the
+///    `"duplicate_active"` message, archived the
+///    `"archived_duplicate"` restore offer; both typed answers, no
+///    error, nothing written); the four write settings copied from
+///    `default.*` (PRJ-012/DEF-005); the D-29 color over the ACTIVE
+///    projects' colors; `create` (the repository appends `sort_order`);
+///    and the `project.added` journal entry (LOG-001…004,
+///    info/user/ok, entity project) **inside the same transaction** —
+///    a rolled-back add leaves no entry claiming it happened. The
+///    `E_SYNC_RUNNING` guard of SYS-005 does not apply: that rule
+///    lists the project-*editing* commands, and no sync writer exists
+///    yet; the guard joins with the sync-run task.
+/// 5. **Write-access warning** (§6.9, T-063/D-094): after the commit,
+///    [`eunomia_fs::write_access::check_write_access`] over the
+///    root's future target file, on the blocking pool (never inside
+///    the transaction — a dead drive must not hold the one database
+///    lock, the D-096 probe-order rule). The verdict travels as the
+///    response's `write_access_warning`; the project stays added.
+///
+/// Failures reach the log with their §10 code
+/// ([`logging::project_add_failed`]); the three typed non-add
+/// outcomes log nothing (nothing happened), and a successful add is
+/// the journal entry itself (the D-051 mirror policy — info+user+ok
+/// is not mirrored to the file log).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn project_add_manual<R: Runtime>(
+    app: AppHandle<R>,
+    path: String,
+    accept_repo_root: Option<bool>,
+) -> Result<ProjectAddResult, AppError> {
+    project_add_manual_impl(app, path, accept_repo_root)
+        .await
+        .inspect_err(logging::project_add_failed)
+}
+
+/// The body of [`project_add_manual`], split so the one logging edge
+/// covers every failure path (the `activity_list` shape) — including
+/// the SEC-003 rejection, which fires before anything else.
+async fn project_add_manual_impl<R: Runtime>(
+    app: AppHandle<R>,
+    path: String,
+    accept_repo_root: Option<bool>,
+) -> Result<ProjectAddResult, AppError> {
+    // SEC-003 (§5.6): the input gate. The canonical form comes back
+    // from the check; the walk below then re-resolves that
+    // already-canonical form (its own first step, D-086) — idempotent
+    // for the normal case, and equality with the pick stays byte
+    // equality on canonical forms.
+    let picked = session_paths::validate_ui_path(&app, &path).await?;
+    // PRJ-003/D-08: the walk-up over live folders is blocking I/O
+    // (SYS-001) — a dead mount must not stall an async worker.
+    let walked = picked.clone();
+    let root =
+        tauri::async_runtime::spawn_blocking(move || eunomia_fs::paths::find_git_root(&walked))
+            .await
+            .map_err(db::join_failure_to_app_error)?
+            .map_err(|source| repo_lookup_failed(&source))?;
+    // The database every non-offer answer needs, resolved BEFORE the
+    // offer branch so recovery mode answers consistently: a picked
+    // folder of any depth gets the honest `NoDatabase` state answer,
+    // not an offer whose confirm could only fail the same way (the
+    // round-1 review finding).
+    let database = managed_db(&app)?;
+    // PRJ-003: a subfolder is *offered* the root, never silently
+    // re-registered — the confirm call re-sends this same picked path
+    // with the flag (see the command docs for the SEC-003 reasoning).
+    if root != picked && accept_repo_root != Some(true) {
+        return Ok(ProjectAddResult::repo_root_offered(&root));
+    }
+    let name = derived_name(&root)?;
+    let label_default = eunomia_core::project_validators::default_label(&name);
+    let label = eunomia_core::project_validators::validate_label(&label_default)
+        .map_err(|source| rejected_field("label", &label_default, &source.to_string()))?
+        .to_owned();
+
+    // The transaction half: everything the operation writes happens in
+    // one `Db::run` (D-037). The moved values are what `NewProject`
+    // borrows; the probe keeps its own copies outside.
+    let root_key = eunomia_fs::paths::path_key(&root);
+    let probe_root = root.clone();
+    let outcome = database
+        .run(move |transaction| {
+            // DB-015: the key is unique across active AND archived
+            // rows, and the check runs inside the operation's own
+            // transaction — the same single-connection serialization
+            // D-037 gives every writer, so the create below cannot
+            // race past it.
+            if let Some(existing) =
+                eunomia_store::projects::find_by_path_key(transaction, &root_key)
+                    .map_err(projects_store_to_app_error)?
+            {
+                return Ok(AddOutcome::Refused(ProjectAddResult::duplicate_of(
+                    &existing,
+                )));
+            }
+            // PRJ-012: the write settings a new project copies from
+            // `default.*` — read here, inside the transaction, so the
+            // copy is atomic with the create (a concurrent
+            // `settings_set` cannot split them).
+            let scheme = match stored_default(transaction, SettingKey::DefaultScheme)? {
+                SettingValue::Scheme(scheme) => scheme,
+                _ => return Err(unpaired_setting(SettingKey::DefaultScheme)),
+            };
+            let base_name = match stored_default(transaction, SettingKey::DefaultBaseName)? {
+                SettingValue::BaseName(base_name) => base_name,
+                _ => return Err(unpaired_setting(SettingKey::DefaultBaseName)),
+            };
+            let extra_local = match stored_default(transaction, SettingKey::DefaultExtraLocal)? {
+                SettingValue::ExtraFile(extra) => extra,
+                _ => return Err(unpaired_setting(SettingKey::DefaultExtraLocal)),
+            };
+            let extra_project = match stored_default(transaction, SettingKey::DefaultExtraProject)?
+            {
+                SettingValue::ExtraFile(extra) => extra,
+                _ => return Err(unpaired_setting(SettingKey::DefaultExtraProject)),
+            };
+            // D-29/DB-041: the least-used palette color among ACTIVE
+            // projects, tie-broken by a fresh UUIDv7's hash. The row's
+            // own id is minted inside `create` and cannot be known
+            // before the color is chosen; the store is frozen for this
+            // task, so the tie-break hashes a pre-generated sibling
+            // id — both are fresh UUIDv7s at decision time, which is
+            // the determinism D-29's parenthetical asks of a decision
+            // point (recorded in the task's DECISIONS.md entry).
+            let occupied = occupied_colors(transaction)?;
+            let tie_break_id = eunomia_store::values::new_id();
+            let color =
+                eunomia_core::color_pick::pick_color(&occupied, &ProjectId::new(tie_break_id));
+            // The stored path is the verbatim canonicalize output
+            // (DB-030); the lossy form is the TEXT-column boundary the
+            // key and the log share (D-086) — a non-UTF-8 byte reaches
+            // the row the same way it reached the key.
+            let path_text = root.to_string_lossy().into_owned();
+            let new = eunomia_store::projects::NewProject {
+                path: &path_text,
+                path_key: &root_key,
+                name: &name,
+                label: &label,
+                color: color.as_str(),
+                description: "",
+                added_via: eunomia_store::projects::AddedVia::Manual,
+                scheme,
+                base_name,
+                extra_local,
+                extra_project,
+            };
+            // The create: a `DuplicatePathKey` here is the one write
+            // race the in-transaction check above cannot produce (one
+            // connection serializes every writer, D-037) — and if it
+            // ever fires anyway, the honest answer is the SAME typed
+            // duplicate outcome, not the read-command fallback whose
+            // diagnostic would misname the flow and whose
+            // `E_DB_LOCKED` code would invite a retry (the round-1
+            // review finding). Convergence, never a masked conflict.
+            let created = match eunomia_store::projects::create(transaction, &new) {
+                Ok(created) => created,
+                Err(ProjectsError::DuplicatePathKey { .. }) => {
+                    let existing =
+                        eunomia_store::projects::find_by_path_key(transaction, &root_key)
+                            .map_err(projects_store_to_app_error)?
+                            .ok_or_else(|| {
+                                projects_fallback(
+                                    "ProjectsError",
+                                    "a duplicate path key conflict vanished on the re-read",
+                                )
+                            })?;
+                    return Ok(AddOutcome::Refused(ProjectAddResult::duplicate_of(
+                        &existing,
+                    )));
+                }
+                Err(other) => return Err(projects_store_to_app_error(other)),
+            };
+            // LOG-001…004 ("adding … projects") inside the operation's
+            // own transaction (D-051): entity and project carry the
+            // new id; no details — paths ride `Details::File` for file
+            // writes only, and the row itself holds the path.
+            let mut entry = LogEntry::new(
+                Action::ProjectAdded,
+                Level::Info,
+                Visibility::User,
+                Outcome::Ok,
+            );
+            entry.entity = Some(Entity {
+                kind: EntityType::Project,
+                id: created.id.as_str(),
+            });
+            entry.project_id = Some(created.id.as_str());
+            insert(transaction, &entry).map_err(activity_log_to_app_error)?;
+            // The D-051 mirror contract: one call per written entry
+            // (info+user+ok is the unmirrored shape today).
+            logging::action_logged(&entry);
+            Ok(AddOutcome::Created(created))
+        })
+        .await?;
+    match outcome {
+        // The typed refusals: nothing was written, and nothing logs —
+        // the flow answered a question about the user's folder.
+        AddOutcome::Refused(result) => Ok(result),
+        AddOutcome::Created(project) => {
+            // §6.9's "checked when adding (warning)": the probe runs
+            // after the commit, on the blocking pool (a dead drive
+            // delays only this response — the D-096 probe-order rule),
+            // over the root's future target file — scheme C writes
+            // `<STEM>.project.md` and never touches the main file
+            // (D-20), so the probe asks about the file the app will
+            // actually write (the round-1 review finding: probing
+            // `base_name` mis-targets every scheme-C project). The
+            // project stays registered whatever the verdict.
+            let target = probe_root.join(probe_target_name(project.scheme, project.base_name));
+            let warning = tauri::async_runtime::spawn_blocking(move || {
+                eunomia_fs::write_access::check_write_access(&target)
+                    .err()
+                    .as_ref()
+                    .and_then(write_access_warning)
+            })
+            .await
+            .map_err(db::join_failure_to_app_error)?;
+            Ok(ProjectAddResult::added(&project, warning))
+        }
+    }
+}
+
+/// The transaction half of [`project_add_manual`]: the created row, or
+/// the typed refusal the duplicate check answered (the wire result is
+/// built around either once the probe has run).
+enum AddOutcome {
+    /// The row was created and journaled; the commit is the caller's
+    /// `Db::run`.
+    Created(eunomia_store::projects::Project),
+    /// The duplicate check answered instead — active message or
+    /// archived-restore offer; nothing was written.
+    Refused(ProjectAddResult),
+}
+
+/// Maps the root-lookup failure onto §10 (the PRJ-003 half of the
+/// flow): the negative lookup (`NoGitEntry` — every ancestor probed,
+/// no `.git` anywhere) is `E_NOT_A_REPO`, §10's row for "a folder
+/// without `.git` is being added"; a refused probe or a refused
+/// canonicalization is `E_PROJECT_UNAVAILABLE` — "could not check" is
+/// not "checked and absent" (the D-090 split; §10 keeps the two
+/// apart, and the user actions differ: retry or fix access vs. pick
+/// the repository root). The walked path travels in `params`
+/// (SEC-008: paths may) and the OS refusal, when there is one, in
+/// `details` (§10's first-class log fact).
+fn repo_lookup_failed(source: &NotARepoError) -> AppError {
+    let code = match source {
+        NotARepoError::NoGitEntry { .. } => ErrorCode::NotARepo,
+        NotARepoError::Canonicalize { .. } | NotARepoError::NotReadable { .. } => {
+            ErrorCode::ProjectUnavailable
+        }
+    };
+    let mut app_error = AppError::new(code);
+    app_error
+        .params
+        .insert("path".to_owned(), source.path().to_owned());
+    match source.io_error() {
+        Some(io) => app_error.with_os_error(io),
+        None => app_error,
+    }
+}
+
+/// The default display name of a new project (S1): the repository
+/// root's own folder name, §6.9-validated through the core validator —
+/// trimmed, 1–100 characters, code points. A canonical root always has
+/// a folder name except the filesystem root itself (`/`, `C:\`), whose
+/// empty derivation is the honest `E_VALIDATION` naming the field (a
+/// repository mounted at the filesystem root is named by the user in
+/// the settings modal afterwards — but the app cannot register a
+/// nameless row, and the CHECKs would reject it anyway).
+fn derived_name(root: &Path) -> Result<String, AppError> {
+    let raw = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    eunomia_core::project_validators::validate_name(&raw)
+        .map_err(|source| rejected_field("name", &raw, &source.to_string()))
+}
+
+/// Reads one §6.5 setting the new project copies, through the store's
+/// single read path (D-039): a missing row answers the §6.5 default, a
+/// corrupt cell answers the settings corrupt fallback
+/// ([`settings_cell_to_app_error`], never `E_VALIDATION` — the T-027
+/// round-2 rule: corruption is not the caller's input).
+fn stored_default(
+    transaction: &rusqlite::Transaction<'_>,
+    key: SettingKey,
+) -> Result<SettingValue, AppError> {
+    eunomia_store::settings::get(transaction, key).map_err(settings_cell_to_app_error)
+}
+
+/// The wrong-variant arm of a default-setting read: `get` re-parses
+/// every stored cell through the key's §6.5 contract, so a value of
+/// the wrong variant reaching the destructure means the read's own
+/// validation was bypassed — unreachable, but typed honestly instead
+/// of `unwrap`ped. The synthesized `SettingsError::Type` rides the
+/// shared mapper, whose diagnostic is class-only (the fields never
+/// reach the wire or the log).
+fn unpaired_setting(key: SettingKey) -> AppError {
+    settings_cell_to_app_error(StorageError::Settings {
+        key: key.as_str().to_owned(),
+        source: SettingsError::Type {
+            expected: "the key's §6.5 type",
+            found: "another variant",
+        },
+    })
+}
+
+/// The D-29 input: the colors held by ACTIVE projects, one entry per
+/// project (a multiset — repetitions count, the archived contribute
+/// nothing, DB-014). The `color` column has no schema CHECK (§6.2),
+/// so a stored cell outside the palette can only be corruption or a
+/// newer app version — the D-096 corrupt-cells fallback with a
+/// class-only diagnostic, never a guess (and never the stored value on
+/// a SEC-008 surface).
+fn occupied_colors(transaction: &rusqlite::Transaction<'_>) -> Result<Vec<Color>, AppError> {
+    eunomia_store::projects::list(transaction, ListScope::Active)
+        .map_err(projects_store_to_app_error)?
+        .into_iter()
+        .map(|project| {
+            eunomia_core::project_validators::validate_color(&project.color).map_err(|_| {
+                projects_fallback(
+                    "ProjectsCorrupt",
+                    "a stored color cell is outside its palette",
+                )
+            })
+        })
+        .collect()
+}
+
+/// The §9 target-file name the write-access probe checks: scheme C
+/// writes `<STEM>.project.md` and never edits the main file (D-20), so
+/// the probe must ask about the file the app will actually write —
+/// [`eunomia_core::backup_name::target_file_name`] is the single owner
+/// of that mapping (the round-1 review finding: probing the row's
+/// `base_name` mis-targets every scheme-C project). The store's
+/// vocabulary twins are converted member-by-member — both enums carry
+/// the same schema literals, and the match is compile-checked on both
+/// sides, so a new member of either cannot drift silently.
+fn probe_target_name(
+    scheme: eunomia_store::settings::Scheme,
+    base_name: eunomia_store::settings::BaseName,
+) -> &'static str {
+    use eunomia_core::project::{BaseName, Scheme};
+    let core_scheme = match scheme {
+        eunomia_store::settings::Scheme::A => Scheme::A,
+        eunomia_store::settings::Scheme::B => Scheme::B,
+        eunomia_store::settings::Scheme::C => Scheme::C,
+    };
+    let core_base_name = match base_name {
+        eunomia_store::settings::BaseName::AgentsMd => BaseName::AgentsMd,
+        eunomia_store::settings::BaseName::ClaudeMd => BaseName::ClaudeMd,
+    };
+    eunomia_core::backup_name::target_file_name(core_scheme, core_base_name)
+}
+
+/// Shapes the §6.9 warning from the probe's verdict: the two rights
+/// verdicts map to their wire classes; a refused probe maps to `None`
+/// — "could not check" is not "no rights" (the D-090 split), the
+/// project is added without a warning, and the sync preflight (where
+/// the same probe's failure is an `E_NO_WRITE_ACCESS` skip, §9.4)
+/// re-checks before any write.
+fn write_access_warning(source: &WriteAccessError) -> Option<String> {
+    match source {
+        WriteAccessError::FolderNotWritable { .. } => Some("folder_not_writable".to_owned()),
+        WriteAccessError::FileReadOnly { .. } => Some("file_read_only".to_owned()),
+        WriteAccessError::ProbeFailed { .. } => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // `markdown_preview` (T-056, §7.10 Library module, SEC-005, D-15, D-009)
 // ---------------------------------------------------------------------------
 
@@ -2167,6 +2763,133 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- `project_add_manual` seam tests (T-074) -----------------------
+
+    #[test]
+    fn a_negative_root_lookup_is_e_not_a_repo_with_the_picked_path() {
+        // Arrange: the walk's negative verdict — every ancestor probed,
+        // no `.git` anywhere (PRJ-003/D-08). No OS call failed, so the
+        // §10 row's own situation: "Project not added … Pick the
+        // repository root".
+        let source = NotARepoError::NoGitEntry {
+            path: "/home/user/plain".to_owned(),
+        };
+
+        // Act
+        let app_error = repo_lookup_failed(&source);
+
+        // Assert: E_NOT_A_REPO with its default key, the walked path in
+        // params (SEC-008: paths may), and no details — a fact about the
+        // tree, not an OS failure.
+        assert_eq!(app_error.code, ErrorCode::NotARepo);
+        assert_eq!(app_error.message_key, "errors.not_a_repo");
+        assert_eq!(
+            app_error.params.get("path").map(String::as_str),
+            Some("/home/user/plain")
+        );
+        assert!(app_error.details.is_none());
+    }
+
+    #[test]
+    fn a_refused_root_probe_is_project_unavailable_with_the_os_facts() {
+        // Arrange: the walk's refused probe — "could not check" is not
+        // "checked and absent" (D-090), so the §10 row is
+        // E_PROJECT_UNAVAILABLE, not E_NOT_A_REPO. Both io-backed
+        // variants of the walk share the arm; the Canonicalize one is
+        // the vanish race the pick itself can also hit (D-100).
+        let refused = NotARepoError::NotReadable {
+            path: "/home/user/locked".to_owned(),
+            source: std::io::Error::from_raw_os_error(13),
+        };
+        let vanished = NotARepoError::Canonicalize {
+            source: eunomia_fs::paths::canonicalize(Path::new("/definitely/not/here/t074"))
+                .expect_err("a missing path must fail canonicalization"),
+        };
+
+        for source in [&refused, &vanished] {
+            // Act
+            let app_error = repo_lookup_failed(source);
+
+            // Assert: the §10 row, the walked path in params, and the OS
+            // refusal in details (§10's first-class log fact).
+            assert_eq!(app_error.code, ErrorCode::ProjectUnavailable);
+            assert_eq!(app_error.message_key, "errors.project_unavailable");
+            assert!(app_error.params.contains_key("path"));
+            let details = app_error.details.expect("the OS refusal travels");
+            assert!(details.os_code.is_some(), "the raw OS code is present");
+        }
+    }
+
+    #[test]
+    fn the_derived_name_is_the_root_folder_name_section_69_validated() {
+        // The S1 default: the repository root's own folder name, through
+        // the core validator (trim, 1–100 code points). The edges a
+        // canonical root can actually produce: a plain name, a padded
+        // one (a folder literally named with edge spaces — legal on
+        // Unix), a 100/101-character name, and the filesystem root
+        // itself (no file name at all → the honest E_VALIDATION, since
+        // the schema CHECKs would reject an empty name anyway).
+        assert_eq!(
+            derived_name(Path::new("/home/user/eunomia-repo")).unwrap(),
+            "eunomia-repo"
+        );
+        assert_eq!(derived_name(Path::new("/home/user/ pad ")).unwrap(), "pad");
+        let hundred = "r".repeat(100);
+        assert_eq!(
+            derived_name(Path::new("/home/user").join(&hundred).as_path()).unwrap(),
+            hundred
+        );
+        let too_long = derived_name(Path::new("/home/user").join("r".repeat(101)).as_path())
+            .expect_err("a 101-character folder name must be rejected");
+        assert_eq!(too_long.code, ErrorCode::Validation);
+        assert_eq!(
+            too_long.params.get("field").map(String::as_str),
+            Some("name")
+        );
+        assert!(
+            too_long
+                .params
+                .get("reason")
+                .is_some_and(|reason| reason.contains("101")),
+            "the reason carries the validator's own wording: {:?}",
+            too_long.params
+        );
+        let nameless = derived_name(Path::new("/")).expect_err("the filesystem root has no name");
+        assert_eq!(nameless.code, ErrorCode::Validation);
+        assert_eq!(
+            nameless.params.get("field").map(String::as_str),
+            Some("name")
+        );
+    }
+
+    #[test]
+    fn write_access_verdicts_map_to_warning_classes_and_refusals_stay_silent() {
+        // The §6.9 warning classes on the wire: the two rights verdicts
+        // (T-063/D-094) name their class; a refused probe answers None
+        // — "could not check" is not "no rights" (the D-090 split), and
+        // the sync preflight re-checks where a refusal is a skip.
+        let folder = WriteAccessError::FolderNotWritable {
+            path: "/repo/AGENTS.md".to_owned(),
+            source: std::io::Error::from_raw_os_error(13),
+        };
+        assert_eq!(
+            write_access_warning(&folder).as_deref(),
+            Some("folder_not_writable")
+        );
+        let file = WriteAccessError::FileReadOnly {
+            path: "/repo/AGENTS.md".to_owned(),
+        };
+        assert_eq!(
+            write_access_warning(&file).as_deref(),
+            Some("file_read_only")
+        );
+        let refused = WriteAccessError::ProbeFailed {
+            path: "/repo/AGENTS.md".to_owned(),
+            source: std::io::Error::other("vanished mid-probe"),
+        };
+        assert_eq!(write_access_warning(&refused), None);
     }
 
     // ---- `app_info` field-source pins (T-031) --------------------------
