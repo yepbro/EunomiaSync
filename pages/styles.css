@@ -13,7 +13,9 @@
    update check, REL-004), DB-041/042 (project labels in the column
    headers), MAIN-006 (#text-tooltip: instruction text, 400 ms delay),
    MAIN-012…014 / LIB-005…007 (hide/restore instruction: .hide-btn eye
-   buttons, #hide-dialog confirm),
+   buttons, #hide-dialog confirm), MAIN-015…023 / LIB-030…034 (heading
+   add/rename/delete: .hbtn buttons, #heading-dialog,
+   #heading-delete-dialog),
    UI-001, UI-011, UI-012, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
@@ -551,6 +553,56 @@ body {
 .hide-btn:hover {
   color: var(--accent-strong);
   background: var(--accent-soft);
+}
+
+/* Heading action buttons (MAIN-015…023: add child, rename, delete) —
+   the per-row icon idiom sized to the tree row; also used by the "+"
+   in the "Instruction" column header */
+.hbtn {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  inline-size: 20px;
+  block-size: 20px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex: none;
+}
+
+.hbtn svg {
+  inline-size: 13px;
+  block-size: 13px;
+  fill: currentColor;
+}
+
+.hbtn:hover {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.hbtn--delete:hover {
+  color: var(--danger);
+  background: transparent;
+}
+
+.hbtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.hbtn:disabled:hover {
+  color: var(--text-faint);
+  background: transparent;
+}
+
+#instruction-header .hbtn {
+  margin-inline-start: 4px;
+  vertical-align: middle;
 }
 
 /* ----- Matrix cells (MAIN-001…005: four states, shape-based, NFR-020) --- */

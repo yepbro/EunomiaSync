@@ -26,7 +26,10 @@
   shown by one reusable #text-tooltip after a 400 ms delay),
   hide/restore instruction from the matrix (MAIN-012…014, LIB-005…007:
   eye-off button per instruction row, #hide-dialog confirm, restore
-  without confirmation while "Show hidden" is on).
+  without confirmation while "Show hidden" is on),
+  heading add/rename/delete (MAIN-015…023, LIB-030…034: header "+" and
+  per-heading child/rename/delete buttons, #heading-dialog,
+  #heading-delete-dialog keeping the section's instructions).
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
   (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-002…007 (scan) +
@@ -153,7 +156,18 @@
               <th scope="col" class="c-check">
                 <input id="select-all" type="checkbox" aria-label="Select all rows" />
               </th>
-              <th scope="col" class="c-name" id="instruction-header">Instruction</th>
+              <th scope="col" class="c-name" id="instruction-header">
+                Instruction
+                <!-- "+" adds a top-level section (MAIN-015): the header
+                     stays the drag-drop target for moving a section. -->
+                <button
+                  id="add-section-btn"
+                  type="button"
+                  class="hbtn hbtn--add"
+                  title="Add top-level section"
+                  aria-label="Add top-level section"
+                ></button>
+              </th>
 
               <th
                 scope="col"
@@ -2673,6 +2687,51 @@
           <div class="modal-actions">
             <button value="cancel" class="btn btn-ghost">Cancel</button>
             <button value="hide" class="btn btn-primary">Hide</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Add/rename section dialog (MAIN-015…023, LIB-030…031): shared by
+         the header "+" (top-level ## section at the end of the tree), a
+         heading's "+" (child section, level+1 capped at 6) and the
+         heading's pencil (rename, prefilled). Name: 1–200 characters,
+         one line (§6.9). -->
+      <dialog id="heading-dialog" class="modal" aria-labelledby="hd-title">
+        <form id="hd-form" method="dialog" novalidate>
+          <h2 id="hd-title">Add section</h2>
+          <div class="ps-field">
+            <label class="field-label" for="hd-name">Section name</label>
+            <input
+              id="hd-name"
+              class="ps-input"
+              type="text"
+              autocomplete="off"
+              maxlength="200"
+              aria-describedby="hd-name-error"
+            />
+            <p id="hd-name-error" class="ps-error" hidden></p>
+          </div>
+          <p class="ps-hint">Name: 1–200 characters, one line (§6.9).</p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="save" class="btn btn-primary">Save</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Delete-section confirmation (MAIN-015…023, LIB-033, §6.4, UI-010):
+         a dedicated dialog. Confirming removes only the heading row — the
+         section's instructions stay in place and become part of the
+         previous section. -->
+      <dialog id="heading-delete-dialog" class="modal" aria-labelledby="hdel-title">
+        <form method="dialog">
+          <h2 id="hdel-title">Delete section</h2>
+          <p class="modal-text">
+            The section's instructions stay in place and become part of the previous section.
+          </p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="delete" class="btn btn-danger">Delete</button>
           </div>
         </form>
       </dialog>

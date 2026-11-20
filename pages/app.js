@@ -34,6 +34,9 @@
    hide/restore instruction from the matrix (MAIN-012…014, LIB-005…007:
    eye-off button per row, dedicated confirm dialog, restore without
    confirmation while "Show hidden" is on),
+   heading add/rename/delete (MAIN-015…023, LIB-030…034: header "+" for
+   top-level sections, per-heading child/rename/delete buttons, shared
+   #heading-dialog, delete confirm keeps the instructions),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -341,6 +344,23 @@
      dropped on the "Instruction" column header it becomes the first
      top-level section. */
 
+  /* First row after the heading's section (insertion point); shared with
+     the heading add/delete flows below */
+  const sectionEndAfter = (headingRow) => {
+    const level = headingLevel(headingRow)
+    let tr = headingRow.nextElementSibling
+    while (tr && !(tr.classList.contains('row-heading') && headingLevel(tr) <= level)) {
+      tr = tr.nextElementSibling
+    }
+    return tr
+  }
+
+  /* New rows join the drag system: the drag listeners are delegated, so
+     only the draggable attribute is needed per row */
+  const makeRowDraggable = (tr) => {
+    tr.draggable = true
+  }
+
   function initRowDrag() {
     const table = document.querySelector('.matrix')
     const headerTh = document.getElementById('instruction-header')
@@ -359,16 +379,6 @@
       draggedSectionRows = []
       clearDropMark()
       applyFilters()
-    }
-
-    /* First row after the heading's section (insertion point) */
-    const sectionEndAfter = (headingRow) => {
-      const level = headingLevel(headingRow)
-      let tr = headingRow.nextElementSibling
-      while (tr && !(tr.classList.contains('row-heading') && headingLevel(tr) <= level)) {
-        tr = tr.nextElementSibling
-      }
-      return tr
     }
 
     /* All rows belonging to the heading's section (heading excluded) */
@@ -396,7 +406,7 @@
       }
     }
 
-    for (const tr of rows()) tr.draggable = true
+    for (const tr of rows()) makeRowDraggable(tr)
 
     tbody.addEventListener('dragstart', (e) => {
       const tr = e.target.closest('tr')
@@ -555,6 +565,10 @@
   tbody.addEventListener('click', (e) => {
     const heading = e.target.closest('tr.row-heading')
     if (!heading) return
+    /* The caret relies on this row-level handler; every other button on
+       the heading row (add/rename/delete below) handles its own click */
+    const btn = e.target.closest('button')
+    if (btn && !btn.classList.contains('caret-btn')) return
     const nowCollapsed = !collapsed.has(heading)
     if (nowCollapsed) collapsed.add(heading)
     else collapsed.delete(heading)
@@ -639,6 +653,212 @@
     refreshRowHiddenState(row)
     setHiddenCount()
     applyFilters()
+  })
+
+  /* ---------- Heading add / rename / delete (MAIN-015…023, LIB-030…034) ----- */
+  /* UI lives in the library tree: a "+" in the "Instruction" column header
+     adds a top-level ## section at the end of the tree, every heading row
+     carries "+" (child section, level+1 capped at 6), pencil (rename) and
+     trash (delete) buttons. Add and rename share the small #heading-dialog
+     (name: 1–200 characters, one line, §6.9); deleting confirms in a
+     dedicated dialog — the section's instructions stay in place and become
+     part of the previous section (§6.4, LIB-033) — and removes only the
+     heading <tr>. New rows are full citizens: draggable (delegated drag
+     listeners), caret with aria-expanded, [data-level] + --depth indent, so
+     collapse, filters and drag treat them like the static ones. */
+
+  const headingDialog = document.getElementById('heading-dialog')
+  const headingForm = document.getElementById('hd-form')
+  const headingDialogTitle = document.getElementById('hd-title')
+  const headingNameInput = document.getElementById('hd-name')
+  const headingNameError = document.getElementById('hd-name-error')
+  const headingDeleteDialog = document.getElementById('heading-delete-dialog')
+  const headerAddSectionBtn = document.getElementById('add-section-btn')
+  let headingDialogState = null
+  let pendingDeleteHeading = null
+
+  const headingName = (row) => (row.querySelector('.hname')?.textContent ?? '').trim()
+
+  /* One heading action button in the per-row icon idiom */
+  function mkHeadingButton(kind, icon) {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = `hbtn hbtn--${kind}`
+    b.innerHTML = ICONS[icon]
+    return b
+  }
+
+  function refreshHeadingButtons(row) {
+    const name = headingName(row)
+    const level = headingLevel(row)
+    const addBtn = row.querySelector('.hbtn--add')
+    if (addBtn) {
+      if (level >= 6) {
+        addBtn.disabled = true
+        addBtn.title = 'Headings go up to level 6 — a deeper sub-section cannot be added (LIB-030)'
+      } else {
+        addBtn.disabled = false
+        addBtn.title = `Add sub-section under ${name}`
+      }
+      addBtn.setAttribute('aria-label', addBtn.title)
+    }
+    const renameBtn = row.querySelector('.hbtn--rename')
+    if (renameBtn) {
+      renameBtn.title = `Rename section ${name}`
+      renameBtn.setAttribute('aria-label', renameBtn.title)
+    }
+    const deleteBtn = row.querySelector('.hbtn--delete')
+    if (deleteBtn) {
+      deleteBtn.title = `Delete section ${name}`
+      deleteBtn.setAttribute('aria-label', deleteBtn.title)
+    }
+  }
+
+  /* Attaches the three action buttons to a heading row (init + new rows) */
+  function attachHeadingButtons(row) {
+    const wrap = row.querySelector('.name-wrap')
+    if (!wrap || row.querySelector('.hbtn')) return
+    const addBtn = mkHeadingButton('add', 'add')
+    const renameBtn = mkHeadingButton('rename', 'edit')
+    const deleteBtn = mkHeadingButton('delete', 'delete')
+    wrap.append(addBtn, renameBtn, deleteBtn)
+    refreshHeadingButtons(row)
+  }
+
+  /* A full heading <tr>, mirroring the static markup: aria-hidden check
+     cell, th.c-name with data-level + --depth indent, caret, name, fill */
+  function buildHeadingRow({ level, name }) {
+    const tr = document.createElement('tr')
+    tr.className = 'row-heading'
+
+    const tdCheck = document.createElement('td')
+    tdCheck.className = 'c-check'
+    tdCheck.setAttribute('aria-hidden', 'true')
+
+    const th = document.createElement('th')
+    th.setAttribute('scope', 'row')
+    th.className = 'c-name'
+    th.dataset.level = String(level)
+    th.style.setProperty('--depth', String(level - 2))
+    const wrap = document.createElement('span')
+    wrap.className = 'name-wrap'
+    const caret = document.createElement('button')
+    caret.type = 'button'
+    caret.className = 'caret-btn'
+    caret.setAttribute('aria-expanded', 'true')
+    caret.setAttribute('aria-label', `Toggle section ${name}`)
+    const hname = document.createElement('span')
+    hname.className = 'hname'
+    hname.textContent = name
+    wrap.append(caret, hname)
+    th.append(wrap)
+
+    const tdFill = document.createElement('td')
+    tdFill.className = 'c-fill'
+    tdFill.colSpan = 8
+
+    tr.append(tdCheck, th, tdFill)
+    attachHeadingButtons(tr)
+    makeRowDraggable(tr)
+    return tr
+  }
+
+  function initHeadingTools() {
+    for (const tr of rows()) {
+      if (isHeading(tr)) attachHeadingButtons(tr)
+    }
+    /* Header "+": top-level ## section at the end of the tree. The header
+       stays the section drop target — the button is inside the same th. */
+    headerAddSectionBtn.innerHTML = ICONS.add
+    headerAddSectionBtn.addEventListener('click', () => openHeadingDialog({ mode: 'add' }))
+
+    /* Delegated actions on the heading buttons */
+    tbody.addEventListener('click', (e) => {
+      const btn = e.target.closest('.hbtn')
+      if (!btn) return
+      const row = btn.closest('tr.row-heading')
+      if (!row) return
+      if (btn.classList.contains('hbtn--add')) {
+        openHeadingDialog({ mode: 'add', parent: row })
+      } else if (btn.classList.contains('hbtn--rename')) {
+        openHeadingDialog({ mode: 'rename', row })
+      } else if (btn.classList.contains('hbtn--delete')) {
+        pendingDeleteHeading = row
+        headingDeleteDialog.showModal()
+      }
+    })
+  }
+
+  function validateHeadingName() {
+    const name = headingNameInput.value.trim()
+    if (name.length < 1 || name.length > 200 || name.includes('\n')) {
+      setFieldError(headingNameInput, headingNameError, 'Name is required — 1–200 characters, one line (§6.9).')
+      return false
+    }
+    setFieldError(headingNameInput, headingNameError, '')
+    return true
+  }
+
+  function openHeadingDialog({ mode, parent = null, row = null }) {
+    headingDialogState = { mode, parent, row }
+    if (mode === 'add') {
+      headingDialogTitle.textContent = parent
+        ? `Add sub-section under ${headingName(parent)}`
+        : 'Add section'
+      headingNameInput.value = ''
+    } else {
+      headingDialogTitle.textContent = 'Rename section'
+      headingNameInput.value = headingName(row)
+    }
+    setFieldError(headingNameInput, headingNameError, '')
+    headingDialog.showModal()
+    headingNameInput.focus()
+    headingNameInput.select()
+  }
+
+  /* Save validates on the button click (preventing it keeps the dialog
+     open with the inline error — project-settings idiom) */
+  headingForm.querySelector('button[value="save"]').addEventListener('click', (e) => {
+    if (!validateHeadingName()) e.preventDefault()
+  })
+
+  /* Enter in the name field saves — the implicit submitter would be Cancel */
+  headingForm.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.target !== headingNameInput) return
+    e.preventDefault()
+    if (validateHeadingName()) headingDialog.close('save')
+  })
+
+  headingDialog.addEventListener('close', () => {
+    const st = headingDialogState
+    headingDialogState = null
+    if (!st || headingDialog.returnValue !== 'save') return
+    const name = headingNameInput.value.trim()
+    if (st.mode === 'add') {
+      const level = st.parent ? Math.min(6, headingLevel(st.parent) + 1) : 2
+      const tr = buildHeadingRow({ level, name })
+      if (st.parent) {
+        const anchor = sectionEndAfter(st.parent)
+        if (anchor) tbody.insertBefore(tr, anchor)
+        else tbody.append(tr)
+      } else {
+        tbody.append(tr)
+      }
+    } else if (st.row) {
+      st.row.querySelector('.hname').textContent = name
+      st.row.querySelector('.caret-btn').setAttribute('aria-label', `Toggle section ${name}`)
+      refreshHeadingButtons(st.row)
+    }
+  })
+
+  headingDeleteDialog.addEventListener('close', () => {
+    const row = pendingDeleteHeading
+    pendingDeleteHeading = null
+    if (!row || headingDeleteDialog.returnValue !== 'delete') return
+    /* LIB-033/§6.4: only the heading goes away — its instructions stay and
+       join the previous section. Drop the collapse state with it. */
+    collapsed.delete(row)
+    row.remove()
   })
 
   /* ---------- Instruction editor modal (UI-003, LIB-002) ------------------- */
@@ -3892,6 +4112,9 @@
 
   /* Hide/restore buttons on every instruction row (MAIN-012…014) */
   initHideButtons()
+
+  /* Heading add/rename/delete tools (MAIN-015…023) */
+  initHeadingTools()
 
   /* Toolbar icon buttons (Activity, Settings): glyphs from the ICONS
      idiom; the accessible names and tooltips live in the markup */
