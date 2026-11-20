@@ -6727,3 +6727,171 @@ fixes against the code and passing the test audit; its one finding —
 the refused-removal (`cleanup = Some`) branches had no pinning test —
 was fixed with the Unix-gated r-x-folder test above (mutation-checked:
 dropping the cleanup reporting fails exactly that test).
+
+### D-092 — Sync target-path resolution: whole-chain canonicalization, the component-wise containment with a Windows-only fold retry, and the uniform final-path check — 2026-11-19
+
+Problem: T-062 implements §9.4 preflight step 2 / §9.5 step 1 (T-F6):
+the sync's write target `<root>/<name>` must be resolved when it is a
+symlink ("the write goes to the real file"; the common case
+`CLAUDE.md` → `AGENTS.md`) and refused typed when it is dangling
+(`E_TARGET_BROKEN_LINK`), resolves outside the root
+(`E_TARGET_OUTSIDE_ROOT`), or is a folder (`E_TARGET_IS_DIR`). The
+spec pins the verdicts but leaves open: (1) the resolution mechanism —
+`dunce::canonicalize` on the link vs a `symlink_metadata` +
+`read_link` composition; (2) how containment is checked on every OS
+(component-wise vs string prefixes; what case-insensitivity means for
+the ROOT comparison); (3) the typed-error shape, given that two
+verdicts are tree facts with no OS failure and two are refusals; (4)
+whether an absent target is an error (the spec implies a first sync
+creates it); (5) what the function promises about the race between
+resolution and the later write.
+
+Solution: `resolve_target_path(root, file_name) -> Result<TargetPath,
+TargetPathError>` in `crates/eunomia-fs/src/paths.rs`, next to the
+canonicalization it builds on.
+
+- MECHANISM: the module's own `canonicalize` (dunce) on the linked
+  candidate — the WHOLE chain resolves in one OS call (the kernel
+  follows links of any depth; a `read_link` composition would
+  re-implement the walk with a depth bound and re-derive normalization),
+  and the answer is the absolute, verbatim-spelled canonical form both
+  the containment check and the writer want (the D-086 primitive). A
+  dangling link is ENOENT from that call — the spec's own case falls
+  out; a loop is ELOOP, classified broken like a dangling link (the
+  resolution can never end at a real file; the constant is spelled per
+  platform — Linux 40, macOS 62, verified against xnu's
+  `bsd/sys/errno.h` where 32 is EPIPE — because `ErrorKind::FilesystemLoop`
+  is still unstable; platforms whose spelling is unknown here fall to
+  the coarse `NotReadable` bucket, code riding in the source). The
+  resolved real path is statted to classify a link-to-directory as
+  `IsDir` — canonicalize succeeds on directories, so the folder
+  verdict needs its own probe. The D-086 verbatim ruling is about the
+  PROJECT path's identity; the resolved target is a WRITE path, not a
+  stored identity — its canonical form is what keeps containment
+  honest and what the writer renames over.
+- TARGETPATH, NOT A BARE PATHBUF: the success struct carries the write
+  path AND the resolved file name, because the name crosses a second
+  seam — the staging grammar `.<name>.eunomia-<token>.tmp` (9.5 step
+  2, D-088) keys on the RESOLVED name (a `CLAUDE.md` link stages and
+  is swept as `AGENTS.md`); both fields come from one resolution and
+  cannot drift. The name is lossy text (the module's established
+  U+FFFD posture); the write path carries the real bytes.
+- CONTAINMENT: component-wise (`Path::strip_prefix`) between CANONICAL
+  forms — never a string prefix (`/repo2` does not start with
+  `/repo`); both sides are canonical because the ROOT ITSELF
+  canonicalizes at entry (the D-086 posture ENFORCED here, not assumed
+  of the caller: a root behind a symlinked ancestor — on macOS every
+  temp fixture, `/var/…` = `/private/var/…` — must not produce a false
+  OutsideRoot; a vanished root is the honest `NotReadable` refusal,
+  the pipeline's availability check owns that situation) plus
+  canonicalize on the link, so the shared prefix carries the
+  filesystem's own spelling and the byte-exact comparison answers
+  everywhere. The check is PHYSICAL on every branch, not lexical (the
+  round-2 review caught the first draft judging the non-link branches
+  on the joined spelling, where an INTERMEDIATE symlink — `sub/x.md`
+  with `sub → ../outside` — is lexically inside but physically out):
+  the regular-file branch canonicalizes its whole path (for a
+  one-component contract name the answer is the same path; one extra
+  realpath is the price of not trusting the name), and the absent
+  branch resolves its parent chain ([`resolve_absent`]; a parent
+  chain that does not exist has nothing to link through — the lexical
+  join is the truth there, a future creation is plain). The check
+  also demands ordinary NAMES in the remainder
+  after the prefix: a `..` component strips-prefix TEXTUALLY while
+  climbing out of the root (verified — the review round caught the
+  first draft relying on the bare prefix), and an absolute name
+  replaces the root; both are refused as
+  `OutsideRoot`, while an interior `.` is inert (`components()`
+  normalizes it away; the OS resolves the same inside file) — the fs
+  layer does not silently trust the enum seam
+  (§5.7, SEC-006). When byte-exact fails, the comparison retries
+  case-folded on WINDOWS ONLY — the one platform whose filesystem
+  folds case as unconditional platform behavior (NTFS/FAT), folded
+  with the same rule as `PathKeyRule::Windows` per component (NFC →
+  simple fold → NFC), defense-in-depth behind the root
+  canonicalization. macOS is deliberately excluded: default APFS folds but case-sensitive APFS is supported, and a
+  folded comparison there could accept a genuinely DIFFERENT directory
+  — the false-inside direction, the dangerous one (a write outside the
+  registered root); Linux keeps bytes (DB-030). The check runs on the
+  FINAL write path whatever produced it: for contract inputs
+  (`file_name` is one ordinary component from `target_file_name`,
+  §5.7, SEC-006) it is a no-op, but a structurally escaping name
+  (`..`, `.`, an absolute path) is refused as
+  `OutsideRoot` instead of silently written.
+- ERROR SHAPE: `TargetPathError`, one variant per §10 `E_TARGET_*`
+  code named for it, plus the module's established `NotReadable`
+  bucket (D-084/D-090) for refused probes — "could not check" is not
+  any of §9.4's verdicts. `BrokenLink` and `NotReadable` carry the
+  exact `io::Error` (source chain, `raw_os_error`); `OutsideRoot` and
+  `IsDir` are tree facts no OS call failed for — `os_code()` is None,
+  the D-090 negative-lookup/refusal split. `OutsideRoot` carries both
+  paths (the resolved real path and the root it was checked against).
+  Hand-rolled impls, no `thiserror` (D-017); accessors `path()`/
+  `io_error()`/`os_code()` in the module's shape. The new consuming
+  accessor `CanonicalizeError::into_io_error` lets typed errors
+  classify a canonicalization refusal and re-raise the io error as
+  their own variant (`NotARepoError` carries it whole instead — both
+  patterns now exist deliberately).
+- ABSENT TARGET IS `Ok`: the plain joined path (of the canonicalized
+  root) is returned and nothing
+  is created — a first sync CREATES the file (§9.4 implies it; pinned
+  by a test asserting nothing was created, the preflight "changes
+  nothing" rule). A regular-file target returns the joined path
+  unchanged: the root is canonical and the name one component, so the
+  join is already canonical and no resolution call is made.
+- TOCTOU, DOCUMENTED: the probes are separate OS calls over a live
+  filesystem; the verdict is what they observed at their moment (the
+  D-084 posture; pinned by a remove-the-file flip test). The
+  structural guarantee: the write target is the RESOLVED path, so the
+  atomic write renames over the real file and never over the link
+  spelling — the link survives (T-F6). Not guaranteed: the link can be
+  re-pointed before the write (the write lands on the previously
+  resolved file; the next sync re-resolves — a sync is idempotent,
+  §10); an absent target can appear as a link (the rename replaces
+  that link with a regular file; §9.4's skip semantics tolerate the
+  flip); a resolved file can vanish (the write reports its own
+  failure, 9.5 step 7). No snapshot, no pretended atomicity.
+- No new dependencies (std `fs` probes + the crate's own canonicalize;
+  D-017's allow-list untouched, Cargo.toml/Cargo.lock unchanged).
+  `CanonicalizeError::into_io_error` is the only change to existing
+  API; lib.rs's paths sentence gained the new capability (plus the
+  D-090 lookup it had omitted under the concurrent-siblings posture).
+- KNOWN OPEN (the D-088/D-090 posture): ARCHITECTURE.md's tree still
+  lists the fs modules as skeletons — the concurrent-siblings posture
+  leaves that shared tree to the orchestrator's refresh; the accurate
+  record is this entry and the module docs. And a Windows link loop
+  classifies as `NotReadable`, not `BrokenLink`: the Win32 spelling of
+  the loop refusal is not pinned from this machine (a blind constant
+  would be an unverified fact), so it falls to the documented
+  unknown-platform bucket with the exact code riding in the source.
+
+Tests: 17 unit tests + 1 doctest in `paths.rs` (18th cfg-gated for
+Windows CI), colocated, through the public function on real temp
+fixtures — the card's four acceptances first: the dangling link
+(`BrokenLink`, ENOENT = 2, the link spelling named); a link to a REAL
+file outside the fixture root (`OutsideRoot` carrying the resolved
+path and the canonical root, no OS code); a plain folder target and a link
+resolving THROUGH to a folder (both `IsDir`, the resolved path named);
+and `CLAUDE.md` → `AGENTS.md` (the write path is the canonical real
+file, the staging name is `AGENTS.md`, the link survives — T-F6).
+Plus: the absent-target creation case (nothing created); the
+regular-file pass-through; a depth-2 chain resolving to the final
+file; a self-loop (`BrokenLink`, OS code riding along); a relative
+multi-component link spelling resolving through the link's folder; the
+structural escape refusals (`..` and absolute names are
+`OutsideRoot` — pinned end to end AND in the pure core, where the
+ParentDir remainder strips-prefix textually; an interior `.` pinned
+inert and accepted); the intermediate-link refusals (a deeper name
+reached through — and created behind — a link hiding in a middle
+component judges by the real location, both branches pinned); the
+containment posture — byte-exact pinned on Linux (a case-differing
+sibling folder is OUTSIDE) and by the pure parameterized
+`inside_root_components` core (both flavors, plus the `/repo2`
+string-prefix trap), with the Windows-leg pin (a case-flipped root
+spelling stays inside — the observable the platform owes, absorbed by
+the root canonicalization with the fold retry behind it); a denied
+target probe under a search-bit-less root
+(`NotReadable`, EACCES = 13, loud root skip); the observed-tree flip
+(resolves while the real file exists, broken after removal); and the
+error-contract test pinning Display texts, `path()` per variant, the
+io-backed/fact split and the `source()` chain.

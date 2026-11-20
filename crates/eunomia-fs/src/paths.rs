@@ -13,9 +13,11 @@
 //! Implemented so far: the project-folder availability check
 //! ([`check_project_available`], spec 6.9's project-path row, 9.4
 //! preflight step 1), the project-path canonicalization with the
-//! `path_key` identity key (DB-030, DB-031, D-07), and the Git
+//! `path_key` identity key (DB-030, DB-031, D-07), the Git
 //! repository root lookup ([`find_git_root`], PRJ-003's walk-up from a
-//! chosen subfolder, D-08). Still planned: the SEC-003 allowlist path
+//! chosen subfolder, D-08), and the sync target-path resolution with
+//! its symlink checks ([`resolve_target_path`], 9.4 preflight step 2,
+//! 9.5 step 1, T-F6). Still planned: the SEC-003 allowlist path
 //! checks.
 //!
 //! # Canonicalization and the path_key (DB-030, DB-031, D-07)
@@ -106,7 +108,25 @@
 //! classifications — a denied probe under a folder without the search
 //! bit (loud root skip), a missing input, and a plain-file input. The
 //! SEC-003 checks keep their planned coverage: rejection of
-//! paths outside the registered or session-allowed set.
+//! paths outside the registered or session-allowed set. The
+//! target-path resolution is tested through the public function
+//! against real fixtures: the absent-target creation case and the
+//! regular-file pass-through, the `CLAUDE.md` → `AGENTS.md` acceptance
+//! (the write target is the real file and the resolved name is its
+//! name), a depth-2 link chain, the dangling link and the loop, the
+//! outside-root containment (a link to a real file outside the fixture
+//! root), the folder verdicts for a plain folder and for a link
+//! resolving through to one, a relative link spelling, the structural
+//! escape refusals (`..` and absolute spellings are refused —
+//! the textual prefix would match, so the check demands ordinary
+//! names; an interior `.` is inert and pinned accepted), the
+//! intermediate-link refusals (a deeper name reached through — or
+//! created behind — a link hiding in a middle component judges by the
+//! real location), the containment
+//! posture (byte-exact pinned on Linux; the Windows fold retry pinned
+//! by the cfg-gated leg and by the pure parameterized core), a denied
+//! target probe (loud root skip), the observed-tree flip of the
+//! verdict, and the error-contract pin.
 
 use std::fmt;
 use std::fs;
@@ -574,6 +594,16 @@ impl CanonicalizeError {
         &self.source
     }
 
+    /// Consumes the error into the OS failure behind it — for typed
+    /// errors that classify the refusal by `ErrorKind`/code and then
+    /// re-raise the io error as their own variant (the
+    /// [`TargetPathError`] resolution verdicts; [`NotARepoError`]
+    /// carries the [`CanonicalizeError`] whole instead).
+    #[must_use]
+    pub fn into_io_error(self) -> io::Error {
+        self.source
+    }
+
     /// The raw OS error code (`std::io::Error::raw_os_error`) —
     /// §10 names it a first-class fact of every error log line.
     #[must_use]
@@ -824,6 +854,592 @@ impl std::error::Error for NotARepoError {
             NotARepoError::Canonicalize { source } => Some(source),
             NotARepoError::NotReadable { source, .. } => Some(source),
             NotARepoError::NoGitEntry { .. } => None,
+        }
+    }
+}
+
+// ---- 9.4 preflight step 2 / 9.5 step 1: the sync target path -------
+
+/// The resolved write target of one project's sync (§9.4 preflight
+/// step 2, §9.5 step 1): the path the atomic write renames over, and
+/// the resolved target's file NAME the staging grammar takes.
+///
+/// A struct rather than a bare `PathBuf` because the name crosses a
+/// second seam: the staging file is spelled `.<name>.eunomia-<token>.tmp`
+/// (9.5 step 2, D-088) and `<name>` is the RESOLVED target's — a
+/// `CLAUDE.md` link pointing at `AGENTS.md` stages (and is swept,
+/// D-088's coordination rule to T-066) as `AGENTS.md`. Both fields
+/// come from the same resolution, so the write path and the staging
+/// name can never drift apart. The name is lossy text
+/// (`to_string_lossy`, the module's established form — the same
+/// documented U+FFFD cost posture as the `path_key`), which is what
+/// the staging-name grammar (`&str`, D-088) consumes; the write path
+/// itself carries the real bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetPath {
+    /// The path the atomic write renames over (9.5 step 4): the plain
+    /// `<root>/<name>` for an absent (creation case) or regular-file
+    /// target, the symlink-resolved real path otherwise. Canonical:
+    /// the root precondition (below) plus [`canonicalize`] on a link.
+    path: std::path::PathBuf,
+    /// The resolved target's file name, lossy text — the staging
+    /// grammar's input (9.5 step 2, D-088).
+    file_name: String,
+}
+
+impl TargetPath {
+    /// The path the atomic write targets (9.5 steps 1 and 4). For a
+    /// symlinked target this is the REAL file's path, never the link
+    /// spelling — renaming over the link spelling would replace the
+    /// link with a regular file, while renaming over the resolved path
+    /// keeps the link intact (T-F6).
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The resolved target's file name (lossy text): the name the
+    /// staging file is built from and the sweep keys on (9.5 step 2,
+    /// D-088's coordination rule — a `CLAUDE.md` link stages as the
+    /// real file's name).
+    #[must_use]
+    pub fn file_name(&self) -> &str {
+        &self.file_name
+    }
+}
+
+/// Resolves the target path of one project's sync and checks it
+/// (§9.4 preflight step 2): given the project's canonical root and the
+/// target file's NAME (`target_file_name`, §5.7 — SEC-006: only a
+/// value from the enum), produces the path the write will use and the
+/// resolved name the staging grammar takes.
+///
+/// # The verdicts, in §9.4's own words
+///
+/// - The target is not there: `Ok` with the plain joined path — a
+///   first sync CREATES the file, so absence is not an error (pinned
+///   deliberately; every other probe below is about entries that
+///   exist). The parent chain still resolves when it is deeper than
+///   the root, so an intermediate link cannot smuggle the creation
+///   path outside (see the containment bullet).
+/// - The target is a regular file: that path, resolved — the root is
+///   canonical and a one-component name joins canonically, so for the
+///   contract shape the resolution answers the same path (one extra
+///   realpath is the price of not trusting the name: a multi-component
+///   name reached through an intermediate link judges by its REAL
+///   location, and the write lands on the real file).
+/// - The target is a symbolic link: the path is resolved and the
+///   write goes to the real file — the common case `CLAUDE.md` points
+///   to `AGENTS.md` (T-F6). The whole chain resolves in one OS call
+///   through the module's [`canonicalize`] (the D-086 primitive): the
+///   kernel follows links of any depth, and the answer is the absolute,
+///   verbatim-spelled canonical form the containment check and the
+///   write both want. A `read_link` composition would re-implement the
+///   walk with a depth bound for no gain.
+/// - The link does not end at a real file — a dangling link, or a
+///   loop the OS refuses to follow (ELOOP):
+///   [`TargetPathError::BrokenLink`], the `E_TARGET_BROKEN_LINK`
+///   variant.
+/// - The resolved real path lies outside the project root:
+///   [`TargetPathError::OutsideRoot`], the `E_TARGET_OUTSIDE_ROOT`
+///   variant. The check is component-wise (`Path::strip_prefix`)
+///   between canonical forms — never a string prefix (`/repo2` does
+///   not start with `/repo`), and the remainder must be ordinary
+///   names (a `..` component is refused, not climbed; an interior
+///   `.` is inert — `components()` normalizes it away and the OS
+///   resolves the same inside file).
+/// - The target path is a folder — as itself, or as the real file a
+///   link resolves to: [`TargetPathError::IsDir`], the
+///   `E_TARGET_IS_DIR` variant. The folder verdict answers BEFORE
+///   containment: a link resolving to a folder outside the root
+///   reports IsDir, not OutsideRoot — both are §9.4 skips, and the
+///   folder fact is the nearer cause.
+/// - An OS probe was REFUSED (denied access on the way to the entry,
+///   a dropped drive): [`TargetPathError::NotReadable`] with the exact
+///   [`io::Error`] — "could not check" is not any of §9.4's verdicts
+///   (the D-090 ruling's negative-lookup/refusal split).
+///
+/// # The containment check's platform posture
+///
+/// Both sides of the check are canonical (the root by the caller's
+/// D-086 posture, the link's resolution by [`canonicalize`]), so their
+/// shared prefix carries the filesystem's own spelling and the
+/// byte-exact component comparison answers on every platform. When the
+/// byte-exact comparison fails, the comparison retries case-folded on
+/// the ONE platform whose filesystem comparison folds case as
+/// UNCONDITIONAL platform behavior (Windows: NTFS/FAT, the same fold
+/// the module's [`PathKeyRule::Windows`] applies) — defense-in-depth
+/// against a root that arrived with non-canonical case spelling; a
+/// folded miss can only widen the verdict, and the byte-exact pass
+/// runs first. macOS is deliberately excluded: default APFS folds, but
+/// case-sensitive APFS is a supported configuration, and a folded
+/// comparison there could accept a genuinely DIFFERENT directory as
+/// inside the root — the false-inside direction, which is the
+/// dangerous one (a write outside the registered root). Linux keeps
+/// bytes (DB-030).
+///
+/// # Contracts the caller holds
+///
+/// `root` is the project root, spelled however the caller holds it —
+/// it is CANONICALIZED HERE (the D-086 posture enforced, not assumed:
+/// both containment sides and every returned path live under the
+/// canonical form, so a root behind a symlinked ancestor — on macOS
+/// every temp fixture, `/var/…` = `/private/var/…` — cannot turn a
+/// legitimate target into a false OutsideRoot). `file_name` is a
+/// single ordinary file-name component from [`target_file_name`]
+/// (§5.7; SEC-006: names never come from free-form strings). The
+/// containment check nevertheless runs on the FINAL write path
+/// whatever produced it — PHYSICALLY, not lexically: every branch
+/// resolves its path through canonicalize (a regular file reached
+/// through an intermediate link judges by its real location; an
+/// absent final component resolves its parent chain; a parent chain
+/// that does not exist has nothing to link through), and the check
+/// demands ordinary names in the
+/// remainder: a structurally escaping name — `..` (whose textual
+/// prefix would still match) or an absolute path — is refused as
+/// [`TargetPathError::OutsideRoot`] rather than silently written,
+/// while an interior `.` is inert (components normalize it away; the
+/// OS resolves the same inside file). The real defense is §5.7's
+/// enum, this makes the fs layer
+/// not silently trust it.
+///
+/// The D-086 verbatim-stored-path ruling is about the PROJECT path's
+/// identity; the resolved target is a WRITE path, not a stored
+/// identity — its canonical (verbatim-spelled) form is simply what the
+/// writer opens and renames over, and what keeps the containment
+/// comparison honest.
+///
+/// # Races are honest (TOCTOU)
+///
+/// The probes are separate OS calls over a live filesystem; the
+/// verdict is what they observed at their moment — no snapshot, no
+/// pretended atomicity (the D-084 posture). The guarantee that matters
+/// is structural: the write target is the RESOLVED path, so the atomic
+/// write renames over the real file and never over the link spelling
+/// — the link survives (T-F6). What this function does NOT guarantee:
+/// the tree can change between resolution and write. The link can be
+/// re-pointed (the write lands on the previously resolved file; the
+/// next sync re-resolves and converges — a sync is idempotent, §10);
+/// an absent target can appear as a link (the rename then replaces
+/// that link with a regular file — §9.4's skip semantics tolerate the
+/// flip, and the next sync re-resolves); an intermediate component of
+/// a deeper name can be re-pointed after the parent chain resolved
+/// (the write lands wherever the tree holds at write time; the same
+/// next-sync convergence); a resolved file can vanish
+/// (the write reports its own failure, 9.5 step 7).
+///
+/// # Errors
+///
+/// [`TargetPathError`], one variant per §10 `E_TARGET_*` code plus the
+/// refused-probe bucket; the variant doc comments name their codes.
+/// What the command layer maps the io-backed variants to is its call
+/// (D-062's posture keeps `AppError` out of this crate).
+///
+/// # Examples
+///
+/// ```
+/// use eunomia_fs::paths::{canonicalize, resolve_target_path};
+/// use std::fs;
+///
+/// let dir = tempfile::tempdir().unwrap();
+/// let root = dir.path().join("repo");
+/// fs::create_dir(&root).unwrap();
+/// fs::write(root.join("AGENTS.md"), b"real file").unwrap();
+///
+/// // An absent target is the plain joined path (of the canonical root):
+/// // a first sync creates it.
+/// let created = resolve_target_path(&root, "CLAUDE.md").unwrap();
+/// assert_eq!(created.path(), canonicalize(&root).unwrap().join("CLAUDE.md"));
+/// assert_eq!(created.file_name(), "CLAUDE.md");
+///
+/// // The common case (T-F6): the link resolves, the write goes to the
+/// // real file, and the resolved name is the real file's name.
+/// #[cfg(unix)]
+/// {
+///     std::os::unix::fs::symlink("AGENTS.md", root.join("CLAUDE.md")).unwrap();
+///     let target = resolve_target_path(&root, "CLAUDE.md").unwrap();
+///     assert_eq!(
+///         target.path(),
+///         canonicalize(&root).unwrap().join("AGENTS.md")
+///     );
+///     assert_eq!(target.file_name(), "AGENTS.md");
+/// }
+/// ```
+pub fn resolve_target_path(root: &Path, file_name: &str) -> Result<TargetPath, TargetPathError> {
+    // The containment comparison must be canonical on BOTH sides, and
+    // the returned paths must live under one spelling: the root
+    // resolves through the module's canonicalize — the D-086 posture
+    // ENFORCED here rather than assumed of the caller. A root behind
+    // a symlinked ancestor (on macOS every temp fixture: `/var/…` is
+    // the same folder as `/private/var/…`) must not turn a legitimate
+    // target into a false OutsideRoot. A vanished or unresolvable root
+    // is a refusal, not a verdict: the availability check (§9.4 step
+    // 1) owns that situation in the pipeline, and this is the honest
+    // answer if the tree moved mid-run.
+    let root = canonicalize(root).map_err(|error| TargetPathError::NotReadable {
+        path: error.path().to_owned(),
+        source: error.into_io_error(),
+    })?;
+    let candidate = root.join(file_name);
+    // Probe WITHOUT following a final symlink: the verdict "is the
+    // target a link" is §9.4's fork, and a plain folder must answer
+    // IsDir before any resolution is attempted.
+    let write_path = match fs::symlink_metadata(&candidate) {
+        // Not there: a first sync creates it — but INTERMEDIATE
+        // components may exist and may be links, so the parent chain
+        // resolves through canonicalize and containment judges the
+        // real location (see [`resolve_absent`]).
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            resolve_absent(&root, &candidate)?
+        }
+        // The probe was refused, not answered: ride out typed.
+        Err(source) => {
+            return Err(TargetPathError::NotReadable {
+                path: candidate.to_string_lossy().into_owned(),
+                source,
+            });
+        }
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                resolve_link(&candidate)?
+            } else if file_type.is_dir() {
+                return Err(TargetPathError::IsDir {
+                    path: candidate.to_string_lossy().into_owned(),
+                });
+            } else {
+                // A regular file (or any non-directory, non-link
+                // entry) — possibly reached THROUGH intermediate
+                // links (the probe followed them): resolve the whole
+                // path so containment judges the real location and
+                // the write lands on the real file. For a contract
+                // name (one component under the canonical root) this
+                // is the same path spelled by the join — one extra
+                // realpath is the price of not trusting the name.
+                // The atomic rename replaces it in place.
+                canonicalize(&candidate).map_err(|error| TargetPathError::NotReadable {
+                    path: error.path().to_owned(),
+                    source: error.into_io_error(),
+                })?
+            }
+        }
+    };
+    // Containment on the FINAL write path, whatever produced it (see
+    // "Contracts the caller holds" for why the plain cases run it too).
+    if !inside_root(&root, &write_path) {
+        return Err(TargetPathError::OutsideRoot {
+            root: root.to_string_lossy().into_owned(),
+            path: write_path.to_string_lossy().into_owned(),
+        });
+    }
+    let resolved_name = match write_path.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        // A canonical path with no final component is a filesystem
+        // root — a folder, so §9.4's verdict is IsDir, not a panic.
+        // Unreachable for contract inputs (the folder verdicts above
+        // already refused every directory); kept so the function
+        // stays total.
+        None => {
+            return Err(TargetPathError::IsDir {
+                path: write_path.to_string_lossy().into_owned(),
+            });
+        }
+    };
+    Ok(TargetPath {
+        path: write_path,
+        file_name: resolved_name,
+    })
+}
+
+/// Resolves the write path for an ABSENT final component (the
+/// creation case): the parent chain resolves through canonicalize so
+/// containment judges the real location an intermediate link would
+/// lead to, and the final component is carried verbatim — it is the
+/// name the write creates.
+///
+/// The root itself is already canonical, so a one-component name (the
+/// contract shape, §5.7) takes the lexical join with no extra syscall.
+/// A parent chain that does not exist has nothing to link through —
+/// the lexical join is the truth there (a future creation is plain,
+/// or the write fails on the missing folder); any other refusal to
+/// resolve the parent is [`TargetPathError::NotReadable`].
+fn resolve_absent(root: &Path, candidate: &Path) -> Result<std::path::PathBuf, TargetPathError> {
+    // A parentless candidate is a bare relative name or a filesystem
+    // root — both impossible here (the join runs under a canonical
+    // absolute root, and an absent root-like path cannot be probed
+    // absent); the lexical candidate keeps the function total.
+    let Some(parent) = candidate.parent() else {
+        return Ok(candidate.to_path_buf());
+    };
+    if parent == root {
+        // One component under the canonical root: the lexical join IS
+        // the real path.
+        return Ok(candidate.to_path_buf());
+    }
+    match canonicalize(parent) {
+        Ok(real_parent) => match candidate.file_name() {
+            Some(final_component) => Ok(real_parent.join(final_component)),
+            // No final component: nothing to rejoin (unreachable for
+            // a join under a canonical root); the lexical candidate
+            // keeps the function total.
+            None => Ok(candidate.to_path_buf()),
+        },
+        Err(error) => {
+            let source = error.into_io_error();
+            if source.kind() == io::ErrorKind::NotFound {
+                // The parent chain does not exist either: no link can
+                // hide there, the lexical join is the truth.
+                Ok(candidate.to_path_buf())
+            } else {
+                Err(TargetPathError::NotReadable {
+                    path: candidate.to_string_lossy().into_owned(),
+                    source,
+                })
+            }
+        }
+    }
+}
+
+/// Resolves a symlinked target through its whole chain to the real
+/// file (§9.4 step 2). The whole-chain resolution is the module's
+/// [`canonicalize`]; a chain that does not end at a real file is
+/// [`TargetPathError::BrokenLink`] (dangling, or a loop the OS refuses
+/// to follow), any other refusal is [`TargetPathError::NotReadable`],/// and a chain ending at a directory is [`TargetPathError::IsDir`] —
+/// the write cannot go into a folder.
+fn resolve_link(candidate: &Path) -> Result<std::path::PathBuf, TargetPathError> {
+    let real = match canonicalize(candidate) {
+        Ok(real) => real,
+        Err(error) => {
+            let source = error.into_io_error();
+            if source.kind() == io::ErrorKind::NotFound || is_filesystem_loop(source.raw_os_error())
+            {
+                return Err(TargetPathError::BrokenLink {
+                    path: candidate.to_string_lossy().into_owned(),
+                    source,
+                });
+            }
+            return Err(TargetPathError::NotReadable {
+                path: candidate.to_string_lossy().into_owned(),
+                source,
+            });
+        }
+    };
+    // The chain ended at something: classify the FINAL file (a link
+    // resolving to a directory is the folder verdict, §9.4).
+    match fs::metadata(&real) {
+        Ok(metadata) if metadata.is_dir() => Err(TargetPathError::IsDir {
+            path: real.to_string_lossy().into_owned(),
+        }),
+        // The file vanished between the resolution and this stat: the
+        // link does not (any longer) resolve to a real file — broken.
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            Err(TargetPathError::BrokenLink {
+                path: candidate.to_string_lossy().into_owned(),
+                source,
+            })
+        }
+        Err(source) => Err(TargetPathError::NotReadable {
+            path: real.to_string_lossy().into_owned(),
+            source,
+        }),
+        Ok(_) => Ok(real),
+    }
+}
+
+/// Whether an OS refusal means the link chain cannot be followed
+/// (ELOOP — a loop, or a chain past the OS's depth cap): the
+/// resolution can never end at a real file, so the verdict is broken,
+/// like a dangling link. The constant is spelled per platform (errno
+/// values are platform-defined; Linux carries ELOOP at 40, macOS at
+/// 62 — verified against xnu's `bsd/sys/errno.h`; 32 there is EPIPE);
+/// where the platform's spelling is unknown here the refusal
+/// classifies as the coarse [`TargetPathError::NotReadable`] bucket —
+/// the exact OS code still rides in the source for the §10 log line.
+fn is_filesystem_loop(raw_os_error: Option<i32>) -> bool {
+    match raw_os_error {
+        Some(code) if cfg!(target_os = "linux") => code == 40, // ELOOP
+        Some(code) if cfg!(target_os = "macos") => code == 62, // ELOOP
+        _ => false,
+    }
+}
+
+/// Whether `candidate` lies inside `root`, compared component-wise
+/// between the two canonical forms; see [`resolve_target_path`] for
+/// the platform posture of the case-fold retry.
+fn inside_root(root: &Path, candidate: &Path) -> bool {
+    inside_root_components(root, candidate, cfg!(target_os = "windows"))
+}
+
+/// [`inside_root`] with the fold flavor explicit — the pure,
+/// parameterized core (the `path_key_with_rule` idiom): the platform
+/// wrapper selects, and every flavor is testable on every OS. The
+/// folded pass reuses the Windows key rule per component (NFC →
+/// simple fold → NFC), which is exactly the fold NTFS `$UpCase`
+/// applies (DB-030's correspondence).
+fn inside_root_components(root: &Path, candidate: &Path, fold_case: bool) -> bool {
+    // The remainder after the root prefix must be ordinary NAMES: a
+    // ParentDir left over (`<root>/../x`) climbs out textually while
+    // the textual prefix still matches — refused, because the name
+    // parameter is contracted to be a plain component (§5.7) and
+    // nothing is written on the strength of a textual prefix alone.
+    // An interior CurDir never reaches this test: components()
+    // normalizes it away, and it names the same inside file.
+    if let Ok(remainder) = candidate.strip_prefix(root)
+        && remainder
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return true;
+    }
+    if !fold_case {
+        return false;
+    }
+    let folded = |path: &Path| -> Vec<(String, bool)> {
+        path.components()
+            .map(|component| {
+                let plain = matches!(component, std::path::Component::Normal(_));
+                let text = component.as_os_str().to_string_lossy();
+                (path_key_with_rule(&text, PathKeyRule::Windows), plain)
+            })
+            .collect()
+    };
+    let (root_parts, candidate_parts) = (folded(root), folded(candidate));
+    root_parts.len() <= candidate_parts.len()
+        && root_parts
+            .iter()
+            .zip(&candidate_parts)
+            .all(|(root_part, candidate_part)| root_part == candidate_part)
+        && candidate_parts[root_parts.len()..]
+            .iter()
+            .all(|(_, plain)| *plain)
+}
+
+/// Why [`resolve_target_path`] refused the target: one variant per
+/// §10 code of the row "The target is a folder, a dangling link, or
+/// outside the project root", named for its `E_TARGET_*` code, plus
+/// the refused-probe bucket. `BrokenLink` and `NotReadable` carry the
+/// OS failure (its `raw_os_error` and `ErrorKind` are §10's log
+/// facts); `OutsideRoot` and `IsDir` are facts about the tree no OS
+/// call failed for — their `os_code()` is `None`, the D-090
+/// negative-lookup/refusal split. Hand-rolled impls, not `thiserror`:
+/// the crate's §5.2 dependency list has none (the DECISIONS.md D-017
+/// store precedent).
+#[derive(Debug)]
+pub enum TargetPathError {
+    /// The target is a symlink whose chain does not end at a real
+    /// file: dangling (`NotFound`), or a loop the OS refuses to
+    /// follow (ELOOP, where the platform's spelling is known) — the
+    /// `E_TARGET_BROKEN_LINK` variant. The
+    /// path is the link spelling the probes were asked about; the OS
+    /// error distinguishes the two shapes.
+    BrokenLink {
+        /// The link spelling whose chain does not resolve (lossy
+        /// form, the same text the log line shows).
+        path: String,
+        /// The OS failure, carrying the raw error code.
+        source: io::Error,
+    },
+    /// The resolved real path lies outside the project root — the
+    /// `E_TARGET_OUTSIDE_ROOT` variant. No OS call failed, so there is
+    /// no io error to carry; both paths are the §10 log facts.
+    OutsideRoot {
+        /// The project root the containment was checked against
+        /// (lossy form).
+        root: String,
+        /// The resolved real path that fell outside it (lossy form).
+        path: String,
+    },
+    /// The target path is a folder — as itself, or as the real file a
+    /// link resolves to — the `E_TARGET_IS_DIR` variant. No OS call
+    /// failed, so there is no io error to carry.
+    IsDir {
+        /// The folder path (lossy form): the joined spelling for a
+        /// plain folder, the resolved path for a link resolving to
+        /// one.
+        path: String,
+    },
+    /// An OS probe on the way to a verdict was refused: denied access
+    /// on the target or an ancestor, a drive dropped mid-check, a
+    /// resolution failure that is neither dangling nor a loop. The
+    /// module's established coarse access bucket (D-084, D-090) with
+    /// the exact [`io::Error`] riding along; what the command layer
+    /// maps it to is its call.
+    NotReadable {
+        /// The probed path whose inspection was refused (lossy form).
+        path: String,
+        /// The OS failure, carrying the raw error code.
+        source: io::Error,
+    },
+}
+
+impl TargetPathError {
+    /// The path text this failure is about: the link spelling or
+    /// joined target for the probe-backed variants, the resolved real
+    /// path for `OutsideRoot` and `IsDir` (lossy form, the same text
+    /// the §10 log line shows).
+    #[must_use]
+    pub fn path(&self) -> &str {
+        match self {
+            TargetPathError::BrokenLink { path, .. }
+            | TargetPathError::OutsideRoot { path, .. }
+            | TargetPathError::IsDir { path }
+            | TargetPathError::NotReadable { path, .. } => path,
+        }
+    }
+
+    /// The I/O error behind this failure, when an OS call produced it;
+    /// `None` for the tree-fact verdicts (`OutsideRoot`, `IsDir`).
+    #[must_use]
+    pub fn io_error(&self) -> Option<&io::Error> {
+        match self {
+            TargetPathError::BrokenLink { source, .. }
+            | TargetPathError::NotReadable { source, .. } => Some(source),
+            TargetPathError::OutsideRoot { .. } | TargetPathError::IsDir { .. } => None,
+        }
+    }
+
+    /// The raw OS error code (`std::io::Error::raw_os_error`) — §10
+    /// names it a first-class fact of every error log line. `None`
+    /// where no OS call failed.
+    #[must_use]
+    pub fn os_code(&self) -> Option<i32> {
+        self.io_error().and_then(io::Error::raw_os_error)
+    }
+}
+
+impl fmt::Display for TargetPathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TargetPathError::BrokenLink { path, source } => {
+                write!(
+                    f,
+                    "target path {path} does not resolve to a real file: {source}"
+                )
+            }
+            TargetPathError::OutsideRoot { root, path } => {
+                write!(
+                    f,
+                    "target path {path} resolves outside the project root {root}"
+                )
+            }
+            TargetPathError::IsDir { path } => {
+                write!(f, "target path {path} is a directory")
+            }
+            TargetPathError::NotReadable { path, source } => {
+                write!(f, "target path {path} cannot be inspected: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TargetPathError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TargetPathError::BrokenLink { source, .. }
+            | TargetPathError::NotReadable { source, .. } => {
+                Some(source as &(dyn std::error::Error + 'static))
+            }
+            TargetPathError::OutsideRoot { .. } | TargetPathError::IsDir { .. } => None,
         }
     }
 }
@@ -2153,5 +2769,703 @@ mod tests {
         assert!(wrapped.io_error().is_some());
         assert!(wrapped.os_code().is_some());
         assert!(wrapped.source().is_some());
+    }
+
+    // ---- 9.4 preflight step 2: the sync target path --------------------
+
+    #[test]
+    fn an_absent_target_is_the_plain_joined_path_the_creation_case() {
+        // §9.4's implicit first case: a first sync CREATES the file, so
+        // an absent target is `Ok` with the plain joined spelling —
+        // and resolving changed nothing (preflight "changes nothing").
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+
+        let target = resolve_target_path(&root, "AGENTS.md")
+            .expect("an absent target is not an error: the write creates it");
+        assert_eq!(
+            target.path(),
+            canonicalize(&root)
+                .expect("the fixture root must canonicalize")
+                .join("AGENTS.md"),
+            "the write path is the plain joined spelling of the CANONICAL \
+             root, verbatim — no target resolution is performed"
+        );
+        assert_eq!(target.file_name(), "AGENTS.md");
+        assert!(
+            !root.join("AGENTS.md").exists(),
+            "resolution must not create anything: preflight changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_regular_file_target_keeps_the_plain_path() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        fs::write(root.join("AGENTS.md"), b"real file")
+            .expect("writing the fixture file must work");
+
+        let target =
+            resolve_target_path(&root, "AGENTS.md").expect("a regular file needs no resolution");
+        assert_eq!(
+            target.path(),
+            canonicalize(&root)
+                .expect("the fixture root must canonicalize")
+                .join("AGENTS.md"),
+            "a regular file is written at the joined path, unchanged"
+        );
+        assert_eq!(target.file_name(), "AGENTS.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_claude_md_link_resolves_the_write_to_the_real_agents_md() {
+        // THE card's acceptance case (T-F6): `CLAUDE.md` is a symlink
+        // to `AGENTS.md` — the write goes to the real file, the
+        // resolved staging name is the real file's name, and the link
+        // itself is untouched (resolution only reads).
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        fs::write(root.join("AGENTS.md"), b"real file").expect("writing the real file must work");
+        if !symlink_or_report_untestable(Path::new("AGENTS.md"), &root.join("CLAUDE.md")) {
+            return;
+        }
+
+        let target = resolve_target_path(&root, "CLAUDE.md")
+            .expect("the common case: a link to a real file inside the root");
+        let real = canonicalize(&root)
+            .expect("the fixture root must canonicalize")
+            .join("AGENTS.md");
+        assert_eq!(
+            target.path(),
+            real,
+            "§9.4: the write goes to the real file, not the link spelling"
+        );
+        assert_eq!(
+            target.file_name(),
+            "AGENTS.md",
+            "the resolved name is the real file's name (the D-088 staging rule)"
+        );
+        assert_ne!(
+            target.path(),
+            root.join("CLAUDE.md"),
+            "the link spelling is resolved away"
+        );
+        let link =
+            fs::symlink_metadata(root.join("CLAUDE.md")).expect("the link must still be there");
+        assert!(
+            link.file_type().is_symlink(),
+            "resolution only reads: the link survives, got: {link:?}"
+        );
+
+        // The plain half of the pair resolves to itself at the same
+        // real path — one write target for both spellings.
+        let direct = resolve_target_path(&root, "AGENTS.md")
+            .expect("a regular file target needs no resolution");
+        assert_eq!(direct.path(), real);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_chain_of_depth_two_resolves_to_the_final_file() {
+        // The whole chain resolves in one call — no per-level walk of
+        // our own: CLAUDE.md → mid.md → AGENTS.md answers AGENTS.md.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        fs::write(root.join("AGENTS.md"), b"real file").expect("writing the real file must work");
+        if !symlink_or_report_untestable(Path::new("AGENTS.md"), &root.join("mid.md")) {
+            return;
+        }
+        if !symlink_or_report_untestable(Path::new("mid.md"), &root.join("CLAUDE.md")) {
+            return;
+        }
+
+        let target = resolve_target_path(&root, "CLAUDE.md")
+            .expect("a chain of depth 2 ends at the real file");
+        assert_eq!(
+            target.path(),
+            canonicalize(&root)
+                .expect("the fixture root must canonicalize")
+                .join("AGENTS.md"),
+            "the chain resolves past the intermediate link"
+        );
+        assert_eq!(target.file_name(), "AGENTS.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_is_a_typed_broken_link() {
+        // The card's E_TARGET_BROKEN_LINK case: the link points at a
+        // file that does not exist — skipped, typed, never a panic.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        if !symlink_or_report_untestable(Path::new("nowhere.md"), &root.join("CLAUDE.md")) {
+            return;
+        }
+
+        let err = resolve_target_path(&root, "CLAUDE.md")
+            .expect_err("a dangling link must be refused, not written through");
+        assert!(
+            matches!(&err, TargetPathError::BrokenLink { .. }),
+            "a dangling link must be BrokenLink, got: {err:?}"
+        );
+        assert_eq!(
+            err.path(),
+            canonicalize(&root)
+                .expect("the fixture root must canonicalize")
+                .join("CLAUDE.md")
+                .to_string_lossy(),
+            "the error names the link spelling the probes were asked about"
+        );
+        assert_eq!(
+            err.os_code(),
+            Some(2),
+            "ENOENT is the OS code the §10 log line carries for a dangling link"
+        );
+        assert!(err.io_error().is_some());
+        assert!(err.source().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_loop_is_broken_not_unreadable() {
+        // A link that follows back to itself never ends at a real
+        // file: broken, like a dangling link — not "cannot inspect"
+        // (the OS's ELOOP answer is about the link structure, which is
+        // exactly what E_TARGET_BROKEN_LINK describes).
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        if !symlink_or_report_untestable(Path::new("loop.md"), &root.join("loop.md")) {
+            return;
+        }
+
+        let err =
+            resolve_target_path(&root, "loop.md").expect_err("a loop does not end at a real file");
+        assert!(
+            matches!(&err, TargetPathError::BrokenLink { .. }),
+            "a loop must be BrokenLink, got: {err:?}"
+        );
+        assert!(
+            err.os_code().is_some(),
+            "the OS refused the resolution: the code rides along"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_resolving_outside_the_root_is_typed_outside_root() {
+        // The card's E_TARGET_OUTSIDE_ROOT case, with a REAL file
+        // outside the fixture root — the containment check's true
+        // test: the link would resolve, and only the prefix check
+        // stops the write.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        let outside = dir.path().join("outside.md");
+        fs::write(&outside, b"not ours").expect("writing the outside file must work");
+        if !symlink_or_report_untestable(Path::new("../outside.md"), &root.join("CLAUDE.md")) {
+            return;
+        }
+
+        let err = resolve_target_path(&root, "CLAUDE.md")
+            .expect_err("a real path outside the root must be refused");
+        let (root_text, path_text) = match &err {
+            TargetPathError::OutsideRoot { root, path } => (root.as_str(), path.as_str()),
+            other => panic!("must be OutsideRoot, got: {other:?}"),
+        };
+        assert_eq!(
+            path_text,
+            canonicalize(&outside)
+                .expect("the outside file must canonicalize")
+                .to_string_lossy(),
+            "the error names the RESOLVED real path, not the link spelling"
+        );
+        assert_eq!(
+            root_text,
+            canonicalize(&root)
+                .expect("the fixture root must canonicalize")
+                .to_string_lossy(),
+            "the error names the canonical root the containment was checked against"
+        );
+        assert_eq!(
+            err.os_code(),
+            None,
+            "containment is a fact about the tree: no OS call failed"
+        );
+        assert!(err.io_error().is_none());
+        assert!(err.source().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_resolving_through_to_a_directory_is_the_dir_verdict() {
+        // A symlink to a symlink to a folder: the chain resolves to a
+        // directory, and the write cannot go into a folder — the same
+        // E_TARGET_IS_DIR verdict as a plain folder target.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        fs::create_dir(root.join("sub")).expect("creating the fixture folder must work");
+        if !symlink_or_report_untestable(Path::new("sub"), &root.join("alias-sub")) {
+            return;
+        }
+        if !symlink_or_report_untestable(Path::new("alias-sub"), &root.join("CLAUDE.md")) {
+            return;
+        }
+
+        let err =
+            resolve_target_path(&root, "CLAUDE.md").expect_err("§9.4: the target path is a folder");
+        assert!(
+            matches!(&err, TargetPathError::IsDir { .. }),
+            "a link resolving to a folder must be IsDir, got: {err:?}"
+        );
+        assert_eq!(
+            err.path(),
+            canonicalize(&root)
+                .expect("the fixture root must canonicalize")
+                .join("sub")
+                .to_string_lossy(),
+            "the folder verdict names the resolved path"
+        );
+    }
+
+    #[test]
+    fn a_plain_directory_target_is_the_dir_verdict() {
+        // E_TARGET_IS_DIR without any link involved: the target path
+        // itself is a folder.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        fs::create_dir(root.join("AGENTS.md")).expect("creating the fixture folder must work");
+
+        let err =
+            resolve_target_path(&root, "AGENTS.md").expect_err("§9.4: the target path is a folder");
+        assert!(
+            matches!(&err, TargetPathError::IsDir { .. }),
+            "a plain folder target must be IsDir, got: {err:?}"
+        );
+        assert_eq!(
+            err.path(),
+            canonicalize(&root)
+                .expect("the fixture root must canonicalize")
+                .join("AGENTS.md")
+                .to_string_lossy(),
+            "the plain folder verdict names the joined spelling"
+        );
+        assert_eq!(
+            err.os_code(),
+            None,
+            "the probes succeeded: a fact about the tree, no OS code"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_link_spelling_resolves_through_the_link_s_folder() {
+        // The link text has no leading separator: resolution is
+        // relative to the LINK's folder, and a multi-component
+        // relative spelling still lands inside the root.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        fs::create_dir(root.join("sub")).expect("creating the fixture folder must work");
+        fs::write(root.join("sub").join("AGENTS.md"), b"real file")
+            .expect("writing the real file must work");
+        if !symlink_or_report_untestable(Path::new("sub/AGENTS.md"), &root.join("CLAUDE.md")) {
+            return;
+        }
+
+        let target = resolve_target_path(&root, "CLAUDE.md")
+            .expect("a relative spelling resolves through the link's folder");
+        assert_eq!(
+            target.path(),
+            canonicalize(&root)
+                .expect("the fixture root must canonicalize")
+                .join("sub")
+                .join("AGENTS.md"),
+        );
+        assert_eq!(target.file_name(), "AGENTS.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_intermediate_symlink_cannot_smuggle_the_target_outside() {
+        // The round-2 defense, both halves: a multi-component name is
+        // out of contract (§5.7 names are one component), but the fs
+        // layer does not lean on that — the regular-file branch
+        // resolves its whole path and the absent branch resolves its
+        // parent chain, so a link hiding in an INTERMEDIATE component
+        // judges by the real location. The reviewer's probe, pinned:
+        // `sub/AGENTS.md` with `sub → ../outside`.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).expect("creating the outside folder must work");
+        fs::write(outside.join("AGENTS.md"), b"not ours")
+            .expect("writing the outside file must work");
+        if !symlink_or_report_untestable(Path::new("../outside"), &root.join("sub")) {
+            return;
+        }
+
+        // Half one: the final component EXISTS behind the intermediate
+        // link — the probe follows it, the regular-file branch
+        // canonicalizes, containment sees the real outside path.
+        let existing = resolve_target_path(&root, "sub/AGENTS.md")
+            .expect_err("a target physically outside the root must be refused");
+        assert!(
+            matches!(&existing, TargetPathError::OutsideRoot { .. }),
+            "an intermediate link must not accept an outside target, got: {existing:?}"
+        );
+        assert_eq!(
+            existing.path(),
+            canonicalize(&outside)
+                .expect("the outside folder must canonicalize")
+                .join("AGENTS.md")
+                .to_string_lossy(),
+            "the error names the real outside path the write would have used"
+        );
+
+        // Half two: the final component is ABSENT behind the
+        // intermediate link — the parent chain resolves, containment
+        // sees the real outside folder the creation would land in.
+        fs::remove_file(outside.join("AGENTS.md")).expect("removing must work");
+        let absent = resolve_target_path(&root, "sub/AGENTS.md")
+            .expect_err("a creation behind an outside intermediate link must be refused");
+        assert!(
+            matches!(&absent, TargetPathError::OutsideRoot { .. }),
+            "the absent branch must judge the resolved parent, got: {absent:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn containment_is_byte_exact_a_case_differing_sibling_is_outside() {
+        // This platform's posture, pinned so it cannot drift: on Linux
+        // `repo` and `REPO` are different folders, and a link into the
+        // case-differing sibling is OUTSIDE the root — the check must
+        // not fold case where the filesystem does not.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        let sibling = dir.path().join("REPO");
+        fs::create_dir(&sibling).expect("creating the case-differing sibling must work");
+        fs::write(sibling.join("x.md"), b"other folder")
+            .expect("writing the sibling file must work");
+        if !symlink_or_report_untestable(Path::new("../REPO/x.md"), &root.join("CLAUDE.md")) {
+            return;
+        }
+
+        let err = resolve_target_path(&root, "CLAUDE.md")
+            .expect_err("a link into a case-differing sibling folder is outside the root on Linux");
+        assert!(
+            matches!(&err, TargetPathError::OutsideRoot { .. }),
+            "the byte-exact containment must refuse, got: {err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn on_windows_a_case_variant_root_spelling_stays_inside() {
+        // The observable the platform owes: a root spelled with
+        // non-canonical case must never read as outside the root. Two
+        // layers absorb it — the root canonicalizes here (the on-disk
+        // spelling comes back from GetFinalPathNameByHandle), and the
+        // folded containment retry would accept behind it. Creating a
+        // file symlink needs SeCreateSymbolicLinkPrivilege: only that
+        // capability absence skips (ERROR_PRIVILEGE_NOT_HELD = 1314);
+        // anything else panics.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        fs::write(root.join("AGENTS.md"), b"real file").expect("writing the real file must work");
+        if let Err(error) =
+            std::os::windows::fs::symlink_file(root.join("AGENTS.md"), root.join("CLAUDE.md"))
+        {
+            if error.raw_os_error() == Some(1314) {
+                eprintln!(
+                    "skipping the Windows containment test: the runner lacks \
+                     SeCreateSymbolicLinkPrivilege ({error}), the symlink \
+                     fixture cannot be created here"
+                );
+                return;
+            }
+            panic!("creating the file-symlink fixture failed: {error}");
+        }
+
+        // The same folder spelled with a case-flipped name: the byte-
+        // exact prefix fails, the folded retry must accept.
+        let canonical = canonicalize(&root).expect("the fixture root must canonicalize");
+        let variant_name = {
+            let name = canonical
+                .file_name()
+                .expect("a canonical root has a file name")
+                .to_string_lossy()
+                .into_owned();
+            let mut chars: Vec<char> = name.chars().collect();
+            let first = chars[0].to_ascii_lowercase();
+            chars[0] = if first == chars[0] {
+                chars[0].to_ascii_uppercase()
+            } else {
+                first
+            };
+            chars.iter().collect::<String>()
+        };
+        let variant_root = canonical
+            .parent()
+            .expect("a canonical root has a parent")
+            .join(variant_name);
+        assert_ne!(
+            variant_root, canonical,
+            "precondition: the variant spelling must differ from the canonical one"
+        );
+
+        let target = resolve_target_path(&variant_root, "CLAUDE.md")
+            .expect("a case-only root spelling drift must not read as outside the root on Windows");
+        assert_eq!(
+            target.path(),
+            canonical.join("AGENTS.md"),
+            "the write path is the canonical real file"
+        );
+    }
+
+    #[test]
+    fn the_containment_core_follows_the_fold_flavor() {
+        // The pure, parameterized core (the `path_key_with_rule`
+        // idiom): both flavors are pinned on every OS; the platform
+        // wrapper selects (byte-exact here, the folded retry on
+        // Windows — pinned by the cfg-gated leg above).
+        let root = Path::new("/data/Repo");
+        let inside = Path::new("/data/Repo/sub/x.md");
+        let case_variant = Path::new("/data/repo/x.md");
+        let sibling = Path::new("/data/Repo2/x.md");
+
+        for fold_case in [false, true] {
+            assert!(
+                inside_root_components(root, inside, fold_case),
+                "a subpath is inside, fold_case = {fold_case}"
+            );
+            assert!(
+                inside_root_components(root, root, fold_case),
+                "the root itself is inside, fold_case = {fold_case}"
+            );
+            assert!(
+                !inside_root_components(root, sibling, fold_case),
+                "a name-sharing string prefix is not inside (component-wise, \
+                 fold_case = {fold_case})"
+            );
+            // The textual-prefix trap: `<root>/../x` strips-prefix to
+            // a remainder that is NOT ordinary names — refused in both
+            // flavors, nothing is written on the strength of a textual
+            // prefix alone. An absolute spelling replaces the root and
+            // is refused too. A `.` is different: `components()`
+            // normalizes interior CurDir components away (only a
+            // leading one survives), and the OS resolves it to the
+            // same inside file — inert, accepted.
+            assert!(
+                !inside_root_components(root, Path::new("/data/Repo/../evil.md"), fold_case),
+                "a ParentDir remainder climbs out: refused, fold_case = {fold_case}"
+            );
+            assert!(
+                !inside_root_components(root, Path::new("/etc/evil.md"), fold_case),
+                "an absolute spelling replaces the root: refused, \
+                 fold_case = {fold_case}"
+            );
+            assert!(
+                inside_root_components(root, Path::new("/data/Repo/./x.md"), fold_case),
+                "an interior CurDir is inert — the same inside file: \
+                 accepted, fold_case = {fold_case}"
+            );
+        }
+        assert!(
+            !inside_root_components(root, case_variant, false),
+            "the byte-exact flavor keeps a case-different spelling outside"
+        );
+        assert!(
+            inside_root_components(root, case_variant, true),
+            "the folded flavor accepts it — the Windows retry"
+        );
+    }
+
+    #[test]
+    fn an_escaping_name_is_refused_as_outside_root() {
+        // The uniform-containment defense, pinned end to end: the name
+        // parameter is contracted to be one ordinary component (§5.7,
+        // SEC-006), but a structurally escaping spelling must not be
+        // silently written even if a caller ever broke that contract —
+        // `..` strips-prefix TEXTUALLY (verified: the remainder is
+        // `../evil.md`), so the check demands ordinary names.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+
+        let parent_escape = resolve_target_path(&root, "../evil.md")
+            .expect_err("a `..` name climbs out of the root: refused");
+        assert!(
+            matches!(&parent_escape, TargetPathError::OutsideRoot { .. }),
+            "the ParentDir escape must be OutsideRoot, got: {parent_escape:?}"
+        );
+        assert_eq!(
+            parent_escape.os_code(),
+            None,
+            "a containment refusal is a fact about the path, no OS code"
+        );
+
+        let absolute = resolve_target_path(&root, "/definitely/not/here.md")
+            .expect_err("an absolute name replaces the root: refused");
+        assert!(
+            matches!(&absolute, TargetPathError::OutsideRoot { .. }),
+            "the absolute escape must be OutsideRoot, got: {absolute:?}"
+        );
+        assert_eq!(
+            absolute.path(),
+            "/definitely/not/here.md",
+            "the error names the path the write would have used"
+        );
+
+        let curdir = resolve_target_path(&root, "./AGENTS.md").expect(
+            "an interior `.` is inert — components() normalizes it \
+                    away and the OS resolves the same inside file",
+        );
+        assert_eq!(
+            curdir.file_name(),
+            "AGENTS.md",
+            "the inert re-spelling resolves to the same file name"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_denied_probe_on_the_target_is_not_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The probe `symlink_metadata(<root>/<name>)` needs search on
+        // the root: without the search bit it answers EACCES, which is
+        // a REFUSAL — not any of §9.4's three verdicts. Loud root
+        // skip; mode restored before the assertions so a panic cannot
+        // strand the fixture.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        if running_as_root_is_untestable(&root) {
+            eprintln!(
+                "skipping a_denied_probe_on_the_target_is_not_readable: \
+                 running as root — mode bits are not enforced, the \
+                 unsearchable-root precondition cannot be set up"
+            );
+            return;
+        }
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o600))
+            .expect("removing the search bits must work");
+        let result = resolve_target_path(&root, "AGENTS.md");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+            .expect("restoring mode bits must work");
+
+        let err = result.expect_err("a refused target probe must be an error");
+        assert!(
+            matches!(&err, TargetPathError::NotReadable { .. }),
+            "a denied probe must be NotReadable, got: {err:?}"
+        );
+        assert_eq!(
+            err.os_code(),
+            Some(13),
+            "EACCES is the OS code the §10 log line carries for denied access"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_verdict_is_what_the_probes_observed_not_a_snapshot() {
+        // The D-084 vanished-`.git` posture, on the target: the link
+        // resolves while the real file exists; remove the file and the
+        // SAME link is broken. The verdict is recomputed from the
+        // tree, never cached — and the resolution-to-write race is the
+        // documented TOCTOU posture's observable edge.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).expect("creating the fixture repository must work");
+        fs::write(root.join("AGENTS.md"), b"real file").expect("writing the real file must work");
+        if !symlink_or_report_untestable(Path::new("AGENTS.md"), &root.join("CLAUDE.md")) {
+            return;
+        }
+        resolve_target_path(&root, "CLAUDE.md")
+            .expect("the link resolves while the real file exists");
+
+        fs::remove_file(root.join("AGENTS.md")).expect("removing the real file must work");
+        let err = resolve_target_path(&root, "CLAUDE.md")
+            .expect_err("a now-dangling link must be broken at this check");
+        assert!(
+            matches!(&err, TargetPathError::BrokenLink { .. }),
+            "the recomputed verdict must be BrokenLink, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_target_error_contract_follows_the_module_style() {
+        // The command layer branches on the variants and logs the
+        // Display text; these assertions pin the wording (lowercase,
+        // no trailing punctuation — the house style), the path()
+        // accessor per variant, the io-backed/fact split and the
+        // source() chain — without pinning std's strerror table.
+        let broken = TargetPathError::BrokenLink {
+            path: "/repo/CLAUDE.md".into(),
+            source: io::Error::from_raw_os_error(2),
+        };
+        assert!(
+            broken
+                .to_string()
+                .starts_with("target path /repo/CLAUDE.md does not resolve to a real file: "),
+            "the BrokenLink text must state the fact, then the OS text: {broken}"
+        );
+        assert_eq!(broken.path(), "/repo/CLAUDE.md");
+        assert_eq!(broken.os_code(), Some(2));
+        assert!(broken.io_error().is_some());
+        assert!(broken.source().is_some());
+
+        let outside = TargetPathError::OutsideRoot {
+            root: "/repo".into(),
+            path: "/etc/passwd".into(),
+        };
+        assert_eq!(
+            outside.to_string(),
+            "target path /etc/passwd resolves outside the project root /repo"
+        );
+        assert_eq!(
+            outside.path(),
+            "/etc/passwd",
+            "the subject of the failure is the resolved path"
+        );
+        assert_eq!(outside.os_code(), None);
+        assert!(outside.io_error().is_none());
+        assert!(outside.source().is_none());
+
+        let is_dir = TargetPathError::IsDir {
+            path: "/repo/sub".into(),
+        };
+        assert_eq!(is_dir.to_string(), "target path /repo/sub is a directory");
+        assert_eq!(is_dir.path(), "/repo/sub");
+        assert_eq!(is_dir.os_code(), None);
+        assert!(is_dir.source().is_none());
+
+        let not_readable = TargetPathError::NotReadable {
+            path: "/repo/locked".into(),
+            source: io::Error::from_raw_os_error(13),
+        };
+        assert!(
+            not_readable
+                .to_string()
+                .starts_with("target path /repo/locked cannot be inspected: "),
+            "the NotReadable text must state the fact, then the OS text: {not_readable}"
+        );
+        assert_eq!(not_readable.path(), "/repo/locked");
+        assert_eq!(not_readable.os_code(), Some(13));
+        assert!(not_readable.source().is_some());
     }
 }
