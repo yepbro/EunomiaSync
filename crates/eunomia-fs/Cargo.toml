@@ -10,12 +10,13 @@ publish = false
 # Dependency set pinned by the spec (docs/spec.md 5.2) and the owner
 # rulings of 2026-11-19 (DB-030 as amended in spec commits 1e1b930 and
 # 9a953d9; the DECISIONS.md entry of this task records the adoption).
-# The `ignore`/`walkdir`/`tempfile` modules are skeleton
-# stubs, so those three stay intentionally idle until the task that
-# implements their module lands (precedent: the spec-pinned allow-list
-# of eunomia-core, DECISIONS.md D-017):
+# The `walkdir`/`tempfile` modules are still skeleton stubs, so those
+# two stay intentionally idle until the task that implements their use
+# lands (precedent: the spec-pinned allow-list of eunomia-core,
+# DECISIONS.md D-017):
 # - `ignore` drives the repository scan (spec 9.6, ALG-050): its parallel
-#   WalkBuilder, run with .gitignore reading disabled;
+#   WalkBuilder, run with .gitignore reading disabled; active since the
+#   scan task (T-061) landed;
 # - `walkdir` covers plain recursive traversal outside the repository-scan
 #   algorithm, e.g. the app's own data directory (scan, backup);
 # - `tempfile` stages same-folder write-then-rename file updates (atomic,
@@ -57,5 +58,7 @@ dunce = "1"
 # Domain types for scan/backup results (spec 5.2 lists `core`). Deliberate
 # departure from D-017's store rule (core edge only with the first
 # consumer): the card fixes this crate's dependency set at creation, so the
-# edge is wired now; the skeleton references none of core's types yet.
+# edge is wired now; active since the backup task landed (the §7.6/§5.5
+# name builders of `backup_name` and the incremental SHA-256 of `hash` —
+# fs hashes through core and never names `sha2` itself).
 eunomia-core = { path = "../eunomia-core" }

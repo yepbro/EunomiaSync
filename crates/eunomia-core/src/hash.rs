@@ -70,6 +70,14 @@
 //! Lowercase hexadecimal, 64 characters — the spelling of
 //! `projects.last_synced_hash` (DB-020) and of the SHA-256 values the
 //! backup checks compare (BKP-010).
+//!
+//! The build hash is not the only SHA-256 this crate owns:
+//! [`Sha256Hex`] is the PLAIN byte-stream digest behind BKP-010's
+//! backup checks — the same digest arithmetic and the same spelling,
+//! without the `v1` framing. `eunomia-fs` streams file bytes through
+//! it, so file-system code hashes without ever naming the `sha2`
+//! crate (the §5.2 `fs` row lists `core`, not `sha2`; D-017's
+//! per-crate allow-lists stay intact).
 
 use std::path::Path;
 
@@ -156,6 +164,84 @@ fn feed_framed(hasher: &mut Sha256, bytes: &[u8]) {
 /// The canonical spelling of an extra-file enabled flag.
 fn flag_bytes(enabled: bool) -> &'static [u8] {
     if enabled { b"true" } else { b"false" }
+}
+
+/// An incremental SHA-256 over a raw byte stream, rendered as the
+/// canonical 64-character lowercase hexadecimal digest.
+///
+/// This is the plain file-content hash of spec §7.6 BKP-010 — NOT the
+/// DB-020 build hash: [`build_hash`] feeds a framed, versioned byte
+/// stream (`v1` + length-framed fields), while a `Sha256Hex` digests
+/// exactly the bytes it is handed and nothing else — the digest of a
+/// file's content, byte for byte. The output spelling is the same
+/// canonical 64 lowercase hex characters as every compared SHA-256 in
+/// the app, so a digest recorded by the store layer and a digest
+/// computed by the file-system layer compare by exact string
+/// equality (the backup dedup contract, BKP-010: equal digests mean
+/// equal content).
+///
+/// The API is incremental on purpose: `eunomia-fs` streams a file
+/// through [`update`](Sha256Hex::update) in fixed-size chunks — no
+/// whole file is ever loaded into memory — and reads the digest with
+/// [`finalize_hex`](Sha256Hex::finalize_hex). The type is pure (no
+/// I/O, no clock): it owns only the digest arithmetic, keeping
+/// `sha2` a core-internal detail — file-system code hashes through
+/// this wrapper and never depends on the hashing crate itself (the
+/// §5.2 `fs` row lists `core`, not `sha2`; DECISIONS.md D-017's
+/// per-crate allow-lists stay intact). The DB-020 build hash is
+/// untouched by this wrapper: its formula, framing and `v1` tag live
+/// only in [`build_hash`].
+///
+/// # Examples
+///
+/// ```
+/// use eunomia_core::hash::Sha256Hex;
+///
+/// let mut hasher = Sha256Hex::new();
+/// hasher.update(b"a");
+/// hasher.update(b"bc");
+/// // The FIPS 180-2 vector for "abc", in the canonical spelling:
+/// assert_eq!(
+///     hasher.finalize_hex(),
+///     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+/// );
+/// ```
+#[derive(Debug)]
+pub struct Sha256Hex {
+    /// The crate-internal digest state; the wrapper exists so callers
+    /// never name the hashing crate or the digest's byte form.
+    inner: Sha256,
+}
+
+impl Sha256Hex {
+    /// Starts a fresh digest over zero bytes so far.
+    #[must_use = "a dropped hasher digests nothing"]
+    pub fn new() -> Self {
+        Self {
+            inner: Sha256::new(),
+        }
+    }
+
+    /// Feeds the next chunk of bytes into the digest. Chunks may come
+    /// in any sizes and any counts: the digest depends only on the
+    /// total byte stream, never on where the chunk boundaries fell
+    /// (pinned by tests against independently computed FIPS vectors).
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.inner.update(bytes);
+    }
+
+    /// Finishes the digest and renders it as the canonical 64
+    /// lowercase hexadecimal characters (see the type's docs).
+    #[must_use = "the digest is the only output; dropping it hashes for nothing"]
+    pub fn finalize_hex(self) -> String {
+        to_lowercase_hex(&self.inner.finalize())
+    }
+}
+
+impl Default for Sha256Hex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Renders digest bytes as lowercase hexadecimal. Hand-rolled: a `hex`
@@ -472,6 +558,94 @@ mod tests {
         for pair in hashes.windows(2) {
             assert_eq!(pair[0], pair[1]);
         }
+    }
+
+    // ---- the plain byte-stream digest (Sha256Hex) ----------------------
+
+    #[test]
+    fn the_plain_digest_matches_the_fips_vectors() {
+        // Independently computed SHA-256 values (FIPS 180-2 vectors,
+        // re-checked with Python's hashlib): the wrapper digests raw
+        // bytes with no framing of its own.
+        let cases: [(&[u8], &str); 3] = [
+            (
+                b"",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                b"abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+            ),
+        ];
+        for (input, expected) in cases {
+            let mut hasher = Sha256Hex::new();
+            hasher.update(input);
+            assert_eq!(hasher.finalize_hex(), expected, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn the_plain_digest_is_independent_of_the_chunking() {
+        // The BKP-010 hash streams files in fixed chunks; the digest
+        // must depend on the byte stream alone, never on where the
+        // chunk boundaries fell (1-byte, 3-byte and whole-stream
+        // feedings of the same content all agree, and agree with the
+        // FIPS vector).
+        let input = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        let expected = "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1";
+
+        let whole = {
+            let mut hasher = Sha256Hex::new();
+            hasher.update(input);
+            hasher.finalize_hex()
+        };
+        assert_eq!(whole, expected);
+
+        let one_byte_chunks = {
+            let mut hasher = Sha256Hex::new();
+            for byte in input {
+                hasher.update(std::slice::from_ref(byte));
+            }
+            hasher.finalize_hex()
+        };
+        assert_eq!(one_byte_chunks, expected);
+
+        let odd_chunks = {
+            let mut hasher = Sha256Hex::new();
+            for chunk in input.chunks(7) {
+                hasher.update(chunk);
+            }
+            hasher.finalize_hex()
+        };
+        assert_eq!(odd_chunks, expected);
+    }
+
+    #[test]
+    fn the_plain_digest_spelling_is_64_lowercase_hex_characters() {
+        let mut hasher = Sha256Hex::new();
+        hasher.update(b"abc");
+        let digest = hasher.finalize_hex();
+        assert_eq!(digest.len(), 64);
+        assert!(
+            digest
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+            "the digest must be lowercase hex, got: {digest}"
+        );
+    }
+
+    #[test]
+    fn a_default_hasher_is_a_fresh_hasher() {
+        let mut hasher = Sha256Hex::default();
+        hasher.update(b"");
+        assert_eq!(
+            hasher.finalize_hex(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]

@@ -6552,3 +6552,178 @@ requires existence); a missing input is the `Canonicalize` variant (path text,
 ENOENT = 2 pinned on unix); and the error-contract test pins the
 Display texts, `path()` per variant, the io-backed split and the
 `source()` chain.
+
+### D-091 — Backup copy with verification: the fs→core edge activated, the plain SHA-256 widened in core, and the check/remove/dedup semantics — 2026-11-19
+
+Problem: T-068 implements spec §7.6's copy row (BKP-001, 002, 008,
+010, 011) and §9.4 phase 2 step 1 as `eunomia-fs`'s `backup` module:
+copy the target file into `backups/<project_id>__<slug>/`, check size
+and SHA-256 before the copy counts as created, and skip the copy when
+the source's digest equals the file's last backup's (the record then
+points at the existing copy). The card fixes the acceptance ("a
+substituted damaged copy is caught by the check; an identical file
+does not multiply copies") but leaves open: how `fs` reaches the
+D-080 name builders and a SHA-256 without violating §5.2's
+dependency rows; the copy/check ordering and its TOCTOU honesty; the
+dedup contract's input; what a failed copy leaves on disk; folder
+rights (SEC-007); and the API shape of an eight-input operation.
+
+Solution: the `backup` module of `eunomia-fs` — one entry point
+`backup_target_file(&BackupTarget)` plus `verify_backup_copy`, the
+typed `BackupError` (hand-rolled, D-017/D-084 posture,
+`io_error()`/`os_code()` accessors in the `paths.rs` shape), and
+`BackupOutcome::{Created, Deduplicated}`. The rulings:
+
+- FS→CORE: §5.2's `fs` row lists `core`, so the edge — pre-wired by
+  T-003 (D-019) — is now first-activated: `backup` consumes
+  `backup_name`'s builders and `hash`'s digest type. The manifest
+  gained no dependency line; its comment's "the skeleton references
+  none of core's types yet" was truthed instead.
+- HASH VISIBILITY: `fs` never names `sha2` (§5.2 pins `sha2` to
+  core's row; D-017's per-crate allow-lists). Core gained
+  `hash::Sha256Hex` — an opaque incremental wrapper
+  (`new`/`update`/`finalize_hex`, pure, no I/O) rendering the
+  canonical 64-character lowercase hex — and `fs` streams file bytes
+  through it. This is a deliberate, recorded API-surface widening
+  made from an fs task because the spec's shape demands it: the hash
+  lives in the crate that owns `sha2`, the streaming lives in the
+  crate that owns files, and the wrapper keeps the digest's byte
+  form and the hashing crate out of `fs`'s vocabulary. The DB-020
+  build hash (`build_hash`'s `v1` framing) is untouched — the
+  wrapper digests raw bytes only, the plain file-content hash
+  BKP-010 compares.
+- STREAMING: every pass moves a fixed 64 KiB chunk
+  (`COPY_CHUNK_BYTES`, one named constant) — source hashing, copying
+  and copy verification never hold more than one chunk. Three
+  passes: hash the source (size from the open file's own metadata,
+  fstat, taken once), copy, re-hash the copy. `std::fs::copy` is
+  deliberately not used: it silently overwrites the destination and
+  preserves the source's permission bits, neither of which the
+  backup semantics want.
+- DEDUP: `last_backup_sha256_hex: Option<&str>` is a PARAMETER — the
+  store lookup belongs to the store tasks. Comparison is exact
+  full-digest equality on the canonical lowercase spelling; both
+  sides hash with the same core primitive, so equal strings mean
+  equal content, and a non-canonical value simply compares unequal
+  into a fresh copy. A dedup decision creates NOTHING (not even the
+  folders) and returns the source's (size, digest) so the caller's
+  record can reference the existing copy; whether that copy is still
+  on disk is the store's record question, not this module's.
+- CHECK AND REMOVAL: BKP-010's check is size first, then the digest
+  of the copy's bytes (no digest computed for a size mismatch — the
+  check has already failed). The copy is `sync_all`-ed before the
+  check so the verification judges settled bytes. Any check failure
+  REMOVES the corrupt copy — bytes under a verified-backup name that
+  are not verified content must not linger (the card's damaged-copy
+  acceptance) — and `VerifyFailed::cleanup` carries a refused
+  removal for the run's `discarded` sweep (BKP-005) to retry.
+  `verify_backup_copy` is the check as its own public function with
+  the same remove-on-failure contract, so tests and future callers
+  drive it directly. Write-path errors remove the partial copy the
+  same way; handles are dropped before removal (Windows sharing
+  violations).
+- NEVER OVERWRITE: the copy is created with `create_new` — an
+  existing file under the destination name (a same-millisecond
+  collision in a retried run) is the typed `CopyFailed`
+  (`AlreadyExists`), never a clobber: a backup is history.
+- FOLDERS: the `backups` root and the project folder are created as
+  needed (BKP-001/002: a first-ever backup must not fail for a
+  missing folder); a missing DATA directory is the typed
+  `FolderCreateFailed`, not silently repaired — app startup owns
+  that folder. The root is born `0700` on Unix: created in ONE step
+  with that mode (`DirBuilder::mode`), so no window exists in which
+  a permissive root is on disk and there is no chmod to fail after
+  creation (a umask can only remove bits, and `0700` has no
+  group/other bits to remove); an existing root keeps its rights.
+  The leaf copy's mode is the platform default and deliberately
+  unpinned — the BKP specs pin no leaf rights, and traversal past
+  the `0700` root is impossible for anyone but the owner regardless.
+- CRASH DEBRIS AND DURABILITY: the copy is written straight to its
+  final §5.5 name (`create_new`; no staging grammar for backups —
+  that would be its own naming convention, its own task), so a kill
+  mid-copy can leave a partial file under a final backup name; the
+  debris is INERT (no record references it — the record follows a
+  verified copy) and its sweeping belongs to the store tasks'
+  run-level/retention work, the same relationship §9.5's staging
+  files have to `temp_files`. The copy's bytes are `sync_all`-ed
+  before the check, but the project folder's entry is not fsynced
+  (§9.5 pins a directory fsync for the write phase's rename only;
+  std cannot open directories portably on Windows); a crash in the
+  copy→record window can lose the entry — the unreferenced/missing
+  copy situation §10's restore path already models (`missing`
+  status). Accepted here, recorded, owned downstream.
+- TOCTOU: honest — hash → copy → re-hash copy, so a source change
+  between passes surfaces as a verification mismatch (the copy is
+  not the snapshot's bytes) and the corrupt copy is removed; a size
+  change mid-hash fails against the fstat size. The one unclosable
+  window — a same-size mutation DURING the hash read — is documented
+  as out of the check's threat model (silent copy corruption, not
+  adversarial mutation; §9.5 separately verifies what gets written).
+  The source file is never modified.
+- API SHAPE: the eight inputs are one operation's vocabulary —
+  grouped in the `BackupTarget<'a>` struct (source, data_dir,
+  project_id, project_name, scheme, base_name, time,
+  last_backup_sha256_hex) instead of an eight-argument call; the
+  `too_many_arguments` lint fired and the repo has no `#[allow]`
+  precedent — restructure, don't allow. All identity fields stay
+  typed (SEC-006): the builders own the gates, a hostile ID is
+  `NameFailed` before any path exists, a hostile name is cleaned.
+  The §9.4 RUN semantics (the `backup_records` row, the `discarded`
+  sweep, the `aborted`/`E_BACKUP_FAILED` mapping) are the store and
+  pipeline tasks' — this module is the per-file operation they call;
+  no DB, no clock, no configuration reads.
+
+Known-open items, D-062's posture: `eunomia-fs`'s `lib.rs` `//!`
+prose still lists `backup` as a skeleton, and `eunomia-core`'s
+`lib.rs` sha2 parenthetical does not yet mention the new wrapper —
+both blocks are contested by live parallel tasks (T-059/T-064) and
+are reconciled when the files are next free.
+
+Testing: 20 colocated tests in `backup.rs` + 4 in core's `hash.rs`
+(+ 1 doctest) — the happy path against independent oracles (FIPS
+180-2 vectors; the created name pinned byte for byte to the builders'
+spelling with the injected time), the dedup acceptance (same digest →
+no copy and no folders; different digest → a copy; a last hash
+matching only the hash8 PREFIX → a copy, pinning full-digest
+equality against the short-id trap; an uppercase last hash → a
+copy, pinning exact-byte equality), the substituted
+same-size copy and the truncated copy caught by `verify_backup_copy`
+and removed from disk, an untouched copy passing, the 8 MiB
+streaming case (a Python-hashlib oracle over the exact byte pattern
+— chunking cannot drift), the empty file, a missing source (typed,
+OS code), folder creation with the `0700` root, a missing data
+directory, the never-overwrite collision, the REFUSED corrupt-copy
+removal (an r-x folder: `cleanup` carries EACCES, the Display says
+"could not be removed", the copy stays for the `discarded` sweep —
+Unix-gated with the loud root skip), hostile id and hostile
+name (components stay `Normal`), and the error contract (Display,
+source chain, OS codes). Mutations were run against the battery and
+each bit exactly its test: weakening the digest comparison fails the
+substitution test, removing the dedup branch fails the
+identical-file test, dropping the size check fails the truncation
+test, and skipping the corrupt-copy removal fails the removal
+assertions. Windows-target and
+macOS-target compile checks of the crate's tests pass (the cfg-gated
+mode and permission code). Full suite: fmt, clippy
+`--workspace --all-targets -D warnings`, `cargo deny check`,
+`cargo test --workspace` (975 green) and the four pnpm checks all
+green on the handed-back commit.
+
+Round-1 review (deepseek-v4.1-flash) approved with five findings,
+all addressed: the hash8-prefix and uppercase dedup boundary tests
+were added (P2: full-digest equality now pinned), the `0700` root
+creation became one-step (`DirBuilder::mode` — no permissive-root
+window, P2), the `CopyFailed::cleanup` doc reference was corrected
+(P3), the manifest comment now says `ignore` is active since T-061
+(P3), and `verify_backup_copy`'s docs open with "destructive by
+contract" (P3 — the destructive signature is kept deliberately: the
+removal-on-failure is the module's pinned BKP-010 contract, and a
+`&BackupCopy` parameter would not remove the footgun). The
+crash-debris and directory-entry findings were answered with the
+documented posture above rather than new machinery (staging names
+and dir-fsync are unpinned by the spec and out of the card's scope).
+Round-2 review (hy4-flash-free) approved, verifying all five round-1
+fixes against the code and passing the test audit; its one finding —
+the refused-removal (`cleanup = Some`) branches had no pinning test —
+was fixed with the Unix-gated r-x-folder test above (mutation-checked:
+dropping the cleanup reporting fails exactly that test).
