@@ -1217,7 +1217,14 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    // Linux-only, and deliberately so: the fixture creates an entry whose
+    // name is invalid UTF-8, which only Linux filesystems accept — APFS
+    // (macOS) and NTFS reject such names outright with EILSEQ (CI failure
+    // 44691597845, macOS-15 leg: `Illegal byte sequence` at fixture setup,
+    // 2026-11-20). On those platforms the swept-world state the test pins
+    // cannot exist, so the non-deletion guarantee is untestable there and
+    // the sweep's name matcher never sees such bytes to begin with.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_non_utf8_entry_name_is_never_deleted() {
         // The grammar is `&str`-shaped; an entry whose name is not
