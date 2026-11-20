@@ -8679,3 +8679,75 @@ i.position` — the DB-014 scoping lives in SQL, not in caller
   paths; and a cross-check that the snapshot's sets equal the
   repositories' own active/all reads (a filter drift in either
   direction fails).
+
+### D-107 — The T-070 platform matrix suites: cfg-grouped integration tests per OS, shell-arranged Windows fixtures, and the cmd quoting trap — 2026-11-20
+
+Problem: T-070 turns spec 15.3's platform matrix ("case-insensitive
+NTFS, long paths, junctions, locked files, CRLF in repositories, write
+rights in protected folders / case-insensitive APFS, NFD names … /
+rights and owners, symlinks"; NFR-001..003, 12.1) into tests for
+`eunomia-fs`, while CI develops on a Linux box and the inline suites
+already pin the pure halves (the DB-030 key rules with literals, the
+Unix symlink shapes, T-F8's locked-file criterion per D-099's ladder).
+Three questions: (1) how to organize tests so each OS leg runs its own
+real-filesystem facts, the Linux leg runs a real subset locally, and
+the other groups still cannot rot; (2) how to build the two Windows
+fixtures std cannot build (junctions, write-denied folders) without
+leaving the crate's dependency list (frozen by this task's file
+scope); (3) what the "protected folders" row means when the CI runner
+is ephemeral and elevated.
+
+Solution: three integration suites in `crates/eunomia-fs/tests/` —
+`paths_platform.rs`, `scan_platform.rs`, `atomic_platform.rs` — each a
+common group plus `#[cfg(windows)]` / `#[cfg(target_os = "macos")]` /
+`#[cfg(unix)]` / `#[cfg(target_os = "linux")]` groups:
+
+- THE LADDER EXTENDED TO INTEGRATION TESTS: every group drives the
+  public API against the real filesystem (case variants resolve to the
+  stored spelling and one key on NTFS/APFS; NFD/NFC spellings are one
+  folder on APFS and TWO projects on Linux — the counter-truth that
+  makes the folding rule meaningful; a junction aliases its target to
+  one DB-031 identity and is not followed by the walk; verbatim
+  `\\?\` paths past MAX_PATH canonicalize, key `//?/…`, scan and write;
+  EACCES 13 / ERROR_ACCESS_DENIED 5 ride the typed skips and the
+  WriteFailed step; the setgid group rides onto written files). The
+  Windows/macOS groups are compile-checked by the cross-target runs
+  (`cargo check -p eunomia-fs --all-targets --target
+x86_64-pc-windows-msvc` / `aarch64-apple-darwin`, D-099's precedent)
+  and executed by the ci.yml OS matrix (`cargo test --workspace` on
+  ubuntu/windows/macos legs; clippy runs on ubuntu only, so per-target
+  unused-import hygiene in cfg-gated modules matters).
+- SHELL-ARRANGED WINDOWS FIXTURES, ZERO NEW DEPS: junctions via
+  `cmd /C mklink /J` (no elevation; windows-sys has no enabled
+  reparse-point feature and Cargo.toml is frozen), the write-denied
+  folder via `icacls /deny <whoami>:(WD,AD)` — deny ACEs bind even
+  elevated runners, deletion still flows from the parent, and
+  `/remove:d` restores before the assertions (the house
+  restore-before-assert pattern); long paths built as verbatim
+  `\\?\` spellings, which no manifest dependency needs.
+- THE CMD QUOTING TRAP (round-1 review P1, the entry's recess lesson):
+  `Command`'s Windows argument escaping backslash-escapes embedded
+  quotes MSVC-style, cmd does not honor backslash escapes — manually
+  wrapping mklink's path arguments in quotes mangles them and breaks
+  both junction tests. Plain `.arg(path)` values are correct: std
+  quotes a token iff it needs it. The duplicated helpers that carried
+  the bug were hoisted into `tests/common/mod.rs`
+  (`#![allow(dead_code)]`: each test crate links its own copy and uses
+  a different per-target subset) so the drift cannot recur.
+- HONEST SCOPING: "protected folders" is arranged as an ACL denial on
+  an OWNED temp folder (an arrangeable fact, not a guess about system
+  folders); T-F8 and the read-only-attribute gate stay with their
+  inline criterion tests (documented in the module headers); the macOS
+  "permission prompts" (TCC) and Linux XDG/Wayland/AppImage rows are
+  not filesystem-layer behaviors and are out of this crate's scope.
+
+Tests: 18 tests — 8 run on the Linux leg (1 common paths + 2 linux
+scan + 5 unix atomic), 9 on Windows, 9 on macOS (the shared common and
+case-insensitive groups run on every leg). Mutation-checked: making
+the Linux path_key rule NFC-normalize kills
+`nfc_and_nfd_named_repositories_are_two_projects`. Round-1 review
+(deepseek-v4.1-flash) — CHANGES REQUESTED (P1 quoting bug above, P2
+duplication/scoping, P3 tautologies): all fixed and amended. Round-2
+review (hy4-flash-free) — APPROVED, no findings; independently
+confirmed the inline-duplication boundaries and the CI platform
+assumptions.
