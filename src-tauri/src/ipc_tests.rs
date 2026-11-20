@@ -53,8 +53,9 @@
 //! conditionally) and both halves of the uid predicate through the
 //! injected-uid sheet.
 //!
-//! The `markdown_preview` tests (T-056, §7.10 Library module, SEC-005,
-//! D-15) pin the acceptance pair on the wire: a `<script>` block and an
+//! The `markdown_preview` tests (T-056 the pipeline, T-057 the
+//! warnings; §7.10 Library module, SEC-005, D-15) pin the acceptance
+//! pair on the wire: a `<script>` block and an
 //! external image (both spellings — Markdown `![alt](https://…)` and
 //! raw `<img src="https://…">`) reach the command's result only as
 //! escaped visible text, never as executable or referenceable markup;
@@ -1846,7 +1847,8 @@ fn the_app_info_command_is_registered_with_the_specta_builder() {
 }
 
 // ---------------------------------------------------------------------------
-// `markdown_preview` (T-056, §7.10 Library module, SEC-005, D-15)
+// `markdown_preview` (T-056 the pipeline, T-057 the warnings; §7.10
+// Library module, SEC-005, D-15)
 // ---------------------------------------------------------------------------
 
 /// Invokes `markdown_preview` over the app's `main` webview,
@@ -1973,15 +1975,80 @@ fn markdown_preview_escapes_raw_html_and_renders_markdown_over_ipc() {
 #[test]
 fn markdown_preview_renders_empty_text_to_an_empty_result() {
     // Arrange: the §6.9-empty variant text (LIB-002's empty variant)
-    // is a real editor state.
+    // is a real editor state — and, trivially, clean text.
     let app = markdown_preview_app();
 
     // Act
     let preview =
         invoke_markdown_preview(&main_webview(&app), "").expect("the command must succeed");
 
-    // Assert: the honest preview of nothing is nothing.
+    // Assert: the honest preview of nothing is nothing — no HTML, no
+    // warnings (the T-057 empty half of the acceptance pair).
     assert_eq!(preview.html, "");
+    assert!(
+        preview.warnings.is_empty(),
+        "empty text must carry no warnings: {:?}",
+        preview.warnings
+    );
+    drop(app);
+}
+
+#[test]
+fn markdown_preview_reports_an_unclosed_code_fence_over_ipc() {
+    // Arrange: the T-057 acceptance test — an unclosed ``` fence in
+    // the text the editor would send. The command must still SUCCEED
+    // (warnings do not block anything) and carry the warning as data.
+    let app = markdown_preview_app();
+    let text = "para\n\n```\ncode that never closes\n";
+
+    // Act
+    let preview =
+        invoke_markdown_preview(&main_webview(&app), text).expect("the command must succeed");
+
+    // Assert: one warning of the spec's named kind, pointing at the
+    // opening fence's line (3, one-based) — the piece of data the
+    // editor UI renders; the swallowed text still renders as a code
+    // block, proving the HTML half is unaffected by the warning.
+    assert_eq!(
+        preview.warnings,
+        vec![crate::markdown::MarkdownWarning {
+            kind: crate::markdown::MarkdownWarningKind::UnclosedCodeFence,
+            line: 3,
+        }],
+        "the unclosed fence must arrive as one warning at line 3: {:?}",
+        preview.warnings
+    );
+    assert!(
+        preview.html.contains("<pre><code>") && preview.html.contains("code that never closes"),
+        "the code block still renders: {}",
+        preview.html
+    );
+    drop(app);
+}
+
+#[test]
+fn markdown_preview_returns_no_warnings_for_clean_text_over_ipc() {
+    // Arrange: the T-057 acceptance test's clean half — ordinary
+    // Markdown with a closed fence, the shape the editor shows
+    // without a warning.
+    let app = markdown_preview_app();
+    let text = "# Guide\n\n```rust\nlet x = 1;\n```\n\nDone.\n";
+
+    // Act
+    let preview =
+        invoke_markdown_preview(&main_webview(&app), text).expect("the command must succeed");
+
+    // Assert: no warnings, the render intact.
+    assert!(
+        preview.warnings.is_empty(),
+        "clean text must carry no warnings: {:?}",
+        preview.warnings
+    );
+    assert!(
+        preview.html.contains("<h1>Guide</h1>") && preview.html.contains("<pre><code>"),
+        "the ordinary render is intact: {}",
+        preview.html
+    );
     drop(app);
 }
 

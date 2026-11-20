@@ -5744,3 +5744,144 @@ root link → `Missing`); ENOTDIR = 20 riding in the typed error
 unit-variant texts, io-variant prefixes, `source()` Some/None); the
 cross-filesystem `/dev/shm` acceptance (skip-able, including an unusable
 `/dev/shm`); and the `$RECYCLE.BIN`/`mnt` path-shape acceptance.
+
+### D-085 — Markdown preview warnings: one parse, offsets-based unclosed-fence detection, the minimal taxonomy; additive response shape — 2026-11-19
+
+Problem: T-057 implements the warnings half of D-15 ("validation gives
+warnings only (for example, an unclosed code fence) and does not block
+writing") and §7.3 LIB-002/009…016 ("Markdown warnings (for example, an
+unclosed code block) that do not block saving"): `markdown_preview` must
+return a warnings list beside the sanitized HTML. Five points were open:
+(1) the taxonomy — the spec pins the category (warnings, non-blocking)
+and names ONE kind by example, leaving the rest of the set open;
+(2) DETECTION — pulldown-cmark's event stream does not mark an unclosed
+fence: closed and unclosed blocks pair `Start(CodeBlock)` /
+`Text…` / `End(CodeBlock)` identically (verified empirically against
+0.13.6 before designing), so "detect it from the event stream" needed a
+real invariant, not a read of event kinds; (3) the card's "no second
+parser over the text" bites the moment the command needs HTML and
+warnings from the same text; (4) the response shape must extend T-056's
+named struct additively, with the bindings regenerated in the same
+commit; (5) what "enough for the UI to point at the problem" means.
+
+Solution: the pipeline in `markdown.rs` becomes
+`preview(text) -> Preview { html, warnings }` — ONE parse serving both
+outputs.
+
+- TAXONOMY, MINIMAL AND SPEC-FAITHFUL: the single kind
+  `MarkdownWarningKind::UnclosedCodeFence` (wire string
+  `unclosed_code_fence` via `serde(rename_all)`, the ErrorCode
+  wire-contract rule — the strings are a contract for the editor UI,
+  pinned by the bindings). The spec names exactly one kind by example;
+  inventing more kinds (unbalanced emphasis? undefined links?) would be
+  guessing UI for problems nobody asked about — the enum is closed, and
+  a future kind is an additive variant plus its own decision.
+  Non-blocking BY CONSTRUCTION: a warning is response data; the save
+  path reads none of it; the command keeps §7.10's `Result` shape with
+  no reachable `Err` (D-083's totality holds — detection cannot fail),
+  and `errors.rs` is untouched: warnings are not errors, no §10 code
+  exists or is needed.
+- DETECTION, OFFSETS NOT EVENT KINDS: the tracker observes the same
+  stream the renderer consumes — `Parser::into_offset_iter()`, the
+  same parser with the same options (the transformed event sequence
+  `push_html` receives is bit-for-bit D-083's; the exact-HTML test
+  with a warning present pins it). The invariant, in its final (gap)
+  form after the round-1 review: a fenced block is unclosed UNLESS the
+  source between its content's end and the block's own end holds a
+  closing fence — a fence line is never whitespace, so an empty or
+  whitespace-only gap means no closer was ever consumed: the block ran
+  to end-of-input, or an enclosing container broke it first (a list
+  item's next bullet, a blockquote's end — pulldown ends the block
+  there with no closer). Furthest-end tracking survives CRLF input,
+  whose in-fence content arrives as split text pieces. The
+  closing-fence rules (same fence character, at least as many
+  characters, nothing else on the line) are pulldown-cmark's and are
+  NOT reimplemented: a too-short or wrong-character line stays
+  _content_ and keeps the content running to the block's end — exactly
+  the warning case, for free. Two pulldown specifics the gap form had
+  to survive: the degenerate one-or-two-line blocks with no content
+  events at all (`"```"`, `"```\n"`, `"```\n```"`, `"```\n```\n"`) are
+  decided by a bounded read of the block's own source range (closed ⟺
+  a line follows the opening fence line inside it), and — the round-1
+  review's catch, reproduced before fixing — a final
+  non-newline-terminated line of 1–3 spaces is a synthesized
+  zero-length item with NO content event, so the first (equality)
+  wording of the invariant missed the warning there; the gap form
+  (whitespace-only gap ⟹ unclosed) covers it, with the
+  closed-fence-with-trailing-whitespace-after-the-closer shape pinned
+  as the no-false-warning half. Indented code blocks emit
+  `CodeBlock(Indented)` and never warn — even when their lines look
+  like fences, which CommonMark itself declares content.
+- POSITION: `line: u32`, 1-based, of the OPENING fence — the thing an
+  author fixes — counted over the raw text's bytes. A byte offset was
+  rejected: the editor's textarea is line-addressable, and an offset
+  would drag a second coordinate system (UTF-16 units in JS) into a
+  wire contract for no requirement. The counting is cursor-based (the
+  round-1 review measured the per-warning full rescan at ~483 ms on a
+  max-size §6.9 draft full of container-broken fences): warnings
+  arrive in source order, so each count folds only the bytes since the
+  previous warning into a running line cursor — O(text) once in
+  total, not per warning — and the counter saturates (`try_from`
+  ceiling + `saturating_add`) instead of overflowing: the original
+  +1 arithmetic was the one panic-capable spot on a documented-total
+  path.
+- RESPONSE SHAPE, ADDITIVE: `MarkdownPreview` gains
+  `warnings: Vec<MarkdownWarning>` after the unchanged `html` field —
+  the coordinated bindings regeneration D-083's named struct was
+  shaped for; `MarkdownWarning { kind, line }` is specta-typed and
+  travels as `MarkdownWarning[]`/`MarkdownWarningKind` in
+  `src/bindings.ts`, drift-pinned as before. Nothing about the html
+  wire the UI consumes moved.
+- STRUCTURE: `preview_html` (`&str → String`, D-083) is renamed
+  `preview` — the old name promised a bare string and the function no
+  longer returns one; the rename is recorded here as part of the same
+  decision. The T-056 unit tests now assert on `.html` of the same
+  pipeline; `sanitize`, the escaping transform and the render are
+  byte-for-byte unchanged.
+- A BUG THE TESTS CAUGHT, RECORDED: the first implementation compared
+  the absolute content end against the RELATIVE slice length
+  (`text[start..end].len()`) — fences at source offset 0 passed
+  (where absolute and relative coincide) and every fence opening after
+  content silently produced no warning. The acceptance test (fence on
+  line 3) went red before anything else touched the code; fixed by
+  comparing against the absolute block end. The lesson is structural:
+  offsets must never be mixed across coordinate systems in one
+  comparison — the invariant's doc comment now names both offsets
+  absolute explicitly.
+
+Tests: 14 warning-half unit tests in `markdown.rs` — the unclosed fence
+warning at its opening line 3 (with the swallowed text still rendering
+as a code block); clean text (heading, emphasis, CLOSED fence,
+paragraph) warning-free; unclosed at EOF without a trailing newline;
+the shorter-closer and foreign-fence-character lines that cannot
+close; the unclosed tilde fence; the four degenerate one-line forms in
+both polarities; container breaks (list item and blockquote) warning
+at the opening line with their closed-fence twins pinned quiet; the
+whitespace-only tail line (the round-1 catch, with tab / 4-space /
+trailing-newline boundary shapes and the
+closed-with-trailing-whitespace no-false-warning half); two unclosed
+fences in source order (lines 1 and 3); the serde wire literal pinned
+directly (`unclosed_code_fence`, the errors.rs rule); indented code
+blocks (plain and fence-shaped) never warning; CRLF input in both
+polarities; one warning per unclosed fence wherever it opens
+(closed-then-unclosed, opening line 7 pinned); and the exact-HTML pin
+proving warnings and HTML are independent outputs (the render
+byte-for-byte D-083's while a warning fires). The empty test now pins
+the whole `Preview` (empty html, empty warnings). 2 new command-level
+tests in `ipc_tests.rs`: the unclosed fence over the mock-IPC envelope
+(one warning, kind and line intact on the wire, the command still
+`Ok`) and clean text warning-free over IPC; the empty IPC test gained
+the warnings-empty assertion. Review round 1
+(opencode-go/deepseek-v4.1-flash, verdict approve-with-fixes): P2-1
+(the whitespace-tail miss) fixed with the gap-form invariant and its
+regression test; P2-2 (closed-fence-in-container coverage) added to
+the container test; P3-1 (quadratic line counting, the +1 overflow)
+fixed with the cursor and saturating arithmetic; P3-2 (doc wording and
+the test count) corrected here; P3-3 (the wire literal) pinned by the
+new serde test; P3-4 (lone-CR line endings) declined — §6.9
+normalizes CRLF→LF on save and real editors emit LF/CRLF, so a lone-CR
+document is not a shape the editor produces, and the warning still
+fires with a correct kind there (only the line number could differ in
+an input the save path would normalize anyway). Full suite: 798 tests
+green; fmt, clippy `-D warnings`, `cargo deny check`, pnpm lint /
+format:check / typecheck / test all green.

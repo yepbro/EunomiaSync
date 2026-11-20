@@ -1092,23 +1092,33 @@ fn settings_corrupt_diagnostic(source: &SettingsError) -> String {
 // ---------------------------------------------------------------------------
 
 /// The `markdown_preview` response (§7.10 Library module): the
-/// sanitized preview HTML. A named struct, not a bare `String`, so
-/// D-15's warnings list (the editor's "Markdown warnings that do not
-/// block saving", the T-057 card) can join as an additional field in a
-/// coordinated bindings regeneration without reshaping the wire shape
-/// the UI already consumes.
+/// sanitized preview HTML plus D-15's non-blocking Markdown warnings.
+/// A named struct since T-056, which carried only `html` in the shape
+/// T-057's warnings list was already planned for; the `warnings` field
+/// joined in a coordinated bindings regeneration (T-057) without
+/// reshaping the wire the UI already consumes — `html` keeps its
+/// position and meaning.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub(crate) struct MarkdownPreview {
     /// The sanitized HTML (SEC-005): pulldown-cmark's render with
     /// every raw-HTML fragment of the text escaped into visible text
     /// and no resource-loading element anywhere —
-    /// [`markdown::preview_html`] is the pipeline and its policy.
+    /// [`markdown::preview`] is the pipeline and its policy.
     pub(crate) html: String,
+    /// The Markdown warnings (D-15, §7.3 LIB-002/009…016's "Markdown
+    /// warnings (for example, an unclosed code block) that do not
+    /// block saving"): one entry per finding, in source order, empty
+    /// for clean text. Pure data for the editor's Preview UI — the
+    /// save path never reads them and the command never fails because
+    /// of them ([`markdown::MarkdownWarning`] is the taxonomy,
+    /// [`markdown::preview`] the detection, in the same single parse
+    /// pass as the HTML).
+    pub(crate) warnings: Vec<markdown::MarkdownWarning>,
 }
 
-/// Renders the editor's Markdown into sanitized preview HTML (§7.10
-/// Library module `markdown_preview`, the D-009 name registry;
-/// SEC-005, D-15).
+/// Renders the editor's Markdown into sanitized preview HTML with the
+/// Markdown warnings alongside (§7.10 Library module `markdown_preview`,
+/// the D-009 name registry; SEC-005, D-15, §7.3 LIB-002/009…016).
 ///
 /// Stateless and **non-database**: it reads no managed state and does
 /// no I/O, so there is nothing to route through [`Db::run`], and
@@ -1123,15 +1133,20 @@ pub(crate) struct MarkdownPreview {
 /// editor's live preview of whatever the field currently holds, and
 /// the save path (the validating constructors of the
 /// instruction/variant tasks) is where text length and reserved
-/// markers are enforced. The `Result` shape is §7.10's uniform command
-/// contract, not a claim of fallibility: the pipeline is total, so no
-/// `Err` is reachable today — and there is no log edge for the same
-/// reason (§10 logs errors; none can occur).
+/// markers are enforced. The warnings follow the same reading — they
+/// observe the draft as-is (D-15: "warnings only … does not block
+/// writing") and are computed in the same single parse pass as the
+/// HTML. The `Result` shape is §7.10's uniform command contract, not a
+/// claim of fallibility: the pipeline is total, so no `Err` is
+/// reachable today — and there is no log edge for the same reason
+/// (§10 logs errors; none can occur).
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn markdown_preview(text: String) -> Result<MarkdownPreview, AppError> {
+    let preview = markdown::preview(&text);
     Ok(MarkdownPreview {
-        html: markdown::preview_html(&text),
+        html: preview.html,
+        warnings: preview.warnings,
     })
 }
 
