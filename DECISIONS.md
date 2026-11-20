@@ -6895,3 +6895,134 @@ target probe under a search-bit-less root
 (resolves while the real file exists, broken after removal); and the
 error-contract test pinning Display texts, `path()` per variant, the
 io-backed/fact split and the `source()` chain.
+
+### D-093 — The projects repository: TEXT in/out with the schema's full path_key uniqueness, a table-wide gapless sort_order, direct `ProjectsError` (the `StorageError` surface freeze), and the journaling boundary left with the producer — 2026-11-19
+
+Problem: T-071 adds CRUD for projects and exclusions, the DB-015
+`path_key` lookup, and the `sort_order` handling to `eunomia-store`
+(spec §6.2, §6.4). Open questions: how the uniqueness scope of the
+lookup relates to the schema's constraint; what rule the
+`projects.sort_order` column follows, given that DB-005/DB-011 pin the
+_library_ `position` explicitly and say nothing projects-specific; how
+the typed UNIQUE violation is surfaced without widening
+`StorageError`; whether project add/change/archive/restore journal
+here (LOG-001…004 name them, D-051 exists); and whether the
+store→core edge finally earns its keep.
+
+Solution: `eunomia_store::projects`, one module for both path-bearing
+tables (`projects`, `project_exclusions` — one feature boundary: the
+§6.4 archive/restore flow composes exclusions, PRJ-017, and one error
+shape), registered in `lib.rs`. Public API: `create`/`get`/
+`find_by_path_key`/`list(scope)`/`update`/`archive`/`restore`/
+`reorder` plus `create_exclusion`/`list_exclusions`/
+`find_exclusion_by_path_key`/`delete_exclusion`, over
+`NewProject`/`Project`/`ProjectUpdate`/`NewExclusion`/`Exclusion` and
+the vocabularies `ProjectState`, `AddedVia`, `ExclusionReason`,
+`ListScope`. The §6.5 enum types (`Scheme`, `BaseName`, `Position`,
+`ExtraFile`) are reused from `settings` — no second definition of a
+closed vocabulary (three private `parse_*` adapters decode them on
+reads; the round trip is unit-pinned).
+
+- _Uniqueness scope: the schema's, not a parameter._ The migration
+  (T-016, source of truth) carries `path_key TEXT NOT NULL UNIQUE` on
+  both tables — a _full_ unique index over active **and** archived
+  rows, exactly DB-015's wording; there is no partial-index reality to
+  reconcile. So `find_by_path_key` deliberately has no active-only
+  scope: it returns the row in either state and the caller branches on
+  `Project::state` (active = PRJ-001's "already added", archived =
+  the "offer to restore" flow). The two tables are separate
+  namespaces: a project row and an exclusion row may legally share a
+  key — that coexistence is what archiving a scan-found project
+  produces, and an integration test pins it.
+- _sort_order: DB-005 over the whole table._ Creation appends
+  `MAX(sort_order) + 1` (a scalar subquery _inside_ the single
+  `INSERT` statement, so the append cannot interleave even outside a
+  transaction); reads order by it (ALG-001's subset read);
+  `reorder` renumbers the complete id set `1..=N` in one transaction
+  and rejects a set that is not a permutation of the table
+  (`ReorderMismatch` with unknown/missing/duplicates counted)
+  _before_ the first write. Archive/restore keep a row's position:
+  §6.4's archive row touches only the folder, the assignments and the
+  scan exclusions — it says nothing about `sort_order`, so keeping the
+  position is this repository's reading (the least destructive one),
+  reinforced by v1 having no physical project delete (the table only
+  grows) and PRJ-013…018's restore "bringing the project back" — with
+  its place. The gapless
+  invariant is therefore table-wide (`1..=N` over all rows), not
+  active-subset-wide; DB-011's 1..=N stays the library's own pin and
+  nothing here touches `library_items`.
+- _Typed UNIQUE violation, deliberately typed._ The one runtime
+  outcome between two individually legal rows — the `path_key`
+  collision (PRJ-001's "already registered", PRJ-006's "skipped") —
+  maps SQLite's extended result code `SQLITE_CONSTRAINT_UNIQUE` to
+  `ProjectsError::DuplicatePathKey { path_key }`, never the message
+  text. §6.9 field validation is NOT duplicated here: it lives in
+  `eunomia_core` (`project_validators`, D-075/D-079) and runs at the
+  command boundary; the schema CHECKs are the store's floor and
+  surface as `ProjectsError::Sql`. `archive`/`restore` are idempotent
+  (a repeated call returns the row unchanged, no `archived_at` drift —
+  the make-operations-idempotent rule), and maintain
+  `archived_at IS NOT NULL ⟺ state = 'archived'`; `update` writes
+  exactly the fields present (PRJ-008's editable set: name, label,
+  color, description, scheme, base_name, the two extra files — never
+  path/path_key, PRJ-008), restamps `updated_at` only when it wrote,
+  and a fieldless update is a verified no-op. Reads reject a stored
+  vocabulary cell outside its CHECK vocabulary with
+  `ProjectsError::Member` (the D-039 corrupt-cells policy; the tests
+  simulate corruption through `PRAGMA ignore_check_constraints`, the
+  only way such a cell can exist).
+- _`ProjectsError` returns directly — the `StorageError` surface is
+  frozen for this task._ The `Settings`/`ActionLog` precedent nests a
+  typed error inside `StorageError`; that path was implemented first
+  and then reverted, because `src-tauri/src/retention.rs` _exhaustively_
+  matches `StorageError` and T-071's hard scope forbids touching
+  `src-tauri/**`. So this module's functions return
+  `Result<_, ProjectsError>` with a `Sql(rusqlite::Error)` variant
+  (`From` impl lets `?` work), all inside `crates/eunomia-store/**`:
+  `storage.rs` ends this task with a zero diff. Consequence for the
+  first command task that consumes the repository: it maps
+  `ProjectsError` beside the `StorageError` it already unwraps; the
+  first store-side task allowed to edit `src-tauri` may normalize the
+  two shapes (fold `ProjectsError` into a `StorageError::Projects`
+  variant) — that is a deliberate follow-up, not drift.
+- _Transactions: executor-agnostic, as D-051 settled._ Every function
+  joins the caller's transaction (the `settings::set` shape); the
+  one-transaction-per-operation boundary stays the app-layer `Db::run`
+  (D-037). `reorder` is the only multi-statement writer and says so in
+  its docs; its rollback atomicity is pinned by an integration test
+  through `unchecked_transaction` (the `action_log::cleanup` test
+  pattern).
+- _Journaling: the producer's, not the repository's._ LOG-001…004
+  does put project add/change/archive/restore in the journal, and the
+  vocabulary already exists (`Action::ProjectAdded`…`ProjectRestored`,
+  D-051) — but D-051's own rule assigns the entry to the _producer_
+  at its `Db::run` boundary (the `settings::set` precedent: the store
+  writes no log rows). The future project-commands task composes
+  `create`/`update`/`archive`/`restore` with `action_log::insert` in
+  its one transaction; nothing here touches `action_log`.
+- _The store→core edge stays unused._ Every signature is TEXT and
+  store-local enums (D-017's rule: the edge is added by the first task
+  whose store code references core types). Canonicalization and
+  `path_key` construction remain `eunomia_fs::paths`' job (DB-030/
+  DB-031, D-086): this module stores and looks up the TEXT it is
+  handed. `Cargo.toml`/`Cargo.lock` unchanged.
+- _Tests._ 28 new tests: a unit pair in the module (vocabulary round
+  trip through the schema literals; error Display shapes) and 26
+  integration tests in `tests/projects.rs` on a real `open_db` +
+  `run_migrations` database (the established store pattern): the
+  active-duplicate and archived-duplicate conflicts as typed errors
+  with the surviving row verified; cross-namespace coexistence;
+  exclusion CRUD with physical delete; gapless append `1..=N` (after
+  a reorder and with an archived row in the middle alike); scoped
+  lists in `sort_order` order; archive/restore keeping positions;
+  reorder renumbering, its three rejection shapes with the table
+  verified untouched, and the transactional rollback (plus the twin
+  pin that a failed duplicate insert inside a transaction keeps that
+  transaction usable — the ABORT promise the command tasks build on);
+  full-column round-trip with UUIDv7/DB-002 pins; partial update with
+  a verified no-op, a same-value update succeeding (`changed == 0`
+  means "no such id"), and a restamped `updated_at` discriminated by
+  a millisecond-boundary sleep; lifecycle stamps and idempotence;
+  `NotFound` typing on every by-id writer; the CHECK floor as `Sql`;
+  corrupt `state`/`added_via`/`reason` cells as typed `Member` on
+  `get` and both `list`s.
