@@ -7,6 +7,7 @@
 
 pub mod action_log;
 pub mod library;
+pub mod library_versions;
 pub mod projects;
 pub mod settings;
 pub mod storage;

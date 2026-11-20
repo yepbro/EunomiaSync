@@ -7922,3 +7922,188 @@ AppError>` is the reusable boundary the upcoming path-consuming
   takes a folder path yet — the first consuming command
   (`project_add_manual`) must add the IPC-level twin (the round-1
   P3 note).
+
+### D-102 — The version-recording service: the ALG-070 hash gate with a snapshot-blind carve-out, prune-to-limit in the caller's transaction, and the limit as a parameter (no core edge yet) — 2026-11-20
+
+Problem: T-082 puts a version of an instruction or variant into the
+`revisions` table on every real save (LIB-026). Open questions: where
+the ALG-070 "same hash as the last version — no version" comparison
+lives and what it compares against; whether the _op_ vocabulary
+(create/update/hide/restore/delete) is hash-gated uniformly — a
+variant's snapshot is name+text only (§7.3), so a soft delete or its
+restore builds a byte-identical snapshot and a literal reading of the
+card's "identical hash — no version" would make `op='delete'`
+unreachable (instructions never delete in v1; §6.4); how the
+`history.max_revisions` limit reaches the service and what "the
+latest version is never deleted" (ALG-072) means at limit 0/1; and
+whether the store finally takes the `eunomia-core` edge spec §5.2
+plans (D-017's first-consumer rule).
+
+Solution: `eunomia_store::library_versions`, a bookkeeping service
+over the existing v1 `revisions` table (no schema change, no changes
+to `library.rs`/`settings.rs`/`Cargo.toml`).
+
+- _The gate compares the new pair with the entity's last recorded
+  version, never with the library row._ ALG-070's wording ("when an
+  instruction name, or a variant name or text, changes… if the hash
+  equals the hash of the last version, no version is created") is a
+  content-save rule; the service receives the finished T-055 pair
+  (snapshot + SHA-256 as TEXT) and one typed op, and compares
+  `snapshot_hash` with the last `revisions` row of the entity
+  (`ORDER BY rev_no DESC LIMIT 1`). Non-snapshot facts therefore
+  cannot create versions by construction: `updated_at` restamps,
+  main-flag promotions, position moves and already-folded CRLF all
+  hash the same and record nothing (pinned end to end through the
+  real repository writers).
+- _The snapshot-blind carve-out._ Variant `delete` and `restore`
+  pass the gate whenever they represent a transition; everything else
+  is hash-gated. §7.3 fixes the variant snapshot's fields (name,
+  text) with no state column, so the two lifecycle transitions are
+  structurally invisible to the hash comparison, while LIB-026's
+  acceptance criterion says "each real change adds one version" and
+  the History panel must show the operations (ALG-071's op list
+  exists for them). A blind op is therefore suppressed only when the
+  last version carries both the same `op` and the same hash: the
+  repository's `delete_variant`/`restore_variant` are idempotent and
+  return no "changed" signal (D-097), so a repeated command
+  (double click, retry) re-records a transition that did not happen —
+  and while a variant is deleted its content cannot change (the
+  repository refuses to edit the dead), so an op-equal, hash-equal
+  re-run is definitionally a re-run, while a genuine transition
+  always differs (a second real delete follows a `restore`, a
+  different op). The reasoning carries one caller invariant, stated
+  in the module docs for the command tasks: every delete/restore
+  transition is recorded through this seam — a state mutation that
+  skips the recording would leave a stale `(op, hash)` as the last
+  version and could wrongly absorb the next genuine transition.
+  Instruction hide/restore need no such pairing:
+  §7.3's instruction snapshot carries the state field, so a genuine
+  transition always changes the hash — and the gate usefully absorbs
+  idempotent re-runs on both sides (re-recording a hide or a delete
+  that did not happen converges to `Unchanged`).
+- _Two entry points, not one: type-level op pairing._
+  `record_instruction` takes `InstructionOp` (create/update/hide/
+  restore), `record_variant` takes `VariantOp` (create/update/
+  delete/restore) — a hide version of a variant or a delete version
+  of an instruction is a compile error, the §6.4 lifecycle table
+  encoded in the API (the `NewLibraryItem` kind-carrying precedent).
+  Both probe the caller's id first: unknown ids are `NotFound`, a
+  heading id is `NotAnInstruction` (§6.2: headings have no
+  versions), a corrupt `kind` cell surfaces as `Member` (D-039, the
+  `assign` raw-probe precedent — this module's error type is its
+  own, D-093 shape). `revert`/`reverted_from` are deliberately not
+  expressible: they are the P1 LIB-028/029 flow.
+- _ALG-071: `rev_no` = previous maximum plus one, as a scalar
+  subquery inside the INSERT_ (the `create_item` shape), so numbers
+  keep growing monotonically past prunes and never re-count from 1 —
+  the UNIQUE(entity_type, entity_id, rev_no) constraint holds
+  throughout.
+- _ALG-072 prune: after the insert, in the same caller transaction,
+  per entity._ `DELETE … WHERE rev_no <= MAX(rev_no) − keep` with
+  `keep = max(max_revisions, 1)`: pure rev_no arithmetic over the
+  UNIQUE index (no LIMIT-parameter subtleties), idempotent, touching
+  only the recorded entity. The clamp makes "the latest version is
+  never deleted" unconditional rather than a caller precondition —
+  a zero/negative limit (a caller bug; §6.5 validates 10–1000)
+  collapses the history to the latest version instead of wiping it.
+  An unchanged record prunes nothing: ALG-072 ties the cleanup to an
+  insertion, so a lowered setting takes effect at an entity's next
+  real change (no standalone sweep exists in v1). The whole
+  recording is multi-statement and atomic only inside the caller's
+  transaction (D-037/D-051), pinned by a rollback test.
+- _The limit is a parameter, not a settings read._ The
+  `action_log::cleanup` `LogLimits` precedent: §6.5's range has one
+  owner (the settings repository), the command layer reads
+  `settings::get(SettingKey::HistoryMaxRevisions)` in the same
+  transaction as the save and passes the value on. This keeps the
+  module free of the settings boundary and makes the 0/1-limit
+  invariant directly testable.
+- _No `eunomia-core` edge (yet)._ D-017's rule — the edge is added
+  by the first task whose store code references core types — is not
+  triggered: T-055's module docs already place "the comparison
+  against the last version and the no-version decision" in the
+  store, the command tasks (T-084+) assemble the pair themselves
+  with the core builders, and the P1 revert will need to pass a
+  _historical_ snapshot through this same seam (no current row can
+  supply it), so the TEXT pair is the forward-compatible boundary.
+  The first store code that needs a core type adds the edge with its
+  own entry.
+
+Tests: 3 unit tests in the module (op members are exactly the §6.2
+CHECK literals; error Display shapes; the prune over an already-pruned
+state removing nothing, at the private seam on an in-memory migrated
+database) and 19 integration tests in `tests/library_versions.rs` on
+a real `open_db` + `run_migrations` database: both card acceptance
+criteria verbatim (an unchanged save adds no version and consumes no
+rev_no; a limit of 10 keeps exactly the ten newest, 6..=15 of 15),
+every op of both entities with the correct literal and rev_no+1
+(including the blind delete/restore carrying the unchanged pair),
+non-snapshot changes (an updated_at restamp on a true no-op field
+write, the main flag, a position move) adding nothing, the repeated
+hide and the repeated blind operation converging to `Unchanged` while
+a genuine delete→restore→delete still records, saving back to an
+older snapshot still recording (the comparison is with the last
+version only), the 0/1/negative-limit clamp keeping the latest, the
+rolling window with rev_no continuing past deletions, the unchanged
+no-cleanup rule, per-entity isolation, the transaction rollback
+leaving neither insert nor prune, unknown ids (including each entry
+point rejecting the other entity kind's id), headings, the corrupt
+kind cell, and the T-055 example pairs stored byte for byte.
+
+Round-1 review (deepseek-v4.1-flash) — REQUEST CHANGES, one P1, three
+P2, three P3; all processed:
+
+- P1-1 taken (the round's substance): the blind carve-out originally
+  recorded delete/restore unconditionally, so a repeated command
+  (the repository's idempotent no-ops hand the caller no "changed"
+  signal) inserted a spurious version, consumed a `rev_no` and could
+  prune a genuine one — a D-16 violation. Fixed by the op-plus-hash
+  pairing described in the carve-out bullet above, with the
+  regression pinned (`repeated_blind_operations_record_no_version`:
+  delete×2 → one version; restore×2 → one version; the genuine
+  second delete records).
+- P2-1 taken: the "identical values" test actually changed the
+  content (`"content 1"` → `"Be brief."`); it now updates with the
+  row's own values and asserts the stored content survived, so the
+  restamp — not an accidental content match — is what the gate
+  ignores.
+- P2-2 taken: "prune idempotency" was claimed but never exercised
+  (the second record was hash-gated before the prune); the public
+  test now claims only what it proves (no cleanup on an unchanged
+  record), and the idempotent re-prune moved to the module's unit
+  test at the private seam.
+- P2-3 taken: no test returned to an older hash, so an
+  any-version gate would have passed the suite;
+  `saving_back_to_an_older_snapshot_still_records_a_version` pins
+  the last-version-only comparison.
+- P3-1 declined: `INSERT … RETURNING` would drop the read-back
+  statement and the `expect`, but the insert-then-read shape is the
+  house precedent (`create_item` et al.) and keeps the statement
+  pattern uniform; not worth diverging.
+- P3-2 taken: the probe contract gained cross-entity cases (a
+  variant id at the instruction entry point and vice versa are
+  `NotFound`); recording on a soft-deleted variant row was already
+  exercised by the blind-ops test and is now stated in its comment.
+- P3-3 superseded by the P1-1 fix: the blind-op re-run limitation no
+  longer exists to document — the gate itself absorbs the re-runs.
+
+Round-2 review (hy4-flash-free) — APPROVE, no P0/P1; one P2, two P3,
+all processed:
+
+- P2-1 taken: the hash half of the op-plus-hash blind gate was never
+  exercised — every blind-op test reused the create's pair, so an
+  op-only mutant (`last_op == op` alone) passed the whole suite. The
+  repeated-blind test now ends with an op-equal, hash-different
+  delete that must record (rev 5), pinning the `&&` semantics as the
+  service's contract (through the repository the case cannot arise —
+  content is frozen while the variant is dead — so the pin is
+  defensive, matching the gate's own defensive posture).
+- P3-1 taken: the blind gate's soundness rests on "every
+  delete/restore transition is recorded through this seam" — now
+  stated as a caller invariant in the module docs and in the
+  carve-out bullet above, so the command and revert tasks inherit
+  it.
+- P3-2 declined: pinning `RevisionError::Sql`'s Display string — the
+  `library` module's own Display test pins its typed variants and
+  leaves the `Sql` wrapper unpinned (it renders rusqlite's message,
+  not this crate's words); matching that precedent.
