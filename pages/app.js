@@ -25,6 +25,8 @@
    search with <mark> highlights in the list and the rendered body,
    articles rendered with the D-15 mini renderer; toolbar "?" button +
    F1 per §11.3),
+   about modal (UPD-001…005, REL-004: product info rows, dependency-
+   license demo list, simulated deterministic two-phase update check),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -38,9 +40,6 @@
   const selectAll = document.getElementById('select-all')
   const selectedChip = document.getElementById('selected-chip')
   const emptyState = document.getElementById('empty-state')
-  const dialog = document.getElementById('placeholder-dialog')
-  const dialogTitle = document.getElementById('dlg-title')
-  const dialogText = document.getElementById('dlg-text')
   const editDialog = document.getElementById('edit-dialog')
   const editTitle = document.getElementById('edit-title')
   const editText = document.getElementById('edit-text')
@@ -3576,15 +3575,133 @@
     if (!helpDialog.open) openHelp()
   })
 
-  /* ---------- Placeholder dialogs (native <dialog>) ------------------------ */
+  /* ---------- About modal (UPD-001…005) ------------------------------------ */
 
-  for (const btn of document.querySelectorAll('.js-open-dialog')) {
-    btn.addEventListener('click', () => {
-      dialogTitle.textContent = btn.dataset.dialogTitle
-      dialogText.textContent = btn.dataset.dialogText
-      dialog.showModal()
-    })
+  const aboutDialog = document.getElementById('about-dialog')
+  const aboutCheckBtn = document.getElementById('about-check-btn')
+  const aboutCheckResult = document.getElementById('about-check-result')
+  const aboutOpenBtn = document.getElementById('about-open-btn')
+  const aboutCheckOpenBtn = document.getElementById('about-check-open-btn')
+
+  /* Demo release metadata for the first check of a session (UPD-002:
+     version and change list come from the release metadata). The check
+     is deterministic: the first one "finds" 0.2.0, every later one
+     answers "latest version" — no randomness. */
+  const ABOUT_CHECK_MS = 1200
+  const ABOUT_NEXT_VERSION = '0.2.0'
+  const ABOUT_RELEASE_CHANGES = [
+    'Scheme B keeps BOM and line breaks',
+    'Backup retention editing in Settings',
+    'External-change watcher',
+  ]
+
+  /* Session state; like the scan timer (NFR-015 idiom), a running check
+     must never survive a dialog close */
+  let aboutCheckCount = 0 /* completed checks this session */
+  let aboutCheckTimer = null /* in-flight simulated request */
+  let aboutUpdateInstalled = false
+
+  function stopAboutCheck() {
+    if (aboutCheckTimer === null) return false
+    clearTimeout(aboutCheckTimer)
+    aboutCheckTimer = null
+    return true
   }
+
+  /* The result area is a pure function of the session state, so a check
+     cancelled by closing the window simply re-renders. Composed strings
+     come from this demo file; the changes list still goes through
+     escapeHtml, and the aria-live area announces every swap. */
+  function renderAboutResult() {
+    if (aboutCheckTimer !== null) {
+      aboutCheckBtn.disabled = true
+      aboutCheckBtn.textContent = 'Checking…'
+      aboutCheckResult.innerHTML = '<p class="ps-hint">Checking for updates…</p>'
+      return
+    }
+    aboutCheckBtn.disabled = false
+    aboutCheckBtn.textContent = 'Check for updates'
+    if (aboutUpdateInstalled) {
+      aboutCheckResult.innerHTML =
+        '<p class="about-result-line">' +
+        '<span class="chip about-chip-installed">Installed</span>' +
+        ' — restart to apply (demo)</p>'
+      return
+    }
+    if (aboutCheckCount === 1) {
+      /* First check: the release metadata (UPD-001…002). Installing
+         starts only after the confirmation click and is not available
+         during a sync (UPD-003) */
+      aboutCheckResult.innerHTML =
+        '<p class="about-result-line">' +
+        `<span class="chip about-chip-update">Update available: ${ABOUT_NEXT_VERSION}</span></p>` +
+        '<ul class="about-changes">' +
+        ABOUT_RELEASE_CHANGES.map((c) => `<li>${escapeHtml(c)}</li>`).join('') +
+        '</ul>' +
+        '<div class="about-install">' +
+        '<button type="button" id="about-install-btn" class="btn btn-primary">' +
+        'Download and install</button>' +
+        '<p class="ps-hint">Not available during a sync (UPD-003).</p>' +
+        '</div>'
+      return
+    }
+    aboutCheckResult.innerHTML =
+      aboutCheckCount === 0
+        ? '<p class="ps-hint">Last check: never — checks run at startup if enabled in Settings (UPD-002).</p>'
+        : '<p class="ps-hint">You are on the latest version (0.1.0-demo).</p>'
+  }
+
+  function startAboutCheck() {
+    stopAboutCheck()
+    aboutCheckTimer = setTimeout(() => {
+      aboutCheckTimer = null
+      aboutCheckCount += 1
+      renderAboutResult()
+    }, ABOUT_CHECK_MS)
+    renderAboutResult()
+  }
+
+  function openAbout() {
+    aboutDialog.showModal()
+    aboutCheckBtn.focus()
+  }
+
+  /* Entry point 1: "About…" in Settings opens the window plain */
+  aboutOpenBtn.addEventListener('click', openAbout)
+
+  /* The primary control inside the window: runs the same simulated
+     check (UPD-001); type="button" so it never submits the dialog form */
+  aboutCheckBtn.addEventListener('click', startAboutCheck)
+
+  /* Entry point 2 (DEF-001, UPD-001): "Check for updates" opens the same
+     window and immediately runs the demo check — in the real app the
+     result lands in this About window */
+  aboutCheckOpenBtn.addEventListener('click', () => {
+    openAbout()
+    startAboutCheck()
+    /* The in-flight check disables the button openAbout focused; move
+       focus to the dialog element itself so it stays inside the window */
+    aboutDialog.focus()
+  })
+
+  /* The install button is re-rendered with the result, so its click is
+     delegated from the result area. The click is the confirmation
+     (UPD-003); the demo then flips to the installed wording */
+  aboutCheckResult.addEventListener('click', (e) => {
+    if (!e.target.closest('#about-install-btn')) return
+    aboutUpdateInstalled = true
+    renderAboutResult()
+  })
+
+  /* Closing mid-check cancels the timer (Esc included) and re-renders
+     the area back to the session's deterministic state */
+  aboutDialog.addEventListener('close', () => {
+    if (stopAboutCheck()) renderAboutResult()
+  })
+
+  /* Normalize the initial line through the same renderer so the static
+     markup in index.html and the state-driven output cannot drift */
+  renderAboutResult()
 
   /* ---------- Init ----------------------------------------------------------*/
 

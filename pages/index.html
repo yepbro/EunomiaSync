@@ -17,7 +17,8 @@
   date/project/type/result filters),
   help modal (HLP-001…005: two-pane FAQ, article list + client-side
   search with <mark> highlights, toolbar "?" button + F1 per §11.3),
-  placeholder modals.
+  about modal (UPD-005, REL-004: product info rows, dependency-license
+  demo list, simulated two-phase update check).
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
   (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-002…007 (scan) +
@@ -26,7 +27,9 @@
   (settings, §6.5 keys, §11.3 Ctrl/Cmd+,) + D-10 (archived and
   excluded-paths screens, PRJ-013…018 restore, exclusion remove,
   DB-014/015) + § 7.7 LOG-001…006 (activity modal) + § 7.8 HLP-001…005
-  (help modal, §11.3 F1) + UI-001 (window, pinned sync panel), UI-012
+  (help modal, §11.3 F1) + § 7.9 UPD-001…005 (About window, simulated
+  update check; REL-004 dependency licenses, D-27 updater) + UI-001
+  (window, pinned sync panel), UI-012
   (empty states), UI-021 (light/dark via OS setting), UI-022
   (reduced motion).
   Tooltips are native `title` attributes; accessible names are real labels.
@@ -2475,19 +2478,6 @@
         </button>
       </footer>
 
-      <!-- Placeholder modal (UI-002 modals; native <dialog> gives focus
-         management, inert background and Esc-close for free) -->
-      <dialog id="placeholder-dialog" class="modal" aria-labelledby="dlg-title">
-        <form method="dialog">
-          <h2 id="dlg-title">Add project</h2>
-          <p id="dlg-text" class="modal-text">Placeholder.</p>
-          <div class="modal-actions">
-            <button value="cancel" class="btn btn-ghost">Close</button>
-            <button value="ok" class="btn btn-primary">Add</button>
-          </div>
-        </form>
-      </dialog>
-
       <!-- Instruction editor (UI-003, LIB-002…025): large two-pane modal —
          variant list on the left (Main badge, dashed mark for empty
          variants, make-main/delete actions, add "Copy of main"/"Empty");
@@ -3349,7 +3339,9 @@
                 </p>
                 <!-- D-10 screens as link-buttons: "Archived projects…"
                      opens the archived list, "Excluded paths…" opens the
-                     exclusions list -->
+                     exclusions list. "About…" opens the About window
+                     (UPD-005); "Check for updates" opens the same window
+                     and runs the simulated check at once (UPD-001) -->
                 <div class="set-buttons">
                   <button type="button" id="archived-open-btn" class="btn btn-ghost">
                     Archived projects…
@@ -3357,20 +3349,10 @@
                   <button type="button" id="exclusions-open-btn" class="btn btn-ghost">
                     Excluded paths…
                   </button>
-                  <button
-                    type="button"
-                    class="btn btn-ghost js-open-dialog"
-                    data-dialog-title="About"
-                    data-dialog-text="Version, identifier pro.yepbro.eunomiasync, author and license (UPD-005) — a later stage wires the real window."
-                  >
+                  <button type="button" id="about-open-btn" class="btn btn-ghost">
                     About…
                   </button>
-                  <button
-                    type="button"
-                    class="btn btn-ghost js-open-dialog"
-                    data-dialog-title="Check for updates"
-                    data-dialog-text="Checks GitHub Releases and shows the version and the list of changes (UPD-001) — a later stage wires the real check."
-                  >
+                  <button type="button" id="about-check-open-btn" class="btn btn-ghost">
                     Check for updates
                   </button>
                 </div>
@@ -3597,6 +3579,110 @@
             <div class="help-article-pane">
               <h3 id="help-article-title"></h3>
               <div id="help-article" class="help-article"></div>
+            </div>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- About (UPD-005, REL-004): the last UI-002 modal. Product info
+           as definition rows — version, identifier, author, dual license
+           (both license texts link out), repository, stable channel
+           (D-27 one-liner); dependency licenses are a compact demo
+           expander (the real list is generated at build time, REL-004).
+           The update block simulates UPD-001…003: the first check of a
+           session "finds" 0.2.0 with a changes list and a
+           Download-and-install button (install starts only after the
+           confirmation click and is not available during a sync —
+           UPD-003); every later check answers "latest version". The
+           initial muted line is reproduced by app.js's renderer so the
+           static text and the state-driven output cannot drift. -->
+      <dialog id="about-dialog" class="modal" aria-labelledby="about-title">
+        <form method="dialog">
+          <h2 id="about-title">About</h2>
+
+          <div class="about-brand">
+            <span class="brand-mark about-brand-mark" aria-hidden="true"></span>
+            <span>EunomiaSync</span>
+            <span class="chip">0.1.0-demo</span>
+          </div>
+
+          <dl class="about-info">
+            <div class="about-row">
+              <dt>Version</dt>
+              <dd>0.1.0-demo</dd>
+            </div>
+            <div class="about-row">
+              <dt>App identifier</dt>
+              <dd><code>pro.yepbro.eunomiasync</code></dd>
+            </div>
+            <div class="about-row">
+              <dt>Author</dt>
+              <dd>Den Brooks — denis@yepbro.pro</dd>
+            </div>
+            <div class="about-row">
+              <dt>License</dt>
+              <dd>
+                Dual license:
+                <a
+                  href="https://opensource.org/license/mit"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="MIT License — opens in a new tab"
+                  >MIT License</a
+                >
+                and
+                <a
+                  href="https://www.apache.org/licenses/LICENSE-2.0"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Apache License, Version 2.0 — opens in a new tab"
+                  >Apache License, Version 2.0</a
+                >
+              </dd>
+            </div>
+            <div class="about-row">
+              <dt>Repository</dt>
+              <dd>
+                <a
+                  href="https://github.com/yepbro/EunomiaSync"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="GitHub repository — opens in a new tab"
+                  >github.com/yepbro/EunomiaSync</a
+                >
+              </dd>
+            </div>
+            <div class="about-row">
+              <dt>Update channel</dt>
+              <dd>stable — signed updates via the Tauri updater from GitHub Releases (D-27)</dd>
+            </div>
+          </dl>
+
+          <details class="about-licenses">
+            <summary>Dependency licenses</summary>
+            <ul class="about-license-list">
+              <li>rusqlite 0.32 — MIT/Apache-2.0</li>
+              <li>tauri 2.x — MIT/Apache-2.0</li>
+              <li>vue 3.x — MIT</li>
+              <li>sha2 0.10 — MIT/Apache-2.0</li>
+              <li>jiff 0.1 — MIT/Apache-2.0</li>
+              <li>pulldown-cmark 0.12 — MIT</li>
+            </ul>
+            <p class="ps-hint">Demo data — the full list is generated at build time (REL-004).</p>
+          </details>
+
+          <div class="about-update">
+            <button type="button" id="about-check-btn" class="btn btn-primary">
+              Check for updates
+            </button>
+            <div id="about-check-result" class="about-check-result" aria-live="polite">
+              <p class="ps-hint">
+                Last check: never — checks run at startup if enabled in Settings (UPD-002).
+              </p>
             </div>
           </div>
 

@@ -8,7 +8,9 @@
    D-10 (archived + excluded paths modals, PRJ-013…018, §6.2
    exclusions, DB-014/015), § 7.7 LOG-001…006 (activity modal),
    § 7.8 HLP-001…005 (help modal: two-pane FAQ, article list +
-   client-side search with <mark> highlights, §11.3 F1),
+   client-side search with <mark> highlights, §11.3 F1), § 7.9
+   UPD-001…005 (About modal: info rows, license expander, simulated
+   update check, REL-004),
    UI-001, UI-011, UI-012, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
@@ -837,7 +839,8 @@ input[type='checkbox']:disabled {
   color: var(--text-muted);
 }
 
-/* ----- Placeholder modal (native <dialog>) -------------------------------- */
+/* ----- Modal base (native <dialog>: focus management, inert background,
+   Esc-close; shared by every modal in the file) ---------------------------- */
 
 .modal {
   inline-size: min(520px, calc(100vw - 32px));
@@ -2606,6 +2609,164 @@ label.scan-row:hover {
   color: var(--text);
   border-radius: 2px;
   padding: 0 1px;
+}
+
+/* ----- About modal (UPD-001…005, REL-004) -------------------------------- */
+/* The last UI-002 modal: static product info as definition rows, a
+   dependency-license demo expander (REL-004 — the real list is
+   generated at build time) and the simulated update check with its
+   deterministic two-phase result rendered by app.js (UPD-001…003).
+   Reuses .chip, .brand-mark, .ps-hint and the global :focus-visible
+   outline; every color goes through theme variables. */
+
+/* Brand row under the title */
+.about-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.about-brand .brand-mark {
+  inline-size: 16px;
+  block-size: 16px;
+  border-radius: 4px;
+}
+
+/* Definition rows in the project-settings read-only row idiom: the dt
+   is the muted label column, the dd the value */
+.about-info {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.about-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.about-row dt {
+  flex: none;
+  inline-size: 104px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.about-row dd {
+  margin: 0;
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+.about-row code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+}
+
+/* External links (both license texts, repository): the title marks the
+   new tab, the underline marks the link itself */
+.about-info a {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.about-info a:hover {
+  color: var(--accent);
+}
+
+/* Dependency licenses (REL-004): compact demo list inside a <details> */
+.about-licenses summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+}
+
+.about-licenses[open] summary {
+  margin-block-end: 8px;
+}
+
+.about-license-list {
+  margin: 0;
+  padding: 8px 10px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+}
+
+/* Muted REL-004 note under the list (closed hides it with the list) */
+.about-licenses .ps-hint {
+  margin-block-start: 6px;
+}
+
+/* Update check block (UPD-001…003): primary button + aria-live result
+   area under it */
+.about-update {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 12px;
+}
+
+.about-check-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* Badge + text line ("Update available: 0.2.0", "Installed — …") */
+.about-result-line {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.about-chip-update,
+.about-chip-installed {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.about-changes {
+  margin: 0;
+  padding-inline-start: 18px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.about-changes li {
+  margin: 2px 0;
+}
+
+/* Install action with the UPD-003 note under it */
+.about-install {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
 }
 
 /* ----- Motion (UI-022: honor the OS "reduce motion" setting) ------------ */
