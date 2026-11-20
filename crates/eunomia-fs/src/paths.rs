@@ -3328,10 +3328,15 @@ mod tests {
         // replaces the root entirely (`/definitely/…`); on Windows it
         // replaces down to the current drive's root (`C:/definitely/…`,
         // CI failure 44698181717). Deriving the expectation from the
-        // same join pins the contract on both platforms.
+        // same join pins the contract on both platforms. (The name is
+        // bound to a variable on purpose: `clippy::join_absolute_paths`
+        // fires on the literal form, yet the absolute join is exactly
+        // the caller mistake this test pins — its `PathBuf::from`
+        // suggestion would erase the drive-root replacement semantics.)
+        let absolute_name = Path::new("/definitely/not/here.md");
         assert_eq!(
             absolute.path(),
-            root.join("/definitely/not/here.md").to_string_lossy(),
+            root.join(absolute_name).to_string_lossy(),
             "the error names the path the write would have used"
         );
 
