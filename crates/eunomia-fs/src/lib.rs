@@ -34,5 +34,6 @@ pub mod backup;
 pub mod free_space;
 pub mod paths;
 pub mod scan;
+pub mod scan_classify;
 pub mod temp_files;
 pub mod write_access;

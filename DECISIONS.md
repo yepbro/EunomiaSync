@@ -7574,3 +7574,99 @@ untouched, D-017's no-core-edge rule intact).
   transaction contracts (move and delete-variant roll back as sets, a
   failed statement — CHECK-rejected, not pre-checked — keeps the
   transaction usable).
+
+### D-098 — ALG-053 classification in `eunomia-fs::scan_classify`: the registry is an injected snapshot, the caller's canonical-root obligation, and set overlaps resolve by the fixed priority known > archived > excluded — 2026-11-20
+
+Problem: T-075 implements the second half of ALG-053 (the first is
+T-061's walker, `scan`; the consumer is PRJ-002/005/006's scan
+window): for every found repository, compute the `path_key` and the
+class `new`/`known` (active)/`archived`/`excluded`. Open questions:
+where the membership data comes from, given the crate boundary (fs
+must not depend on store); what to do when a `path_key` sits in
+several registry sets at once — a typed error or a deterministic
+answer; and what result shape the future command task (T-076)
+should serialize into the throttled progress event.
+
+Solution: `crates/eunomia-fs/src/scan_classify.rs` (registered in
+`lib.rs`), pure and synchronous over the walker's output —
+`classify_key` (the lookup), `classify_repository` (key via
+`paths::path_key` + class; ALG-053's sentence in one call),
+`classify_entry` (the envelope), over `ScanRegistry` /
+`ScanClass` / `ClassifiedRepository` / `ClassifiedScanEvent`.
+
+- _The registry is a parameter, not a dependency._ `ScanRegistry`
+  holds the three membership sets — the `path_key`s of active
+  projects, archived projects, and `project_exclusions` rows — as
+  plain `String`s the caller (T-076) loads from `eunomia-store`
+  (D-093's `list`/`list_exclusions`). The snapshot is taken per
+  scan, so adds/archives committed mid-walk cannot flip a class
+  mid-run; `new` is the fall-through when no set knows the key.
+- _Overlaps are a priority, never an error._ ALG-053 says nothing
+  about a key in two sets, and the honest reading is that overlaps
+  are the NORMAL state: archiving a scan-found project keeps the
+  archived row AND writes an exclusion for the same key (§6.4,
+  PRJ-017; D-093 pins the coexistence with an integration test), so
+  `archived ∩ excluded` is the steady state of every archived
+  scan-found project — a typed error would turn the common case
+  into a failure path. The fixed priority: `known` first (an active
+  project is the truest fact; DB-015's full UNIQUE keeps a key from
+  being both an active and an archived row, and D-10's restore
+  removes the exclusion), `archived` over `excluded` (the project
+  still exists; DB-015's restore offer answers, not the exclusions
+  screen), `excluded` only for keys with no project row. Pinned by
+  tests for each pair and for the three-way overlap.
+- _The key is `paths::path_key` AS GIVEN, no canonicalization — and
+  the canonical root is the CALLER'S obligation._ The walker does
+  NOT canonicalize: it accepts any root verbatim, and a symlinked
+  root is a documented, deliberately supported input that is
+  traversed as the folder it names while every reported path KEEPS
+  the link spelling (`scan`'s own root test pins that) — so "the
+  scan's output paths are canonical by construction" is FALSE as a
+  walker guarantee. What holds instead: classification is pure
+  (pinned: a missing path classifies by its text key, no
+  filesystem), and the IDENTITY it computes matches the stored one
+  exactly when the command layer canonicalizes the scan root with
+  `paths::canonicalize` BEFORE `scan_repositories` — the same
+  function whose output the add flow keys, so both sides spell the
+  identity alike. T-076 owns that obligation (it owns the root
+  choice); this module documents it in its docs and pins the
+  failure mode with a test (a symlinked root classifies `new`
+  against the canonical registry) so it cannot be assumed away.
+  Below a canonical root the no-follow rule (D-07) makes the
+  descendant paths canonical text, and DB-031's canonical aliasing
+  stays the add flow's canonicalize-first job; alias spellings the
+  key itself collapses (separator runs, NFC/NFD under the folding
+  rules) classify as one repository.
+- _Two result shapes, both owned here._ `ClassifiedRepository` is
+  OWNED (path verbatim per D-086, key, class) — found repositories
+  are the payload T-076 accumulates for PRJ-002's result list.
+  `ClassifiedScanEvent<'a>` is the BORROWED 1:1 envelope of every
+  `ScanEvent`: repositories gain their facts, plain folders (the
+  "folders checked" counter) and skips pass through by reference
+  with the walker's reason verbatim (OS code intact) — zero
+  allocation for most events, ready to serialize. The module docs
+  also keep the two "excluded" facts apart: the walk's name-based
+  `SkipReason::Excluded` (ALG-051, pre-classification) vs the
+  registry's `ScanClass::Excluded` (a found repository in
+  `project_exclusions`).
+- _Scope._ No new dependencies (`Cargo.toml` untouched); `scan.rs`,
+  `paths.rs`, store and app layers untouched — the throttle and
+  cancellation of ALG-053's remaining clauses stay the walker's and
+  T-076's.
+
+Tests: 11 unit tests + 4 doctests in `scan_classify.rs`. The
+acceptance criterion end to end (a real tree — two repositories
+plus a nested one — scanned twice through `scan_repositories`:
+empty registry → all `new`; the first scan's keys as the active set
+→ the rescan classifies every repository `known`, none `new`; the
+harvested keys pinned distinct, name-bearing and separator-clean so
+a degenerate key function cannot pass); each set gives its class
+(with the key pinned spelling-independently); the three overlap
+pins (active wins; archived∩excluded → `archived`); alias spellings
+(separator collapse; NFC/NFD under an explicitly-fed folding rule —
+a doc-pin of the cross-module premise where the classifier consumes
+it); purity (a missing path classifies); the symlinked-root failure
+mode (Unix: the canonical registry key is missed, `new` — the
+caller's obligation made concrete); empty registry; and the
+envelope's pass-through for every `SkipReason` (reason kind, OS
+code, and the shared `path()` accessor) and for plain folders.
