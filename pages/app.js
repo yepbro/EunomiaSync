@@ -29,6 +29,8 @@
    license demo list, simulated deterministic two-phase update check),
    project labels in the column headers (DB-041/042: 1–6 character
    label by the color dot, name in the tooltip),
+   instruction text tooltip (MAIN-006: one reusable #text-tooltip, the
+   first 600 characters of the row's data-text after a 400 ms delay),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -67,7 +69,12 @@
   const instructionDisplay = (row) => (row.querySelector('.name')?.textContent ?? '').trim()
   const instructionText = (row) => {
     const isEmpty = !!row.querySelector('.name-empty')
-    return isEmpty ? '' : (row.querySelector('.c-name')?.getAttribute('title') ?? '')
+    /* MAIN-006: the full text lives in data-text (the custom tooltip reads
+       it); the native title stays as the fallback — the empty-instruction
+       rows keep their title hint and no data-text at all */
+    if (isEmpty) return ''
+    const cell = row.querySelector('.c-name')
+    return cell?.getAttribute('data-text') ?? cell?.getAttribute('title') ?? ''
   }
   /* Text of a cell's currently selected option: the main instruction text
      for "Default", the mapped variant text otherwise */
@@ -471,6 +478,72 @@
         target.after(dragged)
       }
       finishDrag()
+    })
+  }
+
+  /* ---------- Instruction text tooltip (MAIN-006) -------------------------- */
+  /* One reusable positioned element for every row. Hovering a row's name
+     (or focusing its name cell — the edit button is what is tabbable
+     there) shows, after exactly 400 ms, the first 600 characters of the
+     cell's data-text (ellipsis when truncated) near the cell, clamped to
+     the viewport. Hidden on mouseleave/blur/scroll/Escape. The name span
+     is not focusable by itself (it would double the tab stops), so the
+     focus trigger fires when focus enters the name cell. */
+
+  const textTooltip = document.getElementById('text-tooltip')
+  const TOOLTIP_DELAY_MS = 400
+  const TOOLTIP_MAX_CHARS = 600
+  let tooltipTimer = null
+
+  function hideTextTooltip() {
+    clearTimeout(tooltipTimer)
+    tooltipTimer = null
+    textTooltip.hidden = true
+  }
+
+  function showTextTooltip(cell, text) {
+    const truncated = text.length > TOOLTIP_MAX_CHARS
+    textTooltip.textContent = truncated ? `${text.slice(0, TOOLTIP_MAX_CHARS)}…` : text
+    textTooltip.hidden = false
+    const r = cell.getBoundingClientRect()
+    const w = textTooltip.offsetWidth
+    const h = textTooltip.offsetHeight
+    const margin = 8
+    const x = Math.min(Math.max(margin, r.left), Math.max(margin, window.innerWidth - w - margin))
+    let y = r.bottom + 6
+    if (y + h > window.innerHeight - margin) y = Math.max(margin, r.top - h - 6)
+    textTooltip.style.left = `${Math.round(x)}px`
+    textTooltip.style.top = `${Math.round(y)}px`
+  }
+
+  function requestTextTooltip(nameEl) {
+    const cell = nameEl.closest('.c-name')
+    const text = cell?.getAttribute('data-text') ?? ''
+    if (!text) return
+    clearTimeout(tooltipTimer)
+    tooltipTimer = setTimeout(() => showTextTooltip(cell, text), TOOLTIP_DELAY_MS)
+  }
+
+  function initTextTooltip() {
+    for (const nameEl of tbody.querySelectorAll('.c-name .name')) {
+      nameEl.addEventListener('mouseenter', () => requestTextTooltip(nameEl))
+      nameEl.addEventListener('mouseleave', hideTextTooltip)
+    }
+    /* Keyboard path: focus enters the name cell (its edit button) */
+    tbody.addEventListener('focusin', (e) => {
+      const cell = e.target.closest('.c-name')
+      const nameEl = cell?.querySelector('.name')
+      if (nameEl) requestTextTooltip(nameEl)
+    })
+    tbody.addEventListener('focusout', hideTextTooltip)
+    /* Any scroll of the matrix region, Escape and resize close it */
+    document.querySelector('.matrix-wrap').addEventListener('scroll', hideTextTooltip, {
+      capture: true,
+      passive: true,
+    })
+    window.addEventListener('resize', hideTextTooltip)
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') hideTextTooltip()
     })
   }
 
@@ -3727,6 +3800,9 @@
 
   /* Row drag-and-drop between sections */
   initRowDrag()
+
+  /* Instruction text tooltip (MAIN-006) */
+  initTextTooltip()
 
   /* Toolbar icon buttons (Activity, Settings): glyphs from the ICONS
      idiom; the accessible names and tooltips live in the markup */

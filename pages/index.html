@@ -21,7 +21,9 @@
   demo list, simulated two-phase update check),
   project labels in the column headers (DB-041/042: a 1–6 character
   label next to the color dot, the full name only in the tooltip and
-  a visually-hidden span for screen readers).
+  a visually-hidden span for screen readers),
+  instruction text tooltip (MAIN-006: the row text lives in data-text,
+  shown by one reusable #text-tooltip after a 400 ms delay).
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
   (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-002…007 (scan) +
@@ -364,7 +366,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 2"
-                title="Always answer in the user's language; default is English."
+                data-text="Always answer in the user's language; default is English."
               >
                 <span class="name-wrap">
                   <button
@@ -449,7 +451,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 2"
-                title="Direct and friendly; no filler phrases."
+                data-text="Direct and friendly; no filler phrases."
               >
                 <span class="name-wrap">
                   <button
@@ -546,7 +548,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 2"
-                title="Comments explain why, not what."
+                data-text="Comments explain why, not what."
               >
                 <span class="name-wrap">
                   <button
@@ -629,7 +631,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 2"
-                title="Public API, workarounds, non-obvious algorithms."
+                data-text="Public API, workarounds, non-obvious algorithms."
               >
                 <span class="name-wrap">
                   <button
@@ -729,7 +731,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="The formatter is the source of truth; never argue with it."
+                data-text="The formatter is the source of truth; never argue with it."
               >
                 <span class="name-wrap">
                   <button
@@ -816,7 +818,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="Descriptive names; no single-letter identifiers outside loop counters."
+                data-text="Descriptive names; no single-letter identifiers outside loop counters."
               >
                 <span class="name-wrap">
                   <button
@@ -898,7 +900,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="Full annotations on all public signatures."
+                data-text="Full annotations on all public signatures."
               >
                 <span class="name-wrap">
                   <button
@@ -980,7 +982,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="Soft limit 100 characters, hard limit 120."
+                data-text="Soft limit 100 characters, hard limit 120."
               >
                 <span class="name-wrap">
                   <button
@@ -1060,7 +1062,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="Hidden instruction — visible only with the Show hidden toggle on."
+                data-text="Hidden instruction — visible only with the Show hidden toggle on."
               >
                 <span class="name-wrap">
                   <button
@@ -1163,7 +1165,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="Imperative mood, subject up to 72 characters; the body explains why."
+                data-text="Imperative mood, subject up to 72 characters; the body explains why."
               >
                 <span class="name-wrap">
                   <button
@@ -1248,7 +1250,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="feature/t-&lt;n&gt;-&lt;slug&gt; — from the task card number."
+                data-text="feature/t-&lt;n&gt;-&lt;slug&gt; — from the task card number."
               >
                 <span class="name-wrap">
                   <button
@@ -1416,7 +1418,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="Hidden instruction — visible only with the Show hidden toggle on."
+                data-text="Hidden instruction — visible only with the Show hidden toggle on."
               >
                 <span class="name-wrap">
                   <button
@@ -1513,7 +1515,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="Test behavior, not implementation."
+                data-text="Test behavior, not implementation."
               >
                 <span class="name-wrap">
                   <button
@@ -1598,7 +1600,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="Smoke scenarios run on every pull request."
+                data-text="Smoke scenarios run on every pull request."
               >
                 <span class="name-wrap">
                   <button
@@ -1675,7 +1677,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="Critical paths are covered at 80% or more."
+                data-text="Critical paths are covered at 80% or more."
               >
                 <span class="name-wrap">
                   <button
@@ -1759,7 +1761,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="A red test first, then the fix that makes it green."
+                data-text="A red test first, then the fix that makes it green."
               >
                 <span class="name-wrap">
                   <button
@@ -1857,7 +1859,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="README is updated with any user-visible behavior change."
+                data-text="README is updated with any user-visible behavior change."
               >
                 <span class="name-wrap">
                   <button
@@ -1942,7 +1944,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="Every solved problem gets a D-NNN entry."
+                data-text="Every solved problem gets a D-NNN entry."
               >
                 <span class="name-wrap">
                   <button
@@ -2122,7 +2124,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="Never commit secrets; use environment variables and secret stores."
+                data-text="Never commit secrets; use environment variables and secret stores."
               >
                 <span class="name-wrap">
                   <button
@@ -2208,7 +2210,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="cargo-deny and npm audit run on CI."
+                data-text="cargo-deny and npm audit run on CI."
               >
                 <span class="name-wrap">
                   <button
@@ -2310,7 +2312,7 @@
                 scope="row"
                 class="c-name"
                 style="--depth: 1"
-                title="Initial bundle is at most 200 KB gzip."
+                data-text="Initial bundle is at most 200 KB gzip."
               >
                 <span class="name-wrap">
                   <button
@@ -2387,7 +2389,7 @@
               <td class="c-check">
                 <input type="checkbox" class="row-sel" aria-label="Select row: Profiling" />
               </td>
-              <th scope="row" class="c-name" style="--depth: 1" title="Measure before optimizing.">
+              <th scope="row" class="c-name" style="--depth: 1" data-text="Measure before optimizing.">
                 <span class="name-wrap">
                   <button
                     type="button"
@@ -3702,6 +3704,12 @@
           </div>
         </form>
       </dialog>
+
+      <!-- Instruction text tooltip (MAIN-006): one reusable element for
+           every row. app.js fills it with the first 600 characters of the
+           row's data-text and positions it near the cell after a 400 ms
+           delay; hidden on mouseleave/blur/scroll/Escape. -->
+      <div id="text-tooltip" role="tooltip" hidden></div>
 
       <script src="app.js"></script>
     </div>

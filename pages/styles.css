@@ -11,7 +11,7 @@
    client-side search with <mark> highlights, §11.3 F1), § 7.9
    UPD-001…005 (About modal: info rows, license expander, simulated
    update check, REL-004), DB-041/042 (project labels in the column
-   headers),
+   headers), MAIN-006 (#text-tooltip: instruction text, 400 ms delay),
    UI-001, UI-011, UI-012, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
@@ -835,6 +835,26 @@ input[type='checkbox']:disabled {
   background: var(--accent-soft);
   border-radius: 999px;
   padding: 4px 10px;
+}
+
+/* Instruction text tooltip (MAIN-006): one fixed-position element shared
+   by every row; app.js clamps it to the viewport. Themed via CSS vars. */
+#text-tooltip {
+  position: fixed;
+  z-index: 60;
+  max-inline-size: min(440px, calc(100vw - 16px));
+  max-block-size: 260px;
+  overflow: auto;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 0.18);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* Hidden-instruction counter next to the "Show hidden" toggle: dashed
