@@ -7670,3 +7670,121 @@ mode (Unix: the canonical registry key is missed, `new` — the
 caller's obligation made concrete); empty registry; and the
 envelope's pass-through for every `SkipReason` (reason kind, OS
 code, and the shared `path()` accessor) and for plain folders.
+
+### D-099 — The Windows replace retries: the 1+3 schedule on the raw-attempt seam, classification by raw Win32 code, and the three-level test ladder for a Windows-only behavior — 2026-11-20
+
+Problem: T-067 layers §9.5 step 4's locked-replace discipline
+("sharing violation or access denied → up to 3 retries with pauses of
+100, 300 and 900 ms, then `E_FILE_LOCKED`") onto T-066's `atomic`
+(D-095), which shipped the replace without retries and left the seam
+deliberately single (`replace_target`). Open questions: (1) the
+attempt arithmetic — "3 retries" is 4 attempts (initial + 3) with 3
+pauses, not 3 attempts; (2) which OS errors retry — the spec names
+two conditions, Win32 spells them 32/5, and MoveFileExW advice often
+adds ERROR_LOCK_VIOLATION (33); (3) where the `E_FILE_LOCKED`
+classification lives — §10 gives it its own code, but `WriteFailed`
+was the pipeline's only replace failure shape; (4) how a
+Windows-only behavior is tested where CI runs Linux (a real sharing
+violation needs a Windows handle opened without FILE_SHARE_DELETE);
+(5) how the 1.3 s of pauses stay out of the test suite without a
+public test parameter.
+
+Solution: a platform-neutral `replace_with_lock_retries(attempt,
+pause)` around the raw OS call, plus a typed fs-level refusal —
+`AtomicWriteError::FileLocked(FileLockedFailure)` with the module's
+step/path/source/cleanup contract (and `retries: usize`), matching
+the app layer's existing `ErrorCode::FileLocked` wire name.
+
+- 1+3 SCHEDULE, NEUTRAL CORE: the retry loop takes the attempt and
+  the pause as closures, so it is plain code both platforms compile
+  and the Windows arm wires `perform_replace` (the cfg-split raw
+  call: rename(2) / the D-095 MoveFileExW) plus `thread::sleep`. One
+  initial attempt; each of the three pauses (100/300/900 ms) buys one
+  retry; a success at any attempt returns at once and never waits.
+- EXACTLY TWO RETRIED CODES, BY RAW VALUE: `ERROR_SHARING_VIOLATION`
+  (32) and `ERROR_ACCESS_DENIED` (5), classified by
+  `raw_os_error()` — spelled as local constants because the crate's
+  windows-sys features are exactly `Win32_Storage_FileSystem`
+  (D-095; the named ERROR_* constants live in the not-enabled
+  `Win32_Foundation`) and Cargo.toml is outside this task's file
+  scope. ERROR_LOCK_VIOLATION (33, byte-range locks) is deliberately
+  NOT retried: the spec names two conditions, and 33 is neither.
+- HONEST EXITS: any non-lock refusal ends the loop immediately as the
+  plain OS fact — including one that arrives AFTER lock refusals (the
+  lock lifting into a different failure is reported as itself, never
+  masked as "still locked"; pinned at both the early and the
+  post-schedule position). Exhausted locks exit as the private
+  `ReplaceRefusal::Locked { source, retries }`, classified to
+  `FileLocked` in the step-4 failure path (`abort_replace`, the
+  sibling of `abort`); everything else flows through `abort`
+  unchanged, so `E_DISK_FULL`/`E_WRITE_FAILED` semantics are intact.
+  The variant is `#[cfg(any(windows, test))]`: Unix production never
+  constructs it (§10 pins the row to Windows; rename(2) has no
+  sharing violations) and a never-constructed variant would fail the
+  workspace's `-D warnings`.
+- THREE-LEVEL TEST LADDER: (1) mechanics — the loop itself against
+  injected 32/5 refusals and a recording clock (attempt count 4,
+  pauses exactly 100/300/900, success-after-N, non-lock immediate
+  exit at both positions — no real sleeping anywhere); (2) pipeline —
+  a cfg(test) fault (`LockedReplacePlan`: Exhaust or UnlockAfter+N)
+  routes the replace through the REAL loop with a simulated locked
+  attempt whose eventual success is the real `perform_replace`, so
+  the typed `FileLocked` refusal, the staging cleanup and the intact
+  original run on the Linux legs; (3) the real Windows criterion —
+  T-F8's editor shape as a `std` handle with
+  `share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)` (no
+  FILE_SHARE_DELETE; OpenOptionsExt, no new FFI): the actual
+  MoveFileExW refusals ride the actual schedule (pauses recorded by
+  the same clock seam, so the CI leg does not sleep 1.3 s), then
+  `E_FILE_LOCKED` with the original intact and the staging file
+  gone, and the idempotent §10 retry lands the write after the
+  holder closes. The one-shot fault hook still bypasses the loop
+  (it refuses the STEP, not a syscall attempt) — pinned by a test.
+
+Tests: 13 new test functions in `atomic.rs` — 12 compiled on the
+Linux legs (one of them Unix-only: the refused-cleanup fixture) and 1
+`#[cfg(windows)]` (the T-F8 criterion) — 39 total in the module (37
+run on the Linux legs). Mutation-checked: a wrong pause value, a loop
+that never retries, and a final-refusal masking-as-Locked each fail
+their tests (the masking mutant survived the first battery and forced
+the post-schedule honesty test); the round-1 review's two surviving
+mutants — widening the retried set with ERROR_LOCK_VIOLATION (33) and
+dropping the Locked arm's staging cleanup — forced the 33 pin inside
+the non-lock test and the refused-cleanup fixture
+(`ExhaustWithRefusedCleanup`, the FileLocked twin of the WriteFailed
+folder-lock test).
+Windows-target check and clippy (`--all-targets --target
+x86_64-pc-windows-msvc -D warnings`) pass — the FILE_SHARE_* test
+constants, the retry arm and the Windows-only faults items
+(`arm_pause_recording`, `record_lock_pause_if_armed`, gated
+`#[cfg(windows)]` so Linux test builds stay warning-free) all
+compile on both legs.
+
+Round-1 review (deepseek-v4.1-flash) — CHANGES REQUESTED, no P0/P1,
+two P2, four P3; both P2s fixed plus P3-1/P3-2 (P3-3 documented,
+P3-4 declined):
+
+- P2-1: the deliberate non-retry of ERROR_LOCK_VIOLATION (33) was
+  documented but unpinned — the reviewer's `| Some(33)` mutant
+  survived all 201 tests. Fixed: `a_non_lock_refusal_is_not_retried`
+  iterates `[13, 33]`; the mutant now dies.
+- P2-2: `FileLockedFailure.cleanup = Some(_)` and its Display phrase
+  were never executed — `cleanup: None` and Display-clause mutants
+  both survived. Fixed: `LockedReplacePlan::ExhaustWithRefusedCleanup`
+  (the FileLocked twin of the WriteFailed folder-lock fixture) plus
+  the refused-cleanup test (root-skipped like its twin); both mutants
+  now die.
+- P3-1 taken: the real Windows test accepts `Some(32) | Some(5)` —
+  the OS's choice between the two §9.5 codes, observed only on the CI
+  leg, must not redden it. P3-2 taken: the entry's test counts were
+  corrected. P3-3 documented only: the single-fixture discipline of
+  `Armed`'s combined drop (predating this task) is now stated on the
+  guard. P3-4 declined: `lib.rs`'s stale skeleton sentence is the
+  recorded D-095 KNOWN OPEN posture, outside this task's file scope
+  and inside the sibling task's window.
+
+Round-2 review (hy4-flash-free) — APPROVED, no findings at any level;
+it independently re-ran six mutants in a scratch copy (all die),
+re-measured the test counts (13 new / 39 total / 37 on Linux legs),
+and confirmed the root-skip is the documented house precedent, not
+evasion.

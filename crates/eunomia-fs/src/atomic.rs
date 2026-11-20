@@ -27,7 +27,11 @@
 //!    verification judges bytes the disk has accepted.
 //! 4. **Replace** — Unix `rename(2)`; Windows `MoveFileExW` with
 //!    `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` (§9.5
-//!    step 4).
+//!    step 4). A locked Windows target (sharing violation or access
+//!    denied) is retried after 100, 300 and 900 ms — three retries
+//!    after the initial attempt, then
+//!    [`AtomicWriteError::FileLocked`] (`E_FILE_LOCKED`); any other
+//!    refusal fails immediately.
 //! 5. **Sync the folder entry** — `fsync` on the parent folder, Unix
 //!    only (§9.5 step 5 pins the platform; std cannot open a directory
 //!    on Windows, and `MOVEFILE_WRITE_THROUGH` already flushes the
@@ -48,7 +52,7 @@
 //! # Errors (§10)
 //!
 //! The typed variants map onto the §10 codes the command layer logs
-//! (three codes, four variants — [`AtomicWriteError::NameFailed`]
+//! (four codes, five variants — [`AtomicWriteError::NameFailed`]
 //! folds into `E_WRITE_FAILED`; the D-062 posture: the code mapping
 //! itself belongs to the app layer):
 //!
@@ -69,14 +73,22 @@
 //!   fact, not an invented OS error. The command layer logs it with
 //!   the write-failed code; no §10 row of its own exists.
 //!
-//! `E_FILE_LOCKED` (§9.5 step 4's sharing-violation retries) is NOT
-//! here: Windows replace retries (100/300/900 ms, then
-//! `E_FILE_LOCKED`) are task T-067, layered on this module. The seam
-//! is deliberate and single: every platform funnels the replace
-//! through [`replace_target`], and [`WriteFailed`] carries the raw OS
-//! error of the refused replace — the retry loop and its locked-file
-//! classification drop into that one function and need no new
-//! plumbing through the rest of the pipeline.
+//! - [`AtomicWriteError::FileLocked`] — `E_FILE_LOCKED`, Windows
+//!   only: §9.5 step 4's locked-replace endgame. The Windows replace
+//!   arm retries a sharing violation (`ERROR_SHARING_VIOLATION`, 32)
+//!   or access denial (`ERROR_ACCESS_DENIED`, 5) after 100, 300 and
+//!   900 ms — one initial attempt plus three retries; a target still
+//!   locked after the third retry fails typed here. The Unix arm
+//!   never produces the variant: §10 pins the row to Windows, and
+//!   rename(2) has no sharing violations to retry.
+//!
+//! The retry loop lives in the one seam D-095 established: every
+//! platform funnels the replace through [`replace_target`], and the
+//! Windows arm wraps the raw `MoveFileExW` attempt in the §9.5
+//! schedule. Its refusal type ([`ReplaceRefusal`]) distinguishes the
+//! exhausted lock from every other OS error, and the pipeline's
+//! step-4 failure path classifies it — no new plumbing beyond that
+//! one call site.
 //!
 //! # The pre-write space check
 //!
@@ -144,7 +156,17 @@
 //! the buffer), token collision retry and exhaustion, the missing
 //! folder and degenerate target shapes, the caller-side symlink
 //! resolution keeping the link (T-F6's shape), and the error contract
-//! (Display, source chain, OS codes).
+//! (Display, source chain, OS codes). The Windows lock retries
+//! (§9.5 step 4) run at three levels: mechanics tests against the
+//! retry loop itself (injected `ERROR_SHARING_VIOLATION` /
+//! `ERROR_ACCESS_DENIED` refusals and a recording clock pin the
+//! 100/300/900 ms schedule, the attempt count and the
+//! non-lock-refusal exits — no real sleeping anywhere), pipeline
+//! tests through a simulated locked replace driving the SAME loop
+//! (the typed `E_FILE_LOCKED` refusal, the staging cleanup and the
+//! intact original run on the Linux legs), and one real Windows test
+//! holding the target open without `FILE_SHARE_DELETE` (T-F8's
+//! editor shape, on the CI Windows leg).
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -223,6 +245,11 @@ pub struct WrittenFile {
 ///   untouched for every step up to and including the replace, and
 ///   wholly the new content for the folder sync (the rename already
 ///   happened — old-or-new, never partial).
+/// - [`AtomicWriteError::FileLocked`]: Windows only — the replace
+///   was refused with a sharing violation or access denied through
+///   all of §9.5 step 4's retries (100/300/900 ms). The staging file
+///   was removed unless the removal was refused (`cleanup`); the
+///   target keeps its old content whole.
 /// - [`AtomicWriteError::VerifyFailed`]: the re-read digest did not
 ///   match, or the target could not be read back. The file holds the
 ///   new content (unverified); it is deliberately NOT deleted — §10's
@@ -323,19 +350,11 @@ where
     }
 
     // Step 4: the single atomic transition. Failures here leave the
-    // old file intact and the staging file removable.
-    if let Err(source) = replace_target(&staging_path, target) {
-        return Err(abort(
-            WriteFailed {
-                step: WriteStep::Replace,
-                path: target.to_owned(),
-                source,
-                cleanup: None,
-            },
-            target,
-            &staging_path,
-            required,
-        ));
+    // old file intact and the staging file removable; on Windows the
+    // arm has already ridden §9.5's lock-retry schedule, so an
+    // exhausted lock classifies as E_FILE_LOCKED (abort_replace).
+    if let Err(refusal) = replace_target(&staging_path, target) {
+        return Err(abort_replace(refusal, target, &staging_path, required));
     }
 
     // Step 5 (Unix): make the folder entry itself durable. The rename
@@ -552,35 +571,176 @@ fn copy_existing_mode(target: &Path, staging_path: &Path) -> Result<(), WriteFai
     })
 }
 
-/// Step 4: the single atomic transition — the one function every
-/// platform funnels the replace through, and therefore T-067's seam:
-/// the Windows sharing-violation retry loop (100/300/900 ms, then
-/// `E_FILE_LOCKED`) lands here, and [`WriteFailed`] already carries
-/// the raw OS error it will classify.
+/// How §9.5 step 4 refused: the plain OS error of a non-lock failure
+/// — and of EVERY failure the Unix arm produces (the retry discipline
+/// is Windows-only) — or the lock that outlasted the whole §9.5
+/// schedule. The distinction is §10's: `E_WRITE_FAILED` vs
+/// `E_FILE_LOCKED`.
+#[derive(Debug)]
+enum ReplaceRefusal {
+    /// One OS refusal, unretried: any non-lock error, and every Unix
+    /// replace error whatever its raw code.
+    Os(io::Error),
+    /// Windows: the target stayed locked (sharing violation or access
+    /// denied) through all of §9.5 step 4's retries. `source` is the
+    /// last OS refusal, `retries` how many retries the schedule made.
+    /// Test builds compile the variant on Unix too — the simulated
+    /// locked replace drives the real loop there (see `faults`).
+    #[cfg(any(windows, test))]
+    Locked { source: io::Error, retries: usize },
+}
+
+/// Step 4, the Unix arm: one `rename(2)`, no retries — §10's
+/// `E_FILE_LOCKED` row is pinned to Windows, and rename(2) has no
+/// sharing violations to retry. Whatever the raw code, the refusal is
+/// the plain OS fact.
 #[cfg(unix)]
-fn replace_target(staging_path: &Path, target: &Path) -> io::Result<()> {
+fn replace_target(staging_path: &Path, target: &Path) -> Result<(), ReplaceRefusal> {
+    #[cfg(test)]
+    if faults::locked_replace_is_armed() {
+        // The retry-mechanics test channel: the SAME §9.5 loop the
+        // Windows arm runs, driven by a simulated locked replace and
+        // the recording clock, so the pipeline-level `E_FILE_LOCKED`
+        // path (typed refusal, staging cleanup, original intact) runs
+        // on the Linux legs — a real sharing violation needs a
+        // Windows handle, and T-F8's test owns that on the CI leg.
+        return replace_with_lock_retries(
+            || faults::simulated_lock_attempt(staging_path, target),
+            faults::record_lock_pause,
+        );
+    }
     #[cfg(test)]
     if let Some(source) = faults::inject(faults::Step::Replace, target) {
-        return Err(source);
+        return Err(ReplaceRefusal::Os(source));
     }
+    perform_replace(staging_path, target).map_err(ReplaceRefusal::Os)
+}
+
+/// Step 4, the Windows arm: §9.5's retry discipline around one raw
+/// `MoveFileExW` attempt — a sharing violation
+/// (`ERROR_SHARING_VIOLATION`) or access denial
+/// (`ERROR_ACCESS_DENIED`) is retried after the pauses of
+/// [`LOCK_RETRY_PAUSES_MS`] (100, 300, 900 ms; three retries after
+/// the initial attempt), a target still locked after the third retry
+/// is [`ReplaceRefusal::Locked`] (§10 `E_FILE_LOCKED`), and any other
+/// refusal surfaces immediately.
+#[cfg(windows)]
+fn replace_target(staging_path: &Path, target: &Path) -> Result<(), ReplaceRefusal> {
+    #[cfg(test)]
+    if faults::locked_replace_is_armed() {
+        // The simulated-lock channel (see the Unix arm): the schedule
+        // and its classification run against injected refusals with
+        // the recording clock, no real sleeping.
+        return replace_with_lock_retries(
+            || faults::simulated_lock_attempt(staging_path, target),
+            faults::record_lock_pause,
+        );
+    }
+    #[cfg(test)]
+    if let Some(source) = faults::inject(faults::Step::Replace, target) {
+        return Err(ReplaceRefusal::Os(source));
+    }
+    replace_with_lock_retries(
+        || perform_replace(staging_path, target),
+        |pause| {
+            #[cfg(test)]
+            if faults::record_lock_pause_if_armed(pause) {
+                return;
+            }
+            std::thread::sleep(pause);
+        },
+    )
+}
+
+/// §9.5 step 4's retry schedule: the pause before each of the three
+/// retries of a locked Windows replace, in milliseconds.
+#[cfg(any(windows, test))]
+const LOCK_RETRY_PAUSES_MS: [u64; 3] = [100, 300, 900];
+
+/// `ERROR_SHARING_VIOLATION` (32): another process holds the target
+/// open without `FILE_SHARE_DELETE` — the editor/antivirus shape of
+/// §10's `E_FILE_LOCKED` row. Spelled here as a number because the
+/// crate's windows-sys feature set is exactly
+/// `Win32_Storage_FileSystem` (D-095); the named constant lives in
+/// the not-enabled `Win32_Foundation`.
+#[cfg(any(windows, test))]
+const ERROR_SHARING_VIOLATION: i32 = 32;
+
+/// `ERROR_ACCESS_DENIED` (5): the target's ACL or attributes refuse
+/// the delete-on-replace; §9.5 step 4 retries it alongside the
+/// sharing violation. Same spelling note as
+/// [`ERROR_SHARING_VIOLATION`].
+#[cfg(any(windows, test))]
+const ERROR_ACCESS_DENIED: i32 = 5;
+
+/// Whether `source` is one of §9.5 step 4's two retried lock
+/// refusals, by raw Win32 code. Deliberately exactly the spec's two:
+/// `ERROR_LOCK_VIOLATION` (33, byte-range locks) is not in the set
+/// the spec names.
+#[cfg(any(windows, test))]
+fn is_lock_refusal(source: &io::Error) -> bool {
+    matches!(
+        source.raw_os_error(),
+        Some(ERROR_SHARING_VIOLATION) | Some(ERROR_ACCESS_DENIED)
+    )
+}
+
+/// §9.5 step 4's retry discipline, written platform-neutral so the
+/// Linux legs can drive it: `attempt` runs once, and while it refuses
+/// with a lock code, again after each pause of
+/// [`LOCK_RETRY_PAUSES_MS`] — one initial attempt plus at most three
+/// retries. `pause` is the sleep seam: production sleeps the calling
+/// thread, tests record the duration (the mock clock).
+///
+/// A refusal that is not a lock code ends the loop immediately as
+/// [`ReplaceRefusal::Os`] — including one that arrives after lock
+/// refusals: the honest latest fact, never masked as exhausted locks.
+/// A lock that outlasts the whole schedule is
+/// [`ReplaceRefusal::Locked`] with the last OS refusal; a success at
+/// any attempt returns at once and waits no further.
+#[cfg(any(windows, test))]
+fn replace_with_lock_retries(
+    mut attempt: impl FnMut() -> io::Result<()>,
+    mut pause: impl FnMut(std::time::Duration),
+) -> Result<(), ReplaceRefusal> {
+    let mut outcome = attempt();
+    for pause_ms in LOCK_RETRY_PAUSES_MS {
+        match outcome {
+            Ok(()) => return Ok(()),
+            Err(source) if is_lock_refusal(&source) => {}
+            Err(source) => return Err(ReplaceRefusal::Os(source)),
+        }
+        pause(std::time::Duration::from_millis(pause_ms));
+        outcome = attempt();
+    }
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(source) if is_lock_refusal(&source) => Err(ReplaceRefusal::Locked {
+            source,
+            retries: LOCK_RETRY_PAUSES_MS.len(),
+        }),
+        Err(source) => Err(ReplaceRefusal::Os(source)),
+    }
+}
+
+/// One raw §9.5 step-4 attempt, no retries: Unix `rename(2)`, which
+/// replaces atomically.
+#[cfg(unix)]
+fn perform_replace(staging_path: &Path, target: &Path) -> io::Result<()> {
     fs::rename(staging_path, target)
 }
 
-/// The Windows arm of step 4: `MoveFileExW` with
-/// `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`, exactly the
-/// two flags §9.5 step 4 pins. std's own `fs::rename` is
-/// `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` only (verified in
-/// the toolchain's std source, `sys/fs/windows.rs`), so the
-/// spec-pinned write-through needs the direct call — the crate's
-/// second owner-sanctioned FFI call after D-089's free-space probe,
-/// same discipline. No retries here: sharing violations surface
-/// verbatim for T-067's loop to own.
+/// One raw §9.5 step-4 attempt, no retries — the direct
+/// `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` call. std's own
+/// `fs::rename` is `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`
+/// only (verified in the toolchain's std source,
+/// `sys/fs/windows.rs`), so the spec-pinned write-through needs the
+/// direct call — the crate's second owner-sanctioned FFI call after
+/// D-089's free-space probe, same discipline (D-095). The retry loop
+/// around it is [`replace_target`]'s Windows arm; this function is
+/// the single unsynchronized syscall.
 #[cfg(windows)]
-fn replace_target(staging_path: &Path, target: &Path) -> io::Result<()> {
-    #[cfg(test)]
-    if let Some(source) = faults::inject(faults::Step::Replace, target) {
-        return Err(source);
-    }
+fn perform_replace(staging_path: &Path, target: &Path) -> io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
@@ -607,8 +767,8 @@ fn replace_target(staging_path: &Path, target: &Path) -> io::Result<()> {
     //    this step, so no self-inflicted sharing violation exists.
     // 4. On failure the reason is in `GetLastError` — read in the
     //    very next statement (`io::Error::last_os_error()`) before
-    //    anything can overwrite it, and carried whole for T-067's
-    //    sharing-violation classification.
+    //    anything can overwrite it, and returned whole for the retry
+    //    loop's lock classification.
     let ok = unsafe {
         MoveFileExW(
             old_w.as_ptr(),
@@ -732,6 +892,43 @@ fn abort(
     })
 }
 
+/// Step 4's failure path: removes the staging file, then classifies —
+/// an exhausted Windows lock schedule is §10's `E_FILE_LOCKED`
+/// ([`AtomicWriteError::FileLocked`]); any other refusal goes through
+/// [`abort`] (a no-space refusal is the write-time `E_DISK_FULL`,
+/// everything else `E_WRITE_FAILED` with the step named).
+fn abort_replace(
+    refusal: ReplaceRefusal,
+    target: &Path,
+    staging_path: &Path,
+    required: u64,
+) -> AtomicWriteError {
+    match refusal {
+        ReplaceRefusal::Os(source) => abort(
+            WriteFailed {
+                step: WriteStep::Replace,
+                path: target.to_owned(),
+                source,
+                cleanup: None,
+            },
+            target,
+            staging_path,
+            required,
+        ),
+        #[cfg(any(windows, test))]
+        ReplaceRefusal::Locked { source, retries } => {
+            let cleanup = remove_staging(staging_path);
+            AtomicWriteError::FileLocked(FileLockedFailure {
+                step: WriteStep::Replace,
+                path: target.to_owned(),
+                retries,
+                source,
+                cleanup,
+            })
+        }
+    }
+}
+
 /// Which §9.5 pipeline step refused — the fact §10's log line carries
 /// next to the OS error ("every error is written to the log with its
 /// code, project, path, and OS code").
@@ -782,6 +979,28 @@ pub struct WriteFailed {
     /// The staging-file removal outcome: `None` = removed (or nothing
     /// existed yet — the staging create's own failures), `Some` = the
     /// staging file is still on disk and the sweep's retry owns it.
+    pub cleanup: Option<io::Error>,
+}
+
+/// The failure data of §10's `E_FILE_LOCKED`: a Windows target that
+/// stayed locked through all of §9.5 step 4's retries.
+#[derive(Debug)]
+pub struct FileLockedFailure {
+    /// The pipeline step that refused — always [`WriteStep::Replace`]:
+    /// the lock is a replace-step fact, and the field keeps the
+    /// module's step/path contract uniform.
+    pub step: WriteStep,
+    /// The locked target path the replace was retried on.
+    pub path: PathBuf,
+    /// How many §9.5 retries were made before giving up — the
+    /// schedule's three (after 100, 300 and 900 ms).
+    pub retries: usize,
+    /// The last OS refusal (`ERROR_SHARING_VIOLATION` or
+    /// `ERROR_ACCESS_DENIED`), carrying the raw code for the §10 log
+    /// line.
+    pub source: io::Error,
+    /// The staging-file removal outcome, identical in meaning to
+    /// [`WriteFailed::cleanup`].
     pub cleanup: Option<io::Error>,
 }
 
@@ -879,6 +1098,14 @@ pub enum AtomicWriteError {
     /// A pipeline step refused (§10 `E_WRITE_FAILED`); the staging
     /// file was removed unless the removal itself was refused.
     WriteFailed(WriteFailed),
+    /// The target is locked by another process (§10 `E_FILE_LOCKED`;
+    /// Windows only): the §9.5 step-4 replace was refused with a
+    /// sharing violation or access denied through all three retries
+    /// (100/300/900 ms). The staging file was removed unless the
+    /// removal itself was refused (`cleanup`); the target keeps its
+    /// old content whole. Unix never produces this variant — §10
+    /// pins the row to Windows.
+    FileLocked(FileLockedFailure),
     /// The written file failed the §9.5 step-6 re-read check (§10
     /// `E_VERIFY_FAILED`). The file holds the new, unverified
     /// content and is deliberately not deleted — the remedy is the
@@ -897,6 +1124,7 @@ impl AtomicWriteError {
             AtomicWriteError::NameFailed { .. } => None,
             AtomicWriteError::DiskFull(failed) => failed.source.as_ref(),
             AtomicWriteError::WriteFailed(failed) => Some(&failed.source),
+            AtomicWriteError::FileLocked(failed) => Some(&failed.source),
             AtomicWriteError::VerifyFailed(failed) => failed.mismatch.io_error(),
         }
     }
@@ -959,6 +1187,21 @@ impl fmt::Display for AtomicWriteError {
                 }
                 Ok(())
             }
+            AtomicWriteError::FileLocked(failed) => {
+                write!(
+                    f,
+                    "the atomic write failed while {} {}: the file is locked by another \
+                     process, {} retries failed: {}",
+                    failed.step,
+                    failed.path.display(),
+                    failed.retries,
+                    failed.source
+                )?;
+                if let Some(cleanup) = &failed.cleanup {
+                    write!(f, "; the staging file could not be removed: {cleanup}")?;
+                }
+                Ok(())
+            }
             AtomicWriteError::VerifyFailed(failed) => {
                 write!(
                     f,
@@ -990,6 +1233,7 @@ impl std::error::Error for AtomicWriteError {
                 .as_ref()
                 .map(|source| source as &(dyn std::error::Error + 'static)),
             AtomicWriteError::WriteFailed(failed) => Some(&failed.source),
+            AtomicWriteError::FileLocked(failed) => Some(&failed.source),
             AtomicWriteError::VerifyFailed(failed) => failed
                 .mismatch
                 .io_error()
@@ -1009,6 +1253,7 @@ mod faults {
     use std::io;
     use std::io::Write as _;
     use std::path::Path;
+    use std::time::Duration;
 
     /// The pipeline steps a fault can refuse. `ModeCopy` and
     /// `DirSync` exist only where those steps do (Unix).
@@ -1040,20 +1285,53 @@ mod faults {
         CorruptTarget,
     }
 
+    /// The simulated locked replace of §9.5 step 4's retry tests: what
+    /// the simulated replace attempt answers while the plan is armed.
+    /// It drives the REAL retry loop (the same function the Windows
+    /// arm runs) with injected OS refusals, so the schedule, the
+    /// classification and the pipeline's `E_FILE_LOCKED` path are
+    /// exercised on every platform — a real sharing violation needs a
+    /// Windows handle.
+    pub(crate) enum LockedReplacePlan {
+        /// Refuse every attempt with the lock code — the exhaustion
+        /// path (§10: "3 retries failed").
+        Exhaust { code: i32 },
+        /// The exhaustion path with the §9.5 step-7 cleanup refused
+        /// too: the target's folder goes read-only-execute for the
+        /// duration, so the staging removal itself fails EACCES and
+        /// `FileLockedFailure::cleanup` has a real refusal to carry
+        /// (Unix: mode bits are the fixture, like
+        /// `Fault::FailAndLockFolder`).
+        #[cfg(unix)]
+        ExhaustWithRefusedCleanup { code: i32 },
+        /// Refuse `refusals` attempts with the lock code, then
+        /// perform the REAL replace — the holder closed the file
+        /// mid-schedule and the write must land.
+        UnlockAfter { refusals: usize, code: i32 },
+    }
+
     thread_local! {
         static FAULT: RefCell<Option<Fault>> = const { RefCell::new(None) };
         static FIXED_TOKENS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        static LOCKED_REPLACE: RefCell<Option<LockedReplacePlan>> = const { RefCell::new(None) };
+        static LOCK_PAUSES: RefCell<Option<Vec<Duration>>> = const { RefCell::new(None) };
     }
 
     /// Keeps an armed fault (and any fixed token sequence) armed for
     /// a scope and disarms on drop — a test can never leak a fault
-    /// into the next one.
+    /// into the next one. ONE fixture scope per test: a guard's drop
+    /// disarms EVERY fixture of this module on the thread (the
+    /// single-fixture discipline of the original fault/token guards),
+    /// so arming a second fixture mid-scope silently cancels the
+    /// first — combine what a test needs into one plan instead.
     pub(crate) struct Armed;
 
     impl Drop for Armed {
         fn drop(&mut self) {
             FAULT.with(|cell| *cell.borrow_mut() = None);
             FIXED_TOKENS.with(|cell| cell.borrow_mut().clear());
+            LOCKED_REPLACE.with(|cell| *cell.borrow_mut() = None);
+            LOCK_PAUSES.with(|cell| *cell.borrow_mut() = None);
         }
     }
 
@@ -1071,6 +1349,108 @@ mod faults {
             *cell.borrow_mut() = tokens.iter().map(|token| (*token).to_owned()).collect();
         });
         Armed
+    }
+
+    /// Arms a simulated locked replace (see [`LockedReplacePlan`]) and
+    /// the pause-recording clock together — the retry-mechanics
+    /// fixtures want both, and one guard drops both.
+    pub(crate) fn arm_locked_replace(plan: LockedReplacePlan) -> Armed {
+        LOCKED_REPLACE.with(|cell| *cell.borrow_mut() = Some(plan));
+        LOCK_PAUSES.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
+        Armed
+    }
+
+    /// Arms only the pause-recording clock — the real-handle Windows
+    /// test (T-F8) drives the true `MoveFileExW` refusals and needs
+    /// no simulation, only a clock that does not really sleep.
+    #[cfg(windows)]
+    pub(crate) fn arm_pause_recording() -> Armed {
+        LOCK_PAUSES.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
+        Armed
+    }
+
+    /// Whether a simulated locked replace is armed — the retry-loop
+    /// test channel of both platform arms' `replace_target`.
+    pub(crate) fn locked_replace_is_armed() -> bool {
+        LOCKED_REPLACE.with(|cell| cell.borrow().is_some())
+    }
+
+    /// One attempt of the simulated locked replace: refuse with the
+    /// plan's lock code until the plan says the real replace runs
+    /// (`UnlockAfter` with its refusals spent) — the "real" attempt is
+    /// the production `perform_replace`, so an unlocking schedule
+    /// genuinely lands the file.
+    pub(crate) fn simulated_lock_attempt(staging_path: &Path, target: &Path) -> io::Result<()> {
+        /// What the plan says this attempt does.
+        enum Next {
+            Refuse(i32),
+            Replace,
+        }
+        let next = LOCKED_REPLACE.with(|cell| {
+            let mut armed = cell.borrow_mut();
+            match armed.as_mut() {
+                Some(LockedReplacePlan::Exhaust { code }) => Next::Refuse(*code),
+                #[cfg(unix)]
+                Some(LockedReplacePlan::ExhaustWithRefusedCleanup { code }) => {
+                    // The removal will be refused the same way the
+                    // folder-lock fault arranges it: read-only-execute
+                    // mode bits. Idempotent across attempts.
+                    lock_folder(target.parent().unwrap_or(Path::new("")));
+                    Next::Refuse(*code)
+                }
+                Some(LockedReplacePlan::UnlockAfter { refusals, code }) => {
+                    if *refusals == 0 {
+                        Next::Replace
+                    } else {
+                        *refusals -= 1;
+                        Next::Refuse(*code)
+                    }
+                }
+                None => Next::Replace,
+            }
+        });
+        match next {
+            Next::Refuse(code) => Err(io::Error::from_raw_os_error(code)),
+            Next::Replace => super::perform_replace(staging_path, target),
+        }
+    }
+
+    /// The mock clock of the simulated-replace channel: records the
+    /// pause instead of sleeping.
+    pub(crate) fn record_lock_pause(pause: Duration) {
+        LOCK_PAUSES.with(|cell| {
+            if let Some(pauses) = cell.borrow_mut().as_mut() {
+                pauses.push(pause);
+            }
+        });
+    }
+
+    /// The real Windows loop's clock seam: records the pause and
+    /// reports `true` (skip the real sleep) when the recording clock
+    /// is armed, `false` when production must really sleep.
+    #[cfg(windows)]
+    pub(crate) fn record_lock_pause_if_armed(pause: Duration) -> bool {
+        LOCK_PAUSES.with(|cell| {
+            let mut sink = cell.borrow_mut();
+            match sink.as_mut() {
+                Some(pauses) => {
+                    pauses.push(pause);
+                    true
+                }
+                None => false,
+            }
+        })
+    }
+
+    /// The pauses the recording clock has observed so far (empty when
+    /// no clock is armed) — the schedule oracle of the retry tests.
+    pub(crate) fn lock_pauses() -> Vec<Duration> {
+        LOCK_PAUSES.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|pauses| pauses.clone())
+                .unwrap_or_default()
+        })
     }
 
     /// The one-shot consumption point: when the armed fault targets
@@ -1143,6 +1523,7 @@ mod tests {
     use std::error::Error as _;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use tempfile::TempDir;
 
@@ -1405,6 +1786,412 @@ mod tests {
             failed.cleanup.is_none(),
             "the staging file must be removed, not carried"
         );
+        assert_eq!(
+            fs::read(&target).expect("the target must survive"),
+            b"untouched"
+        );
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    // ---- the Windows lock-retry schedule (§9.5 step 4, T-F8) ---------
+
+    #[test]
+    fn a_sharing_violation_rides_the_full_schedule_then_refuses_locked() {
+        // ERROR_SHARING_VIOLATION = 32: the editor/antivirus shape.
+        // The loop runs against injected refusals with a recording
+        // clock — the schedule and attempt count are pinned without
+        // any real sleeping.
+        let mut attempts = 0;
+        let mut pauses = Vec::new();
+        let refusal = replace_with_lock_retries(
+            || {
+                attempts += 1;
+                Err(io::Error::from_raw_os_error(32))
+            },
+            |pause| pauses.push(pause),
+        )
+        .expect_err("a permanently locked target must refuse the write");
+
+        assert_eq!(attempts, 4, "one initial attempt plus three retries");
+        assert_eq!(
+            pauses,
+            [
+                Duration::from_millis(100),
+                Duration::from_millis(300),
+                Duration::from_millis(900),
+            ],
+            "the §9.5 pauses, in order and no more"
+        );
+        let ReplaceRefusal::Locked { source, retries } = refusal else {
+            panic!("exhausted locks are the typed refusal, got: {refusal:?}");
+        };
+        assert_eq!(retries, 3);
+        assert_eq!(
+            source.raw_os_error(),
+            Some(32),
+            "the last OS refusal rides for the log line"
+        );
+    }
+
+    #[test]
+    fn an_access_denied_refusal_rides_the_same_schedule() {
+        // ERROR_ACCESS_DENIED = 5: §9.5 step 4 retries it alongside
+        // the sharing violation — the same discipline, the same end.
+        let mut attempts = 0;
+        let mut pauses = Vec::new();
+        let refusal = replace_with_lock_retries(
+            || {
+                attempts += 1;
+                Err(io::Error::from_raw_os_error(5))
+            },
+            |pause| pauses.push(pause),
+        )
+        .expect_err("a permanently denied target must refuse the write");
+
+        assert_eq!(attempts, 4);
+        assert_eq!(
+            pauses,
+            [
+                Duration::from_millis(100),
+                Duration::from_millis(300),
+                Duration::from_millis(900),
+            ]
+        );
+        let ReplaceRefusal::Locked { source, .. } = refusal else {
+            panic!("access denied exhausts into the same typed refusal: {refusal:?}");
+        };
+        assert_eq!(source.raw_os_error(), Some(5));
+    }
+
+    #[test]
+    fn a_lock_that_lifts_mid_schedule_succeeds_after_the_pauses_so_far() {
+        // The holder closes the file between retries: the write must
+        // land, having waited exactly the pauses before the winning
+        // attempt.
+        let mut attempts = 0;
+        let mut pauses = Vec::new();
+        replace_with_lock_retries(
+            || {
+                attempts += 1;
+                if attempts <= 2 {
+                    Err(io::Error::from_raw_os_error(32))
+                } else {
+                    Ok(())
+                }
+            },
+            |pause| pauses.push(pause),
+        )
+        .expect("a lock that lifts must let the write through");
+
+        assert_eq!(attempts, 3, "the initial attempt and two retries");
+        assert_eq!(
+            pauses,
+            [Duration::from_millis(100), Duration::from_millis(300),],
+            "no pause after the successful attempt"
+        );
+    }
+
+    #[test]
+    fn a_non_lock_refusal_is_not_retried() {
+        // Only the two §9.5 lock codes wait: any other refusal fails
+        // at once, exactly as before the retry loop existed. 33 is
+        // ERROR_LOCK_VIOLATION — byte-range locks, the one code
+        // MoveFileExW retry advice habitually adds — and D-099 rules
+        // it OUT: the spec names two conditions, and 33 is neither
+        // (a mutant widening the set dies here).
+        for code in [13, 33] {
+            let mut attempts = 0;
+            let mut pauses = Vec::new();
+            let refusal = replace_with_lock_retries(
+                || {
+                    attempts += 1;
+                    Err(io::Error::from_raw_os_error(code))
+                },
+                |pause| pauses.push(pause),
+            )
+            .expect_err("a non-lock refusal must fail immediately");
+
+            assert_eq!(attempts, 1, "code {code}: exactly one attempt");
+            assert!(pauses.is_empty(), "code {code}: no pause was taken");
+            let ReplaceRefusal::Os(source) = refusal else {
+                panic!("code {code}: a plain OS refusal stays the plain shape");
+            };
+            assert_eq!(source.raw_os_error(), Some(code));
+        }
+    }
+
+    #[test]
+    fn a_different_refusal_after_locks_is_reported_as_itself() {
+        // The lock lifts into a DIFFERENT failure (say the folder
+        // vanished mid-schedule): the honest latest fact is reported,
+        // never masked as "still locked".
+        let mut attempts = 0;
+        let mut pauses = Vec::new();
+        let refusal = replace_with_lock_retries(
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(io::Error::from_raw_os_error(32))
+                } else {
+                    Err(io::Error::from_raw_os_error(13))
+                }
+            },
+            |pause| pauses.push(pause),
+        )
+        .expect_err("the second refusal must fail the replace");
+
+        assert_eq!(attempts, 2);
+        assert_eq!(pauses, [Duration::from_millis(100)]);
+        let ReplaceRefusal::Os(source) = refusal else {
+            panic!("the latest refusal is the fact, got: {refusal:?}");
+        };
+        assert_eq!(source.raw_os_error(), Some(13));
+    }
+
+    #[test]
+    fn a_different_refusal_at_the_last_scheduled_attempt_is_reported_as_itself() {
+        // The same honesty at the schedule's END: three lock refusals
+        // ride all three pauses, the fourth attempt refuses with a
+        // different code — and that fact, not "locked", is the
+        // verdict (a mutant classifying the final refusal as Locked
+        // dies here).
+        let mut attempts = 0;
+        let mut pauses = Vec::new();
+        let refusal = replace_with_lock_retries(
+            || {
+                attempts += 1;
+                if attempts <= 3 {
+                    Err(io::Error::from_raw_os_error(32))
+                } else {
+                    Err(io::Error::from_raw_os_error(13))
+                }
+            },
+            |pause| pauses.push(pause),
+        )
+        .expect_err("the fourth refusal must fail the replace");
+
+        assert_eq!(attempts, 4, "the whole schedule ran first");
+        assert_eq!(
+            pauses,
+            [
+                Duration::from_millis(100),
+                Duration::from_millis(300),
+                Duration::from_millis(900),
+            ]
+        );
+        let ReplaceRefusal::Os(source) = refusal else {
+            panic!("the latest refusal is the fact, got: {refusal:?}");
+        };
+        assert_eq!(source.raw_os_error(), Some(13));
+    }
+
+    #[test]
+    fn an_exhausted_locked_replace_fails_file_locked_and_cleans_the_staging_file() {
+        // The pipeline-level endgame on the Linux legs: the simulated
+        // locked replace drives the REAL loop, so the typed refusal,
+        // the staging cleanup and the intact original all run.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        let _fault = faults::arm_locked_replace(faults::LockedReplacePlan::Exhaust { code: 32 });
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("a permanently locked target must fail the write");
+
+        let AtomicWriteError::FileLocked(failed) = &err else {
+            panic!("exhausted lock retries are E_FILE_LOCKED, got: {err:?}");
+        };
+        assert_eq!(failed.step, WriteStep::Replace);
+        assert_eq!(failed.path, target);
+        assert_eq!(failed.retries, 3, "the whole §9.5 schedule ran");
+        assert_eq!(
+            err.os_code(),
+            Some(32),
+            "the last OS refusal rides for the §10 log line"
+        );
+        assert!(
+            failed.cleanup.is_none(),
+            "the staging file must be removed, not carried"
+        );
+        assert_eq!(
+            faults::lock_pauses(),
+            [
+                Duration::from_millis(100),
+                Duration::from_millis(300),
+                Duration::from_millis(900),
+            ],
+            "the real schedule ran, in order"
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target must survive"),
+            b"untouched"
+        );
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    #[test]
+    fn an_exhausted_access_denied_replace_carries_code_five() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        let _fault = faults::arm_locked_replace(faults::LockedReplacePlan::Exhaust { code: 5 });
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("a permanently denied target must fail the write");
+
+        let AtomicWriteError::FileLocked(_) = &err else {
+            panic!("access denied exhausts into E_FILE_LOCKED too, got: {err:?}");
+        };
+        assert_eq!(err.os_code(), Some(5));
+        assert_eq!(
+            fs::read(&target).expect("the target must survive"),
+            b"untouched"
+        );
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    #[test]
+    fn a_locked_replace_that_unlocks_mid_schedule_lands_the_write() {
+        // T-F8's happy neighbor: the editor closes the file while the
+        // schedule is still running — the retry succeeds, the write
+        // lands whole.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"old");
+        let _fault = faults::arm_locked_replace(faults::LockedReplacePlan::UnlockAfter {
+            refusals: 2,
+            code: 32,
+        });
+
+        write_target_file(&target, b"new", plenty_free())
+            .expect("a lock that lifts must let the write land");
+
+        assert_eq!(fs::read(&target).expect("the write must land"), b"new");
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+        assert_eq!(
+            faults::lock_pauses(),
+            [Duration::from_millis(100), Duration::from_millis(300),],
+            "two refusals, two pauses — nothing after the success"
+        );
+    }
+
+    #[test]
+    fn an_unlocked_replace_waits_not_at_all() {
+        // §9.5's schedule spends time only on refusals: a target free
+        // from the first attempt must not wait a single millisecond.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"old");
+        let _fault = faults::arm_locked_replace(faults::LockedReplacePlan::UnlockAfter {
+            refusals: 0,
+            code: 32,
+        });
+
+        write_target_file(&target, b"new", plenty_free())
+            .expect("a free target must replace immediately");
+
+        assert_eq!(fs::read(&target).expect("the write must land"), b"new");
+        assert!(
+            faults::lock_pauses().is_empty(),
+            "a first-attempt success never pauses"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_cleanup_after_an_exhausted_lock_is_carried_and_the_debris_stays_sweepable() {
+        // The FileLocked twin of the WriteFailed refused-removal
+        // fixture: the lock exhausts AND the folder refuses the
+        // §9.5 step-7 removal — the refusal must ride in `cleanup`
+        // (the sweep owns the leftover), and the Display must say the
+        // leftover exists.
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::temp_files::is_app_tmp_file;
+
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        if running_as_root_is_untestable(dir.path()) {
+            eprintln!(
+                "skipping a_refused_cleanup_after_an_exhausted_lock_is_carried_and_the_debris_stays_sweepable: \
+                 running as root — mode bits are not enforced, the refused-removal \
+                 precondition cannot be set up"
+            );
+            return;
+        }
+        let _fault =
+            faults::arm_locked_replace(faults::LockedReplacePlan::ExhaustWithRefusedCleanup {
+                code: 32,
+            });
+
+        let result = write_target_file(&target, b"abc", plenty_free());
+        // Restore even when the assertions below panic, so TempDir's
+        // teardown can remove the directory.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755))
+            .expect("restoring mode bits must work");
+
+        let err = result.expect_err("the exhausted lock must fail the write");
+        let AtomicWriteError::FileLocked(failed) = &err else {
+            panic!("the exhausted lock is still E_FILE_LOCKED, got: {err:?}");
+        };
+        let cleanup = failed
+            .cleanup
+            .as_ref()
+            .expect("the refused removal must be carried, not dropped");
+        assert_eq!(
+            cleanup.raw_os_error(),
+            Some(13),
+            "the removal refusal is EACCES"
+        );
+        assert!(
+            err.to_string().contains("could not be removed"),
+            "the Display must say the leftover exists: {err}"
+        );
+        assert_eq!(
+            failed.retries, 3,
+            "the whole schedule ran before the verdict"
+        );
+        // The leftover is exactly one staging file under the sweep's
+        // grammar — T-F2's debris contract, unchanged by the retries.
+        let leftover: Vec<String> = entry_names(dir.path())
+            .into_iter()
+            .filter(|name| name != "AGENTS.md")
+            .collect();
+        assert_eq!(
+            leftover.len(),
+            1,
+            "exactly one staging file stays: {leftover:?}"
+        );
+        assert!(
+            is_app_tmp_file(&leftover[0], "AGENTS.md"),
+            "the leftover must be sweepable debris: {}",
+            leftover[0]
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target must survive"),
+            b"untouched"
+        );
+    }
+
+    #[test]
+    fn an_injected_replace_refusal_bypasses_the_retry_schedule() {
+        // The one-shot hook refuses the STEP, not a syscall attempt,
+        // so no retries ride it — pinning both the seam's semantics
+        // and the platform boundary: on Unix the arm never classifies
+        // a lock at all (raw 32 is just a number there — EPIPE), and
+        // even on Windows the injection precedes the loop.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        let _fault = faults::arm(faults::Fault::Fail(
+            faults::Step::Replace,
+            io::Error::from_raw_os_error(32),
+        ));
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("the injected refusal must fail the write");
+
+        let AtomicWriteError::WriteFailed(failed) = &err else {
+            panic!("a one-shot refusal stays E_WRITE_FAILED, got: {err:?}");
+        };
+        assert_eq!(failed.step, WriteStep::Replace);
+        assert_eq!(err.os_code(), Some(32));
+        assert!(faults::lock_pauses().is_empty(), "the schedule never ran");
         assert_eq!(
             fs::read(&target).expect("the target must survive"),
             b"untouched"
@@ -1907,6 +2694,70 @@ mod tests {
         assert!(!staging.exists(), "the staging file is gone");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_target_open_without_share_delete_is_retried_then_file_locked() {
+        // T-F8, the acceptance criterion: an editor holds the target
+        // open without FILE_SHARE_DELETE — the REAL MoveFileExW
+        // refuses (32 for this share-mode shape; 5 if the OS twists
+        // through an ACL check — either of the two §9.5 codes), the
+        // schedule runs between the real refusals, and the write ends
+        // E_FILE_LOCKED with the original intact and the staging file
+        // removed. The recording clock keeps the CI leg from really
+        // sleeping 1.3 s; the refusals themselves are the OS's own.
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        {
+            // FILE_SHARE_READ | FILE_SHARE_WRITE, deliberately NO
+            // FILE_SHARE_DELETE: the replace must delete the target,
+            // and the holder does not allow it.
+            let _holder = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(&target)
+                .expect("the fixture must be able to hold the target open");
+            let _clock = faults::arm_pause_recording();
+
+            let err = write_target_file(&target, b"abc", plenty_free())
+                .expect_err("a held-open target must fail the write");
+
+            let AtomicWriteError::FileLocked(failed) = &err else {
+                panic!("the exhausted retries must be E_FILE_LOCKED, got: {err:?}");
+            };
+            assert_eq!(failed.step, WriteStep::Replace);
+            assert_eq!(failed.path, target);
+            assert_eq!(failed.retries, 3);
+            assert!(
+                matches!(err.os_code(), Some(32) | Some(5)),
+                "a real §9.5 lock refusal rides for the log line: {:?}",
+                err.os_code()
+            );
+            assert!(failed.cleanup.is_none(), "the staging file was removed");
+            assert_eq!(
+                faults::lock_pauses(),
+                [
+                    Duration::from_millis(100),
+                    Duration::from_millis(300),
+                    Duration::from_millis(900),
+                ],
+                "the real schedule ran between the real refusals"
+            );
+            assert_eq!(
+                fs::read(&target).expect("the target must survive"),
+                b"untouched"
+            );
+            assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+        }
+        // The holder is gone — §10's remedy is the idempotent retry:
+        // the same write must now land.
+        write_target_file(&target, b"abc", plenty_free())
+            .expect("the write must land once the holder closed");
+        assert_eq!(fs::read(&target).expect("the file must exist"), b"abc");
+    }
+
     // ---- the error contract ----------------------------------------------
 
     #[test]
@@ -1929,6 +2780,29 @@ mod tests {
         assert_eq!(
             write_failed.source().map(|source| source.to_string()),
             Some(io::Error::from_raw_os_error(13).to_string())
+        );
+
+        // The exhausted Windows lock: the step, the path, the retry
+        // count and the OS error in the text; the io error in the
+        // source chain.
+        let file_locked = AtomicWriteError::FileLocked(FileLockedFailure {
+            step: WriteStep::Replace,
+            path: PathBuf::from("/repo/AGENTS.md"),
+            retries: 3,
+            source: io::Error::from_raw_os_error(32),
+            cleanup: None,
+        });
+        assert!(
+            file_locked.to_string().starts_with(
+                "the atomic write failed while replacing the target /repo/AGENTS.md: \
+                 the file is locked by another process, 3 retries failed: "
+            ),
+            "the Display must name the step, the path and the retries: {file_locked}"
+        );
+        assert_eq!(file_locked.os_code(), Some(32));
+        assert_eq!(
+            file_locked.source().map(|source| source.to_string()),
+            Some(io::Error::from_raw_os_error(32).to_string())
         );
 
         // The pre-write disk-full verdict: both numbers, no OS code.
