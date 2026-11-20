@@ -29,7 +29,11 @@
   without confirmation while "Show hidden" is on),
   heading add/rename/delete (MAIN-015…023, LIB-030…034: header "+" and
   per-heading child/rename/delete buttons, #heading-dialog,
-  #heading-delete-dialog keeping the section's instructions).
+  #heading-delete-dialog keeping the section's instructions),
+  bulk assignment operations (§7.4 UI bulk operations, UI-010, NFR-021:
+  "Assign to projects…" dialog with project multi-select and a variant
+  choice for a single row, per-column "⋮" menu with assign-all/clear,
+  10+ changes confirm with the exact number).
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
   (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-002…007 (scan) +
@@ -92,6 +96,12 @@
         <span class="spacer"></span>
 
         <span id="selected-chip" class="selected-chip" hidden></span>
+
+        <!-- Bulk assignment (§7.4 UI bulk operations, UI-010): appears with
+             a row selection; opens #bulk-dialog -->
+        <button id="bulk-assign-btn" type="button" class="btn btn-ghost" hidden>
+          Assign to projects…
+        </button>
 
         <!-- Activity (§7.7 UI row) and Settings (DEF-001…004): icon ghost
              buttons in the right cluster, per the spec toolbar sketch.
@@ -2690,6 +2700,59 @@
           </div>
         </form>
       </dialog>
+
+      <!-- Bulk assignment dialog (§7.4 UI bulk operations, UI-010, NFR-021):
+         multi-select of the demo projects (color dots + names, rendered by
+         app.js from PROJECTS); with exactly one instruction row selected a
+         variant radio list appears (Default + the instruction's variants,
+         the same source the cell selects use). With several rows selected
+         every row gets the Default/main variant. Apply flows through
+         updateCellState/refreshDirtyState; 10 or more affected assignments
+         ask in #bulk-confirm-dialog first. -->
+      <dialog id="bulk-dialog" class="modal" aria-labelledby="bulk-title">
+        <form id="bulk-form" method="dialog" novalidate>
+          <h2 id="bulk-title">Assign to projects</h2>
+          <p class="modal-text">Choose the projects for the selected instructions.</p>
+
+          <fieldset class="ps-field">
+            <legend class="field-label">Projects</legend>
+            <div id="bulk-projects"></div>
+          </fieldset>
+
+          <div id="bulk-variant-block" class="ps-field" hidden>
+            <span class="field-label">Variant</span>
+            <div id="bulk-variants"></div>
+          </div>
+
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button id="bulk-apply-btn" value="apply" class="btn btn-primary">Apply</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Bulk-change confirmation (UI-010, NFR-021): shared by the bulk
+         dialog and the column menu; states the exact number of changed
+         assignments before anything is applied. -->
+      <dialog id="bulk-confirm-dialog" class="modal" aria-labelledby="bc-title">
+        <form method="dialog">
+          <h2 id="bc-title">Bulk change</h2>
+          <p id="bc-text" class="modal-text">Placeholder.</p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="continue" class="btn btn-primary">Continue</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Column actions menu (§7.4 UI bulk operations): one reusable
+         positioned menu opened by the "⋮" button of a project column
+         header; "Assign all visible" / "Clear column". app.js closes it on
+         outside click, Escape and scroll; 10+ changes confirm first. -->
+      <div id="column-menu" aria-label="Column actions" hidden>
+        <button type="button" data-action="assign">Assign all visible</button>
+        <button type="button" data-action="clear">Clear column</button>
+      </div>
 
       <!-- Add/rename section dialog (MAIN-015…023, LIB-030…031): shared by
          the header "+" (top-level ## section at the end of the tree), a

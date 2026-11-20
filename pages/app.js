@@ -37,6 +37,9 @@
    heading add/rename/delete (MAIN-015…023, LIB-030…034: header "+" for
    top-level sections, per-heading child/rename/delete buttons, shared
    #heading-dialog, delete confirm keeps the instructions),
+   bulk assignment operations (§7.4 UI bulk operations, UI-010, NFR-021:
+   #bulk-dialog with project multi-select and a single-row variant
+   choice, per-column "⋮" menu, #bulk-confirm-dialog for 10+ changes),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -49,6 +52,7 @@
   const showHiddenToggle = document.getElementById('show-hidden')
   const selectAll = document.getElementById('select-all')
   const selectedChip = document.getElementById('selected-chip')
+  const bulkAssignBtn = document.getElementById('bulk-assign-btn')
   const emptyState = document.getElementById('empty-state')
   const editDialog = document.getElementById('edit-dialog')
   const editTitle = document.getElementById('edit-title')
@@ -182,6 +186,8 @@
     if (n > 0) {
       selectedChip.textContent = n === 1 ? '1 row selected' : `${n} rows selected`
     }
+    /* Bulk operations entry point appears with a selection (§7.4) */
+    bulkAssignBtn.hidden = n === 0
   }
 
   /* ---------- Changed cells: assignment differs from the last sync -------- */
@@ -859,6 +865,267 @@
        join the previous section. Drop the collapse state with it. */
     collapsed.delete(row)
     row.remove()
+  })
+
+  /* ---------- Bulk assignment operations (§7.4 "UI (bulk operations)",
+     UI-010, NFR-021) ------------------------------------------------------- */
+  /* Two entry points over the same cell primitive: the toolbar
+     "Assign to projects…" button (visible while at least one row is
+     selected) opens #bulk-dialog — a project multi-select, plus a variant
+     radio list when exactly one instruction row is selected (the same
+     variantOptionsFor source the cell selects use); every project column
+     header gets a "⋮" menu with "Assign all visible" (Default/main
+     variant) and "Clear column". Both flows count the assignments that
+     would actually change and confirm with the exact number in
+     #bulk-confirm-dialog before applying 10 or more (NFR-021). Unavailable
+     cells (disabled checkbox) and custom cells (data-custom) are skipped —
+     custom instructions have their own per-cell flows, so "Clear column"
+     leaves them alone too. Everything flows through updateCellState /
+     refreshDirtyState; the row selection is not touched. */
+
+  const bulkDialog = document.getElementById('bulk-dialog')
+  const bulkProjectsEl = document.getElementById('bulk-projects')
+  const bulkVariantBlock = document.getElementById('bulk-variant-block')
+  const bulkVariantsEl = document.getElementById('bulk-variants')
+  const bulkApplyBtn = document.getElementById('bulk-apply-btn')
+  const bulkConfirmDialog = document.getElementById('bulk-confirm-dialog')
+  const bulkConfirmText = document.getElementById('bc-text')
+  const columnMenu = document.getElementById('column-menu')
+  let bulkPlan = null
+  let columnPlan = null
+  let columnMenuCol = -1
+  let columnMenuBtn = null
+
+  /* One cell of a bulk operation. mode: 'assign' (checked + variant) or
+     'clear' (unchecked). With apply=false it only reports whether the
+     cell would change (the confirmation counter); unavailable columns and
+     custom cells never take part. */
+  function bulkCell(td, mode, variant, apply) {
+    const input = td.querySelector('.assign')
+    if (!input || input.disabled) return false
+    if (td.dataset.custom === 'true') return false
+    const select = td.querySelector('.variant-select')
+    let changed = false
+    if (mode === 'assign') {
+      if (!input.checked) changed = true
+      const variantApplies =
+        !!select &&
+        !!variant &&
+        select.value !== variant &&
+        [...select.options].some((o) => o.value === variant)
+      if (variantApplies) changed = true
+      if (apply && changed) {
+        input.checked = true
+        if (variantApplies) select.value = variant
+      }
+    } else if (input.checked) {
+      changed = true
+      if (apply) input.checked = false
+    }
+    if (apply && changed) updateCellState(input)
+    return changed
+  }
+
+  function runBulkPlan(plan) {
+    for (const tr of plan.rows) {
+      for (const colIdx of plan.projects) {
+        const td = tr.cells[2 + colIdx]
+        if (td) bulkCell(td, 'assign', plan.variant, true)
+      }
+    }
+    refreshDirtyState()
+  }
+
+  function runColumnPlan(plan) {
+    for (const tr of rows()) {
+      if (isHeading(tr) || tr.classList.contains('row-off')) continue
+      const td = tr.cells[2 + plan.colIdx]
+      if (td) bulkCell(td, plan.mode, plan.mode === 'assign' ? 'Default' : '', true)
+    }
+    refreshDirtyState()
+  }
+
+  function openBulkDialog() {
+    const selRows = rows().filter((tr) => tr.querySelector('.row-sel')?.checked)
+    /* Project multi-select: color dot + full name, PROJECTS order = columns */
+    bulkProjectsEl.replaceChildren(
+      ...[...PROJECTS.values()].map((p) => {
+        const label = document.createElement('label')
+        label.className = 'ps-check-row bulk-row'
+        const input = document.createElement('input')
+        input.type = 'checkbox'
+        input.value = p.name
+        const dot = document.createElement('span')
+        dot.className = 'proj-color'
+        dot.style.setProperty('--c', p.color)
+        dot.setAttribute('aria-hidden', 'true')
+        const name = document.createElement('span')
+        name.textContent = p.name
+        label.append(input, dot, name)
+        return label
+      }),
+    )
+    /* Variant choice (Default + variants of the same source the cell
+       selects use) only for exactly one selected instruction row */
+    if (selRows.length === 1) {
+      const options = variantOptionsFor(selRows[0])
+      const list = options.length ? options : ['Default']
+      bulkVariantsEl.replaceChildren(
+        ...list.map((v, i) => {
+          const label = document.createElement('label')
+          label.className = 'ps-check-row bulk-row'
+          const input = document.createElement('input')
+          input.type = 'radio'
+          input.name = 'bulk-variant'
+          input.value = v
+          input.checked = i === 0
+          const name = document.createElement('span')
+          name.textContent = v === 'Default' ? 'Default (main variant)' : v
+          label.append(input, name)
+          return label
+        }),
+      )
+      bulkVariantBlock.hidden = false
+    } else {
+      bulkVariantsEl.replaceChildren()
+      bulkVariantBlock.hidden = true
+    }
+    bulkDialog.showModal()
+    bulkProjectsEl.querySelector('input')?.focus()
+  }
+
+  bulkAssignBtn.addEventListener('click', openBulkDialog)
+
+  /* Build the plan from the dialog state; count = assignments that would
+     actually change */
+  function buildBulkPlan() {
+    const selRows = rows().filter((tr) => tr.querySelector('.row-sel')?.checked)
+    const projects = [...bulkProjectsEl.querySelectorAll('input:checked')]
+      .map((input) => projectNames.indexOf(input.value))
+      .filter((idx) => idx >= 0)
+    const variant = bulkVariantBlock.hidden
+      ? 'Default'
+      : (bulkVariantsEl.querySelector('input:checked')?.value ?? 'Default')
+    let count = 0
+    for (const tr of selRows) {
+      for (const colIdx of projects) {
+        const td = tr.cells[2 + colIdx]
+        if (td && bulkCell(td, 'assign', variant, false)) count += 1
+      }
+    }
+    return { rows: selRows, projects, variant, count }
+  }
+
+  /* NFR-021/UI-010: 10 or more affected assignments confirm first. The
+     plan is always stored: a plain Apply submits the form and the close
+     handler runs it; 10+ clicks prevent the submit, keep the dialog open
+     and route through #bulk-confirm-dialog. */
+  bulkApplyBtn.addEventListener('click', (e) => {
+    const plan = buildBulkPlan()
+    bulkPlan = plan
+    if (plan.count >= 10) {
+      e.preventDefault()
+      bulkConfirmText.textContent = `This will change ${plan.count} assignments. Continue?`
+      bulkConfirmDialog.showModal()
+    }
+  })
+
+  bulkDialog.addEventListener('close', () => {
+    if (bulkDialog.returnValue !== 'apply') {
+      bulkPlan = null
+      return
+    }
+    const plan = bulkPlan
+    bulkPlan = null
+    if (!plan) return
+    runBulkPlan(plan)
+  })
+
+  bulkConfirmDialog.addEventListener('close', () => {
+    if (bulkConfirmDialog.returnValue !== 'continue') {
+      bulkPlan = null
+      columnPlan = null
+      return
+    }
+    if (bulkPlan) {
+      /* close('apply') runs the plan in the bulk dialog's close handler */
+      bulkDialog.close('apply')
+    } else if (columnPlan) {
+      const plan = columnPlan
+      columnPlan = null
+      runColumnPlan(plan)
+    }
+  })
+
+  /* ---------- Column actions menu ("⋮" per project header) ----------------- */
+
+  function closeColumnMenu() {
+    if (columnMenu.hidden) return
+    columnMenu.hidden = true
+    columnMenuCol = -1
+    columnMenuBtn?.setAttribute('aria-expanded', 'false')
+    columnMenuBtn = null
+  }
+
+  function openColumnMenu(btn, colIdx) {
+    columnMenuCol = colIdx
+    columnMenuBtn = btn
+    btn.setAttribute('aria-expanded', 'true')
+    columnMenu.hidden = false
+    const r = btn.getBoundingClientRect()
+    const w = columnMenu.offsetWidth
+    const h = columnMenu.offsetHeight
+    const margin = 8
+    const x = Math.min(Math.max(margin, r.right - w), Math.max(margin, window.innerWidth - w - margin))
+    let y = r.bottom + 4
+    if (y + h > window.innerHeight - margin) y = Math.max(margin, r.top - h - 4)
+    columnMenu.style.left = `${Math.round(x)}px`
+    columnMenu.style.top = `${Math.round(y)}px`
+    columnMenu.querySelector('button')?.focus()
+  }
+
+  columnMenu.addEventListener('click', (e) => {
+    const item = e.target.closest('button[data-action]')
+    if (!item || columnMenuCol < 0) return
+    const mode = item.dataset.action
+    const colIdx = columnMenuCol
+    closeColumnMenu()
+    let count = 0
+    for (const tr of rows()) {
+      if (isHeading(tr) || tr.classList.contains('row-off')) continue
+      const td = tr.cells[2 + colIdx]
+      if (td && bulkCell(td, mode, mode === 'assign' ? 'Default' : '', false)) count += 1
+    }
+    if (count >= 10) {
+      columnPlan = { colIdx, mode, count }
+      bulkConfirmText.textContent = `This will change ${count} assignments. Continue?`
+      bulkConfirmDialog.showModal()
+    } else {
+      runColumnPlan({ colIdx, mode })
+    }
+  })
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.col-menu-btn')
+    if (btn) {
+      const th = btn.closest('th.c-proj')
+      const colIdx = projectHeads.indexOf(th)
+      if (colIdx >= 0 && (columnMenu.hidden || columnMenuCol !== colIdx)) {
+        openColumnMenu(btn, colIdx)
+      } else {
+        closeColumnMenu()
+      }
+      return
+    }
+    if (!e.target.closest('#column-menu')) closeColumnMenu()
+  })
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeColumnMenu()
+  })
+  document.querySelector('.matrix-wrap').addEventListener('scroll', closeColumnMenu, {
+    capture: true,
+    passive: true,
   })
 
   /* ---------- Instruction editor modal (UI-003, LIB-002) ------------------- */
@@ -1748,6 +2015,8 @@
        the hide and restore commands of MAIN-012…014, LIB-005…007 */
     hide: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5c2.76 0 5 2.24 5 5 0 .51-.1 1-.24 1.46l3.06 3.06c1.39-1.23 2.49-2.77 3.18-4.53C21.27 7.11 17 4 12 4c-1.27 0-2.49.2-3.64.57l2.17 2.17c.47-.14.96-.24 1.47-.24zM2.71 3.16c-.39.39-.39 1.02 0 1.41l1.97 1.97C3.06 7.83 1.77 9.53 1 11.5 2.73 15.89 7 19 12 19c1.52 0 2.97-.3 4.31-.82l2.72 2.72c.39.39 1.02.39 1.41 0 .39-.39.39-1.02 0-1.41L4.13 3.16c-.39-.39-1.03-.39-1.42 0zM12 16.5c-2.76 0-5-2.24-5-5 0-.77.18-1.5.49-2.14l1.57 1.57c-.03.18-.06.37-.06.57 0 1.66 1.34 3 3 3 .2 0 .38-.03.57-.07L14.14 16c-.65.32-1.37.5-2.14.5zm2.97-5.33c-.15-1.4-1.25-2.49-2.64-2.64l2.64 2.64z"/></svg>',
     eye: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4C7 4 2.73 7.11 1 11.5 2.73 15.89 7 19 12 19s9.27-3.11 11-7.5C21.27 7.11 17 4 12 4zm0 12.5c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>',
+    /* Column actions menu (Material "more_vert") */
+    menu: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>',
     /* Toolbar buttons (Activity, Settings): Material-style solid glyphs,
        14px, filled with currentColor like the cell icons */
     activity:
@@ -2292,6 +2561,10 @@
       }
       p.editBtn.title = `Edit project — ${name}`
       p.editBtn.setAttribute('aria-label', `Edit project — ${name}`)
+      if (p.menuBtn) {
+        p.menuBtn.title = `Column actions — ${name}`
+        p.menuBtn.setAttribute('aria-label', `Column actions — ${name}`)
+      }
     }
   })
 
@@ -4139,6 +4412,18 @@
       openProjectSettings(th.querySelector('.proj-name').textContent.trim())
     })
     line.append(btn)
+    /* Column actions menu button (§7.4 bulk operations): "Assign all
+       visible" / "Clear column" for this project */
+    const menuBtn = document.createElement('button')
+    menuBtn.type = 'button'
+    menuBtn.className = 'cell-icon col-menu-btn'
+    menuBtn.innerHTML = ICONS.menu
+    menuBtn.title = `Column actions — ${proj}`
+    menuBtn.setAttribute('aria-label', `Column actions — ${proj}`)
+    menuBtn.setAttribute('aria-haspopup', 'true')
+    menuBtn.setAttribute('aria-expanded', 'false')
+    if (p) p.menuBtn = menuBtn
+    line.append(menuBtn)
   }
 
   /* Per-project custom instruction icons on every assignable cell */

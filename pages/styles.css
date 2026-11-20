@@ -15,7 +15,8 @@
    MAIN-012…014 / LIB-005…007 (hide/restore instruction: .hide-btn eye
    buttons, #hide-dialog confirm), MAIN-015…023 / LIB-030…034 (heading
    add/rename/delete: .hbtn buttons, #heading-dialog,
-   #heading-delete-dialog),
+   #heading-delete-dialog), §7.4 UI bulk operations / UI-010 / NFR-021
+   (#bulk-dialog, #bulk-confirm-dialog, #column-menu, .bulk-row),
    UI-001, UI-011, UI-012, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
@@ -143,6 +144,9 @@ body {
 .toolbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap; /* the "Assign to projects…" button + chip may exceed the
+                       960px minimum width with a large selection: the right
+                       cluster wraps instead of clipping */
   gap: 8px;
   padding: 10px 12px;
   background: var(--surface);
@@ -178,8 +182,13 @@ body {
 }
 
 .toolbar input[type='search'] {
-  flex: 0 1 300px;
+  /* Small base + growth: the base sizes drive the flex-wrap line break, so
+     a large basis would wrap the toolbar whenever the "Assign to
+     projects…" button and the selection chip are visible (the demo rows
+     come pre-selected). The search grows into the free space instead. */
+  flex: 1 1 120px;
   min-inline-size: 110px;
+  max-inline-size: 300px;
 }
 
 .toolbar select {
@@ -603,6 +612,67 @@ body {
 #instruction-header .hbtn {
   margin-inline-start: 4px;
   vertical-align: middle;
+}
+
+/* ----- Bulk assignment operations (§7.4 UI bulk operations) --------------- */
+
+/* The toolbar ghost button must really disappear without a selection:
+   .btn sets display, which would defeat the [hidden] attribute */
+#bulk-assign-btn[hidden] {
+  display: none;
+}
+
+/* Project/variant rows of #bulk-dialog: the .ps-check-row idiom plus the
+   header color dot */
+.bulk-row {
+  padding-block: 3px;
+}
+
+.bulk-row .proj-color {
+  inline-size: 10px;
+  block-size: 10px;
+}
+
+/* Column actions menu: one reusable fixed-position menu per project
+   header "⋮" button; app.js positions and clamps it like the tooltip.
+   display:flex would defeat the [hidden] attribute, so it is re-applied
+   explicitly. */
+#column-menu {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 180px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 0.18);
+}
+
+#column-menu[hidden] {
+  display: none;
+}
+
+#column-menu button {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: start;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#column-menu button:hover {
+  background: var(--row-hover);
+}
+
+.proj-line .col-menu-btn {
+  margin-inline-start: 3px;
 }
 
 /* ----- Matrix cells (MAIN-001…005: four states, shape-based, NFR-020) --- */
