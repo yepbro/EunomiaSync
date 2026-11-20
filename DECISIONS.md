@@ -5885,3 +5885,139 @@ fires with a correct kind there (only the line number could differ in
 an input the save path would normalize anyway). Full suite: 798 tests
 green; fmt, clippy `-D warnings`, `cargo deny check`, pnpm lint /
 format:check / typecheck / test all green.
+
+### D-087 — The repository scan walker: probe-based ALG-052 classification, Quit-token cancellation, and parameters-not-configuration — 2026-11-19
+
+Problem: T-061 implements the folder traversal of §9.6 (ALG-050..054,
+PRJ-007, D-04..D-07) as the walker ONLY — path_key/classification is
+T-075, progress events and the cancel command are T-076 — and four
+design points were open: (1) how a folder is classified as repository /
+submodule-or-worktree when `.git` is ON the default exclusion list
+(D-05), which makes "watch for `.git` entries in the walk's own
+listing" self-defeating; (2) whether ALG-054 ("reads only directory
+entry names and does not open files") forbids that classification
+syscall entirely; (3) the cancellation primitive — no tokio in the
+allow-list, and SYS-003 names a token for BOTH scan and sync; (4) what
+the walker yields when the parallel walk's order is unspecified, and
+how PRJ-002's "folders checked" counter survives the walker-only scope.
+
+Solution: `scan_repositories(root, options, cancel, on_event) ->
+ScanOutcome` in `crates/eunomia-fs/src/scan.rs`, on `ignore`'s parallel
+`WalkBuilder` with threads `min(4, available cores)`
+(`available_parallelism`, std), depth passed one-for-one to
+`max_depth` as `NonZeroUsize` (ruling out the unlimited-walk reading of
+an unvalidated value), every ignore-file source AND the hidden filter
+off (the spec's only skip rules are the explicit names of ALG-051; a
+blanket hidden filter would hide repositories the spec wants found),
+`follow_links(false)` (junctions surface as symlinks in std's file
+type, so the same gate covers ALG-050's reparse points).
+
+- PROBE-BASED CLASSIFICATION: every traversed, non-excluded directory
+  gets exactly one `symlink_metadata(<dir>/.git)` (the D-084 idiom):
+  `.git` DIRECTORY → Repository event, walk CONTINUES inside (ALG-051's
+  nested-repositories rule); any other `.git` kind — file or symlink —
+  → Skipped("submodule or worktree"), NOT descended (D-06: "you can add
+  it by hand"; ALG-051's continue-inside rule is written for found
+  repositories, not skips); NotFound → plain Directory event, walk
+  descends; any other OS refusal → Skipped(Access) with the error, NOT
+  descended. ALG-054 is honored, not violated, by the probe: it never
+  opens a file and no content can surface through the API — and the
+  listing-watching alternative is WRONG under default settings, because
+  exclusion is a traversal rule: `.git` on D-05's list would stop the
+  `.git` entry from ever being listed, so no parent could ever be
+  classified a repository. Exclusion must gate the DESCENT, not the
+  DETECTION; the probe keeps the two rules independent. One stat per
+  directory (never per file) is the walker's only syscall beyond the
+  walk itself; the unreadable-file test pins the observable half of
+  ALG-054 (a chmod-000 FILE produces no event), and the syscall-negative
+  is pinned by API shape — no event variant could carry contents.
+- EXCLUSION PRECEDENCE: an excluded folder is skipped, not descended,
+  and NOT probed — exclusion wins over detection even when the folder
+  holds a `.git` directory (this is what makes D-05's list coherent).
+  The scan ROOT is exempt from the name filters (the user chose it
+  explicitly); comparison is exact and case-sensitive (the list is user
+  data, the spec pins no folding). System folders (`$RECYCLE.BIN`,
+  `System Volume Information`, `.Trash`, `.Trashes`) fold into the same
+  `SkipReason::Excluded` — PRJ-002 shows both as "excluded".
+- ACCESS ERRORS ARE DATA: every per-entry failure — walker-reported
+  (unreadable root, failed listing) or probe refusal — becomes
+  `ScanEvent::Skipped` with `SkipReason::Access { source: io::Error }`
+  reconstructed from `ignore`'s error WITHOUT moving or unwrapping it
+  (round-2 review F-1 records the mechanism the code actually uses,
+  after the round-1 P3-3 fix removed the guard+expect pair): the
+  borrowed `error.io_error()` is inspected and the source is rebuilt —
+  `from_raw_os_error` for OS-backed errors (the exact `raw_os_error`,
+  and with it std's kind and strerror text), `Error::new(kind, text)`
+  otherwise; the non-io shapes are unreachable with all ignore sources
+  off, but a synthetic `io::Error::other` fallback keeps the arm
+  total. The traversal continues (PRJ-007); `scan_repositories` is
+  total, no `Result`. `ignore::Error` never leaks into the API
+  (boundary discipline; its errors carry no `path()` accessor — the
+  path comes from a private recursive match over the public wrapper
+  variants). Documented corner: a searchable-but-unlistable folder
+  (Unix `x` without `r`) yields its classification AND an access skip
+  for the same path — both facts are true (pinned by a test).
+- TOKEN PRIMITIVE: `CancelToken` — a `Clone` `Arc<AtomicBool>` wrapper
+  with `cancel()` (Release) / `is_cancelled()` (Acquire), the weakest
+  correct pair since nothing else synchronizes on the flag. No new
+  dependency; no tokio-util (not in the allow-list); nothing to reuse in
+  the workspace (grepped). Checked FIRST on every entry — found, plain,
+  skipped, and walker errors alike — and answered with
+  `WalkState::Quit`, `ignore`'s whole-walk quit primitive, so
+  termination is prompt and observable (`run` returning). The outcome
+  is exact, not sampled: the visitor records its quit in a shared
+  `quit_observed` flag at the moment it answers `Quit`, and the outcome
+  derives from that — a flip racing with the last entry (after every
+  check) reports `Completed`, because nothing was interrupted and every
+  result is whole (round-1 review P3-1 ruled the naive final re-read of
+  the token a doc-contract defect: it could cancel a fully completed
+  walk). Keeping or dropping in-flight events is the command layer's
+  PRJ-002 rule. The type lives in `scan.rs` but is named for SYS-003's
+  both-consumer scope: the sync task should reuse or relocate it, not
+  grow a second one.
+- YIELD SHAPE: `ScanEvent::{Repository, Directory, Skipped}` — the
+  `Directory` variant is the walker-only answer to PRJ-002's "folders
+  checked" counter (the consumer counts events; no throttled progress
+  here, that is T-076). Callback receives `&ScanEvent` (counters pay
+  nothing; storers clone) and is `Fn + Send + Sync` (shared across
+  walker threads via the per-thread visitor factory). Ordering is
+  UNSPECIFIED beyond parent-before-own-contents (structural); tests
+  assert sets, never sequences.
+- PARAMETERS, NOT CONFIGURATION: `ScanOptions { max_depth:
+NonZeroUsize, exclude_names: Vec<String> }` is built by the command
+  layer from the validated §6.5 keys; no `Default` (duplicating §6.5's
+  defaults here would drift); no `config.toml`/DB/settings reads in the
+  module (scope boundary).
+- MANIFEST UNTOUCHED: the parked `ignore = "0.4"` covers everything
+  (WalkBuilder, WalkState::Quit, DirEntry::file_type); no feature flag
+  needed; `walkdir`/`tempfile`/`dunce`/`eunomia-core` stay idle as
+  pinned (tempfile already used by tests per the T-060 precedent). No
+  `Cargo.lock` change. lib.rs's module-plan sentence ("scan ... still
+  skeletons") is left stale on purpose: the file is shared with a
+  concurrent sibling task, and scan.rs's own module docs are the
+  accurate record (the D-082 known-stale posture); the orchestrator's
+  merge can refresh the sentence.
+- TESTS: 18 in `scan.rs`, colocated, through the public API on real
+  temp trees: the two acceptance pairs — nested repositories found
+  separately, unreadable folder does not stop the traversal (sibling
+  repo still found, EACCES = 13 carried on the skip), pre-cancelled
+  token yields nothing, mid-walk flip on the FIRST yielded entry
+  interrupts with strictly fewer than all deliveries (deterministic:
+  each thread checks per entry and delivers synchronously, so the
+  in-flight window is bounded by the thread count) — plus the battery:
+  `.git`-file skip with the exact reason and no descent, excluded names
+  (skipped, not descended, not classified despite `.git`), the four
+  system folders, the depth bound, symlink non-following (external repo
+  not found, no event for the link), `.gitignore` blindness, root as a
+  repository and root bypassing the name filters, unreadable root (one
+  skip, clean completion), searchable-but-unlistable two-event corner,
+  unreadable file never reported, Display/`os_code()`/`source()`
+  contract. Permission tests skip loudly under root (the paths.rs
+  uid-check precedent); assertions are on sets, never sequences
+  (parallel delivery is unordered). Round-1 additions: the three
+  untested builder switches pinned (`.ignore` files, the hidden filter,
+  parent-level rules — the P2-1 finding that half the ALG-050
+  configuration had no failing test) and the root-symlink exception
+  pinned; the mid-walk assertion tightened to the exact
+  `delivered <= walk_thread_count()` bound (the reviewer verified it
+  against `ignore`'s synchronous per-thread delivery).
