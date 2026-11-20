@@ -769,11 +769,12 @@ mod tests {
         // path's UTF-16 encoding, verbatim, plus exactly one trailing
         // NUL — the terminator GetDiskFreeSpaceExW's LPCWSTR reads. The
         // literals keep the expected units hand-computed, not re-derived
-        // by the method under test.
+        // by the method under test. (The first battery of this literal
+        // dropped the drive colon — CI failure 44698181717, Windows leg.)
         let wide = wide_path(Path::new(r"C:\dir"));
         assert_eq!(
             wide,
-            [0x0043, 0x005C, 0x0064, 0x0069, 0x0072, 0],
+            [0x0043, 0x003A, 0x005C, 0x0064, 0x0069, 0x0072, 0],
             "the path's UTF-16 units, verbatim, then the NUL"
         );
         // One non-ASCII unit pins "code units, not UTF-8 bytes": Ж is

@@ -3323,9 +3323,15 @@ mod tests {
             matches!(&absolute, TargetPathError::OutsideRoot { .. }),
             "the absolute escape must be OutsideRoot, got: {absolute:?}"
         );
+        // The write path the error names is the platform's own join of
+        // the root with the absolute name — on Unix an absolute name
+        // replaces the root entirely (`/definitely/…`); on Windows it
+        // replaces down to the current drive's root (`C:/definitely/…`,
+        // CI failure 44698181717). Deriving the expectation from the
+        // same join pins the contract on both platforms.
         assert_eq!(
             absolute.path(),
-            "/definitely/not/here.md",
+            root.join("/definitely/not/here.md").to_string_lossy(),
             "the error names the path the write would have used"
         );
 
