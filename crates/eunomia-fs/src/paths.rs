@@ -12,9 +12,11 @@
 //!
 //! Implemented so far: the project-folder availability check
 //! ([`check_project_available`], spec 6.9's project-path row, 9.4
-//! preflight step 1) and the project-path canonicalization with the
-//! `path_key` identity key (DB-030, DB-031, D-07). Still planned: the
-//! SEC-003 allowlist path checks.
+//! preflight step 1), the project-path canonicalization with the
+//! `path_key` identity key (DB-030, DB-031, D-07), and the Git
+//! repository root lookup ([`find_git_root`], PRJ-003's walk-up from a
+//! chosen subfolder, D-08). Still planned: the SEC-003 allowlist path
+//! checks.
 //!
 //! # Canonicalization and the path_key (DB-030, DB-031, D-07)
 //!
@@ -93,7 +95,17 @@
 //! the simple-fold fidelity battery (ﬁ/ſ/ß/ẞ/İ/KELVIN SIGN),
 //! separator shapes including the Unix backslash and the verbatim-UNC
 //! key spelling, and the DB-031 one-folder-one-key symlink acceptance
-//! test. The SEC-003 checks keep their planned coverage: rejection of
+//! test. The repository-root lookup is tested through the public
+//! function against real fixtures: the picked folder being the root
+//! itself, a subfolder two levels deep, the nearest `.git` winning over
+//! an outer nested repository, the `.git`-file worktree form and a
+//! `.git` symlink as root terminators, a symlinked input resolving to
+//! the real root, the typed negative lookup outside any repository
+//! (with the temp dir's real ancestors verified `.git`-free
+//! independently of the function under test), and the refusal
+//! classifications — a denied probe under a folder without the search
+//! bit (loud root skip), a missing input, and a plain-file input. The
+//! SEC-003 checks keep their planned coverage: rejection of
 //! paths outside the registered or session-allowed set.
 
 use std::fmt;
@@ -583,6 +595,236 @@ impl fmt::Display for CanonicalizeError {
 impl std::error::Error for CanonicalizeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.source)
+    }
+}
+
+// ---- PRJ-003 / D-08: the Git repository root lookup ----------------
+
+/// Finds the root of the Git repository the chosen folder belongs to
+/// (PRJ-003, D-08): the folder picked in the add-project flow may sit
+/// anywhere inside a repository, and the app must offer the repository
+/// root. The input is canonicalized FIRST — the module's own
+/// [`canonicalize`], the D-086 posture, so the returned root is the
+/// canonical path the app stores (DB-030) — and then the walk climbs
+/// from the canonical path through its ancestors, probing each
+/// directory for a `.git` entry. The FIRST `.git` found — the nearest
+/// root — terminates the walk, and that directory is the answer.
+///
+/// # What counts as a root
+///
+/// ANY entry named `.git`: a directory (a normal repository), a file
+/// (a worktree/submodule gitdir pointer — ALG-052's other form), or a
+/// symlink to either. Presence, not validity — the D-084 idiom, the
+/// same probe [`check_project_available`] makes for the §6.9 row
+/// ("folder with `.git` (folder or file)"). ALG-052's distinction
+/// between the forms belongs to the repository SCAN, which skips the
+/// file form with the reason "submodule or worktree"; this function
+/// serves the add-by-hand flow, where §6.9 and D-06 both accept the
+/// file form ("you can add it by hand") — so a linked worktree's
+/// folder resolves to the worktree's own root, never through the
+/// pointer into the main repository. The probe is
+/// `symlink_metadata(<dir>/.git)`: it inspects the entry itself
+/// without following it, so even a dangling `.git` symlink is a root.
+///
+/// # Nearest root wins
+///
+/// The walk is bottom-up and stops at the first `.git`, so a folder
+/// inside a nested repository (D-06: nested repositories are
+/// registered as separate projects) resolves to the inner repository,
+/// never to the outer one.
+///
+/// # Termination is structural
+///
+/// [`Path::ancestors`] yields the canonical path, then its successive
+/// parents, and stops at the filesystem root (whose `.git` probe still
+/// runs — a repository mounted at `/` is found). Every ancestor of a
+/// canonical path is a strict prefix of it, so the walk visits each
+/// level exactly once and cannot cycle: symlink loops cannot re-enter,
+/// because canonicalization resolved every link before the walk began
+/// (D-07 converts a hand-picked path to its canonical form). No depth
+/// limit and no configuration: the walk is bounded by the path
+/// itself, one `symlink_metadata` per level.
+///
+/// # Races are honest (TOCTOU)
+///
+/// The probes are separate OS calls over a live filesystem: between
+/// the canonicalization and any probe the tree can change — a level
+/// can lose or gain its `.git`, permissions on a walked folder can
+/// change. The function reports what the probes observed at their
+/// moment; no snapshot is taken and no atomicity is pretended. A probe
+/// that is REFUSED (denied search on a walked folder — which also
+/// covers an ancestor denied in the walk's window; the canonicalized
+/// input being a plain file, probed at `<file>/.git`; a drive dropped
+/// mid-walk) is a typed [`NotARepoError::NotReadable`] carrying the
+/// refused path and the OS error — NEVER a silent "no repository":
+/// "could not check" is not "checked and absent", and §10 keeps the
+/// two apart (`E_NOT_A_REPO` invites "Pick the repository root"; an
+/// access failure does not). A plain `NotFound` means "no repository
+/// at this level" and the walk continues.
+///
+/// # Errors
+///
+/// [`NotARepoError`], one variant per failure mode:
+/// [`NotARepoError::NoGitEntry`] is the negative lookup — every level
+/// up to the filesystem root was probed and none has a `.git` entry.
+/// No OS call failed, so the variant carries no [`io::Error`] and
+/// [`NotARepoError::os_code`] answers `None`: a fact about the tree,
+/// not an OS refusal — and the variant the future `E_NOT_A_REPO`
+/// mapping consumes (the command layer maps it; D-062's posture keeps
+/// `AppError` out of this crate). [`NotARepoError::NotReadable`] and
+/// [`NotARepoError::Canonicalize`] carry the OS failure for §10's log
+/// facts.
+///
+/// # Examples
+///
+/// ```
+/// use eunomia_fs::paths::{canonicalize, find_git_root};
+///
+/// let dir = tempfile::tempdir().unwrap();
+/// let repo = dir.path().join("repo");
+/// std::fs::create_dir(&repo).unwrap();
+/// std::fs::create_dir(repo.join(".git")).unwrap();
+/// let deep = repo.join("src").join("fs");
+/// std::fs::create_dir_all(&deep).unwrap();
+///
+/// let canonical_repo = canonicalize(&repo).unwrap();
+/// // A folder two levels inside the repository resolves to the root,
+/// // and the root itself is its own root:
+/// assert_eq!(find_git_root(&deep).unwrap(), canonical_repo);
+/// assert_eq!(find_git_root(&repo).unwrap(), canonical_repo);
+/// ```
+pub fn find_git_root(path: &Path) -> Result<std::path::PathBuf, NotARepoError> {
+    let canonical = canonicalize(path).map_err(|source| NotARepoError::Canonicalize { source })?;
+    for dir in canonical.ancestors() {
+        match fs::symlink_metadata(dir.join(".git")) {
+            // Any entry named `.git` — directory, file, symlink — is
+            // a root; the walked directory IS the repository root.
+            Ok(_) => return Ok(dir.to_path_buf()),
+            // No `.git` at this level: climb one level up.
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            // The probe was refused, not answered: the OS refusal
+            // rides out typed, the walk never pretends absence.
+            Err(source) => {
+                return Err(NotARepoError::NotReadable {
+                    path: dir.to_string_lossy().into_owned(),
+                    source,
+                });
+            }
+        }
+    }
+    // Every level up to and including the filesystem root was probed
+    // and none has a `.git` entry: not inside a repository.
+    Err(NotARepoError::NoGitEntry {
+        path: canonical.to_string_lossy().into_owned(),
+    })
+}
+
+/// Why [`find_git_root`] said no.
+///
+/// The type is named for the §10 code the add-project flow raises on
+/// the negative lookup — `E_NOT_A_REPO` ("A folder without `.git` is
+/// being added"; the user picks the repository root and retries) — but
+/// the variants keep the failure modes distinguishable, because a
+/// refused probe is not a missing repository: `NoGitEntry` is the
+/// variant that maps to `E_NOT_A_REPO`, while the io-backed variants
+/// carry the exact OS failure for §10's log facts (what the command
+/// layer maps them to is its call; D-062's posture keeps `AppError`
+/// out of this crate). Hand-rolled impls, not `thiserror`: the crate's
+/// §5.2 dependency list has no `thiserror` (the DECISIONS.md D-017
+/// store precedent).
+#[derive(Debug)]
+pub enum NotARepoError {
+    /// The input path could not be canonicalized: the folder does not
+    /// exist (moved, deleted, unmounted — D-09's situation), access is
+    /// denied on the way to it, a link loop cannot be followed. The
+    /// typed canonicalization failure, carried whole.
+    Canonicalize {
+        /// The canonicalization refusal (input path text + OS error).
+        source: CanonicalizeError,
+    },
+    /// A `.git` probe on a walked directory was refused by the OS:
+    /// denied search on the folder (or, in the window between
+    /// canonicalization and a later probe, on one of its ancestors),
+    /// the canonicalized input being a plain file (ENOTDIR — this
+    /// classification is pinned on Unix; other platforms may classify
+    /// a non-directory component differently, and a plain-file input
+    /// is outside this function's contract: the folder picker supplies
+    /// folders), a drive dropped mid-walk. The refused path and the
+    /// exact OS failure are the §10 log facts.
+    NotReadable {
+        /// The walked directory whose `.git` probe was refused.
+        path: String,
+        /// The OS failure, carrying the raw error code.
+        source: io::Error,
+    },
+    /// The folder and every ancestor up to the filesystem root were
+    /// probed and none has a `.git` entry: the folder is not inside a
+    /// repository — the `E_NOT_A_REPO` situation. No OS call failed,
+    /// so there is no io error to carry.
+    NoGitEntry {
+        /// The canonicalized folder the walk started from (lossy
+        /// form, the same text the log line shows).
+        path: String,
+    },
+}
+
+impl NotARepoError {
+    /// The path text this failure is about: the canonicalization
+    /// input, the walked directory whose probe was refused, or the
+    /// canonicalized folder whose ascent found no repository (lossy
+    /// form, the same text the §10 log line shows).
+    #[must_use]
+    pub fn path(&self) -> &str {
+        match self {
+            NotARepoError::Canonicalize { source } => source.path(),
+            NotARepoError::NotReadable { path, .. } | NotARepoError::NoGitEntry { path } => path,
+        }
+    }
+
+    /// The I/O error behind this failure, when an OS call produced it;
+    /// `None` for the negative lookup, which is a fact about the tree
+    /// rather than an OS failure.
+    #[must_use]
+    pub fn io_error(&self) -> Option<&io::Error> {
+        match self {
+            NotARepoError::Canonicalize { source } => Some(source.io_error()),
+            NotARepoError::NotReadable { source, .. } => Some(source),
+            NotARepoError::NoGitEntry { .. } => None,
+        }
+    }
+
+    /// The raw OS error code (`std::io::Error::raw_os_error`) — §10
+    /// names it a first-class fact of every error log line. `None`
+    /// where no OS call failed.
+    #[must_use]
+    pub fn os_code(&self) -> Option<i32> {
+        self.io_error().and_then(io::Error::raw_os_error)
+    }
+}
+
+impl fmt::Display for NotARepoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NotARepoError::Canonicalize { source } => {
+                write!(f, "cannot look up the git repository: {source}")
+            }
+            NotARepoError::NotReadable { path, source } => {
+                write!(f, "cannot inspect {path} for a .git entry: {source}")
+            }
+            NotARepoError::NoGitEntry { path } => {
+                write!(f, "no .git entry in {path} or any of its ancestors")
+            }
+        }
+    }
+}
+
+impl std::error::Error for NotARepoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            NotARepoError::Canonicalize { source } => Some(source),
+            NotARepoError::NotReadable { source, .. } => Some(source),
+            NotARepoError::NoGitEntry { .. } => None,
+        }
     }
 }
 
@@ -1538,5 +1780,378 @@ mod tests {
             path_key(&canonicalize(&repo).expect("the real folder must canonicalize")),
             path_key(&canonicalize(&alias).expect("the symlink resolves to the same folder")),
         );
+    }
+
+    // ---- PRJ-003 / D-08: the Git repository root lookup ----------------
+
+    #[test]
+    fn the_chosen_folder_that_is_the_root_is_returned_canonicalized() {
+        // The picked folder IS the repository root: the answer is the
+        // canonical form of the input (the path the app stores,
+        // DB-030) — the root itself, not its parent.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let repo = repo_with_git_entry(dir.path(), "repo");
+        let canonical = canonicalize(&repo).expect("the fixture repository must canonicalize");
+
+        let root = find_git_root(&repo).expect("a folder holding a .git entry is itself the root");
+        assert_eq!(
+            root, canonical,
+            "the answer must be the canonical picked folder itself, not its parent"
+        );
+        assert!(root.is_absolute(), "a canonical root is absolute: {root:?}");
+    }
+
+    #[test]
+    fn a_subfolder_two_levels_deep_finds_the_same_root() {
+        // PRJ-003's subfolder case: the app offers the repository root
+        // for a folder picked anywhere inside the repository.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let repo = repo_with_git_entry(dir.path(), "repo");
+        let deep = repo.join("level-one").join("level-two");
+        fs::create_dir_all(&deep).expect("creating the deep subfolder must work");
+
+        let root =
+            find_git_root(&deep).expect("a subfolder of a repository must resolve to the root");
+        assert_eq!(
+            root,
+            canonicalize(&repo).expect("the fixture repository must canonicalize"),
+            "the walk must stop at the nearest .git above the subfolder"
+        );
+    }
+
+    #[test]
+    fn a_folder_outside_any_repository_is_a_typed_no_git_entry() {
+        // The non-Git case of PRJ-001/003: a folder with no `.git`
+        // anywhere up the tree is rejected — typed, never a panic. The
+        // temp tree has no `.git`; its REAL ancestors (up to the
+        // filesystem root) must not have one either, checked with
+        // plain fs probes independent of the function under test, so
+        // the fixture cannot pass vacuously or fail on a repository
+        // above the temp dir.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let plain = dir.path().join("plain").join("deeper");
+        fs::create_dir_all(&plain).expect("creating the plain tree must work");
+        // Canonicalize FIRST and guard over the CANONICAL ancestors:
+        // the walk probes the ancestors of the canonical fixture path
+        // (which can differ from the spelled temp path where the temp
+        // dir sits behind a symlink), so the guard must inspect the
+        // same set — skip(1) drops the fixture itself.
+        let canonical = canonicalize(&plain).expect("the fixture folder must canonicalize");
+        for ancestor in canonical.ancestors().skip(1) {
+            if fs::symlink_metadata(ancestor.join(".git")).is_ok() {
+                eprintln!(
+                    "skipping a_folder_outside_any_repository_is_a_typed_no_git_entry: \
+                     a .git entry exists above the temp tree ({ancestor:?}), the \
+                     outside-any-repository fixture cannot be isolated here"
+                );
+                return;
+            }
+        }
+
+        let canonical_text = canonical.to_string_lossy().into_owned();
+        let err = find_git_root(&plain).expect_err(
+            "a folder with no .git up to the filesystem root must be rejected \
+             (the E_NOT_A_REPO situation)",
+        );
+        assert!(
+            matches!(&err, NotARepoError::NoGitEntry { .. }),
+            "the negative lookup must be NoGitEntry, got: {err:?}"
+        );
+        assert_eq!(
+            err.path(),
+            canonical_text,
+            "the error names the canonicalized folder the walk started from"
+        );
+        assert_eq!(
+            err.os_code(),
+            None,
+            "no OS call failed on a negative lookup: a fact about the tree, not a refusal"
+        );
+        assert!(
+            err.io_error().is_none(),
+            "there is no io error behind a negative lookup"
+        );
+        assert!(
+            err.source().is_none(),
+            "the source chain is empty for a negative lookup"
+        );
+    }
+
+    #[test]
+    fn a_git_file_terminates_the_walk_worktree_form() {
+        // D-06's other form: `.git` is a FILE holding a `gitdir:`
+        // pointer (a linked worktree). ALG-052 skips such folders in
+        // the SCAN ("submodule or worktree"), but the add-by-hand flow
+        // accepts them (§6.9: "folder or file"; D-06: "you can add it
+        // by hand") — so the walk-up must terminate there, answering
+        // with the worktree's own root, not following the pointer to
+        // the main repository.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let worktree = dir.path().join("worktree");
+        fs::create_dir(&worktree).expect("creating the fixture worktree must work");
+        fs::write(worktree.join(".git"), "gitdir: ../main/.git\n")
+            .expect("writing the gitdir pointer must work");
+        let deep = worktree.join("nested");
+        fs::create_dir(&deep).expect("creating the nested folder must work");
+
+        let root = find_git_root(&deep)
+            .expect("a .git FILE must terminate the walk exactly like a .git directory");
+        assert_eq!(
+            root,
+            canonicalize(&worktree).expect("the fixture worktree must canonicalize"),
+            "the worktree folder itself is the root"
+        );
+    }
+
+    #[test]
+    fn the_nearest_git_root_wins_over_an_outer_nested_repository() {
+        // D-06: nested repositories are registered as separate
+        // projects — the walk stops at the FIRST .git bottom-up, so a
+        // folder inside the inner repository resolves to the inner
+        // root, never to the outer one.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let outer = repo_with_git_entry(dir.path(), "outer");
+        let inner = repo_with_git_entry(&outer, "inner");
+        let inside_inner = inner.join("sub");
+        fs::create_dir(&inside_inner).expect("creating the fixture folder must work");
+
+        let root = find_git_root(&inside_inner).expect("the nearest root must be found");
+        assert_eq!(
+            root,
+            canonicalize(&inner).expect("the inner repository must canonicalize"),
+            "the nearest root wins"
+        );
+        assert_ne!(
+            root,
+            canonicalize(&outer).expect("the outer repository must canonicalize"),
+            "the outer repository must not win over the inner one"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_subfolder_resolves_to_the_real_root_path() {
+        // Canonicalize-first (D-086): the alias spelling never appears
+        // in the answer — the root is the canonical path of the real
+        // repository, the form the app stores (DB-030).
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let repo = repo_with_git_entry(dir.path(), "repo");
+        fs::create_dir(repo.join("sub")).expect("creating the fixture subfolder must work");
+        let alias = dir.path().join("alias");
+        if !symlink_or_report_untestable(&repo, &alias) {
+            return;
+        }
+        let deep_alias = alias.join("sub");
+
+        let root = find_git_root(&deep_alias)
+            .expect("a symlinked subfolder resolves to the repository through its target");
+        assert_eq!(
+            root,
+            canonicalize(&repo).expect("the real repository must canonicalize"),
+            "the answer is the real root, not the alias spelling"
+        );
+        assert_ne!(root, alias, "the alias spelling is resolved away");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_git_symlink_terminates_the_walk_like_any_git_entry() {
+        // The D-084 ruling carried to the walk: "an entry named .git"
+        // counts — presence, not validity. The probe is
+        // symlink_metadata, which does not follow the final symlink,
+        // so even a DANGLING .git symlink terminates the walk; whether
+        // the pointer leads to a healthy gitdir is git's business, and
+        // the scan's form distinction (ALG-052) is not this walk's.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let repo = dir.path().join("linked");
+        fs::create_dir(&repo).expect("creating the fixture repository must work");
+        std::os::unix::fs::symlink("/nowhere/gitdir", repo.join(".git"))
+            .expect("creating the .git symlink must work");
+
+        let root =
+            find_git_root(&repo).expect("a .git entry that is a symlink terminates the walk");
+        assert_eq!(
+            root,
+            canonicalize(&repo).expect("the fixture repository must canonicalize"),
+            "the folder holding the .git symlink is the root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_denied_git_probe_is_not_readable_not_no_git_entry() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The walked folder is canonicalizable but not searchable:
+        // mode 0o600 (no x) — canonicalizing the FINAL component needs
+        // search permission only on its parent, while the
+        // `<folder>/.git` probe needs search ON the folder (verified
+        // on this platform: realpath succeeds, the probe answers
+        // EACCES). The walk must report the refusal as a typed
+        // NotReadable carrying EACCES, never fold it into "no
+        // repository": between canonicalization and any probe a
+        // permission can change (the same window covers an ancestor
+        // denied mid-walk), and "could not check" is not "checked and
+        // absent".
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let repo = dir.path().join("locked");
+        fs::create_dir(&repo).expect("creating the fixture folder must work");
+        if running_as_root_is_untestable(&repo) {
+            eprintln!(
+                "skipping a_denied_git_probe_is_not_readable_not_no_git_entry: \
+                 running as root — mode bits are not enforced, the \
+                 unsearchable-folder precondition cannot be set up"
+            );
+            return;
+        }
+
+        fs::set_permissions(&repo, fs::Permissions::from_mode(0o600))
+            .expect("removing the search bit must work");
+        // Prove the failure below comes from the refused probe and not
+        // from an earlier stage: canonicalization must still succeed
+        // while the search bit is gone. Captured while the fixture is
+        // locked but asserted only after the restore, so even a
+        // precondition panic cannot strand an unremovable fixture.
+        let canonicalization_still_ok = canonicalize(&repo).is_ok();
+        let result = find_git_root(&repo);
+        fs::set_permissions(&repo, fs::Permissions::from_mode(0o755))
+            .expect("restoring mode bits must work");
+        assert!(
+            canonicalization_still_ok,
+            "precondition: a mode-0o600 folder must still canonicalize"
+        );
+
+        let err = result.expect_err("a denied .git probe must be an error");
+        assert!(
+            matches!(&err, NotARepoError::NotReadable { .. }),
+            "a refused probe must be NotReadable, got: {err:?}"
+        );
+        assert_eq!(
+            err.os_code(),
+            Some(13),
+            "EACCES is the OS code the §10 log line carries for denied search"
+        );
+        let canonical_text = canonicalize(&repo)
+            .expect("the restored folder must canonicalize")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            err.path(),
+            canonical_text,
+            "the error names the refused walked directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_plain_file_input_surfaces_enotdir_as_not_readable() {
+        // canonicalize accepts any existing path, so a plain file
+        // reaches the walk: probing `<file>/.git` answers ENOTDIR —
+        // classified NotReadable (the path cannot be a folder), with
+        // the errno riding in the typed error, never NoGitEntry. The
+        // classification is pinned on Unix; on other platforms the OS
+        // may classify a non-directory component differently — a
+        // plain-file input is outside the function's contract (the
+        // folder picker supplies folders), documented on the variant.
+        // Runs regardless of privileges, unlike the permission test
+        // above.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let file = dir.path().join("plain.txt");
+        fs::write(&file, b"not a folder").expect("writing the fixture file must work");
+
+        let err = find_git_root(&file)
+            .expect_err("a plain file is not a folder that could sit inside a repository");
+        assert!(
+            matches!(&err, NotARepoError::NotReadable { .. }),
+            "ENOTDIR must be NotReadable, got: {err:?}"
+        );
+        assert_eq!(
+            err.os_code(),
+            Some(20),
+            "ENOTDIR = 20 must ride into the typed error"
+        );
+    }
+
+    #[test]
+    fn a_missing_input_is_the_canonicalize_failure() {
+        // A folder that does not exist cannot even be canonicalized:
+        // the module's existing typed failure (D-086), carried whole —
+        // path text and OS code for the §10 log line.
+        let missing = Path::new("/definitely/not/here");
+        let err = find_git_root(missing)
+            .expect_err("a missing folder must fail canonicalization before any walk");
+        assert!(
+            matches!(&err, NotARepoError::Canonicalize { .. }),
+            "a missing input must surface the canonicalize failure, got: {err:?}"
+        );
+        assert_eq!(
+            err.path(),
+            "/definitely/not/here",
+            "the error names the input the walk was asked about"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            err.os_code(),
+            Some(2),
+            "ENOENT is the code the §10 log line carries for a missing folder"
+        );
+        assert!(
+            err.source().is_some(),
+            "the canonicalize failure rides in the source chain"
+        );
+    }
+
+    #[test]
+    fn the_root_lookup_error_contract_follows_the_module_style() {
+        // The command layer branches on the variants and logs the
+        // Display text; these assertions pin the wording (lowercase,
+        // no trailing punctuation — the house style), the path()
+        // accessor per variant, the io-backed/os-backed split and the
+        // source() chain — without pinning std's strerror table.
+        let no_git = NotARepoError::NoGitEntry {
+            path: "/tmp/plain".into(),
+        };
+        assert_eq!(
+            no_git.to_string(),
+            "no .git entry in /tmp/plain or any of its ancestors"
+        );
+        assert_eq!(no_git.path(), "/tmp/plain");
+        assert!(
+            no_git.io_error().is_none(),
+            "there is no io error behind a negative lookup"
+        );
+        assert_eq!(no_git.os_code(), None);
+        assert!(no_git.source().is_none());
+
+        let not_readable = NotARepoError::NotReadable {
+            path: "/tmp/locked".into(),
+            source: io::Error::from_raw_os_error(13),
+        };
+        assert!(
+            not_readable
+                .to_string()
+                .starts_with("cannot inspect /tmp/locked for a .git entry: "),
+            "the NotReadable text must state the fact, then the OS text: {not_readable}"
+        );
+        assert_eq!(not_readable.path(), "/tmp/locked");
+        assert!(not_readable.io_error().is_some());
+        assert_eq!(not_readable.os_code(), Some(13));
+        assert!(not_readable.source().is_some());
+
+        let canonicalize_failure =
+            canonicalize(Path::new("/definitely/not/here")).expect_err("a missing path fails");
+        let wrapped = NotARepoError::Canonicalize {
+            source: canonicalize_failure,
+        };
+        assert!(
+            wrapped
+                .to_string()
+                .starts_with("cannot look up the git repository: "),
+            "the Canonicalize text must state the fact, then the inner text: {wrapped}"
+        );
+        assert_eq!(wrapped.path(), "/definitely/not/here");
+        assert!(wrapped.io_error().is_some());
+        assert!(wrapped.os_code().is_some());
+        assert!(wrapped.source().is_some());
     }
 }

@@ -6429,3 +6429,126 @@ panicking or wrapping), the live-probe smoke test (tempdir, positive),
 the missing-path probe (ENOENT = 2 on the typed error), and the
 Display/source-chain contract (all three texts, the source() chain
 Some on `ProbeFailed` only).
+
+### D-090 — The Git repository root lookup: canonicalize-first walk-up in `paths`, the negative-lookup/io-refusal split, and the nearest-root consumer split — 2026-11-19
+
+Problem: T-059 implements PRJ-003/D-08's add-project precondition — the
+folder picked in the UI may sit anywhere inside a repository and the
+app must offer the repository root; a folder with no `.git` anywhere
+above is the future `E_NOT_A_REPO` (spec 10). The card pins the walk
+("up from the chosen folder to the folder with `.git` (folder or
+file)") and four acceptance cases, but leaves five points open: (1)
+which module owns the walk; (2) the typed-error shape, given that a
+NEGATIVE lookup ("no repository above") produces no io error at all
+while a REFUSED probe (denied search, ENOTDIR) does — collapsing the
+two would make "could not check" indistinguishable from "checked and
+absent"; (3) whether ALG-052's dir-vs-file distinction applies to the
+walk too; (4) how canonicalization composes with a walk that must
+answer with a path the app can store; (5) what happens when `.git` is
+itself a symlink.
+
+Solution: `find_git_root(path: &Path) -> Result<std::path::PathBuf,
+NotARepoError>` in `crates/eunomia-fs/src/paths.rs`, next to the
+availability check it mirrors and the canonicalization it builds on.
+
+- PLACEMENT: `paths`. The walk IS a path check on a UI-supplied folder
+  (the module's pinned responsibility), it is the add-by-hand twin of
+  `check_project_available`'s `.git` probe — the §6.9 row "folder with
+  `.git` (folder or file)" checked one level at a time upward — and it
+  consumes the module's own `canonicalize`. Not `scan`: ALG-050ff is
+  discovery over a scan root with its own classification and skip
+  reasons; this answers "is THIS chosen folder inside a repository, and
+  where does it start". No new module (D-019's boundary stands), no new
+  dependency (the walk is std `Path::ancestors` plus one
+  `symlink_metadata` per level; the manifest and `Cargo.lock` are
+  untouched).
+- CANONICALIZE-FIRST, THE D-086 POSTURE: the input resolves through the
+  module's `canonicalize` before any probe, so the returned root is the
+  canonical stored form (DB-030) and the add flow gets "offer the root"
+  and "store the root" from one answer. It also makes the walk SAFE by
+  construction: every ancestor of a canonical path is a strict prefix
+  of it, so `Path::ancestors` visits each level exactly once and
+  terminates at the filesystem root (whose `.git` probe still runs) —
+  no cycle is possible because symlinks are already resolved (D-07).
+  The cost is honest and accepted: canonicalization requires the whole
+  path to EXIST, so a vanished folder fails as the typed
+  `CanonicalizeError` before the walk can say anything about
+  repositories — the right answer anyway for a UI pick (the folder
+  existed at pick time; if it is gone now, that is D-09's situation,
+  not a repository question).
+- TWO FAILURE CLASSES, TWO KINDS OF VARIANT: `NotARepoError` is named
+  for the §10 code the add flow raises, but it is an enum because the
+  failure modes differ in kind. `NoGitEntry { path }` — every level up
+  to the filesystem root was probed and none has `.git`: a fact about
+  the tree, and NO io error exists (a negative lookup is an absence,
+  not a refusal — there is no syscall to carry), so the variant has no
+  `io::Error`, `os_code()` answers `None`, and it is THE variant the
+  future `E_NOT_A_REPO` mapping consumes. `NotReadable { path, source
+}` — a probe REFUSED by the OS (denied search on a walked folder; the
+  canonicalized input being a plain file → ENOTDIR; a drive dropped
+  mid-walk): the refused path text and the exact `io::Error` ride along
+  for §10's log facts, following D-084's precedent of a coarse access
+  bucket (`NotReadable`, this module's established name) with the exact
+  raw code carried. `Canonicalize { source }` — the input itself
+  unresolvable, D-086's typed failure carried whole (so the missing-
+  input case surfaces the existing typed failure instead of a second
+  encoding of it). What the command layer maps the io-backed variants
+  to is its call (D-062's posture keeps `AppError` out of this crate);
+  the hand-rolled impls stay `thiserror`-free (D-017 store precedent).
+- THE PERMISSION WALK IS DETERMINISTIC-TESTABLE ANYWAY: canonicalizing
+  the FINAL component needs search permission only on its parent,
+  while the `<folder>/.git` probe needs search ON the folder — so mode
+  0o600 on the picked folder pins the refused-probe branch without any
+  race (verified on the platform before writing: realpath succeeds,
+  the probe answers EACCES = 13). An ancestor denied in the walk's
+  window is the same variant by construction; the TOCTOU posture is
+  documented like D-084's — probes are separate OS calls over a live
+  tree, the verdict is what the probes observed, and `NotFound` on a
+  level simply continues the climb.
+- `.git` DIR, FILE, OR SYMLINK — ALL ROOT TERMINATORS: the walk serves
+  the add-by-hand flow, where §6.9 and D-06 accept the file form ("you
+  can add it by hand"); ALG-052's "submodule or worktree" skip is a
+  SCAN rule with a different consumer (discovery over a whole tree),
+  not a walk-up rule — a linked worktree resolves to the worktree's
+  own root, never through the pointer into the main repository. The
+  `.git`-symlink ruling follows D-084 (presence, not validity): the
+  probe is `symlink_metadata`, which does not follow the final
+  symlink, so even a DANGLING `.git` symlink terminates the walk;
+  whether the pointer leads to a healthy gitdir is git's business.
+- NEAREST ROOT WINS: bottom-up, the FIRST `.git` stops the walk — a
+  folder inside a nested repository resolves to the inner one (D-06:
+  nested repositories are registered as separate projects), and "the
+  picked folder IS the root" is the walk's first iteration, not a
+  special case.
+- lib.rs STAYS UNTOUCHED (the D-087 posture, now stronger): TWO
+  concurrent sibling tasks own new module lines in that file (T-064,
+  T-065); `paths.rs`'s module docs carry the accurate
+  implemented-so-far record, and the orchestrator's merge refreshes
+  the shared file once for all three tasks.
+
+Tests: 11 unit tests + 1 doctest in `paths.rs`, colocated, through the
+public function on real temp fixtures — the card's four acceptance
+cases first: the picked folder IS the root (the answer equals the
+canonicalized input); a subfolder two levels deep finds the same root;
+the typed negative lookup outside any repository (`path()` pinned to
+the canonicalized input, `os_code()`/`io_error()`/`source()` all None;
+the temp dir's REAL ancestors verified `.git`-free with independent fs
+probes so the fixture cannot pass vacuously, loud skip if the host
+really has a repository above); and the `.git` FILE terminates the
+walk (worktree form, entered from a nested folder). Plus: the nearest
+root wins over an outer nested repository (both sides asserted); a
+symlinked subfolder resolves to the real root path (the
+canonicalize-first observable; the alias spelling asserted absent); a
+dangling `.git` symlink terminates the walk; a denied probe under mode
+0o600 is `NotReadable` with EACCES = 13 and the refused path text
+(loud root skip, mode restored before assertions, a
+canonicalization-still-ok precondition captured while locked); a
+plain-file input is `NotReadable` with ENOTDIR = 20 (root-proof; pins
+that canonicalize accepts files and the walk classifies the refusal
+honestly; pinned on Unix — on other platforms the classification of
+this OUT-OF-CONTRACT input follows the OS answer and is documented on
+the variant: the folder picker supplies folders, canonicalize merely
+requires existence); a missing input is the `Canonicalize` variant (path text,
+ENOENT = 2 pinned on unix); and the error-contract test pins the
+Display texts, `path()` per variant, the io-backed split and the
+`source()` chain.
