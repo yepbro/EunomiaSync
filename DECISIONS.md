@@ -6154,3 +6154,153 @@ NonZeroUsize, exclude_names: Vec<String> }` is built by the command
   pinned; the mid-walk assertion tightened to the exact
   `delivered <= walk_thread_count()` bound (the reviewer verified it
   against `ignore`'s synchronous per-thread delivery).
+
+### D-088 — Stale app tmp cleanup: `temp_files` module, the pinned staging-name grammar, and the sweep's conservative deletion semantics — 2026-11-19
+
+Problem: T-065 implements spec 9.4 phase 1 step 7 ("delete stale app
+temporary files in the target folder (older than one hour)") — the
+cleanup for the debris a killed process leaves behind (9.5's staging
+file, T-F2: the original file is intact; on the next sync, the temp
+file is deleted). Six readings the spec leaves open: where the module
+lives (the T-003 module plan names scan/paths/backup/atomic, and the
+atomic module is T-066's); the token alphabet for "8 random
+characters"; whether the sweep keys on the target file's name; the
+strictness of "older than one hour"; what a per-file failure and a
+missing folder mean for the caller; and how symlinks and races are
+handled.
+
+Solution: a NEW module `crates/eunomia-fs/src/temp_files.rs` — a
+deliberate D-019 boundary change (the plan's four modules own scan/
+paths/backup/atomic concerns; the staging-file NAME convention is
+neither of those, and it must exist before the T-066 writer lands so
+the writer can only spell names the cleanup recognizes). `lib.rs`
+gains exactly one `pub mod temp_files;` line; the `//!` prose list is
+deliberately untouched (D-062's known-open-item posture — parallel
+tasks edit that block only when it is next free).
+
+The API is three functions and their types. (1) `tmp_file_name(
+target_name, token)` — the ONLY spelling of a staging name: `.` +
+target name + `.eunomia-` + token + `.tmp`, the token validated as
+exactly 8 lowercase-hex characters. (2) `is_app_tmp_file(name,
+target_name)` — the matcher, byte-exact and case-sensitive: the
+writer only ever writes lowercase hex, so an uppercase spelling is
+somebody else's file (a looser match would widen what a sweep may
+delete). (3) `remove_stale_tmp_files(folder, target_name, now)` —
+the sweep. The builder/matcher symmetry is pinned by tests: a name
+the builder produces always matches its own target and never a
+different one, so staging debris can never be unrecognizable to the
+cleanup.
+
+TOKEN ALPHABET: the spec's "8 random characters" is pinned to
+lowercase hex `[0-9a-f]` (`TMP_TOKEN_ALPHABET`, `TMP_TOKEN_LEN = 8`),
+derived from the repo's conventions — `hash.rs` renders every digest
+as lowercase hex and D-080 already fixed the 8-char short-id form as
+the first 8 lowercase-hex characters of a SHA-256; one alphabet
+across all app-generated short identifiers, no second convention.
+16^8 ≈ 4·10^9 tokens are ample because the writer creates with
+`create_new` (9.5 step 2) — a collision is an error and a retry, not
+corruption. Hex is also the safe deletion choice: it excludes
+uppercase letters, so `.X.eunomia-ABCDEFGH.tmp` stays foreign.
+
+KEYING: the sweep keys on the target file's own name — a project
+removes only ITS target's staging files (`.CLAUDE.md.eunomia-*.tmp`
+stays when `AGENTS.md` is swept). The spec's `<name>` in 9.5 step 2
+is the file being written, and step 7's "app temporary files in the
+target folder" is read through that same grammar; per-target keying
+is the conservative reading and satisfies T-F2 (the next sync of the
+same target deletes the debris).
+
+STALENESS: strictly older than one hour — `now − mtime > 1h`; a file
+exactly one hour old stays until the next sweep. "Older than"
+is a strict inequality, and deletion ambiguity resolves toward not
+deleting. The mtime is the entry's OWN (`DirEntry::metadata`, no
+symlink traversal); a future mtime (clock skew) fails
+`duration_since` and is never stale. `now` is an explicit
+`SystemTime` parameter — time is a parameter, never a clock
+(D-061's posture); the pipeline reads the clock once per run.
+
+DELETION GATES: an entry is deleted only when the name matches for
+that target AND the entry is a regular file AND it is stale. A
+directory or a symlink with a tmp-shaped name was not created by the
+writer (which makes regular files only) — foreign, left alone; the
+symlink is never followed when reading metadata (D-07's not-followed
+posture, ALG-054's names-and-metadata-only rule — the sweep never
+opens file contents). One listing level, never recursive: 9.5 stages
+in the same folder as the target, so deeper entries cannot be the
+writer's. Non-UTF-8 entry names cannot match a `&str` grammar:
+foreign by construction.
+
+FAILURE SEMANTICS: a missing folder (`NotFound` on the listing) is a
+successful no-op with an empty report — phase 1 step 7 is
+housekeeping between the availability check (step 1) and the write
+(phase 3), it must never fail a run, and "no stale tmp files in a
+folder that does not exist" holds vacuously; a folder that cannot be
+listed at all is the typed `TmpSweepError::ListingFailed` (OS code
+riding in the source, `io_error()`/`os_code()` accessors in the
+`paths.rs` shape); per-file failures (denied stat or unlink) are
+collected in `TmpSweepReport::failed` and the sweep continues — one
+unremovable file must not stop the cleanup (phase 1's "skipped
+projects do not stop the run" spirit), and the caller logs the
+paths. An entry that vanishes between listing, stat and unlink is
+convergence, not failure: the goal state already holds, it is
+silently skipped. TOCTOU is honest: a listing + stat + unlink over a
+live filesystem pretends no snapshot; a staging file created after
+the listing is at most one sweep away (the writer deletes its own
+temporary on every error path, 9.5 step 7).
+
+The atomic-write implementation itself is NOT here — `atomic.rs`
+stays T-066's; this module only fixes the name it must use.
+COORDINATION RULE FOR T-066: `target_name` is the RESOLVED target
+file's name — 9.5 step 1 resolves symlinks before staging, so a
+`CLAUDE.md` link stages (and is swept) as `AGENTS.md`; the sweep and
+the writer must hand the same spelling to the grammar, or each
+spelling's debris waits for the other target's sweep. Deliberately
+no new dependencies (the crate manifest is untouched; `std::time::
+SystemTime` is std, and `tempfile` is already a crate dependency —
+pinned by D-019 for the atomic module — serving the tests). The
+builder rejects a target name that is not a single plain file name
+(separator, NUL, `.`/`..` — it would stage in another folder, which
+the one-level sweep can never reach), and one shared predicate
+(`is_plain_file_name`) gates BOTH the builder and the matcher, so
+the matcher matches nothing for a target the builder could not name
+— a contract-violating caller cannot widen what a sweep may delete.
+Testing: 34 colocated test functions (33 run on Unix CI legs, 1
+Windows-gated for the platform's backslash separator) — the matcher
+near-miss battery (missing dot, extra
+suffix, wrong length, non-hex, uppercase, another target, extra
+prefix, empty token), builder validation and verbatim grammar
+spelling, and real-folder sweeps for the card's acceptance (stale
+deleted, fresh stays, foreign stays — with stale mtimes), the exact
+1-hour boundary and 1-second-past, multiple stale files, missing and
+empty folders, a subfolder not swept, a future mtime, and Unix-gated
+permission-collection (two stale files failing in an r-x folder —
+collecting BOTH proves no abort; loud root skip), symlink-and-dangling
+skip with a stale target (fails any implementation that follows the
+link), a stale tmp-shaped directory kept with its content, and a
+non-UTF-8 name never deleted. Mutations verified the battery bites:
+widening `STALE_AFTER`, case-folding the token alphabet, aborting at
+the first per-file failure, following symlinks in metadata, and
+dropping the regular-file gate each fail exactly their test.
+Round-1 review (deepseek-v4.1-flash) forced the `#[cfg(unix)]` gate
+the listing-failure test had missed (proven by a Windows-target
+compile check), the target-name validation, the empty-target
+matcher guard, the mid-stream report-discard documentation, and two
+D-088 wording fixes; round-2 review (hy4-flash-free) approved with
+the shared `is_plain_file_name` symmetry guard and this count
+correction as its only outcomes.
+`paths.rs`/`scan.rs`/`atomic.rs`, both manifests and `Cargo.lock`
+untouched. Full suite: 831 tests green (33 new on Unix, 798
+before); fmt,
+clippy `-D warnings`, `cargo deny check`, pnpm lint / format:check /
+typecheck / test all green, plus a Windows-target compile check of
+the crate's tests (`cargo check --target x86_64-pc-windows-msvc
+--tests`, round-1 review finding: the listing-failure test had
+missed its `#[cfg(unix)]` gate). The separator validation follows
+`std::path::is_separator` (platform-defined: a backslash is a
+separator on Windows, an ordinary file-name character on Unix —
+pinned per platform). Known open items, D-062's
+posture: lib.rs's `//!` module list, ARCHITECTURE.md's `eunomia-fs`
+tree (which also still shows `paths` as a skeleton) and the
+`atomic` skeleton's doc block all deliberately did NOT gain a
+`temp_files` entry — parallel tasks (T-058/T-061/T-066) edit those
+blocks; reconcile the lists when the files are next free.
