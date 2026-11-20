@@ -104,6 +104,21 @@
 //! changed `default.*` settings, the §6.9 write-access warning over
 //! read-only fixtures, the honest no-database answer, and the
 //! registration pin.
+//!
+//! The `exclusions_list`/`exclusion_remove` tests (T-078, §7.10
+//! Projects module, §6.4 "Path exclusion", D-10/PRJ-013…018) pin the
+//! D-10 "Excluded paths" screen's backend over the mock runtime: the
+//! card's acceptance criterion composed with T-075's classifier end
+//! to end (a real `.git` fixture whose path is excluded in the store
+//! classifies `excluded`; after the command, the SAME scan +
+//! classification classifies it `new`, §6.4's "the path is found by a
+//! scan again" — the walker and classifier are driven directly, the
+//! scan command layer T-076 does not exist yet), the list's every
+//! field in the stable order, the empty-database and honest
+//! no-database answers, the corrupt-cell fallback envelope, the
+//! removal's one-transaction delete + journal (with the rollback
+//! proof in the settings test's trigger shape), the typed
+//! unknown-id refusal, and the registration pins.
 
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -3695,4 +3710,670 @@ fn the_project_add_manual_command_is_registered_with_the_specta_builder() {
         1,
         "lib.rs must register the `project_add_manual` command exactly once (§7.10, D-009)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `exclusions_list` and `exclusion_remove` (T-078, §7.10 Projects
+// module, §6.4 "Path exclusion", D-10/PRJ-013…018, D-093, D-098)
+// ---------------------------------------------------------------------------
+
+/// A mock app with both exclusion commands registered over a fresh
+/// database in a temp root — the healthy-app state (the
+/// `projects_app` shape).
+fn exclusions_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::exclusions_list,
+            crate::commands::exclusion_remove
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    (temp, app)
+}
+
+/// Seeds one exclusion row through the repository (the `Db::run` path
+/// a producing command takes — the archive flow's composition) and
+/// returns its row id. The path and key arrive owned: the executor's
+/// closure is `'static`, and the `FnMut` replay only borrows them.
+fn seed_exclusion(
+    database: &crate::db::Db,
+    path: String,
+    path_key: String,
+    reason: eunomia_store::projects::ExclusionReason,
+) -> String {
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        let new = eunomia_store::projects::NewExclusion {
+            path: &path,
+            path_key: &path_key,
+            reason,
+        };
+        eunomia_store::projects::create_exclusion(tx, &new)
+            .map(|row| row.id)
+            .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("seeding an exclusion through the repository must work")
+}
+
+/// Reads the stored exclusions through the repository — the
+/// "database unchanged" assertions' window into the table.
+fn stored_exclusions(database: &crate::db::Db) -> Vec<eunomia_store::projects::Exclusion> {
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::projects::list_exclusions(tx)
+            .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("reading the exclusions through the repository must work")
+}
+
+/// Invokes `exclusions_list` over the app's `main` webview,
+/// deserializing the success payload into the typed DTO.
+fn invoke_exclusions_list(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+) -> Result<Vec<crate::commands::ExclusionEntry>, serde_json::Value> {
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request("exclusions_list", serde_json::json!({})),
+    );
+    match response {
+        Ok(payload) => Ok(payload
+            .deserialize::<Vec<crate::commands::ExclusionEntry>>()
+            .expect("the success payload must deserialize into the DTO")),
+        Err(error) => Err(error),
+    }
+}
+
+/// Invokes `exclusion_remove` with the `id` wire value over the app's
+/// `main` webview.
+fn invoke_exclusion_remove(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    id: &str,
+) -> Result<(), serde_json::Value> {
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request("exclusion_remove", serde_json::json!({ "id": id })),
+    );
+    match response {
+        Ok(payload) => {
+            // The success payload is the unit value; deserializing it
+            // pins the wire shape (a `null` body, not something else).
+            payload
+                .deserialize::<()>()
+                .expect("the success payload must deserialize into the unit");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Builds the ALG-053 [`ScanRegistry`] exactly the way the scan
+/// command task (T-076) will build it from the store: the three
+/// membership sets read through the repositories (D-093), keys as
+/// stored (D-098's snapshot contract).
+fn scan_registry_from(database: &crate::db::Db) -> eunomia_fs::scan_classify::ScanRegistry {
+    let database = database.clone();
+    let (active, archived, excluded) =
+        tauri::async_runtime::block_on(database.run(move |tx| {
+            let keys = |scope: eunomia_store::projects::ListScope| -> Result<Vec<String>, crate::errors::AppError> {
+                eunomia_store::projects::list(tx, scope)
+                    .map_err(crate::commands::projects_store_to_app_error)
+                    .map(|rows| rows.into_iter().map(|project| project.path_key).collect())
+            };
+            let active = keys(eunomia_store::projects::ListScope::Active)?;
+            let archived = keys(eunomia_store::projects::ListScope::Archived)?;
+            let excluded: Vec<String> = eunomia_store::projects::list_exclusions(tx)
+                .map_err(crate::commands::projects_store_to_app_error)?
+                .into_iter()
+                .map(|row| row.path_key)
+                .collect();
+            Ok((active, archived, excluded))
+        }))
+        .expect("building the registry from the store must work");
+    eunomia_fs::scan_classify::ScanRegistry::new(&active, &archived, &excluded)
+}
+
+/// Runs the walker + classifier directly over `root` — the T-076
+/// composition in miniature (the scan command layer does not exist
+/// yet): the root is canonicalized first (the caller obligation
+/// D-098 records), the walk uses §6.5's default depth and D-05's
+/// default exclusion names exactly as T-076 will load them from the
+/// settings, and every found repository is classified against
+/// `registry`.
+fn scan_classified_from(
+    root: &std::path::Path,
+    registry: &eunomia_fs::scan_classify::ScanRegistry,
+) -> Vec<eunomia_fs::scan_classify::ClassifiedRepository> {
+    let canonical =
+        eunomia_fs::paths::canonicalize(root).expect("the fixture root must canonicalize");
+    let options = eunomia_fs::scan::ScanOptions {
+        max_depth: std::num::NonZeroUsize::new(6).expect("6 is non-zero"),
+        exclude_names: [
+            "node_modules",
+            "vendor",
+            ".git",
+            "dist",
+            "build",
+            "target",
+            ".venv",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    };
+    let cancel = eunomia_fs::scan::CancelToken::new();
+    let found = std::sync::Mutex::new(Vec::new());
+    let outcome = eunomia_fs::scan::scan_repositories(&canonical, &options, &cancel, |event| {
+        if let eunomia_fs::scan::ScanEvent::Repository { path } = event {
+            found
+                .lock()
+                .expect("the test collector cannot be poisoned")
+                .push(eunomia_fs::scan_classify::classify_repository(
+                    path, registry,
+                ));
+        }
+    });
+    assert_eq!(outcome, eunomia_fs::scan::ScanOutcome::Completed);
+    found
+        .into_inner()
+        .expect("the test collector cannot be poisoned")
+}
+
+/// The classified verdict of the one repository whose path ends with
+/// `name` — the per-name accessor the acceptance test asserts
+/// through, so walker order never enters the assertion.
+fn class_of(
+    found: &[eunomia_fs::scan_classify::ClassifiedRepository],
+    name: &str,
+) -> eunomia_fs::scan_classify::ScanClass {
+    found
+        .iter()
+        .find(|repo| repo.path().ends_with(name))
+        .unwrap_or_else(|| panic!("the {name} repository must be found, got: {found:?}"))
+        .class()
+}
+
+#[test]
+fn removing_an_exclusion_makes_the_next_scan_classify_the_path_new() {
+    // T-078's acceptance criterion, composed with T-075/D-098 end to
+    // end: a real `.git` fixture on disk, a real exclusion row in the
+    // store, the real command over IPC — the scan + classification
+    // (driven directly: the scan command layer, T-076, does not exist
+    // yet) answers `excluded` before the removal and `new` after it,
+    // while a never-excluded sibling stays `new` throughout (§6.4:
+    // "the path is found by a scan again").
+    let (temp, app) = exclusions_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let excluded_repo = repo_dir(temp.path(), "excluded-repo");
+    repo_dir(temp.path(), "free-repo");
+    let canonical = eunomia_fs::paths::canonicalize(&excluded_repo)
+        .expect("the fixture repository must canonicalize");
+    let key = eunomia_fs::paths::path_key(&canonical);
+    let id = seed_exclusion(
+        &database,
+        canonical.display().to_string(),
+        key,
+        eunomia_store::projects::ExclusionReason::Manual,
+    );
+
+    // Before: the excluded repository classifies `excluded`, the
+    // never-excluded sibling `new` (ALG-053 over the store-built
+    // registry — both groups of PRJ-002's scan window).
+    let before = scan_classified_from(temp.path(), &scan_registry_from(&database));
+    assert_eq!(
+        class_of(&before, "excluded-repo"),
+        eunomia_fs::scan_classify::ScanClass::Excluded,
+        "the store's exclusion row keeps the path out of the New group"
+    );
+    assert_eq!(
+        class_of(&before, "free-repo"),
+        eunomia_fs::scan_classify::ScanClass::New
+    );
+
+    // Act: the command under test, over the real IPC envelope.
+    invoke_exclusion_remove(&webview, &id).expect("removing the exclusion must succeed");
+
+    // After: the SAME scan + registry construction answers `new` for
+    // the removed path — the physical delete is what changed the
+    // verdict — and the sibling is untouched.
+    let after = scan_classified_from(temp.path(), &scan_registry_from(&database));
+    assert_eq!(
+        class_of(&after, "excluded-repo"),
+        eunomia_fs::scan_classify::ScanClass::New,
+        "§6.4: after the removal the path is found by a scan again"
+    );
+    assert_eq!(
+        class_of(&after, "free-repo"),
+        eunomia_fs::scan_classify::ScanClass::New
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn removing_an_exclusion_of_an_archived_project_keeps_the_scan_verdict_archived() {
+    // The PRJ-017 production shape (the round-1 review's ask):
+    // archiving a scan-found project leaves an ARCHIVED row AND a
+    // `removed_scanned` exclusion on the same `path_key` (§6.4, the
+    // D-093 coexistence). D-098's fixed priority answers `archived`
+    // — the project row is the truer fact — so removing the
+    // exclusion alone must NOT flip the verdict to `new`: the
+    // archived row still holds the key (DB-015), and only
+    // `project_restore` (T-109) clears the last trace. The removal
+    // itself is still §6.4's physical delete: the exclusion row is
+    // gone, and the projects row is untouched.
+    let (temp, app) = exclusions_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let repo = repo_dir(temp.path(), "archived-repo");
+    let canonical =
+        eunomia_fs::paths::canonicalize(&repo).expect("the fixture repository must canonicalize");
+    let key = eunomia_fs::paths::path_key(&canonical);
+    // The archived project row (§6.4): created and archived through
+    // the repository — the archive flow's own composition, the seam
+    // T-109's `project_archive` will own. `seed_project` takes a
+    // `'static` key, so the row is seeded inline with the runtime
+    // key (the `column_project` shape, owned values into the `'static`
+    // closure).
+    let (seed_path, seed_key) = (canonical.display().to_string(), key.clone());
+    let project_id = tauri::async_runtime::block_on(database.run(move |tx| {
+        let new = column_project(&seed_path, &seed_key, "Archived", "ARCH", "slate");
+        eunomia_store::projects::create(tx, &new)
+            .map(|project| project.id)
+            .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("seeding the project through the repository must work");
+    archive_project(&database, project_id.clone());
+    let id = seed_exclusion(
+        &database,
+        canonical.display().to_string(),
+        key,
+        eunomia_store::projects::ExclusionReason::RemovedScanned,
+    );
+
+    // Before: the coexistence classifies `archived` (D-098's
+    // priority — the row over its exclusion side effect).
+    let before = scan_classified_from(temp.path(), &scan_registry_from(&database));
+    assert_eq!(
+        class_of(&before, "archived-repo"),
+        eunomia_fs::scan_classify::ScanClass::Archived,
+        "the archived row wins over its exclusion side effect (PRJ-017)"
+    );
+
+    // Act: the command under test removes the exclusion half.
+    invoke_exclusion_remove(&webview, &id).expect("removing the exclusion must succeed");
+
+    // After: the verdict stays `archived` — the archived row still
+    // holds the key — and the removal did its own work: no exclusion
+    // row left, the projects row untouched in its archived state.
+    let after = scan_classified_from(temp.path(), &scan_registry_from(&database));
+    assert_eq!(
+        class_of(&after, "archived-repo"),
+        eunomia_fs::scan_classify::ScanClass::Archived,
+        "the exclusion removal alone does not resurrect an archived project's key"
+    );
+    assert_eq!(
+        stored_exclusions(&database).len(),
+        0,
+        "the exclusion row is gone"
+    );
+    let projects = stored_projects(&database);
+    assert_eq!(projects.len(), 1, "the projects row is untouched");
+    assert_eq!(
+        projects[0].state,
+        eunomia_store::projects::ProjectState::Archived
+    );
+    assert_eq!(projects[0].id, project_id);
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn exclusions_list_serves_every_field_in_the_stable_order_over_ipc() {
+    // §6.2's every column on the wire — id, path, path_key, reason
+    // (both vocabulary members, stored spellings), created_at — in
+    // the repository's stable order: `created_at` first, the UUIDv7
+    // id's insertion order inside one millisecond. The second half of
+    // the test pins that tiebreak for real: both rows' `created_at`
+    // are forced to ONE timestamp through the executor, so the order
+    // the re-read returns can only be the id's.
+    let (temp, app) = exclusions_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let first = seed_exclusion(
+        &database,
+        "/repos/first".to_owned(),
+        "/repos/first".to_owned(),
+        eunomia_store::projects::ExclusionReason::RemovedScanned,
+    );
+    let second = seed_exclusion(
+        &database,
+        "/repos/second".to_owned(),
+        "/repos/second".to_owned(),
+        eunomia_store::projects::ExclusionReason::Manual,
+    );
+
+    let webview = main_webview(&app);
+    let entries = invoke_exclusions_list(&webview).expect("the listing must succeed");
+
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        [first.as_str(), second.as_str()],
+        "the order is created-at/id — the insertion order here"
+    );
+    let entry = &entries[0];
+    assert_eq!(entry.path, "/repos/first", "the canonical path (DB-030)");
+    assert_eq!(entry.path_key, "/repos/first", "the identity key (DB-030)");
+    assert_eq!(entry.reason, "removed_scanned", "the stored CHECK spelling");
+    assert_eq!(entries[1].reason, "manual", "the second vocabulary member");
+    assert!(
+        entry.created_at.ends_with('Z')
+            && entry.created_at.len() == "2026-11-20T13:03:22.123Z".len(),
+        "the DB-002 UTC ISO-8601 shape, got: {}",
+        entry.created_at
+    );
+
+    // The tiebreak pin: one shared timestamp for both rows (written
+    // through the executor the command uses — `created_at` has no
+    // CHECK, a plain UPDATE is the seam), and the order must still be
+    // the id's — a created-at-only sort could answer either way.
+    let (tie_first, tie_second) = (first.clone(), second.clone());
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.execute(
+            "UPDATE project_exclusions SET created_at = '2026-11-20T10:00:00.000Z'
+             WHERE id = ?1 OR id = ?2",
+            rusqlite::params![tie_first, tie_second],
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("tying the timestamps through the executor must work");
+    let tied = invoke_exclusions_list(&webview).expect("the re-read must succeed");
+    assert_eq!(
+        tied.iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        [first.as_str(), second.as_str()],
+        "a same-millisecond tie resolves by the UUIDv7 id, in insertion order"
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn exclusions_list_answers_an_empty_list_for_a_fresh_database() {
+    // The empty app's honest answer: an empty list, not an error and
+    // not a null payload the frontend has to special-case (the
+    // `projects_list` pin).
+    let (temp, app) = exclusions_app();
+    let entries = invoke_exclusions_list(&main_webview(&app))
+        .expect("a fresh database must answer successfully");
+    assert_eq!(entries, Vec::new());
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_exclusion_commands_answer_honestly_without_a_database() {
+    // Recovery mode (the `projects_list` pin): no `Db` managed — the
+    // recorded D-037 fallback with the `NoDatabase` diagnostic, never
+    // a pretend-empty list (or a successful no-op removal) that would
+    // lie about the exclusions table being empty.
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::exclusions_list,
+            crate::commands::exclusion_remove
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    let webview = main_webview(&app);
+    let error =
+        invoke_exclusions_list(&webview).expect_err("the no-database state must fail honestly");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(error["message_key"], serde_json::json!("errors.db_locked"));
+    assert_eq!(error["details"]["os_kind"], serde_json::json!("NoDatabase"));
+    let error = invoke_exclusion_remove(&webview, "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f")
+        .expect_err("the removal needs the database too");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(error["details"]["os_kind"], serde_json::json!("NoDatabase"));
+}
+
+#[test]
+fn a_corrupt_exclusion_reason_cell_answers_the_fallback_envelope_not_validation() {
+    // The corrupt-cells wire contract (the T-027 round-2 rule, applied
+    // to the exclusions table): a stored vocabulary cell outside its
+    // CHECK vocabulary is corruption, NOT caller input — the read
+    // fails with the recorded D-037 fallback, a `ProjectsCorrupt`
+    // diagnostic, empty params and a class-only `os_message` (a
+    // tampered cell is arbitrary database text; `params` and
+    // `os_message` feed the log line and the localized message).
+    // Written through the `ignore_check_constraints` test seam — the
+    // schema CHECKs make such a cell unreachable through the API.
+    let (temp, app) = exclusions_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    seed_exclusion(
+        &database,
+        "/repos/tampered".to_owned(),
+        "/repos/tampered".to_owned(),
+        eunomia_store::projects::ExclusionReason::Manual,
+    );
+    tauri::async_runtime::block_on(database.run(|tx| {
+        tx.execute_batch(
+            "PRAGMA ignore_check_constraints = 1;\n\
+             UPDATE project_exclusions SET reason = 'bogus';\n\
+             PRAGMA ignore_check_constraints = 0;",
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("tampering the reason cell through the executor must work");
+
+    let error =
+        invoke_exclusions_list(&main_webview(&app)).expect_err("a corrupt cell must fail the read");
+
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(error["message_key"], serde_json::json!("errors.db_locked"));
+    assert_eq!(
+        error["params"],
+        serde_json::json!({}),
+        "no raw cell travels"
+    );
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("ProjectsCorrupt")
+    );
+    assert_eq!(
+        error["details"]["os_message"],
+        serde_json::json!("a stored reason cell is outside its vocabulary"),
+        "the diagnostic names the column and class only, never the stored value"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn exclusion_remove_deletes_the_row_and_journals_the_path_in_one_transaction() {
+    // §6.4's physical delete through the real command: the row is
+    // gone, the list reflects it, and exactly one journal entry
+    // records the removal inside the same transaction —
+    // `project.changed` at info/user/ok whose File detail carries the
+    // removed path (the frozen-vocabulary fit the command docs
+    // record), with no entity or project id (no EntityType names an
+    // exclusion).
+    let (temp, app) = exclusions_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let removed = seed_exclusion(
+        &database,
+        "/repos/removed".to_owned(),
+        "/repos/removed".to_owned(),
+        eunomia_store::projects::ExclusionReason::RemovedScanned,
+    );
+    let kept = seed_exclusion(
+        &database,
+        "/repos/kept".to_owned(),
+        "/repos/kept".to_owned(),
+        eunomia_store::projects::ExclusionReason::Manual,
+    );
+
+    invoke_exclusion_remove(&webview, &removed).expect("the removal must succeed");
+
+    // The row is physically gone; the sibling stays.
+    let stored = stored_exclusions(&database);
+    assert_eq!(
+        stored.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        [kept.as_str()],
+        "the physical delete removed exactly the addressed row"
+    );
+    let entries = invoke_exclusions_list(&webview).expect("the list must reflect the removal");
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        [kept.as_str()]
+    );
+
+    // The journal: exactly one entry, the removal's own event.
+    let journal = journal_entries(&database);
+    assert_eq!(journal.len(), 1, "one removal, one entry");
+    assert_eq!(journal[0].action.as_str(), "project.changed");
+    assert_eq!(journal[0].level.as_str(), "info");
+    assert_eq!(journal[0].visibility.as_str(), "user");
+    assert_eq!(journal[0].result.as_str(), "ok");
+    assert_eq!(journal[0].entity, None, "no EntityType names an exclusion");
+    assert_eq!(journal[0].project_id, None, "no project row is involved");
+    assert_eq!(
+        journal[0].details,
+        Some(serde_json::json!({ "path": "/repos/removed" })),
+        "the File detail carries the removed path — the fact the screen shows"
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn exclusion_remove_rejects_an_unknown_id_with_the_typed_envelope_and_changes_nothing() {
+    // The typed NotFound refusal: an id no row matches (a stale
+    // screen or a replayed click) is `E_VALIDATION` naming the field
+    // — the honest §10 fit of the frozen registry — with the whole
+    // operation rejected: the rows and the journal are provably
+    // unchanged.
+    let (temp, app) = exclusions_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    seed_exclusion(
+        &database,
+        "/repos/only".to_owned(),
+        "/repos/only".to_owned(),
+        eunomia_store::projects::ExclusionReason::Manual,
+    );
+
+    let error = invoke_exclusion_remove(&webview, "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f")
+        .expect_err("an unknown id must be rejected");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"), "{error}");
+    assert_eq!(error["message_key"], serde_json::json!("errors.validation"));
+    assert_eq!(
+        error["params"],
+        serde_json::json!({
+            "field": "id",
+            "value": "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f",
+            "reason": "no exclusion with this id",
+        })
+    );
+    assert_eq!(stored_exclusions(&database).len(), 1, "no row was touched");
+    assert_eq!(journal_entries(&database).len(), 0, "nothing was journaled");
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_failed_exclusion_remove_rolls_back_the_delete_with_its_journal_entry() {
+    // D-051's in-transaction semantics, proven through the real
+    // command (the settings rollback test's shape): the journal entry
+    // shares the operation's transaction, so a failure AFTER the
+    // DELETE succeeded rolls both back — the row survives and the
+    // journal claims nothing. The failure is staged deterministically
+    // inside the database: a trigger that rejects every journal
+    // insert (RAISE(ABORT) → SQLITE_CONSTRAINT → the shared base
+    // classifier's E_VALIDATION with the SQLite facts in details).
+    let (temp, app) = exclusions_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let id = seed_exclusion(
+        &database,
+        "/repos/rollback".to_owned(),
+        "/repos/rollback".to_owned(),
+        eunomia_store::projects::ExclusionReason::Manual,
+    );
+    tauri::async_runtime::block_on(database.run(|tx| {
+        tx.execute_batch(
+            "CREATE TRIGGER reject_every_journal_entry BEFORE INSERT ON action_log
+             BEGIN SELECT RAISE(ABORT, 'test: reject'); END;",
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("staging the trigger must work");
+
+    let error =
+        invoke_exclusion_remove(&webview, &id).expect_err("the staged abort must fail the removal");
+    assert_eq!(
+        error["code"],
+        serde_json::json!("E_VALIDATION"),
+        "the constraint abort maps through the base classifier: {error}"
+    );
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("ConstraintViolation"),
+        "the SQLite facts travel in details: {error}"
+    );
+
+    // Assert: the DELETE rolled back with the journal insert — the
+    // row still stands, the journal still empty. No tails.
+    assert_eq!(stored_exclusions(&database).len(), 1, "the row survived");
+    assert_eq!(
+        journal_entries(&database).len(),
+        0,
+        "no entry claimed a removal"
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_exclusion_commands_are_registered_with_the_specta_builder() {
+    // The §7.10 Projects-module names (D-009's fixed registry),
+    // registered exactly once each (the D-034 wiring-pin rationale) —
+    // the bindings carry `exclusionsList`/`exclusionRemove` to the
+    // frontend through them.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    for name in ["exclusions_list", "exclusion_remove"] {
+        assert_eq!(
+            lib.matches(&format!("commands::{name}")).count(),
+            1,
+            "lib.rs must register the `{name}` command exactly once (§7.10, D-009)"
+        );
+    }
 }

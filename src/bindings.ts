@@ -102,6 +102,74 @@ export const commands = {
 	 */
 	dialogPickFolder: (options?: InvokeOptions) => __TAURI_INVOKE<string | null>("dialog_pick_folder", undefined, options),
 	/**
+	 *  Physically deletes one path exclusion (§7.10 Projects module
+	 *  `exclusion_remove`; §6.4's one physical-delete entity — "the path
+	 *  is found by a scan again"): the D-10 "Excluded paths" screen's
+	 *  "Remove" button.
+	 * 
+	 *  `id` is a row id from [`exclusions_list`] — the command is
+	 *  id-addressed and accepts no path, by design (SEC-003's spirit: a
+	 *  row is chosen from the screen's own list, and no UI-typed path can
+	 *  become a filesystem or store fact through this command). An id
+	 *  that matches no row is the typed `E_VALIDATION` refusal naming the
+	 *  field — a stale screen or a replayed click; the whole operation is
+	 *  rejected and nothing is written. The end state converges either
+	 *  way (the path is not excluded), and the refusal leaves no partial
+	 *  state behind, so a retry after a refresh is always safe (the
+	 *  make-operations-idempotent rule: the store's `delete_exclusion`
+	 *  owns the same rule one layer down — an absent row deletes
+	 *  nothing).
+	 * 
+	 *  One transaction (D-037/D-051, §6.9 "the whole operation runs in
+	 *  one transaction"): the by-id lookup through the repository's
+	 *  ordered list (the store's public face has no by-id read, D-093;
+	 *  the list is exactly the screen's own data, screen-sized), the
+	 *  physical `DELETE`, and the LOG-001…004 journal entry — a
+	 *  `project.changed` record at info/user/ok whose `Details::File`
+	 *  carries the removed path. The frozen `Action` vocabulary (D-051)
+	 *  has no exclusion-specific member and no `EntityType` names an
+	 *  exclusion, so the path — SEC-008 permits paths, and it is exactly
+	 *  the fact the screen shows — identifies the removed row; a future
+	 *  store-side task may grow an `exclusion.removed` member and take
+	 *  the entry over. A failure between the writes rolls both back: the
+	 *  journal never claims a removal that did not commit (the D-051
+	 *  in-transaction rule, pinned here in the settings rollback test's
+	 *  shape).
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::exclusion_remove_failed`]); a successful removal is
+	 *  the journal entry itself (the D-051 mirror policy — info+user+ok
+	 *  is not mirrored to the file log).
+	 */
+	exclusionRemove: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("exclusion_remove", { id }, options),
+	/**
+	 *  Lists the excluded paths for the D-10 "Excluded paths" screen
+	 *  (§7.10 Projects module `exclusions_list`; §6.4: a path exclusion
+	 *  is what keeps an archived scan-found project from resurfacing as a
+	 *  scan candidate, PRJ-013…018).
+	 * 
+	 *  The read runs through the [`Db::run`] executor like every database
+	 *  command (D-037), one transaction off the async runtime, and
+	 *  answers in the repository's own stable order — `created_at`, the
+	 *  UUIDv7 id second: oldest first, insertion order inside one
+	 *  millisecond. A fresh database answers an empty list — the screen's
+	 *  empty state, not an error and not a null payload. Recovery mode
+	 *  (no database) answers the honest [`managed_db`] fallback, never a
+	 *  pretend-empty list that would lie about the exclusions table being
+	 *  empty (the `projects_list` rule).
+	 * 
+	 *  SEC-003 note: the response carries the database's own path facts
+	 *  out to the UI, but the command accepts NO path input — there is
+	 *  nothing to gate, and no UI-typed path can reach the filesystem or
+	 *  the store through it. The inverse direction (`exclusion_remove`)
+	 *  is id-addressed for the same reason.
+	 * 
+	 *  A successful read is never journaled (the `activity_list`
+	 *  rationale: reading is not an event); failures reach the log with
+	 *  their §10 code ([`logging::exclusions_list_failed`]).
+	 */
+	exclusionsList: (options?: InvokeOptions) => __TAURI_INVOKE<ExclusionEntry[]>("exclusions_list", undefined, options),
+	/**
 	 *  Renders the editor's Markdown into sanitized preview HTML with the
 	 *  Markdown warnings alongside (§7.10 Library module `markdown_preview`,
 	 *  the D-009 name registry; SEC-005, D-15, §7.3 LIB-002/009…016).
@@ -1043,6 +1111,44 @@ export type ErrorDetails_Serialize = {
 	 *  localized message (NFR-006).
 	 */
 	os_message: string | null,
+};
+
+/**
+ *  One path exclusion on the `exclusions_list` wire (§6.2
+ *  `project_exclusions`, the D-10 "Excluded paths" screen): the §6.2
+ *  row's every column as a wire primitive — the `ActivityEntry` rule
+ *  that no store type crosses the boundary, with the closed
+ *  vocabulary (`reason`) in its stored spelling the way the
+ *  settings/action-log DTOs carry theirs.
+ */
+export type ExclusionEntry = {
+	/**
+	 *  The row id (UUIDv7 TEXT, DB-002) — the identity
+	 *  `exclusion_remove` addresses; the screen's "Remove" button
+	 *  calls back with it, never with a path.
+	 */
+	id: string,
+	/**
+	 *  The canonical path (DB-030), stored verbatim — the screen's
+	 *  display text: an exclusion IS a path fact.
+	 */
+	path: string,
+	/**
+	 *  The identity key (DB-030/DB-031) — the string the scan
+	 *  registry's excluded set holds (ALG-053, D-098), carried so the
+	 *  scan UI can correlate a skipped repository with its exclusion
+	 *  row without re-deriving the key. A pure text transform of
+	 *  `path` (the `path_key` function, D-086): no fact the path
+	 *  itself does not already carry.
+	 */
+	path_key: string,
+	/**
+	 *  Why the path is excluded (§6.2 CHECK vocabulary):
+	 *  `"removed_scanned"` or `"manual"`, the stored spelling.
+	 */
+	reason: string,
+	/**  When the exclusion was created, DB-002 UTC ISO-8601. */
+	created_at: string,
 };
 
 /**

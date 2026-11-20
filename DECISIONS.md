@@ -8751,3 +8751,139 @@ duplication/scoping, P3 tautologies): all fixed and amended. Round-2
 review (hy4-flash-free) — APPROVED, no findings; independently
 confirmed the inline-duplication boundaries and the CI platform
 assumptions.
+
+### D-106 — `exclusions_list` and `exclusion_remove`: the D-10 screen's backend over the frozen journal vocabulary, an id-addressed remove, and the acceptance criterion composed with the T-075 classifier — 2026-11-20
+
+Problem: T-078 turns §7.10's last two Projects-module names into the
+D-10 "Excluded paths" screen's backend: `exclusions_list` (the
+screen's rows) and `exclusion_remove` (its "Remove" button, §6.4's
+one physical-delete entity — "the path is found by a scan again").
+Five points were open: (1) what the list carries, given the exclusion
+row's identity is a `path_key` but the screen shows a path;
+(2) which §10 code answers an id that matches no row — the card says
+a typed NotFound refusal, the registry has no not-found code;
+(3) how LOG-001…004 journals a removal when the D-051 `Action`
+vocabulary (frozen for this task) has no exclusion member and no
+`EntityType` names an exclusion; (4) how the by-id remove reads its
+row when the store's public face (D-093) has a by-key find but no
+by-id read; (5) how the card's acceptance criterion — "after the
+removal, a scan classifies the path as `new`" — is proven when the
+scan command layer (T-076) does not exist yet.
+
+Solution: two commands in `commands.rs` over the T-071 repository
+(read-only) and the `Db::run` executor (D-037), registered in
+`collect_commands!`, plus two `logging.rs` facade edges
+(`exclusions_list_failed`, `exclusion_remove_failed` — the D-096
+follow-up note for the Projects module's edges, adopted by the task
+that owns them; a successful remove is the journal entry itself, the
+D-051 unmirrored info+user+ok shape, and reads journal nothing).
+
+- _The list mirrors the §6.2 row: id, path, path_key, reason,
+  created_at._ The `ExclusionEntry` DTO carries every column as a
+  wire primitive (the `ActivityEntry` rule), in the repository's own
+  stable order — `created_at`, the UUIDv7 id second (oldest first,
+  insertion order within a millisecond). `path_key` rides the wire
+  deliberately: it is the string the scan registry's excluded set
+  holds (ALG-053/D-098), so the scan UI can correlate a skipped
+  repository with its exclusion row without re-deriving the key, and
+  it is a pure text transform of the `path` that already travels
+  (D-086) — no new fact leaves the database. A fresh database answers
+  an empty list; recovery mode answers the honest `NoDatabase`
+  fallback (the `projects_list` rule, never a pretend-empty list).
+- _An unknown id is the `E_VALIDATION` refusal naming the field._ The
+  frozen §10 registry has no generic not-found code; of the
+  candidates, `E_VALIDATION` (params field/value/reason, the
+  `rejected_field` shape) is the honest fit — the caller's input
+  names no row, the whole operation is rejected, nothing is written —
+  while the D-037 fallback would misname a stale screen as a database
+  problem and invite a meaningless retry. Idempotency holds at the
+  state level (the make-operations-idempotent rule): a refused or
+  replayed remove leaves no partial state — the path is not excluded
+  either way — and the store's own `delete_exclusion` carries the
+  same convergence one layer down.
+- _The journal entry is `project.changed` with the removed path as
+  the `Details::File` payload._ LOG-001…004 does not name exclusion
+  operations, but the card requires the entry, and the frozen D-051
+  vocabularies leave exactly one defensible shape: the projects
+  domain's generic change verb at info/user/ok, no entity (the
+  exclusion id must not ride a `project` entity column — the Activity
+  window's project filter would mis-correlate it), no `project_id`
+  (no project row is involved; `manual` exclusions have none), and
+  the path — SEC-008 permits paths, and it is exactly the fact the
+  screen shows — as the one identifying fact. **Tracked follow-up:**
+  a store-side task should grow an `exclusion.removed` `Action`
+  member (with its `EntityType`) and take the entry over BEFORE the
+  Activity UI ships — until then the Activity window renders these
+  rows as a project change attributable to no project, which is the
+  known cost of the frozen vocabulary; the rows are replaceable (the
+  member's landing task may drop or migrate them, they carry no
+  facts the exclusions table does not).
+- _The by-id read composes the repository's ordered list._ The
+  remove's transaction is: `list_exclusions` (the screen's own data,
+  screen-sized) → find the id → the typed refusal when absent →
+  `delete_exclusion` → the journal `insert` — all inside the one
+  `Db::run` transaction (D-051's producer rule, the T-074 shape), so
+  a failure after the DELETE rolls both back (pinned by the settings
+  rollback test's trigger shape: the row survives, the journal claims
+  nothing).
+- _SEC-003: id-based, no new path vector._ `exclusions_list` takes no
+  input at all; `exclusion_remove` takes an id that must come from
+  the list. No UI-typed path can reach the filesystem or the store
+  through either command — the screen's paths flow out of the
+  database, never in. The wire DTO's `path_key` disclosure adds no
+  capability (see above).
+- _The acceptance criterion is proven by direct composition._ The
+  T-078 IPC test builds the ALG-053 registry exactly the way T-076
+  will (the three membership sets read through the repositories,
+  D-093/D-098; §6.5's default depth and D-05's default exclusion
+  names), canonicalizes the scan root (the caller obligation D-098
+  records), runs the real walker + classifier over a real `.git`
+  fixture: `excluded` before the command, `new` after it — with a
+  never-excluded sibling pinned `new` throughout so the verdict flip
+  is attributable to the removal alone. The flip is the
+  no-project-row shape (a `manual` exclusion, or a `removed_scanned`
+  leftover whose project row is gone); the PRJ-017 coexistence shape
+  — an archived row plus its `removed_scanned` exclusion on one key —
+  classifies `archived` before AND after the removal (D-098's
+  priority; only `project_restore`, T-109, clears the last trace),
+  pinned by its own test so the command never promises more than
+  §6.4 does.
+
+Tests: 10 IPC tests in `ipc_tests.rs` (the package total stays all
+green): the acceptance pair (`removing_an_exclusion_makes_the_next_
+scan_classify_the_path_new`), the PRJ-017 coexistence pin
+(`removing_an_exclusion_of_an_archived_project_keeps_the_scan_verdict_
+archived`), every field + stable order with a forced same-millisecond
+tiebreak pin (both reason members, the DB-002 created_at shape), the
+empty-database list, the honest no-database answers for both
+commands, the corrupt `reason` cell's fallback envelope
+(`ProjectsCorrupt`, class-only diagnostic, no raw cell on any SEC-008
+surface), the removal's one-transaction delete + journal
+(action/level/visibility/result, the `File` path detail, no entity),
+the typed unknown-id refusal with rows and journal proven unchanged,
+the rollback proof (a trigger rejecting the journal insert rolls the
+DELETE back), and the registration pins for both §7.10 names.
+
+- _Round-1 review (deepseek-v4.1-flash: 0×P0/P1, 2×P2, 5×P3, all
+  applied)._ The T-074 journal comment's "paths ride `Details::File`
+  for file writes only" contradicted the new non-file-write `File`
+  detail — scoped to the add flow with a D-106 pointer; the
+  `exclusion.removed` follow-up moved from prose to the tracked form
+  above; the shared mapper's three write-outcome diagnostics
+  reworded command-neutral (exclusion_remove is a write command, the
+  old texts said "reached a read command"); the
+  `exclusions_list_failed` doc now names the base classifier's SQL
+  classes; the order test's id-tiebreak claim became a real pin (one
+  forced shared `created_at` through the executor, re-read ordered by
+  the id); the scan helper now passes D-05's seven-name §6.5 default
+  exclusion list (T-076 fidelity); the PRJ-017 coexistence shape
+  gained its own test (below) and the acceptance bullet's
+  generalization was qualified to the no-project-row shape.
+- _Round-2 review (hy4-flash-free: 0×P0/P1/P2, 2×P3, both
+  applied)._ The `exclusion_remove_failed` doc gained the same SQL
+  class enumeration its sibling received in round 1 (the remove path
+  has three mapper seams: the list read, the delete, the journal
+  insert); the two new facade edges gained the real-subscriber test
+  the peer edges have (`the_exclusion_failure_lines_carry_the_code_
+and_payload` in `logging.rs` — a wrong target or dropped field on
+  either line now fails a test).

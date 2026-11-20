@@ -4,12 +4,14 @@
 //! (T-030), the System module's `app_info` (T-031), the Library
 //! module's `markdown_preview` (T-056), the Projects module's
 //! `projects_list` (T-072), the System module's
-//! `dialog_pick_folder` (T-073) and the Projects module's
-//! `project_add_manual` (T-074): `app_open_data_folder`,
-//! `db_backups_list`, `db_restore_backup`, `db_recreate`,
-//! `activity_list`, `settings_get`, `settings_set`, `app_info`,
-//! `markdown_preview`, `projects_list`, `dialog_pick_folder`,
-//! `project_add_manual`.
+//! `dialog_pick_folder` (T-073), the Projects module's
+//! `project_add_manual` (T-074) and the Projects module's
+//! `exclusions_list`/`exclusion_remove` (T-078):
+//! `app_open_data_folder`, `db_backups_list`, `db_restore_backup`,
+//! `db_recreate`, `activity_list`, `settings_get`, `settings_set`,
+//! `app_info`, `markdown_preview`, `projects_list`,
+//! `dialog_pick_folder`, `project_add_manual`, `exclusions_list`,
+//! `exclusion_remove`.
 //!
 //! Every command returns `Result<T, AppError>` (§7.10) and is generic
 //! over the Tauri runtime — the documented tauri-specta shape for
@@ -77,7 +79,7 @@ use eunomia_core::project::{Color, ProjectId};
 use eunomia_fs::paths::{NotARepoError, ProjectUnavailableError};
 use eunomia_fs::write_access::WriteAccessError;
 use eunomia_store::action_log::{
-    Action, ActionLogError, ActivityQuery, Entity, EntityType, Level, LogEntry, Outcome,
+    Action, ActionLogError, ActivityQuery, Details, Entity, EntityType, Level, LogEntry, Outcome,
     Visibility, insert,
 };
 use eunomia_store::projects::{ListScope, ProjectState, ProjectsError};
@@ -1318,20 +1320,25 @@ pub(crate) fn projects_store_to_app_error(error: ProjectsError) -> AppError {
             "ProjectsCorrupt",
             &format!("a stored {column} cell is outside its vocabulary"),
         ),
-        // The write-path outcomes a list read cannot produce; if one
-        // ever arrives, the same fallback keeps the family label and
-        // class-only text — never the `path_key` or id, which are
-        // stored, path-derived identifiers on the same SEC-008
-        // surfaces.
+        // The write-path outcomes a command consuming this mapper
+        // cannot produce itself (the read commands produce none of
+        // them; `exclusion_remove` pre-empts its one by-id outcome —
+        // NotFound — with the typed refusal before the mapper runs);
+        // if one ever arrives anyway, the same fallback keeps the
+        // family label and class-only text — never the `path_key` or
+        // id, which are stored, path-derived identifiers on the same
+        // SEC-008 surfaces.
         write_outcome => projects_fallback(
             "ProjectsError",
             match &write_outcome {
                 ProjectsError::DuplicatePathKey { .. } => {
-                    "a duplicate path key conflict reached a read command"
+                    "a duplicate path key conflict reached a command that does not produce it"
                 }
-                ProjectsError::NotFound { .. } => "a by-id write outcome reached a read command",
+                ProjectsError::NotFound { .. } => {
+                    "a by-id write outcome reached a command that does not produce it"
+                }
                 ProjectsError::ReorderMismatch { .. } => {
-                    "a reorder mismatch reached a read command"
+                    "a reorder mismatch reached a command that does not produce it"
                 }
                 ProjectsError::Member { .. } | ProjectsError::Sql(_) => {
                     "an unexpected projects store outcome"
@@ -1752,8 +1759,10 @@ async fn project_add_manual_impl<R: Runtime>(
             };
             // LOG-001…004 ("adding … projects") inside the operation's
             // own transaction (D-051): entity and project carry the
-            // new id; no details — paths ride `Details::File` for file
-            // writes only, and the row itself holds the path.
+            // new id; no details — the row itself holds the path
+            // (this flow writes no file; the one non-file-write
+            // `File` detail the app produces is `exclusion_remove`'s,
+            // recorded in D-106).
             let mut entry = LogEntry::new(
                 Action::ProjectAdded,
                 Level::Info,
@@ -1945,6 +1954,201 @@ fn write_access_warning(source: &WriteAccessError) -> Option<String> {
         WriteAccessError::FileReadOnly { .. } => Some("file_read_only".to_owned()),
         WriteAccessError::ProbeFailed { .. } => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// `exclusions_list` and `exclusion_remove` (T-078, §7.10 Projects
+// module, §6.4 "Path exclusion", D-10/PRJ-013…018, LOG-001…004, D-051,
+// D-093, D-098)
+// ---------------------------------------------------------------------------
+
+/// One path exclusion on the `exclusions_list` wire (§6.2
+/// `project_exclusions`, the D-10 "Excluded paths" screen): the §6.2
+/// row's every column as a wire primitive — the `ActivityEntry` rule
+/// that no store type crosses the boundary, with the closed
+/// vocabulary (`reason`) in its stored spelling the way the
+/// settings/action-log DTOs carry theirs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct ExclusionEntry {
+    /// The row id (UUIDv7 TEXT, DB-002) — the identity
+    /// `exclusion_remove` addresses; the screen's "Remove" button
+    /// calls back with it, never with a path.
+    pub(crate) id: String,
+    /// The canonical path (DB-030), stored verbatim — the screen's
+    /// display text: an exclusion IS a path fact.
+    pub(crate) path: String,
+    /// The identity key (DB-030/DB-031) — the string the scan
+    /// registry's excluded set holds (ALG-053, D-098), carried so the
+    /// scan UI can correlate a skipped repository with its exclusion
+    /// row without re-deriving the key. A pure text transform of
+    /// `path` (the `path_key` function, D-086): no fact the path
+    /// itself does not already carry.
+    pub(crate) path_key: String,
+    /// Why the path is excluded (§6.2 CHECK vocabulary):
+    /// `"removed_scanned"` or `"manual"`, the stored spelling.
+    pub(crate) reason: String,
+    /// When the exclusion was created, DB-002 UTC ISO-8601.
+    pub(crate) created_at: String,
+}
+
+impl ExclusionEntry {
+    /// Shapes a stored exclusion row into its wire form.
+    fn from_store(exclusion: eunomia_store::projects::Exclusion) -> Self {
+        ExclusionEntry {
+            id: exclusion.id,
+            path: exclusion.path,
+            path_key: exclusion.path_key,
+            reason: exclusion.reason.as_str().to_owned(),
+            created_at: exclusion.created_at,
+        }
+    }
+}
+
+/// Lists the excluded paths for the D-10 "Excluded paths" screen
+/// (§7.10 Projects module `exclusions_list`; §6.4: a path exclusion
+/// is what keeps an archived scan-found project from resurfacing as a
+/// scan candidate, PRJ-013…018).
+///
+/// The read runs through the [`Db::run`] executor like every database
+/// command (D-037), one transaction off the async runtime, and
+/// answers in the repository's own stable order — `created_at`, the
+/// UUIDv7 id second: oldest first, insertion order inside one
+/// millisecond. A fresh database answers an empty list — the screen's
+/// empty state, not an error and not a null payload. Recovery mode
+/// (no database) answers the honest [`managed_db`] fallback, never a
+/// pretend-empty list that would lie about the exclusions table being
+/// empty (the `projects_list` rule).
+///
+/// SEC-003 note: the response carries the database's own path facts
+/// out to the UI, but the command accepts NO path input — there is
+/// nothing to gate, and no UI-typed path can reach the filesystem or
+/// the store through it. The inverse direction (`exclusion_remove`)
+/// is id-addressed for the same reason.
+///
+/// A successful read is never journaled (the `activity_list`
+/// rationale: reading is not an event); failures reach the log with
+/// their §10 code ([`logging::exclusions_list_failed`]).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn exclusions_list<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<ExclusionEntry>, AppError> {
+    exclusions_list_impl(app)
+        .await
+        .inspect_err(logging::exclusions_list_failed)
+}
+
+/// The body of [`exclusions_list`], split so the one logging edge
+/// covers every failure path (the `activity_list` shape).
+async fn exclusions_list_impl<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<ExclusionEntry>, AppError> {
+    let database = managed_db(&app)?;
+    database
+        .run(move |transaction| {
+            eunomia_store::projects::list_exclusions(transaction)
+                .map(|rows| rows.into_iter().map(ExclusionEntry::from_store).collect())
+                .map_err(projects_store_to_app_error)
+        })
+        .await
+}
+
+/// Physically deletes one path exclusion (§7.10 Projects module
+/// `exclusion_remove`; §6.4's one physical-delete entity — "the path
+/// is found by a scan again"): the D-10 "Excluded paths" screen's
+/// "Remove" button.
+///
+/// `id` is a row id from [`exclusions_list`] — the command is
+/// id-addressed and accepts no path, by design (SEC-003's spirit: a
+/// row is chosen from the screen's own list, and no UI-typed path can
+/// become a filesystem or store fact through this command). An id
+/// that matches no row is the typed `E_VALIDATION` refusal naming the
+/// field — a stale screen or a replayed click; the whole operation is
+/// rejected and nothing is written. The end state converges either
+/// way (the path is not excluded), and the refusal leaves no partial
+/// state behind, so a retry after a refresh is always safe (the
+/// make-operations-idempotent rule: the store's `delete_exclusion`
+/// owns the same rule one layer down — an absent row deletes
+/// nothing).
+///
+/// One transaction (D-037/D-051, §6.9 "the whole operation runs in
+/// one transaction"): the by-id lookup through the repository's
+/// ordered list (the store's public face has no by-id read, D-093;
+/// the list is exactly the screen's own data, screen-sized), the
+/// physical `DELETE`, and the LOG-001…004 journal entry — a
+/// `project.changed` record at info/user/ok whose `Details::File`
+/// carries the removed path. The frozen `Action` vocabulary (D-051)
+/// has no exclusion-specific member and no `EntityType` names an
+/// exclusion, so the path — SEC-008 permits paths, and it is exactly
+/// the fact the screen shows — identifies the removed row; a future
+/// store-side task may grow an `exclusion.removed` member and take
+/// the entry over. A failure between the writes rolls both back: the
+/// journal never claims a removal that did not commit (the D-051
+/// in-transaction rule, pinned here in the settings rollback test's
+/// shape).
+///
+/// Failures reach the log with their §10 code
+/// ([`logging::exclusion_remove_failed`]); a successful removal is
+/// the journal entry itself (the D-051 mirror policy — info+user+ok
+/// is not mirrored to the file log).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn exclusion_remove<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<(), AppError> {
+    exclusion_remove_impl(app, id)
+        .await
+        .inspect_err(logging::exclusion_remove_failed)
+}
+
+/// The body of [`exclusion_remove`], split so the one logging edge
+/// covers every failure path (the `activity_list` shape).
+async fn exclusion_remove_impl<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), AppError> {
+    let database = managed_db(&app)?;
+    database
+        .run(move |transaction| {
+            // The by-id lookup: the store's public face is the ordered
+            // list (D-093 — no by-id read), which is exactly the data
+            // the exclusions screen itself renders, so the find is
+            // bounded by the screen's own size.
+            let exclusions = eunomia_store::projects::list_exclusions(transaction)
+                .map_err(projects_store_to_app_error)?;
+            let Some(exclusion) = exclusions.iter().find(|row| row.id == id) else {
+                // The typed refusal: caller input that names no row —
+                // the honest §10 fit of the frozen registry (no
+                // generic not-found code exists; the D-037 fallback
+                // would misname a stale screen as a database
+                // problem). Nothing was written.
+                return Err(rejected_field("id", &id, "no exclusion with this id"));
+            };
+            // §6.4's physical delete. The store's own NotFound cannot
+            // fire here — the row was just read inside this same
+            // transaction on the one connection (D-037) — and if it
+            // ever does anyway, the shared mapper's fallback keeps
+            // the family label instead of guessing.
+            eunomia_store::projects::delete_exclusion(transaction, &id)
+                .map_err(projects_store_to_app_error)?;
+            // LOG-001…004 inside the operation's own transaction
+            // (D-051): `project.changed` with the removed path as the
+            // File detail — the frozen-vocabulary reasoning is on the
+            // command docs.
+            let mut entry = LogEntry::new(
+                Action::ProjectChanged,
+                Level::Info,
+                Visibility::User,
+                Outcome::Ok,
+            );
+            entry.details = Some(Details::File {
+                path: PathBuf::from(&exclusion.path),
+            });
+            insert(transaction, &entry).map_err(activity_log_to_app_error)?;
+            // The D-051 mirror contract: one call per written entry
+            // (info+user+ok is the unmirrored shape today).
+            logging::action_logged(&entry);
+            Ok(())
+        })
+        .await
 }
 
 // ---------------------------------------------------------------------------

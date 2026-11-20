@@ -788,6 +788,50 @@ pub(crate) fn project_add_failed(error: &AppError) {
     );
 }
 
+/// The `exclusions_list` command failed (T-078, §10's every-error
+/// rule): the `settings_get_failed` shape over the Projects target —
+/// the reachable classes are the store fallback of a corrupt
+/// exclusion cell (the `ProjectsCorrupt` diagnostic), the shared base
+/// classifier's SQL classes (`ProjectsError::Sql` — busy exhaustion,
+/// a corrupt database), and the honest no-database fallback. `error`
+/// level per the facade contract; a successful read is never
+/// journaled and logs nothing (reading is not an event — the
+/// `activity_list` rationale).
+pub(crate) fn exclusions_list_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::projects",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "listing the excluded paths failed"
+    );
+}
+
+/// The `exclusion_remove` command failed (T-078, §10's every-error
+/// rule): the `project_add_failed` shape — the reachable §10 answers
+/// are the typed `E_VALIDATION` refusal of an id no row matches (a
+/// stale screen's row), the shared base classifier's SQL classes
+/// (`ProjectsError::Sql` through the list/delete reads,
+/// `StorageError::Sql` through the journal insert — busy exhaustion,
+/// a corrupt database, a constraint abort), and the store fallback of
+/// a corrupt exclusion cell (`ProjectsCorrupt`). A successful removal
+/// is the journal's own `project.changed` entry, written inside the
+/// operation's transaction (D-051) — never duplicated into the file
+/// log (the info+user+ok unmirrored shape).
+pub(crate) fn exclusion_remove_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::projects",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "removing a path exclusion failed"
+    );
+}
+
 /// A file operation on a project's library file — the SEC-008 core
 /// event. The upcoming variant, sync and backup tasks log through this
 /// helper: it takes the operation code, the file's path and the numeric
@@ -2115,6 +2159,60 @@ mod tests {
         assert!(
             log.contains("/repos/plain") && log.contains("os_code=None"),
             "the params travel on the line and no OS fact is invented, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_exclusion_failure_lines_carry_the_code_and_payload() {
+        // The two exclusion commands' §10 edges (T-078), in the
+        // `project_add_failed` pin shape — the round-2 review's ask:
+        // the list's reachable class is the corrupt-cell fallback
+        // (E_DB_LOCKED with the `ProjectsCorrupt` diagnostic), the
+        // remove's is the typed unknown-id refusal (E_VALIDATION with
+        // the field/value/reason params). A successful remove is the
+        // journal entry itself and a successful read logs nothing;
+        // both halves are structural (no tracing call exists on those
+        // paths).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut corrupt = AppError::new(crate::errors::ErrorCode::DbLocked);
+        corrupt.details = Some(crate::errors::ErrorDetails {
+            os_code: None,
+            os_kind: Some("ProjectsCorrupt".to_owned()),
+            os_message: Some("a stored reason cell is outside its vocabulary".to_owned()),
+        });
+        let mut unknown_id = AppError::new(crate::errors::ErrorCode::Validation);
+        unknown_id
+            .params
+            .insert("field".to_owned(), "id".to_owned());
+        unknown_id.params.insert(
+            "value".to_owned(),
+            "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f".to_owned(),
+        );
+        unknown_id
+            .params
+            .insert("reason".to_owned(), "no exclusion with this id".to_owned());
+
+        tracing::subscriber::with_default(subscriber, || {
+            exclusions_list_failed(&corrupt);
+            exclusion_remove_failed(&unknown_id);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("listing the excluded paths failed")
+                && log.contains("code=\"E_DB_LOCKED\"")
+                && log.contains("os_kind=Some(\"ProjectsCorrupt\")"),
+            "the list edge carries its code literal and the corrupt-cell diagnostic, got: {log}"
+        );
+        assert!(
+            log.contains("removing a path exclusion failed")
+                && log.contains("code=\"E_VALIDATION\"")
+                && log.contains("no exclusion with this id"),
+            "the remove edge carries its code literal and the refusal's reason, got: {log}"
         );
         drop(temp);
     }
