@@ -6,6 +6,30 @@ description = "File-system layer for EunomiaSync: repository scan, path normaliz
 license.workspace = true
 publish = false
 
+[features]
+default = []
+# Fault injection for tests (spec 15.1's "failure points in `fs`",
+# NFR-024's kill-test substrate; task T-069, DECISIONS.md D-101).
+# Release guarantee, by construction: the feature is not in `default`
+# and no [dependencies] edge in the workspace enables it — the only
+# automatic enablement is this crate's own self dev-dependency below,
+# which exists so a plain `cargo test` exercises the fault points.
+# `cargo build` and `cargo build --release` never resolve
+# dev-dependencies, so every production artifact (including the
+# Tauri app) compiles this crate with the feature off; and the module
+# itself refuses to compile in a release profile (a compile_error!),
+# closing the one unification hole cargo leaves open (`cargo build
+# --release --all-targets` / `cargo test --release` resolve
+# dev-dependencies). Absence is verified with `strings`, NOT `nm`:
+# the workspace strips release symbols ([profile.release] strip =
+# true), so nm shows nothing in ANY release rlib — a vacuous check.
+# The two-step method: `cargo build --release -p eunomia-fs` then
+# `strings target/release/libeunomia_fs.rlib | grep -c
+# eunomia_fs15fault_injection` → 0, with a feature-enabled dev build
+# of the same crate as the control (the scan finds the symbols
+# there). See src/fault_injection.rs for the point catalogue.
+fault-injection = []
+
 [dependencies]
 # Dependency set pinned by the spec (docs/spec.md 5.2) and the owner
 # rulings of 2026-11-19 (DB-030 as amended in spec commits 1e1b930 and
@@ -80,3 +104,14 @@ eunomia-core = { path = "../eunomia-core" }
 # feature-gated.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+# The crate's own integration tests (tests/) drive the spec 15.1
+# fault points through the public API the `fault-injection` feature
+# exposes. A package dev-depending on itself by path is cargo's
+# supported way to turn a feature on for test builds only: the edge
+# participates in `cargo test` (so the points are exercised without
+# a command-line flag) and is invisible to `cargo build` /
+# `--release`, keeping the release guarantee recorded on the feature
+# above intact.
+eunomia-fs = { path = ".", features = ["fault-injection"] }

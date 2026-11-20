@@ -8107,3 +8107,182 @@ all processed:
   `library` module's own Display test pins its typed variants and
   leaves the `Sql` wrapper unpinned (it renders rusqlite's message,
   not this crate's words); matching that precedent.
+
+### D-101 — The fs fault-injection feature: the non-default `fault-injection` cargo feature, the self dev-dependency, and the cfg(test) seam generalized without loss — 2026-11-20
+
+Problem: T-069 asks for spec 15.1's "failure points in `fs`" as ONE
+infrastructure, drivable from integration tests and absent from the
+release build. The existing seam (D-095/D-099) was `#[cfg(test)]`-
+private inside `atomic.rs`: invisible to `tests/` (there the crate
+is an external dependency, `cfg(test)` is false) and to the future
+NFR-024 kill tests, which run the library inside a child process.
+Open questions: (1) how a feature-gated seam stays out of the
+release build even though cargo features are additive; (2) how
+integration tests turn the feature on without a CI-fragile
+command-line flag; (3) how to migrate the T-066/T-067 fixtures
+without losing coverage; (4) where the NEW points live — the N-th
+backup copy (T-F1's fs half), the pre-write disk-full verdict
+(15.1's "out of space"), and the two kill-test pauses (T-F2 inside
+a write, T-F3 between phases).
+
+Solution: `eunomia-fs/src/fault_injection.rs`, compiled under
+`#[cfg(any(test, feature = "fault-injection"))]`, holding the whole
+armed-fault registry (thread-local slots + the RAII `Armed` guard,
+D-095's discipline unchanged: any guard's drop disarms every
+fixture on the thread — parallel tests stay isolated); atomic.rs
+and backup.rs consume `pub(crate)` hooks at their production call
+sites under the same cfg.
+
+- THE RELEASE GUARANTEE IS STRUCTURAL: the feature is not in
+  `default`, and NO `[dependencies]` edge in the workspace enables
+  it. The only automatic enablement is the crate's own self
+  dev-dependency (`[dev-dependencies] eunomia-fs = { path = ".",
+features = ["fault-injection"] }`) — cargo's supported self-edge —
+  which exists so a plain `cargo test` (and CI) exercises the
+  points without a flag. `cargo build`/`--release` never resolve
+  dev-dependencies, so every production artifact (including the
+  Tauri app) compiles the crate with the feature off. The one
+  unification hole cargo leaves open — a release build that also
+  resolves dev-dependencies (`cargo build --release --all-targets`,
+  `cargo test --release`) would link the points into release
+  binaries — is closed by a `compile_error!` in the module under
+  `#[cfg(not(debug_assertions))]`: the leak is unrepresentable, at
+  the documented cost that release-profile TEST builds are
+  impossible with the feature on (CI and the release path use none,
+  verified against .github/workflows/ci.yml). Absence is verified
+  with `strings`, NOT `nm` — the workspace strips release symbols
+  (`[profile.release] strip = true`), so nm shows nothing in ANY
+  release rlib and cannot discriminate: `cargo build --release -p
+eunomia-fs` then `strings target/release/libeunomia_fs.rlib |
+grep -c eunomia_fs15fault_injection` → 0, with a feature-enabled
+  dev build of the same crate as the control (the scan finds the
+  symbols there). Workspace test builds DO unify the feature on for
+  every consumer in that build (dev-dependencies participate there)
+  — by design, visible only to test binaries.
+- MIGRATION WITHOUT LOSS: D-095's `faults` module moved verbatim
+  (semantics, one-shot consumption, fixed-token queue, locked-
+  replace plans, recording clock — renamed to a public vocabulary:
+  `arm_atomic_fault`/`AtomicFault`/`AtomicStep`,
+  `fix_staging_tokens`, `arm_locked_replace`, `recorded_lock_pauses`).
+  All 39 atomic unit tests kept their logic, only the API names
+  changed; `perform_replace` became `pub(crate)` (the simulated
+  lock's eventual success is the REAL attempt), and the
+  `cfg(any(windows, test))` items widened to
+  `cfg(any(windows, test, feature = "fault-injection"))`. 214 crate
+  unit tests green before and after.
+- THE NEW POINTS: `arm_backup_copy_failure(n, io::Error)` — the
+  N-th copy pass of `backup_target_file` refuses its write path
+  once per copy (at the pass's start, after the destination exists,
+  so the production partial-copy removal and `CopyFailed`
+  classification run for real; the first attempt placed it inside
+  the streaming loop, which counts chunks, not copies — caught by
+  the integration test and moved); `arm_free_space_override(u64)` —
+  a STATE, not an event: while armed, every successful pre-write
+  probe of the armed thread reports the number, `check_space` still
+  decides, and a FAILED probe passes through untouched (ERR-003's
+  posture preserved and pinned) — the shape higher-layer tests need,
+  since production's closure is not theirs to substitute;
+  `arm_pause(PausePlan{point, skip})` — the kill-test substrate:
+  `PausePoint::StagingSettled` parks between write+sync and the
+  rename (T-F2's exact window; while parked, the disk holds the
+  untouched original plus exactly one sweep-grammar staging file —
+  what a kill there leaves), `PausePoint::WriteEntry` parks at the
+  §9.5 entry (the seam between the backup phase and the write,
+  T-F3's shape at file granularity). The pause is one-shot with a
+  skip counter (T-F3 aims at a later boundary), signals its arrival
+  through a channel (`PauseControl::wait_for_arrival` with timeout),
+  parks until released, and a dropped release channel releases too
+  (a panicked observer must not deadlock the operation). The
+  read-only row of 15.1 stays fixture-driven at `write_access` (the
+  real mark is cheaply arrangeable and the probe is the production
+  check — injecting there would only test the injection); the write
+  path's read-only-shaped refusals are injectable at the atomic
+  steps (EROFS pinned), and `write_access.rs` itself was not touched
+  (task file scope).
+- TESTS: 11 integration tests in `tests/fault_injection.rs` drive
+  every point from OUTSIDE the crate (the way later pipeline tasks
+  and the kill tests will): N-th-copy selectivity + no partial
+  debris + copies before/after land + no leak past the guard;
+  injected replace refusal (original intact, staging cleaned, post-
+  guard write lands); pre-write disk-full over the caller's own
+  plentiful probe; failed-probe passthrough under an armed
+  override; mid-write ENOSPC → DiskFull; the read-only gate by real
+  mark (T-F5) and EROFS at TempCreate; locked-replace exhaustion
+  (typed E_FILE_LOCKED, 3 retries, recorded 100/300/900 ms
+  schedule); StagingSettled pause (disk state inside the window ==
+  the kill contract, release completes the write, no cross-thread
+  leak); WriteEntry pause between phases (backup complete, target
+  untouched, nothing staged); skip-counter selectivity (the first
+  arrival passes with its write landed — the discriminator a broken
+  counter cannot fake) and one-shot liveness (a third write
+  completes unparked). Cross-target clippy (`x86_64-pc-windows-
+msvc`, `aarch64-apple-darwin`, lib and --all-targets, `-D
+warnings`) passes: the windows arm's fault blocks and the
+  cfg-gated `Locked` refusal compile on every leg that can reach
+  them.
+
+Round-1 review (deepseek-v4.1-flash) — CHANGES REQUESTED, no P0/P1,
+three P2 and four P3; all fixed:
+
+- P2-1: the release-absence proof was vacuous — the workspace strips
+  release symbols (`[profile.release] strip = true`), so `nm` shows
+  nothing in ANY release rlib, feature or not; the 527-vs-0 contrast
+  compared an unstripped dev build against a stripped release one.
+  The documented method is now `strings … | grep -c
+eunomia_fs15fault_injection` (0 in the plain release rlib; the
+  feature-enabled dev build is the control that the scan sees the
+  symbols when they exist), restated in the module docs, the feature
+  comment and above.
+- P2-2: the guarantee had a hole — `cargo build --release
+--all-targets` / `cargo test --release` resolve dev-dependencies,
+  so the self edge's feature reached the lib unit that release
+  binaries link (the reviewer reproduced both in the repo and in a
+  minimal replica). Closed structurally: the module now carries
+  `#[cfg(not(debug_assertions))] compile_error!` — the leak is
+  unrepresentable; the cost (no release-profile test builds with the
+  feature) is documented above and matches CI.
+- P2-3: the StagingSettled test did not pin the "written and
+  settled" half of T-F2 (a pause parked before the write would leave
+  an empty staging file and pass). The test now reads the parked
+  staging file and asserts the COMPLETE new content; all three pause
+  tests also assert `done_rx.try_recv().is_err()` — the worker is
+  parked, not merely past the signal.
+- P3-1 taken: lib.rs's `[`fault_injection`]` link broke the
+  feature-off rustdoc build — now plain text. P3-2 taken: the
+  integration suite no longer self-disables via `#![cfg(feature)]`
+  (a dropped self edge would silently skip 0 tests); it demands the
+  feature with a `compile_error!` of its own instead. P3-3 taken:
+  the honest check statement — the test targets always run with the
+  feature (the dev edge provides it; there is no feature-off test
+  run), the feature-off configuration is covered by
+  `cargo build`/`clippy --lib`. P3-4 taken: `#[must_use]` on
+  `Armed` ("dropping the guard disarms every fixture on this
+  thread") and a second-probe assertion pinning the free-space
+  override's STATE semantics.
+
+Round-2 review (hy4-flash-free) — APPROVED, no P0/P1/P2. It
+independently reproduced the strings proof (0 in the plain release
+rlib, symbols present in the feature dev build), confirmed the
+release+feature `compile_error!`, re-verified the migration is
+lossless and all round-1 fixes present, and validated each
+integration test as independently falsifiable. Its one P3 (low
+confidence): the release guard keys on `debug_assertions`, a profile
+flag — a release profile deliberately configured with
+`debug-assertions = true` would bypass it, slightly overstating the
+"unrepresentable" claim. Taken as documentation (the module docs now
+state the keying and name the `strings` scan as the backstop); the
+suggested CI assertion lives in `.github/workflows/ci.yml`, outside
+this task's file scope — recorded here for the orchestrator.
+
+Addendum (post-round-2): the release guard's macro invocation uses
+the BRACE form (`compile_error! { … }`) in both fault_injection.rs
+and its test suite. The app's SEC-008 pin
+(`tracing_events_are_constructed_only_in_the_logging_module`) scans
+every workspace `.rs` source RAW for the substring `error!(` — the
+paren form of the compile-error macro contains that substring and
+reddened the pin (the pin belongs to src-tauri, outside this task's
+file scope, and its conservatism is deliberate: comments showing the
+macro are meant to turn it red). The brace form is the same macro,
+rustfmt-stable, and not a spelling the pin matches; the reason is
+stated at both call sites. (The paren form of the panic-message
+strings is unaffected — only the macro-invocation spelling matters.)

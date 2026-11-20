@@ -144,8 +144,11 @@
 //!
 //! Colocated tests over real temporary directories drive the public
 //! function only; failures at each pipeline step are injected through
-//! a `#[cfg(test)]` fault hook (spec 15.1's "failure points in `fs`"),
-//! so the cleanup paths run in the production code under test. The
+//! the crate's fault-injection module (spec 15.1's "failure points
+//! in `fs`": `fault_injection`, compiled for `cfg(test)` and for the
+//! non-default `fault-injection` feature — the pause and override
+//! points of T-069 live there too), so the cleanup paths run in the
+//! production code under test. The
 //! battery: the new-file and overwrite happy paths against the FIPS
 //! "abc" oracle, the empty write, the mode copy (Unix), the
 //! disk-full shortage/exact-boundary/probe-failure decisions with a
@@ -175,6 +178,8 @@ use std::path::{Path, PathBuf};
 
 use eunomia_core::hash::Sha256Hex;
 
+#[cfg(any(test, feature = "fault-injection"))]
+use crate::fault_injection;
 use crate::free_space::{FreeSpaceError, check_space};
 use crate::temp_files::{TMP_TOKEN_LEN, TmpNameError, tmp_file_name};
 
@@ -283,11 +288,29 @@ where
         .file_name()
         .map(|name| name.to_string_lossy().into_owned());
 
+    // The seam between the backup phase (§9.4 phase 2) and the write
+    // (§9.5), under the fault-injection cfg: the caller's backups
+    // are made and nothing of this write has touched the disk yet —
+    // an armed pause parks here for the between-phases kill tests
+    // (T-F3's shape at single-file granularity, spec 15.1's
+    // "force-killing the process between phases").
+    #[cfg(any(test, feature = "fault-injection"))]
+    fault_injection::pause_if_armed(fault_injection::PausePoint::WriteEntry);
+
     // §10's write-time E_DISK_FULL: only the definitive shortage
     // aborts. A failed probe falls through — the write itself reports
-    // a dropped drive far more precisely (ERR-003).
+    // a dropped drive far more precisely (ERR-003). An armed
+    // fault-injection override replaces what a SUCCESSFUL probe
+    // observed (never the decision, which stays `check_space`'s, and
+    // never a failed probe): 15.1's "out of space" row, drivable by
+    // integration tests that cannot reach into the caller-supplied
+    // closure.
     let required = u64::try_from(contents.len()).unwrap_or(u64::MAX);
-    if let Ok(reported_free) = free_space()
+    #[cfg(any(test, feature = "fault-injection"))]
+    let probe_outcome = fault_injection::override_free_space(free_space());
+    #[cfg(not(any(test, feature = "fault-injection")))]
+    let probe_outcome = free_space();
+    if let Ok(reported_free) = probe_outcome
         && let Err(FreeSpaceError::NotEnoughSpace {
             free,
             required: needed,
@@ -324,12 +347,13 @@ where
     }
 
     // Step 3: write every byte, then settle them.
-    #[cfg(test)]
-    let write_outcome = match faults::inject(faults::Step::WriteSync, target) {
-        Some(source) => Err(source),
-        None => write_and_sync(&staging_file, contents),
-    };
-    #[cfg(not(test))]
+    #[cfg(any(test, feature = "fault-injection"))]
+    let write_outcome =
+        match fault_injection::inject_atomic(fault_injection::AtomicStep::WriteSync, target) {
+            Some(source) => Err(source),
+            None => write_and_sync(&staging_file, contents),
+        };
+    #[cfg(not(any(test, feature = "fault-injection")))]
     let write_outcome = write_and_sync(&staging_file, contents);
     // Close the handle BEFORE the rename and the error-path removal:
     // an open handle is a Windows sharing violation waiting to happen
@@ -348,6 +372,16 @@ where
             required,
         ));
     }
+
+    // T-F2's kill window (spec 15.2), under the fault-injection cfg:
+    // the staging file is written and settled, the rename has not
+    // happened — an armed pause parks here (spec 15.1's
+    // "force-killing the process inside a write"), so a kill test
+    // can take the process down inside the window and check what is
+    // on disk: the untouched original plus exactly one sweepable
+    // staging file.
+    #[cfg(any(test, feature = "fault-injection"))]
+    fault_injection::pause_if_armed(fault_injection::PausePoint::StagingSettled);
 
     // Step 4: the single atomic transition. Failures here leave the
     // old file intact and the staging file removable; on Windows the
@@ -377,8 +411,8 @@ where
     }
 
     // Step 6: verify what the disk holds, not what the buffer held.
-    #[cfg(test)]
-    faults::corrupt_target_if_armed(target);
+    #[cfg(any(test, feature = "fault-injection"))]
+    fault_injection::corrupt_target_if_armed(target);
     match read_back_digest(target) {
         Ok(actual_sha256_hex) if actual_sha256_hex == expected_sha256_hex => {}
         Ok(actual_sha256_hex) => {
@@ -436,8 +470,10 @@ fn create_staging_file(
         let name = tmp_file_name(file_name, &token)
             .map_err(|source| AtomicWriteError::NameFailed { source })?;
         let path = folder.join(name);
-        #[cfg(test)]
-        if let Some(source) = faults::inject(faults::Step::TempCreate, target) {
+        #[cfg(any(test, feature = "fault-injection"))]
+        if let Some(source) =
+            fault_injection::inject_atomic(fault_injection::AtomicStep::TempCreate, target)
+        {
             return Err(AtomicWriteError::WriteFailed(WriteFailed {
                 step: WriteStep::TempCreate,
                 path,
@@ -488,9 +524,9 @@ fn write_and_sync(mut staging_file: &File, contents: &[u8]) -> io::Result<()> {
 /// through core's SHA-256 (see the module docs for why no `rand`);
 /// tests may fix the sequence to pin exact names.
 fn next_token() -> String {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     {
-        if let Some(token) = faults::next_fixed_token() {
+        if let Some(token) = fault_injection::next_fixed_token() {
             return token;
         }
     }
@@ -552,8 +588,10 @@ fn copy_existing_mode(target: &Path, staging_path: &Path) -> Result<(), WriteFai
             });
         }
     };
-    #[cfg(test)]
-    if let Some(source) = faults::inject(faults::Step::ModeCopy, target) {
+    #[cfg(any(test, feature = "fault-injection"))]
+    if let Some(source) =
+        fault_injection::inject_atomic(fault_injection::AtomicStep::ModeCopy, target)
+    {
         return Err(WriteFailed {
             step: WriteStep::ModeCopy,
             path: staging_path.to_owned(),
@@ -586,7 +624,7 @@ enum ReplaceRefusal {
     /// last OS refusal, `retries` how many retries the schedule made.
     /// Test builds compile the variant on Unix too — the simulated
     /// locked replace drives the real loop there (see `faults`).
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, test, feature = "fault-injection"))]
     Locked { source: io::Error, retries: usize },
 }
 
@@ -596,8 +634,8 @@ enum ReplaceRefusal {
 /// the plain OS fact.
 #[cfg(unix)]
 fn replace_target(staging_path: &Path, target: &Path) -> Result<(), ReplaceRefusal> {
-    #[cfg(test)]
-    if faults::locked_replace_is_armed() {
+    #[cfg(any(test, feature = "fault-injection"))]
+    if fault_injection::locked_replace_is_armed() {
         // The retry-mechanics test channel: the SAME §9.5 loop the
         // Windows arm runs, driven by a simulated locked replace and
         // the recording clock, so the pipeline-level `E_FILE_LOCKED`
@@ -605,12 +643,14 @@ fn replace_target(staging_path: &Path, target: &Path) -> Result<(), ReplaceRefus
         // on the Linux legs — a real sharing violation needs a
         // Windows handle, and T-F8's test owns that on the CI leg.
         return replace_with_lock_retries(
-            || faults::simulated_lock_attempt(staging_path, target),
-            faults::record_lock_pause,
+            || fault_injection::simulated_lock_attempt(staging_path, target),
+            fault_injection::record_lock_pause,
         );
     }
-    #[cfg(test)]
-    if let Some(source) = faults::inject(faults::Step::Replace, target) {
+    #[cfg(any(test, feature = "fault-injection"))]
+    if let Some(source) =
+        fault_injection::inject_atomic(fault_injection::AtomicStep::Replace, target)
+    {
         return Err(ReplaceRefusal::Os(source));
     }
     perform_replace(staging_path, target).map_err(ReplaceRefusal::Os)
@@ -626,25 +666,27 @@ fn replace_target(staging_path: &Path, target: &Path) -> Result<(), ReplaceRefus
 /// refusal surfaces immediately.
 #[cfg(windows)]
 fn replace_target(staging_path: &Path, target: &Path) -> Result<(), ReplaceRefusal> {
-    #[cfg(test)]
-    if faults::locked_replace_is_armed() {
+    #[cfg(any(test, feature = "fault-injection"))]
+    if fault_injection::locked_replace_is_armed() {
         // The simulated-lock channel (see the Unix arm): the schedule
         // and its classification run against injected refusals with
         // the recording clock, no real sleeping.
         return replace_with_lock_retries(
-            || faults::simulated_lock_attempt(staging_path, target),
-            faults::record_lock_pause,
+            || fault_injection::simulated_lock_attempt(staging_path, target),
+            fault_injection::record_lock_pause,
         );
     }
-    #[cfg(test)]
-    if let Some(source) = faults::inject(faults::Step::Replace, target) {
+    #[cfg(any(test, feature = "fault-injection"))]
+    if let Some(source) =
+        fault_injection::inject_atomic(fault_injection::AtomicStep::Replace, target)
+    {
         return Err(ReplaceRefusal::Os(source));
     }
     replace_with_lock_retries(
         || perform_replace(staging_path, target),
         |pause| {
-            #[cfg(test)]
-            if faults::record_lock_pause_if_armed(pause) {
+            #[cfg(any(test, feature = "fault-injection"))]
+            if fault_injection::record_lock_pause_if_armed(pause) {
                 return;
             }
             std::thread::sleep(pause);
@@ -654,7 +696,7 @@ fn replace_target(staging_path: &Path, target: &Path) -> Result<(), ReplaceRefus
 
 /// §9.5 step 4's retry schedule: the pause before each of the three
 /// retries of a locked Windows replace, in milliseconds.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "fault-injection"))]
 const LOCK_RETRY_PAUSES_MS: [u64; 3] = [100, 300, 900];
 
 /// `ERROR_SHARING_VIOLATION` (32): another process holds the target
@@ -663,21 +705,21 @@ const LOCK_RETRY_PAUSES_MS: [u64; 3] = [100, 300, 900];
 /// crate's windows-sys feature set is exactly
 /// `Win32_Storage_FileSystem` (D-095); the named constant lives in
 /// the not-enabled `Win32_Foundation`.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "fault-injection"))]
 const ERROR_SHARING_VIOLATION: i32 = 32;
 
 /// `ERROR_ACCESS_DENIED` (5): the target's ACL or attributes refuse
 /// the delete-on-replace; §9.5 step 4 retries it alongside the
 /// sharing violation. Same spelling note as
 /// [`ERROR_SHARING_VIOLATION`].
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "fault-injection"))]
 const ERROR_ACCESS_DENIED: i32 = 5;
 
 /// Whether `source` is one of §9.5 step 4's two retried lock
 /// refusals, by raw Win32 code. Deliberately exactly the spec's two:
 /// `ERROR_LOCK_VIOLATION` (33, byte-range locks) is not in the set
 /// the spec names.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "fault-injection"))]
 fn is_lock_refusal(source: &io::Error) -> bool {
     matches!(
         source.raw_os_error(),
@@ -698,7 +740,7 @@ fn is_lock_refusal(source: &io::Error) -> bool {
 /// A lock that outlasts the whole schedule is
 /// [`ReplaceRefusal::Locked`] with the last OS refusal; a success at
 /// any attempt returns at once and waits no further.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "fault-injection"))]
 fn replace_with_lock_retries(
     mut attempt: impl FnMut() -> io::Result<()>,
     mut pause: impl FnMut(std::time::Duration),
@@ -724,9 +766,11 @@ fn replace_with_lock_retries(
 }
 
 /// One raw §9.5 step-4 attempt, no retries: Unix `rename(2)`, which
-/// replaces atomically.
+/// replaces atomically. `pub(crate)`: the fault-injection module's
+/// simulated locked replace calls the REAL attempt as its eventual
+/// success (`fault_injection::simulated_lock_attempt`).
 #[cfg(unix)]
-fn perform_replace(staging_path: &Path, target: &Path) -> io::Result<()> {
+pub(crate) fn perform_replace(staging_path: &Path, target: &Path) -> io::Result<()> {
     fs::rename(staging_path, target)
 }
 
@@ -738,9 +782,10 @@ fn perform_replace(staging_path: &Path, target: &Path) -> io::Result<()> {
 /// direct call — the crate's second owner-sanctioned FFI call after
 /// D-089's free-space probe, same discipline (D-095). The retry loop
 /// around it is [`replace_target`]'s Windows arm; this function is
-/// the single unsynchronized syscall.
+/// the single unsynchronized syscall. `pub(crate)` for the same
+/// reason as the Unix arm (the simulated locked replace).
 #[cfg(windows)]
-fn perform_replace(staging_path: &Path, target: &Path) -> io::Result<()> {
+pub(crate) fn perform_replace(staging_path: &Path, target: &Path) -> io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
@@ -804,8 +849,10 @@ fn wide_path(path: &Path) -> Vec<u16> {
 /// step to Unix (`MOVEFILE_WRITE_THROUGH` carries the intent there).
 #[cfg(unix)]
 fn sync_parent_folder(folder: &Path, _target: &Path) -> io::Result<()> {
-    #[cfg(test)]
-    if let Some(source) = faults::inject(faults::Step::DirSync, _target) {
+    #[cfg(any(test, feature = "fault-injection"))]
+    if let Some(source) =
+        fault_injection::inject_atomic(fault_injection::AtomicStep::DirSync, _target)
+    {
         return Err(source);
     }
     File::open(folder)?.sync_all()
@@ -816,8 +863,10 @@ fn sync_parent_folder(folder: &Path, _target: &Path) -> io::Result<()> {
 /// of the read surfaces as [`VerifyMismatch::Unreadable`] at the call
 /// site, which owns the §9.5 step it failed.
 fn read_back_digest(target: &Path) -> io::Result<String> {
-    #[cfg(test)]
-    if let Some(source) = faults::inject(faults::Step::VerifyRead, target) {
+    #[cfg(any(test, feature = "fault-injection"))]
+    if let Some(source) =
+        fault_injection::inject_atomic(fault_injection::AtomicStep::VerifyRead, target)
+    {
         return Err(source);
     }
     let mut file = File::open(target)?;
@@ -915,7 +964,7 @@ fn abort_replace(
             staging_path,
             required,
         ),
-        #[cfg(any(windows, test))]
+        #[cfg(any(windows, test, feature = "fault-injection"))]
         ReplaceRefusal::Locked { source, retries } => {
             let cleanup = remove_staging(staging_path);
             AtomicWriteError::FileLocked(FileLockedFailure {
@@ -1242,282 +1291,6 @@ impl std::error::Error for AtomicWriteError {
     }
 }
 
-/// The `#[cfg(test)]` fault-injection seam (spec 15.1's "failure
-/// points in `fs`"): tests arm a fault, the pipeline's step call
-/// sites consume it, and the production cleanup paths run for real.
-/// Nothing here compiles outside `cfg(test)` — the shipped pipeline
-/// has no hooks.
-#[cfg(test)]
-mod faults {
-    use std::cell::RefCell;
-    use std::io;
-    use std::io::Write as _;
-    use std::path::Path;
-    use std::time::Duration;
-
-    /// The pipeline steps a fault can refuse. `ModeCopy` and
-    /// `DirSync` exist only where those steps do (Unix).
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    pub(crate) enum Step {
-        TempCreate,
-        #[cfg(unix)]
-        ModeCopy,
-        WriteSync,
-        Replace,
-        #[cfg(unix)]
-        DirSync,
-        VerifyRead,
-    }
-
-    /// One armed fault.
-    pub(crate) enum Fault {
-        /// Refuse the given step once, with this error.
-        Fail(Step, io::Error),
-        /// Refuse the given step with EACCES after making the target
-        /// folder read-only-execute — so the §9.5 step-7 staging
-        /// removal itself is refused and the `cleanup` field has a
-        /// real refusal to carry (Unix: mode bits are the fixture).
-        #[cfg(unix)]
-        FailAndLockFolder(Step),
-        /// Append one byte to the target just before the §9.5 step-6
-        /// re-read: the settled file no longer holds what was
-        /// written, and the digest check must catch it.
-        CorruptTarget,
-    }
-
-    /// The simulated locked replace of §9.5 step 4's retry tests: what
-    /// the simulated replace attempt answers while the plan is armed.
-    /// It drives the REAL retry loop (the same function the Windows
-    /// arm runs) with injected OS refusals, so the schedule, the
-    /// classification and the pipeline's `E_FILE_LOCKED` path are
-    /// exercised on every platform — a real sharing violation needs a
-    /// Windows handle.
-    pub(crate) enum LockedReplacePlan {
-        /// Refuse every attempt with the lock code — the exhaustion
-        /// path (§10: "3 retries failed").
-        Exhaust { code: i32 },
-        /// The exhaustion path with the §9.5 step-7 cleanup refused
-        /// too: the target's folder goes read-only-execute for the
-        /// duration, so the staging removal itself fails EACCES and
-        /// `FileLockedFailure::cleanup` has a real refusal to carry
-        /// (Unix: mode bits are the fixture, like
-        /// `Fault::FailAndLockFolder`).
-        #[cfg(unix)]
-        ExhaustWithRefusedCleanup { code: i32 },
-        /// Refuse `refusals` attempts with the lock code, then
-        /// perform the REAL replace — the holder closed the file
-        /// mid-schedule and the write must land.
-        UnlockAfter { refusals: usize, code: i32 },
-    }
-
-    thread_local! {
-        static FAULT: RefCell<Option<Fault>> = const { RefCell::new(None) };
-        static FIXED_TOKENS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-        static LOCKED_REPLACE: RefCell<Option<LockedReplacePlan>> = const { RefCell::new(None) };
-        static LOCK_PAUSES: RefCell<Option<Vec<Duration>>> = const { RefCell::new(None) };
-    }
-
-    /// Keeps an armed fault (and any fixed token sequence) armed for
-    /// a scope and disarms on drop — a test can never leak a fault
-    /// into the next one. ONE fixture scope per test: a guard's drop
-    /// disarms EVERY fixture of this module on the thread (the
-    /// single-fixture discipline of the original fault/token guards),
-    /// so arming a second fixture mid-scope silently cancels the
-    /// first — combine what a test needs into one plan instead.
-    pub(crate) struct Armed;
-
-    impl Drop for Armed {
-        fn drop(&mut self) {
-            FAULT.with(|cell| *cell.borrow_mut() = None);
-            FIXED_TOKENS.with(|cell| cell.borrow_mut().clear());
-            LOCKED_REPLACE.with(|cell| *cell.borrow_mut() = None);
-            LOCK_PAUSES.with(|cell| *cell.borrow_mut() = None);
-        }
-    }
-
-    /// Arms `fault` until the returned guard drops.
-    pub(crate) fn arm(fault: Fault) -> Armed {
-        FAULT.with(|cell| *cell.borrow_mut() = Some(fault));
-        Armed
-    }
-
-    /// Fixes the staging-token sequence (the collision fixtures):
-    /// each armed guard drops the whole setup. Returns the same
-    /// guard shape so tests treat faults and tokens alike.
-    pub(crate) fn fix_tokens(tokens: &[&str]) -> Armed {
-        FIXED_TOKENS.with(|cell| {
-            *cell.borrow_mut() = tokens.iter().map(|token| (*token).to_owned()).collect();
-        });
-        Armed
-    }
-
-    /// Arms a simulated locked replace (see [`LockedReplacePlan`]) and
-    /// the pause-recording clock together — the retry-mechanics
-    /// fixtures want both, and one guard drops both.
-    pub(crate) fn arm_locked_replace(plan: LockedReplacePlan) -> Armed {
-        LOCKED_REPLACE.with(|cell| *cell.borrow_mut() = Some(plan));
-        LOCK_PAUSES.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
-        Armed
-    }
-
-    /// Arms only the pause-recording clock — the real-handle Windows
-    /// test (T-F8) drives the true `MoveFileExW` refusals and needs
-    /// no simulation, only a clock that does not really sleep.
-    #[cfg(windows)]
-    pub(crate) fn arm_pause_recording() -> Armed {
-        LOCK_PAUSES.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
-        Armed
-    }
-
-    /// Whether a simulated locked replace is armed — the retry-loop
-    /// test channel of both platform arms' `replace_target`.
-    pub(crate) fn locked_replace_is_armed() -> bool {
-        LOCKED_REPLACE.with(|cell| cell.borrow().is_some())
-    }
-
-    /// One attempt of the simulated locked replace: refuse with the
-    /// plan's lock code until the plan says the real replace runs
-    /// (`UnlockAfter` with its refusals spent) — the "real" attempt is
-    /// the production `perform_replace`, so an unlocking schedule
-    /// genuinely lands the file.
-    pub(crate) fn simulated_lock_attempt(staging_path: &Path, target: &Path) -> io::Result<()> {
-        /// What the plan says this attempt does.
-        enum Next {
-            Refuse(i32),
-            Replace,
-        }
-        let next = LOCKED_REPLACE.with(|cell| {
-            let mut armed = cell.borrow_mut();
-            match armed.as_mut() {
-                Some(LockedReplacePlan::Exhaust { code }) => Next::Refuse(*code),
-                #[cfg(unix)]
-                Some(LockedReplacePlan::ExhaustWithRefusedCleanup { code }) => {
-                    // The removal will be refused the same way the
-                    // folder-lock fault arranges it: read-only-execute
-                    // mode bits. Idempotent across attempts.
-                    lock_folder(target.parent().unwrap_or(Path::new("")));
-                    Next::Refuse(*code)
-                }
-                Some(LockedReplacePlan::UnlockAfter { refusals, code }) => {
-                    if *refusals == 0 {
-                        Next::Replace
-                    } else {
-                        *refusals -= 1;
-                        Next::Refuse(*code)
-                    }
-                }
-                None => Next::Replace,
-            }
-        });
-        match next {
-            Next::Refuse(code) => Err(io::Error::from_raw_os_error(code)),
-            Next::Replace => super::perform_replace(staging_path, target),
-        }
-    }
-
-    /// The mock clock of the simulated-replace channel: records the
-    /// pause instead of sleeping.
-    pub(crate) fn record_lock_pause(pause: Duration) {
-        LOCK_PAUSES.with(|cell| {
-            if let Some(pauses) = cell.borrow_mut().as_mut() {
-                pauses.push(pause);
-            }
-        });
-    }
-
-    /// The real Windows loop's clock seam: records the pause and
-    /// reports `true` (skip the real sleep) when the recording clock
-    /// is armed, `false` when production must really sleep.
-    #[cfg(windows)]
-    pub(crate) fn record_lock_pause_if_armed(pause: Duration) -> bool {
-        LOCK_PAUSES.with(|cell| {
-            let mut sink = cell.borrow_mut();
-            match sink.as_mut() {
-                Some(pauses) => {
-                    pauses.push(pause);
-                    true
-                }
-                None => false,
-            }
-        })
-    }
-
-    /// The pauses the recording clock has observed so far (empty when
-    /// no clock is armed) — the schedule oracle of the retry tests.
-    pub(crate) fn lock_pauses() -> Vec<Duration> {
-        LOCK_PAUSES.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .map(|pauses| pauses.clone())
-                .unwrap_or_default()
-        })
-    }
-
-    /// The one-shot consumption point: when the armed fault targets
-    /// `step`, take it (it fires once) and return its error; a fault
-    /// aimed at another step stays armed for its own call site.
-    pub(crate) fn inject(step: Step, _target: &Path) -> Option<io::Error> {
-        FAULT.with(|cell| {
-            let mut armed = cell.borrow_mut();
-            match armed.take() {
-                Some(Fault::Fail(armed_step, error)) if armed_step == step => Some(error),
-                #[cfg(unix)]
-                Some(Fault::FailAndLockFolder(armed_step)) if armed_step == step => {
-                    lock_folder(_target.parent().unwrap_or(Path::new("")));
-                    Some(io::Error::from_raw_os_error(13))
-                }
-                other => {
-                    *armed = other;
-                    None
-                }
-            }
-        })
-    }
-
-    /// The §9.5 step-6 corruption point: appends one byte to the
-    /// target when `CorruptTarget` is armed (consuming it), so the
-    /// re-read digests bytes this run never wrote.
-    pub(crate) fn corrupt_target_if_armed(target: &Path) {
-        FAULT.with(|cell| {
-            let mut armed = cell.borrow_mut();
-            let taken = armed.take();
-            if matches!(taken, Some(Fault::CorruptTarget)) {
-                let mut file = std::fs::OpenOptions::new()
-                    .append(true)
-                    .open(target)
-                    .expect("the corruption hook must be able to open the target");
-                file.write_all(b"X")
-                    .expect("the corruption hook must be able to append");
-            } else {
-                // Not ours: leave it armed for its own call site.
-                *armed = taken;
-            }
-        });
-    }
-
-    /// The next fixed token when a test pinned the sequence,
-    /// consuming it; `None` falls back to production entropy.
-    pub(crate) fn next_fixed_token() -> Option<String> {
-        FIXED_TOKENS.with(|cell| {
-            if cell.borrow().is_empty() {
-                None
-            } else {
-                Some(cell.borrow_mut().remove(0))
-            }
-        })
-    }
-
-    /// Makes the folder read-only-execute so the staging removal is
-    /// refused (EACCES) — the carried-cleanup fixture's setup.
-    #[cfg(unix)]
-    fn lock_folder(folder: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500))
-            .expect("the lock-folder fixture must be able to chmod");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::error::Error as _;
@@ -1759,8 +1532,8 @@ mod tests {
         let target = existing(dir.path(), "AGENTS.md", b"untouched");
         // ENOSPC = 28: std maps it to ErrorKind::StorageFull, the
         // mid-write verdict the module classifies by.
-        let _fault = faults::arm(faults::Fault::Fail(
-            faults::Step::WriteSync,
+        let _fault = fault_injection::arm_atomic_fault(fault_injection::AtomicFault::Fail(
+            fault_injection::AtomicStep::WriteSync,
             io::Error::from_raw_os_error(28),
         ));
 
@@ -1992,7 +1765,10 @@ mod tests {
         // the staging cleanup and the intact original all run.
         let dir = TempDir::new().expect("a temporary directory must be creatable");
         let target = existing(dir.path(), "AGENTS.md", b"untouched");
-        let _fault = faults::arm_locked_replace(faults::LockedReplacePlan::Exhaust { code: 32 });
+        let _fault =
+            fault_injection::arm_locked_replace(fault_injection::LockedReplacePlan::Exhaust {
+                code: 32,
+            });
 
         let err = write_target_file(&target, b"abc", plenty_free())
             .expect_err("a permanently locked target must fail the write");
@@ -2013,7 +1789,7 @@ mod tests {
             "the staging file must be removed, not carried"
         );
         assert_eq!(
-            faults::lock_pauses(),
+            fault_injection::recorded_lock_pauses(),
             [
                 Duration::from_millis(100),
                 Duration::from_millis(300),
@@ -2032,7 +1808,10 @@ mod tests {
     fn an_exhausted_access_denied_replace_carries_code_five() {
         let dir = TempDir::new().expect("a temporary directory must be creatable");
         let target = existing(dir.path(), "AGENTS.md", b"untouched");
-        let _fault = faults::arm_locked_replace(faults::LockedReplacePlan::Exhaust { code: 5 });
+        let _fault =
+            fault_injection::arm_locked_replace(fault_injection::LockedReplacePlan::Exhaust {
+                code: 5,
+            });
 
         let err = write_target_file(&target, b"abc", plenty_free())
             .expect_err("a permanently denied target must fail the write");
@@ -2055,10 +1834,11 @@ mod tests {
         // lands whole.
         let dir = TempDir::new().expect("a temporary directory must be creatable");
         let target = existing(dir.path(), "AGENTS.md", b"old");
-        let _fault = faults::arm_locked_replace(faults::LockedReplacePlan::UnlockAfter {
-            refusals: 2,
-            code: 32,
-        });
+        let _fault =
+            fault_injection::arm_locked_replace(fault_injection::LockedReplacePlan::UnlockAfter {
+                refusals: 2,
+                code: 32,
+            });
 
         write_target_file(&target, b"new", plenty_free())
             .expect("a lock that lifts must let the write land");
@@ -2066,7 +1846,7 @@ mod tests {
         assert_eq!(fs::read(&target).expect("the write must land"), b"new");
         assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
         assert_eq!(
-            faults::lock_pauses(),
+            fault_injection::recorded_lock_pauses(),
             [Duration::from_millis(100), Duration::from_millis(300),],
             "two refusals, two pauses — nothing after the success"
         );
@@ -2078,17 +1858,18 @@ mod tests {
         // from the first attempt must not wait a single millisecond.
         let dir = TempDir::new().expect("a temporary directory must be creatable");
         let target = existing(dir.path(), "AGENTS.md", b"old");
-        let _fault = faults::arm_locked_replace(faults::LockedReplacePlan::UnlockAfter {
-            refusals: 0,
-            code: 32,
-        });
+        let _fault =
+            fault_injection::arm_locked_replace(fault_injection::LockedReplacePlan::UnlockAfter {
+                refusals: 0,
+                code: 32,
+            });
 
         write_target_file(&target, b"new", plenty_free())
             .expect("a free target must replace immediately");
 
         assert_eq!(fs::read(&target).expect("the write must land"), b"new");
         assert!(
-            faults::lock_pauses().is_empty(),
+            fault_injection::recorded_lock_pauses().is_empty(),
             "a first-attempt success never pauses"
         );
     }
@@ -2115,10 +1896,9 @@ mod tests {
             );
             return;
         }
-        let _fault =
-            faults::arm_locked_replace(faults::LockedReplacePlan::ExhaustWithRefusedCleanup {
-                code: 32,
-            });
+        let _fault = fault_injection::arm_locked_replace(
+            fault_injection::LockedReplacePlan::ExhaustWithRefusedCleanup { code: 32 },
+        );
 
         let result = write_target_file(&target, b"abc", plenty_free());
         // Restore even when the assertions below panic, so TempDir's
@@ -2178,8 +1958,8 @@ mod tests {
         // even on Windows the injection precedes the loop.
         let dir = TempDir::new().expect("a temporary directory must be creatable");
         let target = existing(dir.path(), "AGENTS.md", b"untouched");
-        let _fault = faults::arm(faults::Fault::Fail(
-            faults::Step::Replace,
+        let _fault = fault_injection::arm_atomic_fault(fault_injection::AtomicFault::Fail(
+            fault_injection::AtomicStep::Replace,
             io::Error::from_raw_os_error(32),
         ));
 
@@ -2191,7 +1971,10 @@ mod tests {
         };
         assert_eq!(failed.step, WriteStep::Replace);
         assert_eq!(err.os_code(), Some(32));
-        assert!(faults::lock_pauses().is_empty(), "the schedule never ran");
+        assert!(
+            fault_injection::recorded_lock_pauses().is_empty(),
+            "the schedule never ran"
+        );
         assert_eq!(
             fs::read(&target).expect("the target must survive"),
             b"untouched"
@@ -2205,8 +1988,8 @@ mod tests {
     fn a_staging_create_failure_keeps_the_original_intact() {
         let dir = TempDir::new().expect("a temporary directory must be creatable");
         let target = existing(dir.path(), "AGENTS.md", b"untouched");
-        let _fault = faults::arm(faults::Fault::Fail(
-            faults::Step::TempCreate,
+        let _fault = fault_injection::arm_atomic_fault(fault_injection::AtomicFault::Fail(
+            fault_injection::AtomicStep::TempCreate,
             io::Error::from_raw_os_error(13),
         ));
 
@@ -2254,8 +2037,8 @@ mod tests {
     fn a_mode_copy_failure_cleans_the_staging_file() {
         let dir = TempDir::new().expect("a temporary directory must be creatable");
         let target = existing(dir.path(), "AGENTS.md", b"untouched");
-        let _fault = faults::arm(faults::Fault::Fail(
-            faults::Step::ModeCopy,
+        let _fault = fault_injection::arm_atomic_fault(fault_injection::AtomicFault::Fail(
+            fault_injection::AtomicStep::ModeCopy,
             io::Error::from_raw_os_error(13),
         ));
 
@@ -2282,8 +2065,8 @@ mod tests {
         let dir = TempDir::new().expect("a temporary directory must be creatable");
         let target = existing(dir.path(), "AGENTS.md", b"untouched");
         // EACCES, not ENOSPC: the plain write-failure classification.
-        let _fault = faults::arm(faults::Fault::Fail(
-            faults::Step::WriteSync,
+        let _fault = fault_injection::arm_atomic_fault(fault_injection::AtomicFault::Fail(
+            fault_injection::AtomicStep::WriteSync,
             io::Error::from_raw_os_error(13),
         ));
 
@@ -2309,8 +2092,8 @@ mod tests {
     fn a_replace_failure_cleans_the_staging_file_and_keeps_the_original() {
         let dir = TempDir::new().expect("a temporary directory must be creatable");
         let target = existing(dir.path(), "AGENTS.md", b"untouched");
-        let _fault = faults::arm(faults::Fault::Fail(
-            faults::Step::Replace,
+        let _fault = fault_injection::arm_atomic_fault(fault_injection::AtomicFault::Fail(
+            fault_injection::AtomicStep::Replace,
             io::Error::from_raw_os_error(13),
         ));
 
@@ -2340,8 +2123,8 @@ mod tests {
         // the staging path no longer exists (converged cleanup).
         let dir = TempDir::new().expect("a temporary directory must be creatable");
         let target = existing(dir.path(), "AGENTS.md", b"untouched");
-        let _fault = faults::arm(faults::Fault::Fail(
-            faults::Step::DirSync,
+        let _fault = fault_injection::arm_atomic_fault(fault_injection::AtomicFault::Fail(
+            fault_injection::AtomicStep::DirSync,
             io::Error::from_raw_os_error(5),
         ));
 
@@ -2369,8 +2152,8 @@ mod tests {
     fn a_verify_read_failure_is_verify_failed_with_the_new_content_whole() {
         let dir = TempDir::new().expect("a temporary directory must be creatable");
         let target = existing(dir.path(), "AGENTS.md", b"untouched");
-        let _fault = faults::arm(faults::Fault::Fail(
-            faults::Step::VerifyRead,
+        let _fault = fault_injection::arm_atomic_fault(fault_injection::AtomicFault::Fail(
+            fault_injection::AtomicStep::VerifyRead,
             io::Error::from_raw_os_error(13),
         ));
 
@@ -2401,7 +2184,7 @@ mod tests {
         // comes from the file, not the input buffer.
         let dir = TempDir::new().expect("a temporary directory must be creatable");
         let target = existing(dir.path(), "AGENTS.md", b"untouched");
-        let _fault = faults::arm(faults::Fault::CorruptTarget);
+        let _fault = fault_injection::arm_atomic_fault(fault_injection::AtomicFault::CorruptTarget);
 
         let err = write_target_file(&target, b"abc", plenty_free())
             .expect_err("a corrupted settled file must fail the check");
@@ -2448,7 +2231,9 @@ mod tests {
             );
             return;
         }
-        let _fault = faults::arm(faults::Fault::FailAndLockFolder(faults::Step::WriteSync));
+        let _fault = fault_injection::arm_atomic_fault(
+            fault_injection::AtomicFault::FailAndLockFolder(fault_injection::AtomicStep::WriteSync),
+        );
 
         let result = write_target_file(&target, b"abc", plenty_free());
         // Restore even when the assertions below panic, so TempDir's
@@ -2506,7 +2291,7 @@ mod tests {
         // on to the second token.
         let colliding = dir.path().join(".AGENTS.md.eunomia-abcd1234.tmp");
         fs::write(&colliding, b"foreign debris").expect("writing the fixture must work");
-        let _tokens = faults::fix_tokens(&["abcd1234", "0f1e2d6c"]);
+        let _tokens = fault_injection::fix_staging_tokens(&["abcd1234", "0f1e2d6c"]);
 
         write_target_file(&target, b"abc", plenty_free())
             .expect("a single collision must be retried, not fatal");
@@ -2533,7 +2318,7 @@ mod tests {
         let colliding = dir.path().join(".AGENTS.md.eunomia-abcd1234.tmp");
         fs::write(&colliding, b"foreign debris").expect("writing the fixture must work");
         // Every attempt collides on the same token.
-        let _tokens = faults::fix_tokens(&["abcd1234", "abcd1234", "abcd1234"]);
+        let _tokens = fault_injection::fix_staging_tokens(&["abcd1234", "abcd1234", "abcd1234"]);
 
         let err = write_target_file(&target, b"abc", plenty_free())
             .expect_err("an exhausted token budget must fail the write");
@@ -2719,7 +2504,7 @@ mod tests {
                 .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                 .open(&target)
                 .expect("the fixture must be able to hold the target open");
-            let _clock = faults::arm_pause_recording();
+            let _clock = fault_injection::arm_pause_recording();
 
             let err = write_target_file(&target, b"abc", plenty_free())
                 .expect_err("a held-open target must fail the write");
@@ -2737,7 +2522,7 @@ mod tests {
             );
             assert!(failed.cleanup.is_none(), "the staging file was removed");
             assert_eq!(
-                faults::lock_pauses(),
+                fault_injection::recorded_lock_pauses(),
                 [
                     Duration::from_millis(100),
                     Duration::from_millis(300),

@@ -149,7 +149,11 @@
 //! a missing source, folder creation including the SEC-007 mode, the
 //! never-overwrite collision, the hostile project id and hostile
 //! project name refused/contained, and the error contract (Display,
-//! source chain, OS codes).
+//! source chain, OS codes). The N-th-copy failure point of spec 15.1
+//! (T-F1's fs-level half) is injected through the crate's
+//! `fault_injection` module (`cfg(test)` or the non-default
+//! `fault-injection` feature): the production removal and the
+//! `CopyFailed` classification run under it.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -159,6 +163,9 @@ use std::path::{Path, PathBuf};
 use eunomia_core::backup_name::{BackupNameError, BackupTime, backup_relative_path};
 use eunomia_core::hash::Sha256Hex;
 use eunomia_core::project::{BaseName, ProjectId, Scheme};
+
+#[cfg(any(test, feature = "fault-injection"))]
+use crate::fault_injection;
 
 /// The `backups` folder of the §5.5 layout, relative to the data
 /// directory — the first component of every path the core builders
@@ -429,20 +436,33 @@ fn copy_file(source: &Path, copy_path: &Path) -> Result<(), BackupError> {
         })?;
 
     let mut chunk = [0u8; COPY_CHUNK_BYTES];
-    let write_outcome = loop {
-        let read = match reader.read(&mut chunk) {
-            Ok(read) => read,
-            Err(source) => break Err(source),
-        };
-        if read == 0 {
-            break match writer.sync_all() {
-                Ok(()) => Ok(()),
-                Err(source) => Err(source),
+    // The fault-injection point for spec 15.1's "failure of the
+    // N-th backup" row (T-F1's fs-level half; the run-level sweep is
+    // the pipeline's): an armed plan refuses the write path of the
+    // N-th copy — once per copy, at the pass's start, after the
+    // destination exists, so the partial-copy removal and the
+    // `CopyFailed` classification below run for real.
+    #[cfg(any(test, feature = "fault-injection"))]
+    let injected = fault_injection::inject_backup_copy_failure();
+    #[cfg(not(any(test, feature = "fault-injection")))]
+    let injected: Option<io::Error> = None;
+    let write_outcome = match injected {
+        Some(source) => Err(source),
+        None => loop {
+            let read = match reader.read(&mut chunk) {
+                Ok(read) => read,
+                Err(source) => break Err(source),
             };
-        }
-        if let Err(source) = writer.write_all(&chunk[..read]) {
-            break Err(source);
-        }
+            if read == 0 {
+                break match writer.sync_all() {
+                    Ok(()) => Ok(()),
+                    Err(source) => Err(source),
+                };
+            }
+            if let Err(source) = writer.write_all(&chunk[..read]) {
+                break Err(source);
+            }
+        },
     };
     // Close both handles BEFORE removing: on Windows an open handle
     // would make the removal fail with a sharing violation.
