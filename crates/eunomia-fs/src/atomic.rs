@@ -1,25 +1,2010 @@
-//! Atomic file writes with retries.
+//! Atomic file writes: the seven-step pipeline of spec 9.5.
 //!
-//! Planned responsibility (docs/spec.md 5.2): replace a target file's
-//! content without ever leaving a half-written file behind, following spec
-//! 9.5. A temporary file is created in the same folder as the target
-//! (`tempfile`; same directory keeps the final move a rename, never a
-//! cross-device copy), written and `sync_all`-ed, then swapped in with a
-//! single replace (Windows: `MoveFileExW` with replace-existing and
-//! write-through); on Unix the parent folder is fsynced, and the written
-//! file is re-read and checked against the expected SHA-256. On an error at
-//! any step the temporary file is deleted and the original stays unchanged.
-//! Sharing violations and access errors are retried up to 3 times with
-//! 100/300/900 ms pauses, then `E_FILE_LOCKED`; a hash mismatch is
-//! `E_VERIFY_FAILED`.
+//! One entry point, [`write_target_file`]: it replaces a target file's
+//! content so that a reader (or a crash, OUT-007) only ever sees the
+//! whole old file or the whole new one, never a partial mix. The
+//! pipeline is spec 9.5 verbatim:
 //!
-//! Nothing is implemented yet: this module is part of the crate skeleton
-//! and exists to pin the module boundary.
+//! 1. **Resolve the target path** — the CALLER's step (§9.5 step 1,
+//!    `paths::resolve_target_path`, DECISIONS.md D-092): this module
+//!    receives the resolved write path and never resolves anything
+//!    itself. A `CLAUDE.md` link has therefore already become the real
+//!    `AGENTS.md` path — renaming over the resolved path keeps the
+//!    link (T-F6), and the staging file is spelled with the resolved
+//!    name (D-088's coordination rule), which this module re-derives
+//!    from the path's own file name (lossy text, the D-092 form; for a
+//!    resolved target that is `TargetPath::file_name()` by
+//!    construction).
+//! 2. **Stage** — a temporary file in the SAME folder as the target
+//!    (same folder = same volume = the final swap is a rename, never a
+//!    cross-device copy), named `.<name>.eunomia-<token>.tmp` by
+//!    `temp_files::tmp_file_name` (the one grammar the stale-file
+//!    sweep matches, D-088) and created with `create_new` — a name
+//!    collision is a typed error under a fresh token, never a
+//!    clobber. The rights of the existing target are copied onto the
+//!    staging file (Unix mode, §9.5 step 2).
+//! 3. **Write and settle** — all bytes, then `sync_all`, so the
+//!    verification judges bytes the disk has accepted.
+//! 4. **Replace** — Unix `rename(2)`; Windows `MoveFileExW` with
+//!    `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` (§9.5
+//!    step 4).
+//! 5. **Sync the folder entry** — `fsync` on the parent folder, Unix
+//!    only (§9.5 step 5 pins the platform; std cannot open a directory
+//!    on Windows, and `MOVEFILE_WRITE_THROUGH` already flushes the
+//!    rename there).
+//! 6. **Verify** — re-open the target and compare its SHA-256 with the
+//!    digest of the bytes that were handed in (§9.5 step 6). The check
+//!    reads what is ON DISK, not the input buffer: content that
+//!    changed or corrupted after the swap is caught as
+//!    [`AtomicWriteError::VerifyFailed`].
+//! 7. **Clean up** — on an error at any step the staging file is
+//!    deleted (§9.5 step 7). After a successful replace there is no
+//!    staging file left to delete; for the two post-replace steps
+//!    (folder sync, verify) the file therefore stays WHOLLY the new
+//!    content — old-or-new, never partial — and is never deleted by
+//!    this module: it is the user's data, and §10's remedy for a
+//!    failed verification is the backup, not an empty path.
+//!
+//! # Errors (§10)
+//!
+//! The typed variants map onto the §10 codes the command layer logs
+//! (three codes, four variants — [`AtomicWriteError::NameFailed`]
+//! folds into `E_WRITE_FAILED`; the D-062 posture: the code mapping
+//! itself belongs to the app layer):
+//!
+//! - [`AtomicWriteError::DiskFull`] — `E_DISK_FULL`, "no space … on
+//!   the project volume during the write". Two sources feed it: the
+//!   pre-write check (below) and the OS refusing a write-path step
+//!   with `ENOSPC` (`io::ErrorKind::StorageFull`).
+//! - [`AtomicWriteError::WriteFailed`] — `E_WRITE_FAILED` for every
+//!   other refusal of a pipeline step (staging create, mode copy,
+//!   write/sync, replace, folder sync), each carrying which step
+//!   failed and the raw OS error.
+//! - [`AtomicWriteError::VerifyFailed`] — `E_VERIFY_FAILED`, the
+//!   re-read digest mismatch or an unreadable target.
+//! - [`AtomicWriteError::NameFailed`] — also `E_WRITE_FAILED`: a
+//!   contract violation (the caller handed a path whose file name
+//!   cannot shape a staging name — the resolved targets of D-092
+//!   never can), kept as its own variant so the refusal is a typed
+//!   fact, not an invented OS error. The command layer logs it with
+//!   the write-failed code; no §10 row of its own exists.
+//!
+//! `E_FILE_LOCKED` (§9.5 step 4's sharing-violation retries) is NOT
+//! here: Windows replace retries (100/300/900 ms, then
+//! `E_FILE_LOCKED`) are task T-067, layered on this module. The seam
+//! is deliberate and single: every platform funnels the replace
+//! through [`replace_target`], and [`WriteFailed`] carries the raw OS
+//! error of the refused replace — the retry loop and its locked-file
+//! classification drop into that one function and need no new
+//! plumbing through the rest of the pipeline.
+//!
+//! # The pre-write space check
+//!
+//! §10's `E_DISK_FULL` row names the project volume during the write,
+//! so before anything is created the caller-supplied free-space source
+//! is consulted once — the same seam `free_space::check_backup_space`
+//! established (D-089): production passes
+//! `|| free_space::free_bytes(folder)`, tests substitute a plain
+//! number. The demand is exactly the content's byte count: §9.4's
+//! "plus a 20% margin" arithmetic belongs to the BACKUP volume check,
+//! and no margin is pinned for the write. Only the definitive
+//! shortage verdict aborts: a FAILED probe does not block the write
+//! (a dropped drive then reports its own honest failure from the
+//! write itself, ERR-003's posture) — the write, not the probe, is
+//! the authority on whether the bytes can be written. The exact
+//! boundary passes (`free == required`), inheriting
+//! `free_space::check_space`'s strict-less-than ruling.
+//!
+//! # The staging token
+//!
+//! The spec asks for "8 random characters"; the alphabet is pinned by
+//! D-088 (lowercase hex, `TMP_TOKEN_ALPHABET`). The entropy source is
+//! the wall clock's nanoseconds, the process id and a process-wide
+//! counter, digested through `eunomia-core::hash` — no `rand`
+//! dependency (D-017's allow-list; the token needs uniqueness, not
+//! unpredictability: `create_new` makes a collision an error under
+//! the next token, never corruption, and the sweep recognizes any
+//! grammar-conforming name). A collision retries with a fresh token,
+//! at most [`TOKEN_ATTEMPTS`] times, then fails typed.
+//!
+//! # Crash safety and idempotence (OUT-007, ERR-002)
+//!
+//! The invariant is old-or-new: before the rename the target is the
+//! untouched old file and the staging file is private debris; the
+//! rename is the single atomic transition; after it the target is
+//! wholly the new content. A kill at any instant leaves at most a
+//! staging file under the sweep's grammar (`temp_files`, T-F2) — never
+//! a half-written target. Re-running the write converges: same
+//! content, fresh token, same end state (a sync is idempotent, §10).
+//!
+//! # Races are honest (TOCTOU)
+//!
+//! The pipeline is a sequence of OS calls over a live filesystem; no
+//! snapshot, no pretended atomicity between the steps. The space
+//! verdict is a fact about the moment it was taken; the mode copy
+//! reads the target's metadata at its own instant; the verification
+//! re-reads whatever the target holds after the swap — an external
+//! editor writing between the rename and the verification surfaces as
+//! a digest mismatch (`E_VERIFY_FAILED`), which is the honest report
+//! of "the file does not hold what this run wrote".
 //!
 //! # Testing plan
 //!
-//! Once implemented, tests use temporary directories to cover create-new
-//! and overwrite-existing writes, the crash-safety invariant (the target is
-//! always the old or the new content, never a partial mix), cleanup of the
-//! temporary file on failure, retry behavior ending in `E_FILE_LOCKED`, and
-//! the `E_VERIFY_FAILED` hash-mismatch case.
+//! Colocated tests over real temporary directories drive the public
+//! function only; failures at each pipeline step are injected through
+//! a `#[cfg(test)]` fault hook (spec 15.1's "failure points in `fs`"),
+//! so the cleanup paths run in the production code under test. The
+//! battery: the new-file and overwrite happy paths against the FIPS
+//! "abc" oracle, the empty write, the mode copy (Unix), the
+//! disk-full shortage/exact-boundary/probe-failure decisions with a
+//! substituted source, `ENOSPC` mapped to `E_DISK_FULL`, a failure at
+//! EVERY step leaving the original intact and the staging file
+//! removed (or the refusal carried), the refused cleanup, the digest
+//! check catching a corrupted settled file (it reads the disk, not
+//! the buffer), token collision retry and exhaustion, the missing
+//! folder and degenerate target shapes, the caller-side symlink
+//! resolution keeping the link (T-F6's shape), and the error contract
+//! (Display, source chain, OS codes).
+
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+
+use eunomia_core::hash::Sha256Hex;
+
+use crate::free_space::{FreeSpaceError, check_space};
+use crate::temp_files::{TMP_TOKEN_LEN, TmpNameError, tmp_file_name};
+
+/// How many distinct staging names one write may try before giving
+/// up: a `create_new` collision (same folder, same token — a retried
+/// run racing a debris file) tries the next token; three attempts
+/// bound the loop, and the last refusal is reported typed. D-088's
+/// ruling: a collision is an error and a retry, never corruption.
+const TOKEN_ATTEMPTS: usize = 3;
+
+/// The read chunk of the verification pass: 64 KiB, the same size
+/// `backup` streams with — the target is re-read in fixed chunks and
+/// never loaded whole into memory.
+const VERIFY_CHUNK_BYTES: usize = 64 * 1024;
+
+/// What a successful [`write_target_file`] proved about the file on
+/// disk: the target now holds exactly `size` bytes whose SHA-256 is
+/// `sha256_hex` — the digest was measured by re-reading the settled
+/// file (§9.5 step 6), not by trusting the write.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WrittenFile {
+    /// The target path that was replaced (the resolved write path the
+    /// caller handed in).
+    pub path: PathBuf,
+    /// The content's size in bytes.
+    pub size: u64,
+    /// The content's SHA-256, 64 lowercase hex characters — the
+    /// expected digest the re-read check confirmed against the disk.
+    pub sha256_hex: String,
+}
+
+/// Atomically replaces `target`'s content with `contents` following
+/// the §9.5 pipeline (see the module docs): stage in the same folder
+/// under the D-088 grammar with `create_new`, copy the existing
+/// target's Unix mode onto the staging file, write and `sync_all`,
+/// replace the target in one rename, `fsync` the parent folder (Unix),
+/// then re-read the target and verify its SHA-256.
+///
+/// `target` is the RESOLVED write path (§9.5 step 1 is the caller's —
+/// `paths::resolve_target_path`, D-092); this module renames over
+/// exactly the path it is given. `free_space` is the D-089 seam: the
+/// free bytes of the target's volume, consulted once before anything
+/// is created (production passes `|| free_space::free_bytes(folder)`,
+/// tests substitute a number); only a definitive shortage aborts the
+/// write as [`AtomicWriteError::DiskFull`] — a failed probe does not
+/// block it.
+///
+/// The operation is idempotent: re-running it with the same content
+/// converges to the same file (a fresh staging token each time), so a
+/// retried sync after an interrupted run is safe (§10).
+///
+/// # Errors
+///
+/// - [`AtomicWriteError::NameFailed`]: `target`'s file name cannot
+///   shape a staging name (not a single plain file name) — nothing
+///   was created.
+/// - [`AtomicWriteError::DiskFull`]: the volume of `target` cannot
+///   hold the content (the pre-write check's shortage verdict), or a
+///   write-path step was refused with no space (`ENOSPC` /
+///   `StorageFull`). Before the staging file exists nothing was
+///   touched; after it, the staging file was removed unless even the
+///   removal failed (`cleanup`).
+/// - [`AtomicWriteError::WriteFailed`]: any other refusal of a
+///   pipeline step — staging create (including a missing folder, the
+///   T-F7 shape, and exhausted token collisions), mode copy,
+///   write/sync, replace, folder sync. The staging file was removed
+///   unless the removal was refused (`cleanup`); the target is
+///   untouched for every step up to and including the replace, and
+///   wholly the new content for the folder sync (the rename already
+///   happened — old-or-new, never partial).
+/// - [`AtomicWriteError::VerifyFailed`]: the re-read digest did not
+///   match, or the target could not be read back. The file holds the
+///   new content (unverified); it is deliberately NOT deleted — §10's
+///   remedy is the backup copy.
+pub fn write_target_file<S>(
+    target: &Path,
+    contents: &[u8],
+    free_space: S,
+) -> Result<WrittenFile, AtomicWriteError>
+where
+    S: FnOnce() -> Result<u64, FreeSpaceError>,
+{
+    // A bare relative name ("AGENTS.md") has no folder to stage in —
+    // the resolved targets of D-092 are absolute; refuse the shape
+    // instead of staging into the process's working directory.
+    let Some(folder) = target.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Err(AtomicWriteError::WriteFailed(WriteFailed {
+            step: WriteStep::TempCreate,
+            path: target.to_owned(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the target path has no parent folder to stage in",
+            ),
+            cleanup: None,
+        }));
+    };
+    // The staging name keys on the target's own file name, lossy text
+    // (the D-092 form — `TargetPath::file_name()` for a resolved
+    // target).
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+
+    // §10's write-time E_DISK_FULL: only the definitive shortage
+    // aborts. A failed probe falls through — the write itself reports
+    // a dropped drive far more precisely (ERR-003).
+    let required = u64::try_from(contents.len()).unwrap_or(u64::MAX);
+    if let Ok(reported_free) = free_space()
+        && let Err(FreeSpaceError::NotEnoughSpace {
+            free,
+            required: needed,
+        }) = check_space(reported_free, required)
+    {
+        return Err(AtomicWriteError::DiskFull(DiskFullFailure {
+            path: target.to_owned(),
+            step: None,
+            free: Some(free),
+            required: needed,
+            source: None,
+            cleanup: None,
+        }));
+    }
+
+    // The expected digest of the §9.5 step-6 check: computed from the
+    // handed-in bytes, so the check can only pass when the disk holds
+    // exactly what this run meant to write.
+    let expected_sha256_hex = sha256_hex_of(contents);
+
+    // Step 2: stage. `create_new` under the sweep's grammar; a name
+    // collision retries under a fresh token, at most TOKEN_ATTEMPTS
+    // times in total.
+    let (staging_file, staging_path) = create_staging_file(folder, file_name.as_deref(), target)?;
+
+    // Step 2 (Unix): the existing target's mode rides along — the
+    // replaced file keeps the rights its owner gave it.
+    #[cfg(unix)]
+    if let Err(failure) = copy_existing_mode(target, &staging_path) {
+        // The stated handle discipline: close before the error-path
+        // removal (the removal runs inside `abort`).
+        drop(staging_file);
+        return Err(abort(failure, target, &staging_path, required));
+    }
+
+    // Step 3: write every byte, then settle them.
+    #[cfg(test)]
+    let write_outcome = match faults::inject(faults::Step::WriteSync, target) {
+        Some(source) => Err(source),
+        None => write_and_sync(&staging_file, contents),
+    };
+    #[cfg(not(test))]
+    let write_outcome = write_and_sync(&staging_file, contents);
+    // Close the handle BEFORE the rename and the error-path removal:
+    // an open handle is a Windows sharing violation waiting to happen
+    // (the backup module's precedent).
+    drop(staging_file);
+    if let Err(source) = write_outcome {
+        return Err(abort(
+            WriteFailed {
+                step: WriteStep::WriteSync,
+                path: staging_path.clone(),
+                source,
+                cleanup: None,
+            },
+            target,
+            &staging_path,
+            required,
+        ));
+    }
+
+    // Step 4: the single atomic transition. Failures here leave the
+    // old file intact and the staging file removable.
+    if let Err(source) = replace_target(&staging_path, target) {
+        return Err(abort(
+            WriteFailed {
+                step: WriteStep::Replace,
+                path: target.to_owned(),
+                source,
+                cleanup: None,
+            },
+            target,
+            &staging_path,
+            required,
+        ));
+    }
+
+    // Step 5 (Unix): make the folder entry itself durable. The rename
+    // already happened, so a failure reports the step with the file
+    // wholly new — and the staging path no longer exists, which the
+    // removal treats as converged.
+    #[cfg(unix)]
+    if let Err(source) = sync_parent_folder(folder, target) {
+        return Err(abort(
+            WriteFailed {
+                step: WriteStep::DirSync,
+                path: folder.to_owned(),
+                source,
+                cleanup: None,
+            },
+            target,
+            &staging_path,
+            required,
+        ));
+    }
+
+    // Step 6: verify what the disk holds, not what the buffer held.
+    #[cfg(test)]
+    faults::corrupt_target_if_armed(target);
+    match read_back_digest(target) {
+        Ok(actual_sha256_hex) if actual_sha256_hex == expected_sha256_hex => {}
+        Ok(actual_sha256_hex) => {
+            return Err(AtomicWriteError::VerifyFailed(VerifyFailed {
+                path: target.to_owned(),
+                expected_sha256_hex,
+                mismatch: VerifyMismatch::Digest { actual_sha256_hex },
+            }));
+        }
+        Err(source) => {
+            return Err(AtomicWriteError::VerifyFailed(VerifyFailed {
+                path: target.to_owned(),
+                expected_sha256_hex,
+                mismatch: VerifyMismatch::Unreadable { source },
+            }));
+        }
+    }
+
+    Ok(WrittenFile {
+        path: target.to_owned(),
+        size: required,
+        sha256_hex: expected_sha256_hex,
+    })
+}
+
+/// Step 2's staging create: tries up to [`TOKEN_ATTEMPTS`] distinct
+/// tokens under the D-088 grammar, `create_new` every time — an
+/// existing file under a candidate name is a collision (a retried run
+/// racing that run's debris), answered with the next token, never a
+/// clobber. Any other refusal, or an exhausted budget, fails typed
+/// with nothing left behind.
+fn create_staging_file(
+    folder: &Path,
+    file_name: Option<&str>,
+    target: &Path,
+) -> Result<(File, PathBuf), AtomicWriteError> {
+    let Some(file_name) = file_name else {
+        return Err(AtomicWriteError::WriteFailed(WriteFailed {
+            step: WriteStep::TempCreate,
+            path: target.to_owned(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the target path does not end in a file name",
+            ),
+            cleanup: None,
+        }));
+    };
+    let mut last_collision: Option<(PathBuf, io::Error)> = None;
+    for _ in 0..TOKEN_ATTEMPTS {
+        let token = next_token();
+        // The name is the sweep's grammar or nothing: the builder
+        // refuses anything a one-level sweep could not clean (and a
+        // refused name does not depend on the token, so the first
+        // attempt settles it).
+        let name = tmp_file_name(file_name, &token)
+            .map_err(|source| AtomicWriteError::NameFailed { source })?;
+        let path = folder.join(name);
+        #[cfg(test)]
+        if let Some(source) = faults::inject(faults::Step::TempCreate, target) {
+            return Err(AtomicWriteError::WriteFailed(WriteFailed {
+                step: WriteStep::TempCreate,
+                path,
+                source,
+                cleanup: None,
+            }));
+        }
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((file, path)),
+            // Somebody holds this token's name — a collision, not a
+            // conflict with the target: try the next token.
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                last_collision = Some((path, source));
+            }
+            Err(source) => {
+                return Err(AtomicWriteError::WriteFailed(WriteFailed {
+                    step: WriteStep::TempCreate,
+                    path,
+                    source,
+                    cleanup: None,
+                }));
+            }
+        }
+    }
+    // The budget ran out over collisions: the last attempted name and
+    // its OS refusal are the facts. (The expect is an invariant, not
+    // an input check: the loop ran at least once, and only collisions
+    // reach this point.)
+    let (path, source) = last_collision.expect("an exhausted token budget has seen a collision");
+    Err(AtomicWriteError::WriteFailed(WriteFailed {
+        step: WriteStep::TempCreate,
+        path,
+        source,
+        cleanup: None,
+    }))
+}
+
+/// Step 3: write every byte and `sync_all` — the bytes the later
+/// verification judges must be bytes the disk has accepted, not page
+/// cache promises.
+fn write_and_sync(mut staging_file: &File, contents: &[u8]) -> io::Result<()> {
+    staging_file.write_all(contents)?;
+    staging_file.sync_all()
+}
+
+/// The next staging token: 8 lowercase hex characters. Production
+/// digests the wall clock, the process id and a process-wide counter
+/// through core's SHA-256 (see the module docs for why no `rand`);
+/// tests may fix the sequence to pin exact names.
+fn next_token() -> String {
+    #[cfg(test)]
+    {
+        if let Some(token) = faults::next_fixed_token() {
+            return token;
+        }
+    }
+    production_token()
+}
+
+/// The production token source: uniqueness without a `rand`
+/// dependency — nanoseconds (monotonic enough across a process's
+/// life), the pid (separates concurrent app instances) and a
+/// process-wide counter (separates back-to-back calls within one
+/// nanosecond) digested into the D-088 alphabet.
+fn production_token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|passed| u64::try_from(passed.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let pid = u64::from(std::process::id());
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+
+    let mut hasher = Sha256Hex::new();
+    hasher.update(&nanos.to_le_bytes());
+    hasher.update(&pid.to_le_bytes());
+    hasher.update(&sequence.to_le_bytes());
+    // Lowercase hex is one byte per character: the byte range at 8 is
+    // exactly the first 8 characters.
+    hasher.finalize_hex()[..TMP_TOKEN_LEN].to_owned()
+}
+
+/// Step 2's Unix mode copy: the replaced file keeps the rights of the
+/// file it replaces (`chmod`, which no umask applies to — the copied
+/// mode lands exactly). A target that does not exist is a first sync's
+/// creation: nothing to copy, the platform default stands (the BKP
+/// specs pin no rights for created targets either). The copy is the
+/// full `& 0o7777` mask, faithfully — with the kernel's own limits,
+/// not the module's: the Linux killpriv policy strips setuid/setgid
+/// from any file at write time (a security guarantee no writer can
+/// bypass — the staging file is written after the chmod), while the
+/// sticky bit and the plain rwx bits ride along.
+#[cfg(unix)]
+fn copy_existing_mode(target: &Path, staging_path: &Path) -> Result<(), WriteFailed> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = match fs::metadata(target) {
+        Ok(metadata) => metadata.permissions().mode() & 0o7777,
+        // A vanished or never-existing target: a first sync creates
+        // the file; the default mode is correct (and a target that
+        // vanished mid-run fails honestly at the replace instead).
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(WriteFailed {
+                step: WriteStep::ModeCopy,
+                path: staging_path.to_owned(),
+                source,
+                cleanup: None,
+            });
+        }
+    };
+    #[cfg(test)]
+    if let Some(source) = faults::inject(faults::Step::ModeCopy, target) {
+        return Err(WriteFailed {
+            step: WriteStep::ModeCopy,
+            path: staging_path.to_owned(),
+            source,
+            cleanup: None,
+        });
+    }
+    fs::set_permissions(staging_path, fs::Permissions::from_mode(mode)).map_err(|source| {
+        WriteFailed {
+            step: WriteStep::ModeCopy,
+            path: staging_path.to_owned(),
+            source,
+            cleanup: None,
+        }
+    })
+}
+
+/// Step 4: the single atomic transition — the one function every
+/// platform funnels the replace through, and therefore T-067's seam:
+/// the Windows sharing-violation retry loop (100/300/900 ms, then
+/// `E_FILE_LOCKED`) lands here, and [`WriteFailed`] already carries
+/// the raw OS error it will classify.
+#[cfg(unix)]
+fn replace_target(staging_path: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(source) = faults::inject(faults::Step::Replace, target) {
+        return Err(source);
+    }
+    fs::rename(staging_path, target)
+}
+
+/// The Windows arm of step 4: `MoveFileExW` with
+/// `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`, exactly the
+/// two flags §9.5 step 4 pins. std's own `fs::rename` is
+/// `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` only (verified in
+/// the toolchain's std source, `sys/fs/windows.rs`), so the
+/// spec-pinned write-through needs the direct call — the crate's
+/// second owner-sanctioned FFI call after D-089's free-space probe,
+/// same discipline. No retries here: sharing violations surface
+/// verbatim for T-067's loop to own.
+#[cfg(windows)]
+fn replace_target(staging_path: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(source) = faults::inject(faults::Step::Replace, target) {
+        return Err(source);
+    }
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    // The wide buffers must outlive the call (see the SAFETY
+    // comment): named locals, never temporaries in the call.
+    let old_w = wide_path(staging_path);
+    let new_w = wide_path(target);
+    // SAFETY: `MoveFileExW(lpExistingFileName: LPCWSTR,
+    // lpNewFileName: LPCWSTR, dwFlags: DWORD) -> BOOL` — one call, no
+    // retained state, no callbacks (`extern "system"` ABI,
+    // Kernel32). The Microsoft contract (fileapi.h) and how each
+    // invariant is met:
+    // 1. Both name parameters must be valid NUL-terminated wide
+    //    strings for the duration of the call — `old_w`/`new_w` are
+    //    exactly that (`wide_path` appends the terminator), their
+    //    buffers stay alive and unmutated across the call (borrowed
+    //    `as_ptr()` only), and `PCWSTR` is `*const u16`, the element
+    //    type.
+    // 2. `dwFlags` is a plain value: the two §9.5-pinned constants,
+    //    nothing to validate.
+    // 3. The function writes no caller memory and retains no
+    //    handles; the staging file's own handle was dropped before
+    //    this step, so no self-inflicted sharing violation exists.
+    // 4. On failure the reason is in `GetLastError` — read in the
+    //    very next statement (`io::Error::last_os_error()`) before
+    //    anything can overwrite it, and carried whole for T-067's
+    //    sharing-violation classification.
+    let ok = unsafe {
+        MoveFileExW(
+            old_w.as_ptr(),
+            new_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// The path as a NUL-terminated UTF-16 buffer: the `LPCWSTR` shape
+/// `MoveFileExW` consumes. Verbatim code units plus the terminator;
+/// a named local so its lifetime covers the call (the free-space
+/// module's twin helper, local to keep this module self-contained).
+#[cfg(windows)]
+fn wide_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    wide
+}
+
+/// Step 5 (Unix): `fsync` the parent folder so the rename's directory
+/// entry survives a crash in the window after the replace — the
+/// durability §9.5 step 5 pins for Unix. Opening a directory
+/// read-only and `sync_all`-ing it is the portable-on-Unix shape; on
+/// Windows std cannot open a directory at all, and the spec pins the
+/// step to Unix (`MOVEFILE_WRITE_THROUGH` carries the intent there).
+#[cfg(unix)]
+fn sync_parent_folder(folder: &Path, _target: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(source) = faults::inject(faults::Step::DirSync, _target) {
+        return Err(source);
+    }
+    File::open(folder)?.sync_all()
+}
+
+/// Step 6's read side: streams the target back in fixed chunks and
+/// returns the digest of the bytes found on disk. An injected refusal
+/// of the read surfaces as [`VerifyMismatch::Unreadable`] at the call
+/// site, which owns the §9.5 step it failed.
+fn read_back_digest(target: &Path) -> io::Result<String> {
+    #[cfg(test)]
+    if let Some(source) = faults::inject(faults::Step::VerifyRead, target) {
+        return Err(source);
+    }
+    let mut file = File::open(target)?;
+    let mut hasher = Sha256Hex::new();
+    let mut chunk = [0u8; VERIFY_CHUNK_BYTES];
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&chunk[..read]);
+    }
+    Ok(hasher.finalize_hex())
+}
+
+/// The SHA-256 of the bytes handed in — the §9.5 step-6 expected
+/// value. Pure: no I/O, so it can only describe the input.
+fn sha256_hex_of(contents: &[u8]) -> String {
+    let mut hasher = Sha256Hex::new();
+    hasher.update(contents);
+    hasher.finalize_hex()
+}
+
+/// Removes a failed run's staging file (§9.5 step 7): a staging file
+/// that raced away is converged, not a failure; a refused removal is
+/// returned so the caller carries it (the sweep will retry the
+/// leftover under the same grammar, T-F2).
+fn remove_staging(staging_path: &Path) -> Option<io::Error> {
+    match fs::remove_file(staging_path) {
+        Ok(()) => None,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+        Err(source) => Some(source),
+    }
+}
+
+/// Fails the pipeline after a write-path step refused: removes the
+/// staging file, then classifies — a no-space refusal
+/// (`io::ErrorKind::StorageFull`) is the §10 write-time `E_DISK_FULL`
+/// even though it came from the OS mid-write, everything else is
+/// `E_WRITE_FAILED` with the step named. The mid-write `DiskFull`
+/// verdict reports the TARGET (§10's "path" is the project fact, and
+/// the staging file it just deleted must not be the logged path);
+/// `WriteFailed` keeps the path the failed step operated on.
+fn abort(
+    failure: WriteFailed,
+    target: &Path,
+    staging_path: &Path,
+    required: u64,
+) -> AtomicWriteError {
+    let cleanup = remove_staging(staging_path);
+    let WriteFailed {
+        step,
+        path,
+        source,
+        cleanup: _,
+    } = failure;
+    if source.kind() == io::ErrorKind::StorageFull {
+        return AtomicWriteError::DiskFull(DiskFullFailure {
+            path: target.to_owned(),
+            step: Some(step),
+            free: None,
+            required,
+            source: Some(source),
+            cleanup,
+        });
+    }
+    AtomicWriteError::WriteFailed(WriteFailed {
+        step,
+        path,
+        source,
+        cleanup,
+    })
+}
+
+/// Which §9.5 pipeline step refused — the fact §10's log line carries
+/// next to the OS error ("every error is written to the log with its
+/// code, project, path, and OS code").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteStep {
+    /// Creating the staging file (§9.5 step 2): a missing folder (the
+    /// T-F7 shape), an unwritable one, or an exhausted token budget.
+    TempCreate,
+    /// Copying the existing target's Unix mode onto the staging file
+    /// (§9.5 step 2; Unix only — the variant is never produced on
+    /// Windows).
+    ModeCopy,
+    /// Writing the bytes and `sync_all`-ing them (§9.5 step 3).
+    WriteSync,
+    /// The replace rename itself (§9.5 step 4).
+    Replace,
+    /// The parent-folder `fsync` (§9.5 step 5; Unix only).
+    DirSync,
+}
+
+impl fmt::Display for WriteStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            WriteStep::TempCreate => "creating the staging file",
+            WriteStep::ModeCopy => "copying the file mode",
+            WriteStep::WriteSync => "writing the staging file",
+            WriteStep::Replace => "replacing the target",
+            WriteStep::DirSync => "syncing the folder",
+        };
+        f.write_str(text)
+    }
+}
+
+/// The failure data of a write-path step that refused (§10
+/// `E_WRITE_FAILED`): the step, the path it was operating on (the
+/// staging path for the staging steps, the target for the replace,
+/// the folder for the folder sync — one meaning per step, both
+/// mode-copy failures name the staging path), the OS error, and
+/// whether the §9.5 step-7 cleanup succeeded.
+#[derive(Debug)]
+pub struct WriteFailed {
+    /// Which pipeline step refused.
+    pub step: WriteStep,
+    /// The path the failed step was operating on.
+    pub path: PathBuf,
+    /// The OS failure, carrying the raw error code.
+    pub source: io::Error,
+    /// The staging-file removal outcome: `None` = removed (or nothing
+    /// existed yet — the staging create's own failures), `Some` = the
+    /// staging file is still on disk and the sweep's retry owns it.
+    pub cleanup: Option<io::Error>,
+}
+
+/// The failure data of the §10 write-time `E_DISK_FULL`: what was
+/// demanded, what was available (when the pre-write check could
+/// answer), and the OS refusal when the verdict came from the write
+/// path instead.
+#[derive(Debug)]
+pub struct DiskFullFailure {
+    /// The target file the write demanded space for (§10's log fact —
+    /// never the staging file, even when the OS refusal came from a
+    /// step that was operating on it).
+    pub path: PathBuf,
+    /// The step the OS refusal came from, when the verdict came from
+    /// the write path; `None` for the pre-write check's shortage
+    /// verdict (no step had run yet).
+    pub step: Option<WriteStep>,
+    /// The free bytes the pre-write source reported, when it could
+    /// answer; `None` when the verdict came from the OS refusing a
+    /// write-path step (`source`) and no probe number exists.
+    pub free: Option<u64>,
+    /// The byte count the write demanded: exactly the content's
+    /// length (§9.4's 20% margin belongs to the backup-volume check;
+    /// no margin is pinned for the write).
+    pub required: u64,
+    /// The OS no-space refusal (`ENOSPC` / `StorageFull`) when the
+    /// verdict came from the write path; `None` for the pre-write
+    /// check's shortage verdict.
+    pub source: Option<io::Error>,
+    /// The staging-file removal outcome, identical in meaning to
+    /// [`WriteFailed::cleanup`] (`None` for the pre-write check —
+    /// nothing existed yet).
+    pub cleanup: Option<io::Error>,
+}
+
+/// The failure data of the §9.5 step-6 check: what was expected, and
+/// what the settled file actually showed.
+#[derive(Debug)]
+pub struct VerifyFailed {
+    /// The target path that was re-read.
+    pub path: PathBuf,
+    /// The expected digest: the SHA-256 of the bytes handed in, 64
+    /// lowercase hex characters.
+    pub expected_sha256_hex: String,
+    /// What the re-read actually measured.
+    pub mismatch: VerifyMismatch,
+}
+
+/// What the §9.5 step-6 re-read saw, when it did not match.
+#[derive(Debug)]
+pub enum VerifyMismatch {
+    /// The file was read whole and its bytes hash differently — the
+    /// settled content is not what this run wrote (corruption, or an
+    /// external editor inside the rename→verify window).
+    Digest {
+        /// The digest of the bytes found on disk, 64 lowercase hex
+        /// characters.
+        actual_sha256_hex: String,
+    },
+    /// The target could not be opened or read to the end for the
+    /// check at all.
+    Unreadable {
+        /// The OS failure, carrying the raw error code.
+        source: io::Error,
+    },
+}
+
+impl VerifyMismatch {
+    /// The I/O error behind the mismatch, when there is one.
+    fn io_error(&self) -> Option<&io::Error> {
+        match self {
+            VerifyMismatch::Digest { .. } => None,
+            VerifyMismatch::Unreadable { source } => Some(source),
+        }
+    }
+}
+
+/// Why an atomic write failed (typed, hand-rolled per the crate's
+/// error posture, D-017/D-084: no error-crate dependency; the §10
+/// code mapping happens in the command layer from these facts).
+#[derive(Debug)]
+pub enum AtomicWriteError {
+    /// The target's file name cannot shape a staging name (not a
+    /// single plain file name — separators, NUL, `.`/`..`): nothing
+    /// was created, and no spelling the sweep matches could ever
+    /// have been produced.
+    NameFailed {
+        /// The staging-name builder's typed refusal.
+        source: TmpNameError,
+    },
+    /// No space on the project volume (§10's write-time
+    /// `E_DISK_FULL`): the pre-write check's shortage verdict, or the
+    /// OS refusing a write-path step with no space.
+    DiskFull(DiskFullFailure),
+    /// A pipeline step refused (§10 `E_WRITE_FAILED`); the staging
+    /// file was removed unless the removal itself was refused.
+    WriteFailed(WriteFailed),
+    /// The written file failed the §9.5 step-6 re-read check (§10
+    /// `E_VERIFY_FAILED`). The file holds the new, unverified
+    /// content and is deliberately not deleted — the remedy is the
+    /// backup copy.
+    VerifyFailed(VerifyFailed),
+}
+
+impl AtomicWriteError {
+    /// The I/O error behind the failure, for the caller's log line
+    /// (`ErrorDetails::from_io_error` in the app layer consumes the
+    /// same shape as the sibling modules' errors). `None` where no
+    /// OS call failed (the name refusal; the pre-write shortage
+    /// verdict; the digest mismatch).
+    pub fn io_error(&self) -> Option<&io::Error> {
+        match self {
+            AtomicWriteError::NameFailed { .. } => None,
+            AtomicWriteError::DiskFull(failed) => failed.source.as_ref(),
+            AtomicWriteError::WriteFailed(failed) => Some(&failed.source),
+            AtomicWriteError::VerifyFailed(failed) => failed.mismatch.io_error(),
+        }
+    }
+
+    /// The raw OS error code (`std::io::Error::raw_os_error`), the
+    /// §10 log fact. `None` where no OS call failed.
+    pub fn os_code(&self) -> Option<i32> {
+        self.io_error().and_then(io::Error::raw_os_error)
+    }
+}
+
+impl fmt::Display for AtomicWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AtomicWriteError::NameFailed { source } => {
+                write!(f, "the staging name was refused: {source}")
+            }
+            AtomicWriteError::DiskFull(failed) => {
+                match (failed.free, &failed.source) {
+                    // The pre-write verdict: both numbers are facts.
+                    (Some(free), None) => write!(
+                        f,
+                        "not enough space on the volume of {}: {free} bytes available, {} required",
+                        failed.path.display(),
+                        failed.required
+                    ),
+                    // The mid-write verdict has no probe numbers: the
+                    // OS error is the fact.
+                    (_, Some(source)) => write!(
+                        f,
+                        "no space left while writing {}: {source}",
+                        failed.path.display()
+                    ),
+                    // Both absent is not a shape the pipeline produces
+                    // (one of the two is always set); the arm keeps
+                    // the Display total without panicking on a
+                    // hand-built value.
+                    (None, None) => write!(
+                        f,
+                        "no space left for {}: {} bytes required",
+                        failed.path.display(),
+                        failed.required
+                    ),
+                }?;
+                if let Some(cleanup) = &failed.cleanup {
+                    write!(f, "; the staging file could not be removed: {cleanup}")?;
+                }
+                Ok(())
+            }
+            AtomicWriteError::WriteFailed(failed) => {
+                write!(
+                    f,
+                    "the atomic write failed while {} {}: {}",
+                    failed.step,
+                    failed.path.display(),
+                    failed.source
+                )?;
+                if let Some(cleanup) = &failed.cleanup {
+                    write!(f, "; the staging file could not be removed: {cleanup}")?;
+                }
+                Ok(())
+            }
+            AtomicWriteError::VerifyFailed(failed) => {
+                write!(
+                    f,
+                    "the written file {} failed the check",
+                    failed.path.display()
+                )?;
+                match &failed.mismatch {
+                    VerifyMismatch::Digest { actual_sha256_hex } => write!(
+                        f,
+                        ": sha256 {} expected, {actual_sha256_hex} found",
+                        failed.expected_sha256_hex
+                    )?,
+                    VerifyMismatch::Unreadable { source } => {
+                        write!(f, ": the file could not be read back: {source}")?
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for AtomicWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AtomicWriteError::NameFailed { source } => Some(source),
+            AtomicWriteError::DiskFull(failed) => failed
+                .source
+                .as_ref()
+                .map(|source| source as &(dyn std::error::Error + 'static)),
+            AtomicWriteError::WriteFailed(failed) => Some(&failed.source),
+            AtomicWriteError::VerifyFailed(failed) => failed
+                .mismatch
+                .io_error()
+                .map(|source| source as &(dyn std::error::Error + 'static)),
+        }
+    }
+}
+
+/// The `#[cfg(test)]` fault-injection seam (spec 15.1's "failure
+/// points in `fs`"): tests arm a fault, the pipeline's step call
+/// sites consume it, and the production cleanup paths run for real.
+/// Nothing here compiles outside `cfg(test)` — the shipped pipeline
+/// has no hooks.
+#[cfg(test)]
+mod faults {
+    use std::cell::RefCell;
+    use std::io;
+    use std::io::Write as _;
+    use std::path::Path;
+
+    /// The pipeline steps a fault can refuse. `ModeCopy` and
+    /// `DirSync` exist only where those steps do (Unix).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(crate) enum Step {
+        TempCreate,
+        #[cfg(unix)]
+        ModeCopy,
+        WriteSync,
+        Replace,
+        #[cfg(unix)]
+        DirSync,
+        VerifyRead,
+    }
+
+    /// One armed fault.
+    pub(crate) enum Fault {
+        /// Refuse the given step once, with this error.
+        Fail(Step, io::Error),
+        /// Refuse the given step with EACCES after making the target
+        /// folder read-only-execute — so the §9.5 step-7 staging
+        /// removal itself is refused and the `cleanup` field has a
+        /// real refusal to carry (Unix: mode bits are the fixture).
+        #[cfg(unix)]
+        FailAndLockFolder(Step),
+        /// Append one byte to the target just before the §9.5 step-6
+        /// re-read: the settled file no longer holds what was
+        /// written, and the digest check must catch it.
+        CorruptTarget,
+    }
+
+    thread_local! {
+        static FAULT: RefCell<Option<Fault>> = const { RefCell::new(None) };
+        static FIXED_TOKENS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Keeps an armed fault (and any fixed token sequence) armed for
+    /// a scope and disarms on drop — a test can never leak a fault
+    /// into the next one.
+    pub(crate) struct Armed;
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            FAULT.with(|cell| *cell.borrow_mut() = None);
+            FIXED_TOKENS.with(|cell| cell.borrow_mut().clear());
+        }
+    }
+
+    /// Arms `fault` until the returned guard drops.
+    pub(crate) fn arm(fault: Fault) -> Armed {
+        FAULT.with(|cell| *cell.borrow_mut() = Some(fault));
+        Armed
+    }
+
+    /// Fixes the staging-token sequence (the collision fixtures):
+    /// each armed guard drops the whole setup. Returns the same
+    /// guard shape so tests treat faults and tokens alike.
+    pub(crate) fn fix_tokens(tokens: &[&str]) -> Armed {
+        FIXED_TOKENS.with(|cell| {
+            *cell.borrow_mut() = tokens.iter().map(|token| (*token).to_owned()).collect();
+        });
+        Armed
+    }
+
+    /// The one-shot consumption point: when the armed fault targets
+    /// `step`, take it (it fires once) and return its error; a fault
+    /// aimed at another step stays armed for its own call site.
+    pub(crate) fn inject(step: Step, _target: &Path) -> Option<io::Error> {
+        FAULT.with(|cell| {
+            let mut armed = cell.borrow_mut();
+            match armed.take() {
+                Some(Fault::Fail(armed_step, error)) if armed_step == step => Some(error),
+                #[cfg(unix)]
+                Some(Fault::FailAndLockFolder(armed_step)) if armed_step == step => {
+                    lock_folder(_target.parent().unwrap_or(Path::new("")));
+                    Some(io::Error::from_raw_os_error(13))
+                }
+                other => {
+                    *armed = other;
+                    None
+                }
+            }
+        })
+    }
+
+    /// The §9.5 step-6 corruption point: appends one byte to the
+    /// target when `CorruptTarget` is armed (consuming it), so the
+    /// re-read digests bytes this run never wrote.
+    pub(crate) fn corrupt_target_if_armed(target: &Path) {
+        FAULT.with(|cell| {
+            let mut armed = cell.borrow_mut();
+            let taken = armed.take();
+            if matches!(taken, Some(Fault::CorruptTarget)) {
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(target)
+                    .expect("the corruption hook must be able to open the target");
+                file.write_all(b"X")
+                    .expect("the corruption hook must be able to append");
+            } else {
+                // Not ours: leave it armed for its own call site.
+                *armed = taken;
+            }
+        });
+    }
+
+    /// The next fixed token when a test pinned the sequence,
+    /// consuming it; `None` falls back to production entropy.
+    pub(crate) fn next_fixed_token() -> Option<String> {
+        FIXED_TOKENS.with(|cell| {
+            if cell.borrow().is_empty() {
+                None
+            } else {
+                Some(cell.borrow_mut().remove(0))
+            }
+        })
+    }
+
+    /// Makes the folder read-only-execute so the staging removal is
+    /// refused (EACCES) — the carried-cleanup fixture's setup.
+    #[cfg(unix)]
+    fn lock_folder(folder: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500))
+            .expect("the lock-folder fixture must be able to chmod");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::free_space::free_bytes;
+
+    /// The FIPS 180-2 vector for "abc" (re-checked with Python's
+    /// hashlib) — the independent oracle for the fixture content.
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    /// The FIPS 180-2 vector for the empty input.
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    /// A fake free-space source for the substituted-source seam: a
+    /// closure over a plain number, no filesystem anywhere.
+    fn fake_free(free: u64) -> impl FnOnce() -> Result<u64, FreeSpaceError> {
+        move || Ok(free)
+    }
+
+    /// A plentiful fake source: no space trouble in the happy-path
+    /// fixtures.
+    fn plenty_free() -> impl FnOnce() -> Result<u64, FreeSpaceError> {
+        fake_free(1 << 40)
+    }
+
+    /// The sorted entry names of `folder` — the "no debris" oracle:
+    /// what the write left behind is exactly observable.
+    fn entry_names(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(folder)
+            .expect("reading the fixture folder must work")
+            .map(|entry| {
+                entry
+                    .expect("iterating the fixture folder must work")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The fixture's owner uid is this process's effective uid (the
+    /// fixture was created by it): uid 0 means the tests run as root,
+    /// where mode bits are not enforced and an unwritable directory
+    /// stays writable — the precondition of a permission test cannot
+    /// be set up. The caller skips loudly instead of passing
+    /// vacuously (house precedent: `temp_files`).
+    #[cfg(unix)]
+    fn running_as_root_is_untestable(folder: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        fs::metadata(folder)
+            .expect("the fixture directory must be statable")
+            .uid()
+            == 0
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::metadata(path)
+            .expect("stating the fixture must work")
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    /// A target file with `contents`, for the overwrite fixtures.
+    fn existing(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, contents).expect("writing the fixture file must work");
+        path
+    }
+
+    // ---- the happy paths -----------------------------------------------
+
+    #[test]
+    fn a_new_file_is_written_settled_and_verified() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = dir.path().join("AGENTS.md");
+
+        let written = write_target_file(&target, b"abc", plenty_free())
+            .expect("creating a new file must succeed");
+
+        assert_eq!(fs::read(&target).expect("the file must exist"), b"abc");
+        assert_eq!(written.path, target);
+        assert_eq!(written.size, 3);
+        // The reported digest is the FIPS oracle of the content, not
+        // a self-derived value.
+        assert_eq!(written.sha256_hex, ABC_SHA256);
+        // Nothing else is in the folder: no staging debris.
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    #[test]
+    fn an_existing_file_is_replaced_whole_with_no_debris() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"the old content");
+
+        write_target_file(&target, b"the new content", plenty_free())
+            .expect("replacing an existing file must succeed");
+
+        assert_eq!(
+            fs::read(&target).expect("the file must still exist"),
+            b"the new content",
+            "the target holds exactly the new bytes, never a mix"
+        );
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    #[test]
+    fn an_empty_write_creates_an_empty_verified_file() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = dir.path().join("AGENTS.md");
+
+        let written =
+            write_target_file(&target, b"", plenty_free()).expect("an empty write is legal");
+
+        assert_eq!(fs::read(&target).expect("the file must exist"), b"");
+        assert_eq!(written.size, 0);
+        assert_eq!(written.sha256_hex, EMPTY_SHA256);
+    }
+
+    #[test]
+    fn a_multichunk_write_streams_to_the_right_digest() {
+        // The §9.5 step-6 re-read streams in 64 KiB chunks; a full
+        // chunk plus a tail forces the verifier through a real chunk
+        // boundary (a single `write_all` of this size to a regular
+        // file is normally one syscall, so the writer's partial path
+        // is NOT what is pinned here — the read side is). The
+        // expected digest is a Python-hashlib oracle over the exact
+        // byte pattern (the house precedent: backup's multimegabyte
+        // test), not a value derived from the code under test — a
+        // chunk-accumulation bug in the re-read hasher mismatches the
+        // check and fails this write.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = dir.path().join("AGENTS.md");
+        let contents: Vec<u8> = (0..VERIFY_CHUNK_BYTES + 7)
+            .map(|index| (index % 251) as u8)
+            .collect();
+
+        let written = write_target_file(&target, &contents, plenty_free())
+            .expect("a multichunk write must verify like a small one");
+
+        assert_eq!(written.size, contents.len() as u64);
+        assert_eq!(
+            written.sha256_hex,
+            "48e84525bcb5c9dcd67fa7a692ed20f31909ba8f0dd24c3ada9bd54b057468b0"
+        );
+        assert_eq!(fs::read(&target).expect("the file must exist"), contents);
+    }
+
+    // ---- the space check (§10 E_DISK_FULL, pre-write) -------------------
+
+    #[test]
+    fn a_short_volume_fails_disk_full_before_anything_is_touched() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let contents = b"thirteen bytes";
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+
+        let err = write_target_file(&target, contents, fake_free(contents.len() as u64 - 1))
+            .expect_err("one byte short of the content must refuse the write");
+
+        let AtomicWriteError::DiskFull(failed) = &err else {
+            panic!("a shortage must be DiskFull, got: {err:?}");
+        };
+        assert_eq!(failed.free, Some(contents.len() as u64 - 1));
+        assert_eq!(failed.required, contents.len() as u64);
+        assert_eq!(failed.step, None, "no step had run yet");
+        assert!(failed.source.is_none(), "no OS call failed");
+        assert!(
+            failed.cleanup.is_none(),
+            "nothing existed to clean up — the check runs first"
+        );
+        assert_eq!(err.os_code(), None, "a decision, not an OS failure");
+        // The card's invariant: the original is intact, nothing was
+        // staged.
+        assert_eq!(
+            fs::read(&target).expect("the target must survive"),
+            b"untouched"
+        );
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    #[test]
+    fn a_volume_with_exactly_the_needed_space_passes() {
+        // `check_space`'s strict-less-than ruling, inherited: the
+        // spec aborts only when there is LESS space than needed.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = dir.path().join("AGENTS.md");
+
+        write_target_file(&target, b"abc", fake_free(3)).expect("the exact boundary passes");
+    }
+
+    #[test]
+    fn a_failing_space_probe_does_not_block_the_write() {
+        // ERR-003's posture: the write, not the probe, is the
+        // authority. A dropped drive fails the probe here and the
+        // actual write call later; a flaky probe must not refuse a
+        // write that would succeed.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = dir.path().join("AGENTS.md");
+        let probe = || {
+            Err(FreeSpaceError::ProbeFailed {
+                source: io::Error::from_raw_os_error(2),
+            })
+        };
+
+        write_target_file(&target, b"abc", probe).expect("a failed probe must not abort the write");
+        assert_eq!(fs::read(&target).expect("the file must exist"), b"abc");
+    }
+
+    #[test]
+    fn the_real_free_space_probe_drives_a_successful_write() {
+        // The wiring check: production's closure shape over the real
+        // probe (the substituted-source tests above are the
+        // contract).
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = dir.path().join("AGENTS.md");
+
+        write_target_file(&target, b"abc", || free_bytes(dir.path()))
+            .expect("a live volume must pass the check");
+    }
+
+    // ---- ENOSPC on the write path (§10 E_DISK_FULL, mid-write) ----------
+
+    #[cfg(unix)]
+    #[test]
+    fn enospc_from_the_write_step_is_disk_full_and_cleans_the_staging_file() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        // ENOSPC = 28: std maps it to ErrorKind::StorageFull, the
+        // mid-write verdict the module classifies by.
+        let _fault = faults::arm(faults::Fault::Fail(
+            faults::Step::WriteSync,
+            io::Error::from_raw_os_error(28),
+        ));
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("a no-space refusal must fail the write");
+
+        let AtomicWriteError::DiskFull(failed) = &err else {
+            panic!("ENOSPC must be classified DiskFull, got: {err:?}");
+        };
+        assert_eq!(
+            failed.path, target,
+            "§10's path fact is the target, never the deleted staging file"
+        );
+        assert_eq!(failed.step, Some(WriteStep::WriteSync));
+        assert_eq!(failed.free, None, "no probe number exists mid-write");
+        assert_eq!(failed.required, 3);
+        assert_eq!(
+            err.os_code(),
+            Some(28),
+            "the OS code rides for the §10 log line"
+        );
+        assert!(
+            failed.cleanup.is_none(),
+            "the staging file must be removed, not carried"
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target must survive"),
+            b"untouched"
+        );
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    // ---- a failure at every step: original intact, staging removed ------
+
+    #[test]
+    fn a_staging_create_failure_keeps_the_original_intact() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        let _fault = faults::arm(faults::Fault::Fail(
+            faults::Step::TempCreate,
+            io::Error::from_raw_os_error(13),
+        ));
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("an injected create refusal must fail the write");
+
+        let AtomicWriteError::WriteFailed(failed) = &err else {
+            panic!("an EACCES create refusal must be WriteFailed, got: {err:?}");
+        };
+        assert_eq!(failed.step, WriteStep::TempCreate);
+        assert_eq!(err.os_code(), Some(13));
+        assert!(
+            failed.cleanup.is_none(),
+            "the create itself failed: nothing existed to remove"
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target must survive"),
+            b"untouched"
+        );
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    #[test]
+    fn a_missing_folder_fails_at_the_staging_create_with_the_os_error() {
+        // T-F7's shape: the folder vanished between preflight and the
+        // write.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = dir.path().join("never-created").join("AGENTS.md");
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("a missing folder must fail the staging create");
+
+        let AtomicWriteError::WriteFailed(failed) = &err else {
+            panic!("a missing folder must be WriteFailed, got: {err:?}");
+        };
+        assert_eq!(failed.step, WriteStep::TempCreate);
+        assert!(
+            err.os_code().is_some(),
+            "the OS refusal (ENOENT on Unix) must ride along: {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mode_copy_failure_cleans_the_staging_file() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        let _fault = faults::arm(faults::Fault::Fail(
+            faults::Step::ModeCopy,
+            io::Error::from_raw_os_error(13),
+        ));
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("an injected chmod refusal must fail the write");
+
+        let AtomicWriteError::WriteFailed(failed) = &err else {
+            panic!("a mode-copy refusal must be WriteFailed, got: {err:?}");
+        };
+        assert_eq!(failed.step, WriteStep::ModeCopy);
+        assert!(
+            failed.cleanup.is_none(),
+            "the staging file must be removed, not carried"
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target must survive"),
+            b"untouched"
+        );
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    #[test]
+    fn a_write_step_failure_cleans_the_staging_file_and_keeps_the_original() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        // EACCES, not ENOSPC: the plain write-failure classification.
+        let _fault = faults::arm(faults::Fault::Fail(
+            faults::Step::WriteSync,
+            io::Error::from_raw_os_error(13),
+        ));
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("an injected write refusal must fail the write");
+
+        let AtomicWriteError::WriteFailed(failed) = &err else {
+            panic!("an EACCES write refusal must be WriteFailed, got: {err:?}");
+        };
+        assert_eq!(failed.step, WriteStep::WriteSync);
+        assert!(
+            failed.cleanup.is_none(),
+            "the staging file must be removed, not carried"
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target must survive"),
+            b"untouched"
+        );
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    #[test]
+    fn a_replace_failure_cleans_the_staging_file_and_keeps_the_original() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        let _fault = faults::arm(faults::Fault::Fail(
+            faults::Step::Replace,
+            io::Error::from_raw_os_error(13),
+        ));
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("an injected rename refusal must fail the write");
+
+        let AtomicWriteError::WriteFailed(failed) = &err else {
+            panic!("a replace refusal must be WriteFailed, got: {err:?}");
+        };
+        assert_eq!(failed.step, WriteStep::Replace);
+        assert!(
+            failed.cleanup.is_none(),
+            "the staging file must be removed, not carried"
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target must survive"),
+            b"untouched"
+        );
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_sync_failure_reports_the_step_with_the_new_content_whole() {
+        // Post-replace, old-or-new is the invariant: the rename
+        // already happened, so the file is WHOLLY the new content and
+        // the staging path no longer exists (converged cleanup).
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        let _fault = faults::arm(faults::Fault::Fail(
+            faults::Step::DirSync,
+            io::Error::from_raw_os_error(5),
+        ));
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("an injected fsync refusal must fail the write");
+
+        let AtomicWriteError::WriteFailed(failed) = &err else {
+            panic!("a folder-sync refusal must be WriteFailed, got: {err:?}");
+        };
+        assert_eq!(failed.step, WriteStep::DirSync);
+        assert_eq!(err.os_code(), Some(5), "EIO = 5 rides for the log line");
+        assert!(
+            failed.cleanup.is_none(),
+            "the rename consumed the staging path: converged, not carried"
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target must hold the new bytes"),
+            b"abc",
+            "the file is wholly the new content, never a mix"
+        );
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    #[test]
+    fn a_verify_read_failure_is_verify_failed_with_the_new_content_whole() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        let _fault = faults::arm(faults::Fault::Fail(
+            faults::Step::VerifyRead,
+            io::Error::from_raw_os_error(13),
+        ));
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("an injected read-back refusal must fail the write");
+
+        let AtomicWriteError::VerifyFailed(failed) = &err else {
+            panic!("an unreadable target must be VerifyFailed, got: {err:?}");
+        };
+        assert_eq!(failed.expected_sha256_hex, ABC_SHA256);
+        assert!(
+            matches!(&failed.mismatch, VerifyMismatch::Unreadable { .. }),
+            "the refusal is the unreadable shape: {:?}",
+            failed.mismatch
+        );
+        assert_eq!(err.os_code(), Some(13));
+        // The file is NOT deleted (it is the user's data now); it is
+        // wholly the new content.
+        assert_eq!(fs::read(&target).expect("the file must stay"), b"abc");
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    #[test]
+    fn a_corrupted_settled_file_is_caught_by_the_digest_check() {
+        // The check reads what is ON DISK: appending one byte to the
+        // settled target before the re-read must be caught, with the
+        // actual digest of the corrupted bytes — proving the verdict
+        // comes from the file, not the input buffer.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        let _fault = faults::arm(faults::Fault::CorruptTarget);
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("a corrupted settled file must fail the check");
+
+        let AtomicWriteError::VerifyFailed(failed) = &err else {
+            panic!("a digest mismatch must be VerifyFailed, got: {err:?}");
+        };
+        let VerifyMismatch::Digest { actual_sha256_hex } = &failed.mismatch else {
+            panic!(
+                "the mismatch must carry the actual digest: {:?}",
+                failed.mismatch
+            );
+        };
+        // Independent oracle: the test hashes the file's bytes with
+        // its own read; the module streamed the same file.
+        let mut hasher = Sha256Hex::new();
+        hasher.update(&fs::read(&target).expect("the corrupted file must be readable"));
+        assert_eq!(actual_sha256_hex, &hasher.finalize_hex());
+        assert_eq!(failed.expected_sha256_hex, ABC_SHA256);
+        // The corrupted file is kept, not deleted — §10's remedy is
+        // the backup.
+        assert_eq!(
+            fs::read(&target).expect("the file must stay"),
+            b"abcX",
+            "the corrupted bytes must not be removed by the module"
+        );
+        assert_eq!(entry_names(dir.path()), ["AGENTS.md"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_staging_removal_is_carried_and_the_file_stays_sweepable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::temp_files::is_app_tmp_file;
+
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        if running_as_root_is_untestable(dir.path()) {
+            eprintln!(
+                "skipping a_refused_staging_removal_is_carried_and_the_file_stays_sweepable: \
+                 running as root — mode bits are not enforced, the refused-removal \
+                 precondition cannot be set up"
+            );
+            return;
+        }
+        let _fault = faults::arm(faults::Fault::FailAndLockFolder(faults::Step::WriteSync));
+
+        let result = write_target_file(&target, b"abc", plenty_free());
+        // Restore even when the assertions below panic, so TempDir's
+        // teardown can remove the directory.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755))
+            .expect("restoring mode bits must work");
+
+        let err = result.expect_err("the injected failure must fail the write");
+        let AtomicWriteError::WriteFailed(failed) = &err else {
+            panic!("the refusal must be WriteFailed, got: {err:?}");
+        };
+        let cleanup = failed
+            .cleanup
+            .as_ref()
+            .expect("the refused removal must be carried, not dropped");
+        assert_eq!(
+            cleanup.raw_os_error(),
+            Some(13),
+            "the removal refusal is EACCES"
+        );
+        assert!(
+            err.to_string().contains("could not be removed"),
+            "the Display must say the leftover exists: {err}"
+        );
+        // The leftover is exactly one staging file under the sweep's
+        // grammar — T-F2's debris contract.
+        let leftover: Vec<String> = entry_names(dir.path())
+            .into_iter()
+            .filter(|name| name != "AGENTS.md")
+            .collect();
+        assert_eq!(
+            leftover.len(),
+            1,
+            "exactly one staging file stays: {leftover:?}"
+        );
+        assert!(
+            is_app_tmp_file(&leftover[0], "AGENTS.md"),
+            "the leftover must be sweepable debris: {}",
+            leftover[0]
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target must survive"),
+            b"untouched"
+        );
+    }
+
+    // ---- the staging token and its collisions ---------------------------
+
+    #[test]
+    fn a_token_collision_retries_with_a_fresh_name_and_keeps_the_foreign_file() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        // The exact name the first token will spell — pinned by
+        // pre-creating it: the writer must hit the collision and move
+        // on to the second token.
+        let colliding = dir.path().join(".AGENTS.md.eunomia-abcd1234.tmp");
+        fs::write(&colliding, b"foreign debris").expect("writing the fixture must work");
+        let _tokens = faults::fix_tokens(&["abcd1234", "0f1e2d6c"]);
+
+        write_target_file(&target, b"abc", plenty_free())
+            .expect("a single collision must be retried, not fatal");
+
+        assert_eq!(fs::read(&target).expect("the write must land"), b"abc");
+        assert_eq!(
+            fs::read(&colliding).expect("the foreign file must never be touched"),
+            b"foreign debris",
+            "a collision is an error under the next token, never a clobber"
+        );
+        let mut names = entry_names(dir.path());
+        names.retain(|name| name != "AGENTS.md");
+        assert_eq!(
+            names,
+            [".AGENTS.md.eunomia-abcd1234.tmp"],
+            "the foreign file stays, no second staging file remains"
+        );
+    }
+
+    #[test]
+    fn exhausted_token_attempts_fail_the_write_with_the_last_attempted_name() {
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"untouched");
+        let colliding = dir.path().join(".AGENTS.md.eunomia-abcd1234.tmp");
+        fs::write(&colliding, b"foreign debris").expect("writing the fixture must work");
+        // Every attempt collides on the same token.
+        let _tokens = faults::fix_tokens(&["abcd1234", "abcd1234", "abcd1234"]);
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("an exhausted token budget must fail the write");
+
+        let AtomicWriteError::WriteFailed(failed) = &err else {
+            panic!("an exhausted budget must be WriteFailed, got: {err:?}");
+        };
+        assert_eq!(failed.step, WriteStep::TempCreate);
+        assert_eq!(
+            failed.path, colliding,
+            "the last attempted name is the fact"
+        );
+        assert_eq!(
+            failed.source.kind(),
+            io::ErrorKind::AlreadyExists,
+            "the carried refusal is the collision itself"
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target must survive"),
+            b"untouched"
+        );
+        assert_eq!(
+            fs::read(&colliding).expect("the foreign file must never be touched"),
+            b"foreign debris"
+        );
+    }
+
+    // ---- the Unix mode copy (§9.5 step 2) --------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn the_replaced_file_inherits_the_targets_unix_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"old");
+        // A mode no platform default produces, with no write bit for
+        // group and a stray read bit for other.
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o604))
+            .expect("chmod on the fixture must work");
+
+        write_target_file(&target, b"new", plenty_free()).expect("the write must succeed");
+
+        assert_eq!(
+            mode_of(&target),
+            0o604,
+            "the replaced file keeps the owner's mode, exactly"
+        );
+
+        // The full-mask ruling, pinned through the sticky bit: the
+        // copy is chmod `& 0o7777`, and a `0o777` mask mutant loses
+        // sticky — the one special bit the kernel's killpriv policy
+        // lets survive a write (setuid/setgid are stripped from ANY
+        // file at write time by the kernel itself, whatever the
+        // module does; sticky rides along).
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o1604))
+            .expect("chmod on the fixture must work");
+        write_target_file(&target, b"newer", plenty_free()).expect("the second write must succeed");
+        assert_eq!(mode_of(&target), 0o1604);
+    }
+
+    // ---- the caller seam: resolution happened before (§9.5 step 1) -------
+
+    #[cfg(unix)]
+    #[test]
+    fn a_resolved_symlink_target_writes_the_real_file_and_keeps_the_link() {
+        // T-F6's shape, driven from the caller side: the pipeline
+        // resolves (T-062), this module renames over the resolved
+        // path — the link itself is never the write target.
+        use std::os::unix::fs::symlink;
+
+        use crate::paths::resolve_target_path;
+
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        existing(dir.path(), "AGENTS.md", b"old");
+        symlink("AGENTS.md", dir.path().join("CLAUDE.md")).expect("creating the symlink must work");
+
+        let resolved = resolve_target_path(dir.path(), "CLAUDE.md").expect("the link must resolve");
+        assert_eq!(resolved.file_name(), "AGENTS.md");
+
+        write_target_file(resolved.path(), b"new", plenty_free())
+            .expect("the write must land on the real file");
+
+        assert_eq!(
+            fs::read(dir.path().join("AGENTS.md")).expect("the real file"),
+            b"new"
+        );
+        assert!(
+            fs::symlink_metadata(dir.path().join("CLAUDE.md"))
+                .expect("the link must still exist")
+                .file_type()
+                .is_symlink(),
+            "the link survives the write"
+        );
+    }
+
+    // ---- degenerate target shapes ----------------------------------------
+
+    #[test]
+    fn a_bare_relative_target_is_refused_without_staging_anything() {
+        // The resolved targets of D-092 are absolute; a bare name has
+        // no folder to stage in and must be refused, not staged into
+        // the process's working directory.
+        let err = write_target_file(Path::new("AGENTS.md"), b"abc", plenty_free())
+            .expect_err("a bare relative target must be refused");
+
+        let AtomicWriteError::WriteFailed(failed) = &err else {
+            panic!("the refusal must be WriteFailed, got: {err:?}");
+        };
+        assert_eq!(failed.step, WriteStep::TempCreate);
+        assert_eq!(failed.source.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(err.os_code(), None, "no OS call was made");
+    }
+
+    #[test]
+    fn a_degenerate_file_name_is_refused_by_the_staging_grammar() {
+        // A name the grammar (and the sweep) refuse: NUL can never be
+        // a real file name, but it can be constructed — the builder
+        // must refuse it before anything exists on disk. (`.`/`..`
+        // never reach the builder: std's `file_name` normalizes them
+        // away into the no-file-name refusal above.)
+        let target = PathBuf::from("/repo/AGENTS\0.md");
+
+        let err = write_target_file(&target, b"abc", plenty_free())
+            .expect_err("a degenerate name must be refused");
+
+        assert!(
+            matches!(err, AtomicWriteError::NameFailed { .. }),
+            "the staging-name builder must refuse it, got: {err:?}"
+        );
+        assert!(
+            matches!(
+                err.source(),
+                Some(source) if source.to_string() == TmpNameError::InvalidTargetName.to_string()
+            ),
+            "the refusal is the builder's own typed error: {err:?}"
+        );
+    }
+
+    // ---- the Windows replace arm -----------------------------------------
+
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_replace_swaps_an_existing_file() {
+        // Runs on the CI Windows leg: the MoveFileExW arm replaces an
+        // existing target with the staging file's bytes, in one call,
+        // no retries.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let target = existing(dir.path(), "AGENTS.md", b"old");
+        let staging = existing(dir.path(), "staging.tmp", b"new");
+
+        replace_target(&staging, &target).expect("the replace must succeed");
+
+        assert_eq!(
+            fs::read(&target).expect("the target must hold the new bytes"),
+            b"new"
+        );
+        assert!(!staging.exists(), "the staging file is gone");
+    }
+
+    // ---- the error contract ----------------------------------------------
+
+    #[test]
+    fn display_source_chain_and_os_codes_follow_the_contract() {
+        // WriteFailed: the step, the path and the OS error in the
+        // text; the io error in the source chain.
+        let write_failed = AtomicWriteError::WriteFailed(WriteFailed {
+            step: WriteStep::Replace,
+            path: PathBuf::from("/repo/AGENTS.md"),
+            source: io::Error::from_raw_os_error(13),
+            cleanup: None,
+        });
+        assert!(
+            write_failed.to_string().starts_with(
+                "the atomic write failed while replacing the target /repo/AGENTS.md: "
+            ),
+            "the Display must name the step and the path: {write_failed}"
+        );
+        assert_eq!(write_failed.os_code(), Some(13));
+        assert_eq!(
+            write_failed.source().map(|source| source.to_string()),
+            Some(io::Error::from_raw_os_error(13).to_string())
+        );
+
+        // The pre-write disk-full verdict: both numbers, no OS code.
+        let pre_check = AtomicWriteError::DiskFull(DiskFullFailure {
+            path: PathBuf::from("/repo/AGENTS.md"),
+            step: None,
+            free: Some(10),
+            required: 12,
+            source: None,
+            cleanup: None,
+        });
+        assert_eq!(
+            pre_check.to_string(),
+            "not enough space on the volume of /repo/AGENTS.md: 10 bytes available, 12 required"
+        );
+        assert_eq!(pre_check.os_code(), None);
+        assert!(pre_check.source().is_none());
+
+        // The mid-write verdict: the OS error is the fact, the step
+        // rides along.
+        let mid_write = AtomicWriteError::DiskFull(DiskFullFailure {
+            path: PathBuf::from("/repo/AGENTS.md"),
+            step: Some(WriteStep::WriteSync),
+            free: None,
+            required: 12,
+            source: Some(io::Error::from_raw_os_error(28)),
+            cleanup: None,
+        });
+        assert!(
+            mid_write
+                .to_string()
+                .starts_with("no space left while writing /repo/AGENTS.md: "),
+            "the Display must lead with the OS fact: {mid_write}"
+        );
+        assert_eq!(mid_write.os_code(), Some(28));
+
+        // The verify failures: digest and unreadable shapes.
+        let digest = AtomicWriteError::VerifyFailed(VerifyFailed {
+            path: PathBuf::from("/repo/AGENTS.md"),
+            expected_sha256_hex: ABC_SHA256.to_owned(),
+            mismatch: VerifyMismatch::Digest {
+                actual_sha256_hex: EMPTY_SHA256.to_owned(),
+            },
+        });
+        assert_eq!(
+            digest.to_string(),
+            format!(
+                "the written file /repo/AGENTS.md failed the check: sha256 {ABC_SHA256} expected, {EMPTY_SHA256} found"
+            )
+        );
+        assert_eq!(digest.os_code(), None);
+
+        let unreadable = AtomicWriteError::VerifyFailed(VerifyFailed {
+            path: PathBuf::from("/repo/AGENTS.md"),
+            expected_sha256_hex: ABC_SHA256.to_owned(),
+            mismatch: VerifyMismatch::Unreadable {
+                source: io::Error::from_raw_os_error(13),
+            },
+        });
+        assert!(
+            unreadable.to_string().contains("could not be read back"),
+            "the Display must state the refusal: {unreadable}"
+        );
+        assert_eq!(unreadable.os_code(), Some(13));
+
+        // The name refusal chains to the builder's typed error.
+        let name_failed = AtomicWriteError::NameFailed {
+            source: TmpNameError::InvalidTargetName,
+        };
+        assert_eq!(
+            name_failed.to_string(),
+            format!(
+                "the staging name was refused: {}",
+                TmpNameError::InvalidTargetName
+            )
+        );
+        assert!(name_failed.source().is_some());
+    }
+}

@@ -7288,3 +7288,161 @@ Solution: `projects_list(include_archived: Option<bool>)` in
   the corrupt cell's label and class-only diagnostic, and the
   unreachable write outcomes keeping stored identifiers off every
   wire surface.
+
+### D-095 — The atomic write: the §9.5 pipeline in `atomic`, the write-through gap in std's Windows rename, and the injected seams — 2026-11-20
+
+Problem: T-066 implements spec §9.5 (OUT-007, ERR-002, ERR-003) as
+`eunomia-fs`'s `atomic` module: stage in the same folder, copy the
+Unix mode, write and `sync_all`, replace in one rename, `fsync` the
+parent folder (Unix), re-read and verify SHA-256, delete the staging
+file on every error while the original stays whole. The card fixes
+the errors (`E_WRITE_FAILED`, `E_VERIFY_FAILED`, `E_DISK_FULL`) and
+leaves open: (1) the Windows replace — the card allows "MoveFileExW
+without retries or a std equivalent", and the two are NOT the same:
+std's `fs::rename` on Windows is `MoveFileExW` with
+`MOVEFILE_REPLACE_EXISTING` only (verified in the toolchain's
+`sys/fs/windows.rs`), while §9.5 step 4 pins `MOVEFILE_WRITE_THROUGH`
+too; (2) the staging token's entropy without a `rand` crate; (3) the
+write-volume disk-full arithmetic — §9.4's 20% margin sentence is
+about the BACKUP volume, nothing pins a margin for the write; (4) how
+tests fail each pipeline step without touching other files; (5) what
+"the original stays unchanged" (§9.5 step 7) can even mean for the
+two steps that run AFTER the rename.
+
+Solution: `write_target_file(target, contents, free_space)` plus the
+typed `AtomicWriteError` (`NameFailed`/`DiskFull`/`WriteFailed`/
+`VerifyFailed`, the D-017/D-084 hand-rolled shape with
+`io_error()`/`os_code()`), `WrittenFile` (path/size/digest), and
+`WriteStep` — the step fact §10's log line names next to the OS code
+(`DiskFullFailure` carries it as `Option<WriteStep>` too, `None` for
+the pre-write verdict; `NameFailed` maps onto `E_WRITE_FAILED` — a
+contract-violation shape the intended D-092 caller cannot produce).
+
+- WRITE-THROUGH, NOT STD: the Windows arm of the replace is a direct
+  `MoveFileExW(REPLACE | WRITE_THROUGH)` through `windows-sys` — the
+  crate's second owner-sanctioned FFI call after D-089's probe (the
+  task brief pre-wires `Win32_Storage_FileSystem` for exactly this),
+  one `unsafe` block with every fileapi.h invariant stated at the
+  call site (the D-058/D-089 discipline). Unix uses `fs::rename`
+  (rename(2) replaces atomically). The whole replace funnels through
+  ONE cfg-split `replace_target`, and `WriteFailed` carries the raw
+  OS error — T-067's sharing-violation loop (100/300/900 ms →
+  `E_FILE_LOCKED`) drops into that single function with no new
+  plumbing; this task ships no retries and no `E_FILE_LOCKED`, per
+  the card boundary.
+- TOKEN WITHOUT RAND: 8 lowercase-hex characters (D-088's alphabet)
+  as the first 8 of a SHA-256 over (nanoseconds, pid, a process-wide
+  `AtomicU64` counter), digested through core's `Sha256Hex` — D-017's
+  allow-list stays intact; the token needs uniqueness, not
+  unpredictability (`create_new` makes a collision an error, never
+  corruption). A collision retries under a fresh token, at most 3
+  attempts, then `WriteFailed`/`TempCreate` with the last attempted
+  name and the `AlreadyExists` refusal — D-088's "an error and a
+  retry" honored without unbounded looping.
+- DISK-FULL, TWO SOURCES, NO MARGIN: the demand is exactly the
+  content's byte count (the 20% margin is §9.4's backup-volume rule;
+  no write margin is pinned anywhere), decided by
+  `free_space::check_space` through the D-089 closure seam —
+  production passes `|| free_bytes(folder)`, tests a number. Only the
+  shortage verdict aborts; a FAILED probe does not block the write
+  (the write itself is the authority, ERR-003's posture: a dropped
+  drive reports its own failure). Mid-write `ENOSPC`
+  (`io::ErrorKind::StorageFull`, std maps errno 28 on Unix) from any
+  write-path step classifies into the same `DiskFull` — §10's row is
+  about the situation, not the probe.
+- STEP 7 AFTER STEP 4, HONESTLY: "the original stays unchanged" can
+  only bind up to the replace. For the folder `fsync` and the verify
+  (the two post-rename steps) the file is WHOLLY the new content —
+  old-or-new, never partial (OUT-007's actual invariant) — and is
+  never deleted: it is the user's data, §10's remedy for
+  `E_VERIFY_FAILED` is the backup, and a failed check leaves the
+  unverified new bytes plus the caller's backup rather than an empty
+  path. The staging file's removal is attempted on every failure; a
+  refused removal rides in `cleanup` (Some) and the leftover is
+  grammar-conforming debris the `temp_files` sweep owns (T-F2,
+  mutation-verified).
+- FAULT INJECTION, cfg(test)-ONLY: spec 15.1 names "failure points in
+  `fs`" — implemented as a thread-local armed fault (one-shot, per
+  step: TempCreate/ModeCopy/WriteSync/Replace/DirSync/VerifyRead,
+  plus a corrupt-target-before-verify action and a fixed token queue
+  for the collision fixtures), consumed at the production step call
+  sites under `#[cfg(test)]` statements. The shipped pipeline has no
+  hooks (the `faults` seam does not even compile outside `cfg(test)`),
+  the public API carries no test parameter, and the cleanup paths
+  under test are the production ones. RAII guard (`Armed`) disarms on
+  drop so a test cannot leak a fault.
+- MODE COPY, FULL MASK, KERNEL LIMIT STATED: `chmod` on the staging
+  file (no umask applies) before writing; a missing target is a
+  first-sync creation and keeps the platform default. The mask is the
+  full `& 0o7777` — with the honest limit that the Linux killpriv
+  policy strips setuid/setgid from any file at write time (the
+  staging file is written after the chmod), so those bits cannot
+  survive a non-root atomic replace on modern kernels no matter what
+  a writer does; sticky rides along. Handle discipline follows
+  `backup`: the staging handle is dropped before the rename and every
+  error-path removal (Windows sharing).
+- SEAMS CONSUMED, NOT REBUILT: the staging name is
+  `temp_files::tmp_file_name` (the one grammar the sweep matches),
+  the expected digest is core's `Sha256Hex`, and the caller owns
+  §9.5 step 1 — `write_target_file` receives the RESOLVED path
+  (D-092) and re-derives the lossy file name for the grammar, so a
+  `CLAUDE.md` link writes the real file and the link survives (T-F6,
+  pinned by a caller-side test through `resolve_target_path`).
+
+Tests: 26 colocated test functions in `atomic.rs` (25 run on the
+Linux/macOS legs; 1 is Windows-only) — the happy paths (new,
+overwrite, empty, a 64 KiB+7 multichunk write against a
+Python-hashlib oracle, pinning the streaming verify's chunk
+boundary) with folder-listing no-debris asserts,
+the space decisions (short, exact boundary, probe-failure
+passthrough, the real `free_bytes` closure smoke), `ENOSPC`→
+`DiskFull` (target path + step pinned) with the staging file cleaned,
+a failure at EVERY step (original intact + staging removed, or the
+new content whole for the post-rename steps), the refused cleanup
+(r-x folder, root-skipped, leftover proven sweepable by
+`is_app_tmp_file`), the corrupted settled file caught with the
+actual digest of the corrupted bytes (the check reads the disk, not
+the buffer), collision retry/exhaustion with pre-created names
+pinning the grammar, the mode copy (0o604 plus the sticky bit 0o1604
+— the one special bit the kernel's killpriv policy lets survive a
+write; setuid/setgid are stripped by the kernel at write time
+whatever the module does, so the full-mask ruling is documented with
+that limit and pinned through sticky), the symlink seam, the
+degenerate shapes (bare relative target, NUL name → `NameFailed`),
+and the error contract (Display/source/os_code).
+Mutation-checked: skipping the cleanup, weakening the digest
+comparison, dropping the mode copy and disabling the space check each
+fail exactly their tests. Windows-target and macOS-target clippy of
+the crate's tests pass (the MoveFileExW arm, the cfg-gated faults and
+the unix-only steps); the Windows replace arm's behavior runs on the
+CI Windows leg (`the_windows_replace_swaps_an_existing_file`).
+
+Round-1 review (deepseek-v4.1-flash) — CHANGES REQUESTED with no
+P0/P1, three P2 and four P3; all three P2s fixed plus P3-1..P3-3
+(P3-4, the stale `lib.rs` skeleton sentence, is the recorded
+D-087/D-089/D-092 concurrent-siblings posture for the orchestrator):
+
+- P2-1: the mid-write `ENOSPC` verdict reported the STAGING path in
+  `DiskFullFailure.path` (its own doc says the target; §10's path is
+  the project fact and the staging file is already deleted) — `abort`
+  now takes the target and `DiskFullFailure` gained
+  `step: Option<WriteStep>`; the ENOSPC test pins both.
+- P2-2: the module docs claimed a one-to-one §10 mapping with a
+  fourth variant unaccounted — `NameFailed`'s folding into
+  `E_WRITE_FAILED` is now documented in the error section and here.
+- P2-3: the streaming verify was never exercised past one chunk —
+  the 64 KiB+7 Python-oracle test above was added.
+- P3-1: the mode-copy error path removed the staging file with its
+  handle still open (against the module's own stated discipline) and
+  its two failures disagreed on `path` — the handle is now dropped
+  before that removal, and both report the staging path.
+- P3-2/P3-3: the full-mask mode ruling is now pinned (sticky
+  survives; setuid/setgid cannot — kernel killpriv, stated) and the
+  test-count/wording errors in this entry were corrected.
+
+Round-2 review (hy4-flash-free) — APPROVED, no P0/P1/P2; its one P3
+(the multichunk test's comment claimed `write_all`'s partial-write
+branch, which a single regular-file write need not exercise) was
+taken: the comment now claims only the verifier's chunk boundary. The
+reviewer independently recomputed the 64 KiB+7 oracle and verified
+the `MoveFileExW` call against the pinned windows-sys 0.61.2 source.
