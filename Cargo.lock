@@ -1133,6 +1133,7 @@ name = "eunomia-sync"
 version = "0.1.0"
 dependencies = [
  "ammonia",
+ "eunomia-fs",
  "eunomia-store",
  "jiff 1.0.1",
  "libc",

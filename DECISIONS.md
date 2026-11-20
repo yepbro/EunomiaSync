@@ -7192,3 +7192,99 @@ riding; the refusal classification pinned kind by kind; the token
 grammar over 100 draws; the error contract (Display texts, `path()`,
 the io/fact split, the `source()` chain); and a Linux-gated non-UTF-8
 target name (the lossy spelling probes its folder fine).
+
+### D-096 — `projects_list`: the dirty flag served at its honest DB-022 boundary, availability probed after the transaction, and `ProjectsError` mapped at the command boundary — 2026-11-20
+
+Problem: T-072 turns §7.10's `projects_list` into the first command
+over the T-071 projects repository (the MAIN-028 column fields: label,
+color, availability, dirty, `last_synced_at`). Five points were open:
+(1) where the column's `dirty` fact comes from — DB-021 compares
+`last_synced_hash` with the _current_ build hash, DB-022 assigns the
+current hashes to a background pipeline that has not landed, and the
+store exposes no library/assignment reads to build one from; (2) how
+the command reaches the D-084 availability check — `eunomia-fs` owns
+it, but src-tauri had no `eunomia-fs` edge; (3) how `ProjectsError`
+maps onto the §7.10 wire, given D-093 froze the `StorageError`
+surface and named this task as the mapper; (4) whether the command
+logs failures when the logging facade has no `projects_list` function;
+(5) what "archived by filter" means on the wire.
+
+Solution: `projects_list(include_archived: Option<bool>)` in
+`commands.rs`, registered in `collect_commands!`, returning
+`Vec<ProjectColumnEntry>`.
+
+- _dirty: served at its honest boundary, not computed._ DB-014's
+  archived half is the one part of DB-021 the §6.2 row decides alone
+  (archived is never dirty). For active projects, no database this
+  app can produce holds unsynced changes yet: nothing writes
+  assignments, library content or sync hashes (`last_synced_hash`
+  starts NULL with no writer), so DB-021's exception sentence shields
+  every reachable row and the honest verdict is `false`. The live
+  fact's owner is DB-022's pipeline (`state://dirty`, MAIN-028's dot
+  icon), whose inputs — the library and assignment repositories, the
+  ALG-001 snapshot — do not exist in the store; hand-writing SQL over
+  those tables from the command layer would violate D-010/D-017's
+  schema ownership and duplicate the snapshot task. The seam is
+  `dirty_verdict` in `commands.rs`: the DB-022 task (or the first
+  assignments command) feeds `eunomia_core::dirty::is_dirty` the real
+  build facts there — the DTO field is that pipeline's arrival point,
+  and a silent constant past that point is what the seam's docs
+  forbid. `eunomia-core` is deliberately NOT added to src-tauri:
+  nothing honest can call the predicate with yet.
+- _Availability: the D-084 check, read-only, after the transaction._
+  `eunomia_fs::paths::check_project_available` per project (DB-032's
+  window-open check point), in a `spawn_blocking` that runs AFTER the
+  `Db::run` read: four metadata probes over live folders are blocking
+  file I/O (SYS-001) and must never hold the one database lock — a
+  dead drive delays only this response. An unavailable folder is the
+  entry's `available: false` plus `unavailable_reason` (the wire's
+  own snake_case names of the D-084 verdicts — `missing`,
+  `not_a_directory`, `not_readable`, `no_git_entry`: D-09/MAIN-028's
+  "icon and text" needs the class), never an error of the read. The
+  cost: one `eunomia-fs` dependency edge in `src-tauri/Cargo.toml`
+  (the rusqlite/jiff/tempfile precedent — an edge, not a version; the
+  workspace member was already resolved), flagged to the orchestrator
+  because Cargo.toml sits at this task's scope edge.
+- _`ProjectsError` mapped at the boundary, as D-093 anticipated._
+  `projects_store_to_app_error`: `Sql` → the shared base classifier;
+  `Member` → the recorded D-037 fallback with a `ProjectsCorrupt`
+  label and a class-only diagnostic naming the column (the T-027
+  round-2 rule — a tampered cell is arbitrary database text and never
+  reaches `params`/`os_message`); the write-path outcomes
+  (`DuplicatePathKey`, `NotFound`, `ReorderMismatch` — unreachable
+  from a read) keep the fallback with a `ProjectsError` label and
+  class-only text, so a stored `path_key` or id never travels either.
+  Folding the two store error families together stays D-093's
+  recorded follow-up for a store-side task allowed to edit `src-tauri`.
+- _No failure log edge — a documented gap, not an omission._ The
+  facade's vocabulary grows per command task
+  (`logging::activity_list_failed` is T-027's) and `logging.rs` is
+  outside this card's file scope; the follow-up is whichever task
+  adopts the Projects module's write commands into the facade. A
+  successful read is never journaled (the `activity_list` rationale).
+- _`include_archived` is include-semantics, one scope._ `None`/`false`
+  → `ListScope::Active` (the matrix's columns); `true` → `ListScope::All`
+  — the same ordered read widened, not a second query: §6.4's archive
+  keeps a row's position, so archived entries appear at their old
+  places carrying `state: "archived"` for the D-10 restore screen to
+  filter on. A plain argument, not a query DTO: one boolean has no
+  typo-surface to reject loudly (the `deny_unknown_fields` rationale)
+  and tauri rejects unknown argument names itself.
+- _The DTO carries what the column renders plus what it calls back
+  with._ Beyond the card's five fields: `id` (every later project
+  command addresses it), `name` (DB-041/NFR-020's tooltip), `state`
+  (the filter's consumer) and `unavailable_reason` (D-09's text
+  half). No DB type crosses the boundary (the `ActivityEntry` rule).
+- _Tests._ 6 IPC tests over the mock runtime with projects seeded
+  through the T-071 repository and real `.git` folders for the probe:
+  the sort_order answer after a repository reorder plus the full
+  field set and the unavailable-folder flag (not an error); the
+  archived-filter widening with DB-014's never-dirty pin and the
+  explicit-false twin; the empty-database empty list; the
+  no-database honesty pin; the corrupt-cell fallback envelope (via
+  the `ignore_check_constraints` seam, surfaced by the widened read —
+  the default `state = 'active'` filter shields a tampered row from
+  decoding); the registration pin. 2 unit tests pin the error mapper:
+  the corrupt cell's label and class-only diagnostic, and the
+  unreachable write outcomes keeping stored identifiers off every
+  wire surface.

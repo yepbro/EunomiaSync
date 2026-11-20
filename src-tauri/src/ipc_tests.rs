@@ -62,6 +62,16 @@
 //! plus the empty-input answer and the specta registration pin. The
 //! renderer's own policy has its unit suite in `markdown.rs`; these
 //! tests prove the command carries it over the real IPC envelope.
+//!
+//! The `projects_list` tests (T-072, §7.10 Projects module, §7.1,
+//! §7.4 MAIN-028) use the healthy-app shape with the projects seeded
+//! through the T-071 repository (the `Db::run` path a producing
+//! command takes) and real `.git` folders for the availability probe:
+//! the sort_order answer after a repository reorder, the
+//! archived-filter widening with DB-014's never-dirty pin, the full
+//! column-field set including the D-09 unavailable flag + reason, the
+//! empty-database answer, the no-database honesty pin, the
+//! corrupt-cell fallback envelope, and the registration pin.
 
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -1526,6 +1536,434 @@ fn the_settings_commands_are_registered_with_the_specta_builder() {
             "lib.rs must register the `{name}` command exactly once (§7.10, D-009)"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// `projects_list` (T-072, §7.10 Projects module, §7.1, §7.4 MAIN-028,
+// DB-014/DB-021, D-09/DB-032, D-084)
+// ---------------------------------------------------------------------------
+
+/// A mock app with `projects_list` registered over a fresh database in
+/// a temp root — the healthy-app state (the `activity_app` shape).
+fn projects_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::projects_list])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    (temp, app)
+}
+
+/// Creates a real available repository folder under `root`: the D-084
+/// probe needs the directory, read access and a `.git` entry — a bare
+/// `.git` directory is enough, no git plumbing is involved.
+fn repo_dir(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let repo = root.join(name);
+    std::fs::create_dir_all(repo.join(".git"))
+        .expect("creating the repository folder and its .git entry must work");
+    repo
+}
+
+/// One [`NewProject`] with the given display fields and a fixed
+/// default write configuration — the column fields are what the tests
+/// vary; the §6.5 settings the column never reads stay at defaults.
+fn column_project<'a>(
+    path: &'a str,
+    path_key: &'a str,
+    name: &'a str,
+    label: &'a str,
+    color: &'a str,
+) -> eunomia_store::projects::NewProject<'a> {
+    use eunomia_store::projects::AddedVia;
+    use eunomia_store::settings::{BaseName, ExtraFile, Position, Scheme};
+    eunomia_store::projects::NewProject {
+        path,
+        path_key,
+        name,
+        label,
+        color,
+        description: "",
+        added_via: AddedVia::Manual,
+        scheme: Scheme::A,
+        base_name: BaseName::AgentsMd,
+        extra_local: ExtraFile {
+            enabled: false,
+            position: Position::End,
+        },
+        extra_project: ExtraFile {
+            enabled: false,
+            position: Position::End,
+        },
+    }
+}
+
+/// Seeds one project through the repository (the `Db::run` path a
+/// producing command takes) and returns its row id. The path arrives
+/// owned and the display fields as `'static` spellings — the
+/// executor's closure is `'static`, so nothing may borrow the
+/// test's stack.
+fn seed_project(
+    database: &crate::db::Db,
+    path: String,
+    path_key: &'static str,
+    name: &'static str,
+    label: &'static str,
+    color: &'static str,
+) -> String {
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        let new = column_project(&path, path_key, name, label, color);
+        eunomia_store::projects::create(tx, &new)
+            .map(|project| project.id)
+            .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("seeding a project through the repository must work")
+}
+
+/// Invokes `projects_list` with the given `includeArchived` wire value
+/// (`null` omitted is the default-active read), deserializing the
+/// success payload into the typed DTO.
+fn invoke_projects_list(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    include_archived: serde_json::Value,
+) -> Result<Vec<crate::commands::ProjectColumnEntry>, serde_json::Value> {
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request(
+            "projects_list",
+            serde_json::json!({ "includeArchived": include_archived }),
+        ),
+    );
+    match response {
+        Ok(payload) => Ok(payload
+            .deserialize::<Vec<crate::commands::ProjectColumnEntry>>()
+            .expect("the success payload must deserialize into the DTO")),
+        Err(error) => Err(error),
+    }
+}
+
+#[test]
+fn projects_list_serves_active_columns_in_sort_order_over_ipc() {
+    // Arrange: three real repositories created in Gamma-Alpha-Beta
+    // order (creation appends sort_order 1,2,3), then reordered
+    // through the repository to Alpha-Beta-Gamma — the list must
+    // follow `sort_order`, not insertion or id order; plus a fourth
+    // project whose folder was never created (the D-09 unavailable
+    // case) and a seeded `last_synced_at` on one row (no sync writer
+    // exists yet — the seeding path the tests record).
+    let (temp, app) = projects_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let gamma = seed_project(
+        &database,
+        repo_dir(temp.path(), "gamma").display().to_string(),
+        "/gamma",
+        "Gamma",
+        "GAM",
+        "blue",
+    );
+    let alpha = seed_project(
+        &database,
+        repo_dir(temp.path(), "alpha").display().to_string(),
+        "/alpha",
+        "Alpha",
+        "ALP",
+        "red",
+    );
+    let beta = seed_project(
+        &database,
+        repo_dir(temp.path(), "beta").display().to_string(),
+        "/beta",
+        "Beta",
+        "BET",
+        "green",
+    );
+    let vanished_path = temp.path().join("never-created").display().to_string();
+    let vanished = seed_project(
+        &database,
+        vanished_path,
+        "/never-created",
+        "Vanished",
+        "VAN",
+        "amber",
+    );
+    let (alpha_id, beta_id, gamma_id, vanished_id) = (alpha, beta, gamma, vanished);
+    // D-093: `reorder` renumbers the COMPLETE id set — all four rows,
+    // moved to Alpha-Beta-Gamma-Vanished (the vanished project rides
+    // along at the tail; its folder state is irrelevant to order).
+    let ids = [
+        alpha_id.clone(),
+        beta_id.clone(),
+        gamma_id.clone(),
+        vanished_id.clone(),
+    ];
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::projects::reorder(tx, &ids.iter().map(String::as_str).collect::<Vec<_>>())
+            .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("reordering through the repository must work");
+    // `last_synced_at` has no writer yet (OUT-020: the sync tasks own
+    // it); seed the wire fact directly, the way the corrupt-cell
+    // tests seed their cells.
+    let vanished_for_stamp = vanished_id.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.execute(
+            "UPDATE projects SET last_synced_at = ?1 WHERE id = ?2",
+            rusqlite::params!["2026-11-19T10:30:00.000Z", vanished_for_stamp],
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("stamping last_synced_at through the executor must work");
+
+    // Act
+    let webview = main_webview(&app);
+    let columns = invoke_projects_list(&webview, serde_json::Value::Null)
+        .expect("the active-columns read must succeed");
+
+    // Assert: sort_order order — the reorder moved Alpha to the front
+    // — with every column field on the wire. The vanished folder is a
+    // flag + reason, not an error (D-09/MAIN-028); its dirty flag is
+    // false under the boundary `dirty_verdict` documents; its stamped
+    // time round-trips and the never-synced rows answer `None`.
+    assert_eq!(
+        columns
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            alpha_id.as_str(),
+            beta_id.as_str(),
+            gamma_id.as_str(),
+            vanished_id.as_str()
+        ],
+        "the columns follow sort_order (ALG-001's read order), not insertion order"
+    );
+    let first = &columns[0];
+    assert_eq!(first.id, alpha_id);
+    assert_eq!(first.name, "Alpha");
+    assert_eq!(first.label, "ALP");
+    assert_eq!(first.color, "red");
+    assert_eq!(first.state, "active");
+    assert!(first.available, "a real repository folder is available");
+    assert_eq!(first.unavailable_reason, None);
+    assert!(!first.dirty);
+    assert_eq!(first.last_synced_at, None);
+    let vanished_column = &columns[3];
+    assert!(!vanished_column.available, "the missing folder is a flag");
+    assert_eq!(
+        vanished_column.unavailable_reason.as_deref(),
+        Some("missing"),
+        "the D-084 verdict names the D-09 text"
+    );
+    assert!(!vanished_column.dirty);
+    assert_eq!(
+        vanished_column.last_synced_at.as_deref(),
+        Some("2026-11-19T10:30:00.000Z")
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn projects_list_widens_to_archived_rows_by_the_wire_flag() {
+    // Arrange: Alpha, Beta, Gamma created in order, then Beta archived
+    // — §6.4 keeps its position, so the table order stays
+    // Alpha, Beta, Gamma with Beta carrying `archived`.
+    let (temp, app) = projects_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let alpha = seed_project(
+        &database,
+        repo_dir(temp.path(), "alpha").display().to_string(),
+        "/alpha",
+        "Alpha",
+        "ALP",
+        "red",
+    );
+    let beta = seed_project(
+        &database,
+        repo_dir(temp.path(), "beta").display().to_string(),
+        "/beta",
+        "Beta",
+        "BET",
+        "green",
+    );
+    let gamma = seed_project(
+        &database,
+        repo_dir(temp.path(), "gamma").display().to_string(),
+        "/gamma",
+        "Gamma",
+        "GAM",
+        "blue",
+    );
+    let beta_id = beta.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::projects::archive(tx, &beta_id)
+            .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("archiving through the repository must work");
+    let webview = main_webview(&app);
+
+    // Act + assert, first half: the default read carries the active
+    // columns only — the archived row is filtered out, and the
+    // survivors keep their relative sort_order.
+    let active = invoke_projects_list(&webview, serde_json::Value::Null)
+        .expect("the default read must succeed");
+    assert_eq!(
+        active
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        [alpha.as_str(), gamma.as_str()],
+        "the default read is the active subset in sort_order"
+    );
+
+    // Second half: the explicit flag widens the same ordered read to
+    // the whole table — Beta returns at its kept position, marked
+    // archived, and DB-014's never-dirty rule rides on the wire.
+    let all = invoke_projects_list(&webview, serde_json::json!(true))
+        .expect("the widened read must succeed");
+    assert_eq!(
+        all.iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        [alpha.as_str(), beta.as_str(), gamma.as_str()],
+        "include_archived keeps the table-wide sort_order (archive keeps the position)"
+    );
+    let archived_entry = &all[1];
+    assert_eq!(archived_entry.state, "archived");
+    assert!(
+        !archived_entry.dirty,
+        "DB-014: an archived project is never dirty"
+    );
+
+    // Third half: an explicit false is the default, not a third mode.
+    let explicit = invoke_projects_list(&webview, serde_json::json!(false))
+        .expect("the explicit-false read must succeed");
+    assert_eq!(
+        explicit
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        [alpha.as_str(), gamma.as_str()],
+        "an explicit false is the default active read"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn projects_list_answers_an_empty_list_for_a_fresh_database() {
+    // The empty app's honest answer: an empty list, not an error and
+    // not a null payload the frontend has to special-case.
+    let (temp, app) = projects_app();
+    let webview = main_webview(&app);
+    let columns = invoke_projects_list(&webview, serde_json::Value::Null)
+        .expect("a fresh database must answer successfully");
+    assert_eq!(columns, Vec::new());
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn projects_list_answers_honestly_without_a_database() {
+    // Recovery mode (the `activity_list` pin): no `Db` managed — the
+    // recorded D-037 fallback with the `NoDatabase` diagnostic, never
+    // a pretend-empty list that would lie about the projects table
+    // being empty.
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::projects_list])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    let webview = main_webview(&app);
+    let error = invoke_projects_list(&webview, serde_json::Value::Null)
+        .expect_err("the no-database state must fail honestly");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(error["message_key"], serde_json::json!("errors.db_locked"));
+    assert_eq!(error["details"]["os_kind"], serde_json::json!("NoDatabase"));
+}
+
+#[test]
+fn a_corrupt_projects_cell_answers_the_fallback_envelope_not_validation() {
+    // The corrupt-cells wire contract (the T-027 round-2 rule, applied
+    // to the projects table): a stored vocabulary cell outside its
+    // CHECK vocabulary is corruption, NOT caller input — the read
+    // fails with the recorded D-037 fallback, a `ProjectsCorrupt`
+    // diagnostic, empty params, and a class-only `os_message` (a
+    // tampered cell is arbitrary database text; `params` and
+    // `os_message` feed the log line and the localized message).
+    // Written through the `ignore_check_constraints` test seam — the
+    // schema CHECKs make such a cell unreachable through the API.
+    let (temp, app) = projects_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    seed_project(
+        &database,
+        repo_dir(temp.path(), "alpha").display().to_string(),
+        "/alpha",
+        "Alpha",
+        "ALP",
+        "red",
+    );
+    tauri::async_runtime::block_on(database.run(|tx| {
+        tx.execute_batch(
+            "PRAGMA ignore_check_constraints = 1;\n\
+             UPDATE projects SET state = 'vanished';\n\
+             PRAGMA ignore_check_constraints = 0;",
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("tampering the state cell through the executor must work");
+
+    // Act: the widened read — the default `state = 'active'` filter
+    // would shield the tampered row from ever being decoded, so the
+    // whole-table read is what surfaces the corrupt cell.
+    let webview = main_webview(&app);
+    let error = invoke_projects_list(&webview, serde_json::json!(true))
+        .expect_err("a corrupt cell must fail the read");
+
+    // Assert
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(error["message_key"], serde_json::json!("errors.db_locked"));
+    assert_eq!(
+        error["params"],
+        serde_json::json!({}),
+        "no raw cell travels"
+    );
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("ProjectsCorrupt")
+    );
+    assert_eq!(
+        error["details"]["os_message"],
+        serde_json::json!("a stored state cell is outside its vocabulary"),
+        "the diagnostic names the column and class only, never the stored value"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_projects_list_command_is_registered_with_the_specta_builder() {
+    // The §7.10 Projects-module name, registered exactly once — the
+    // D-034 wiring-pin rationale: without this pin, dropping the
+    // registration would leave `export_bindings_are_up_to_date` green
+    // while it silently rewrote the committed bindings without the
+    // command.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("commands::projects_list").count(),
+        1,
+        "lib.rs must register the `projects_list` command exactly once (§7.10, D-009)"
+    );
 }
 
 // ---------------------------------------------------------------------------

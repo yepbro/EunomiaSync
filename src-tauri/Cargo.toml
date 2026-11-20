@@ -19,6 +19,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 eunomia-store = { path = "../crates/eunomia-store" }
+# The project-folder availability probe of `projects_list` (commands.rs,
+# T-072, spec DB-032/D-09 over the D-084 check): a read-only use of
+# `eunomia_fs::paths::check_project_available`, the crate itself is
+# untouched. Not a new crate in the graph: eunomia-fs is a workspace
+# member (its tempfile dependency is already resolved workspace-wide
+# for src-tauri's dev-dependencies) — this adds an edge, not a version.
+eunomia-fs = { path = "../crates/eunomia-fs" }
 # The DB executor (db.rs, D-037) owns rusqlite types directly — the
 # connection behind the mutex and the transaction it hands to
 # operations. Not a new crate in the graph: rusqlite 0.41 is already

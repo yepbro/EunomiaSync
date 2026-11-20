@@ -1,11 +1,12 @@
 //! The IPC commands (spec §7.10) — the recovery-screen group of the
 //! System module (D-009), the History module's `activity_list`
 //! (T-027), the Settings module's `settings_get`/`settings_set`
-//! (T-030), the System module's `app_info` (T-031) and the Library
-//! module's `markdown_preview` (T-056): `app_open_data_folder`,
+//! (T-030), the System module's `app_info` (T-031), the Library
+//! module's `markdown_preview` (T-056) and the Projects module's
+//! `projects_list` (T-072): `app_open_data_folder`,
 //! `db_backups_list`, `db_restore_backup`, `db_recreate`,
 //! `activity_list`, `settings_get`, `settings_set`, `app_info`,
-//! `markdown_preview`.
+//! `markdown_preview`, `projects_list`.
 //!
 //! Every command returns `Result<T, AppError>` (§7.10) and is generic
 //! over the Tauri runtime — the documented tauri-specta shape for
@@ -55,7 +56,7 @@
 //! as `db::Db::run` (D-037): quick_check scans and file copies are
 //! blocking I/O and never run on the async workers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -68,10 +69,12 @@ use crate::logging;
 use crate::markdown;
 use crate::recovery::{self, DbBackupInfo};
 
+use eunomia_fs::paths::ProjectUnavailableError;
 use eunomia_store::action_log::{
     Action, ActionLogError, ActivityQuery, Entity, EntityType, Level, LogEntry, Outcome,
     Visibility, insert,
 };
+use eunomia_store::projects::{ListScope, ProjectState, ProjectsError};
 use eunomia_store::settings::{SettingKey, SettingValue, SettingsError};
 use eunomia_store::storage::StorageError;
 
@@ -1088,6 +1091,260 @@ fn settings_corrupt_diagnostic(source: &SettingsError) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// `projects_list` (T-072, §7.10 Projects module, §7.1, §7.4 MAIN-028,
+// DB-014/DB-021, D-09/DB-032, D-084)
+// ---------------------------------------------------------------------------
+
+/// One project column entry on the `projects_list` wire (§7.4 MAIN-028,
+/// §7.1): the facts the matrix column renders plus the identity the
+/// column's actions (archive, reorder, "Locate…") call back with, and
+/// the state the "Archived projects" screen filters on. The DB types
+/// never cross the boundary (the `ActivityEntry` rule): every field is
+/// a wire primitive, with the closed vocabularies in their stored
+/// spellings the way the settings/action-log DTOs carry them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct ProjectColumnEntry {
+    /// The row id (UUIDv7 TEXT, DB-002) — the identity every later
+    /// project command (`project_archive`, `projects_reorder`, …)
+    /// addresses.
+    pub(crate) id: String,
+    /// The display name (§6.9) — DB-041/NFR-020: the label is always
+    /// shown and the name travels with it for the column's tooltip.
+    pub(crate) name: String,
+    /// The color-badge label, 1–6 visible characters (DB-042).
+    pub(crate) label: String,
+    /// The palette color (DB-040) as its stored member string.
+    pub(crate) color: String,
+    /// `active` or `archived` (§6.2 CHECK vocabulary): the default
+    /// response carries actives only, so this is `"active"` there;
+    /// an `include_archived` read uses it to tell the screens apart.
+    pub(crate) state: String,
+    /// Whether the project folder passed the D-084 availability
+    /// check at this read (D-09/MAIN-028: the column's icon-and-text
+    /// marking for a moved, deleted or unreadable folder).
+    pub(crate) available: bool,
+    /// Why [`ProjectColumnEntry::available`] is `false`, as the wire's
+    /// own snake_case names of the D-084 verdicts (`missing`,
+    /// `not_a_directory`, `not_readable`, `no_git_entry`) — the text
+    /// half of D-09's marking; `None` when the folder is available.
+    pub(crate) unavailable_reason: Option<String>,
+    /// DB-021's unsynced-changes flag at this read (MAIN-028's dot
+    /// icon); see [`dirty_verdict`] for the boundary this command
+    /// serves it under.
+    pub(crate) dirty: bool,
+    /// The last successful sync's time (LOG-007/OUT-020), DB-002 UTC
+    /// shape; `None` until the first sync writes it.
+    pub(crate) last_synced_at: Option<String>,
+}
+
+/// Lists the projects for the main window's columns and the "Archived
+/// projects" screen (§7.10 Projects module `projects_list`; §7.1; the
+/// §7.4 MAIN-028 column fields).
+///
+/// Active projects come back in `sort_order` order (ALG-001's read
+/// order — the column order PRJ-019/020 persists); `include_archived:
+/// true` widens the same ordered read to every row: §6.4's archive
+/// keeps a row's position, so archived entries appear at their old
+/// places and carry `state: "archived"` for the screen to filter on
+/// (the D-10 restore screen). The read runs through [`Db::run`] like
+/// every database command (D-037), one transaction off the async
+/// runtime.
+///
+/// Each entry's availability is probed fresh (DB-032: the window-open
+/// check point) with the D-084 four-metadata-probe check — read-only
+/// reuse of `eunomia_fs::paths::check_project_available`, the crate
+/// untouched. The probes are blocking file I/O over live folders, so
+/// they run on the blocking pool **after** the transaction (SYS-001):
+/// a slow or dead folder never holds the database lock, and an
+/// unavailable folder is the entry's flag + reason — D-09's
+/// icon-and-text marking, never an error of the read (the sync
+/// re-checks before writing, and "Locate…"/"Archive" stay available
+/// actions on the entry's id).
+///
+/// `dirty` is served under the honest boundary [`dirty_verdict`]
+/// documents: DB-014's archived half is the one part of DB-021 the
+/// §6.2 row decides alone, and the live flag's owner is DB-022's
+/// background hash pipeline (`state://dirty`, MAIN-028), which has
+/// not landed — the DTO field is that pipeline's arrival point.
+///
+/// No failure log edge yet: the logging facade grows per command task
+/// (`logging::activity_list_failed` is T-027's) and `logging.rs` is
+/// outside this task's file scope — the follow-up is whichever task
+/// adopts the Projects module's write commands into the facade. A
+/// successful read is never journaled (the `activity_list` rationale:
+/// reading is not an event).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn projects_list<R: Runtime>(
+    app: AppHandle<R>,
+    include_archived: Option<bool>,
+) -> Result<Vec<ProjectColumnEntry>, AppError> {
+    let database = managed_db(&app)?;
+    // One scope, one ordered read (ALG-001's subset order): the
+    // default keeps the matrix's active columns; the explicit flag
+    // widens to the whole table for the archived screen.
+    let scope = if include_archived == Some(true) {
+        ListScope::All
+    } else {
+        ListScope::Active
+    };
+    let rows = database
+        .run(move |transaction| {
+            eunomia_store::projects::list(transaction, scope).map_err(projects_store_to_app_error)
+        })
+        .await?;
+    // The availability probes (D-084) are blocking file I/O over live
+    // folders: they run on the blocking pool, after the transaction —
+    // a dead drive delays only this response, never the one database
+    // lock, and the entries describe exactly what the read committed.
+    let entries = tauri::async_runtime::spawn_blocking(move || {
+        rows.into_iter()
+            .map(|project| {
+                // The verdict reads the row before the struct build
+                // moves its fields.
+                let dirty = dirty_verdict(&project);
+                let (available, unavailable_reason) = availability_of(Path::new(&project.path));
+                ProjectColumnEntry {
+                    id: project.id,
+                    name: project.name,
+                    label: project.label,
+                    color: project.color,
+                    state: project.state.as_str().to_owned(),
+                    available,
+                    unavailable_reason,
+                    dirty,
+                    last_synced_at: project.last_synced_at,
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(db::join_failure_to_app_error)?;
+    Ok(entries)
+}
+
+/// The `dirty` verdict `projects_list` serves today (DB-021 with
+/// DB-014, MAIN-028) — an honest boundary, not a computation:
+///
+/// DB-021's rule compares the stored `last_synced_hash` with the
+/// **current** build hash, and DB-022 assigns the current hashes to
+/// the background recalculation pipeline that emits `state://dirty`
+/// (MAIN-028's live source for the column's dot icon) — a task that
+/// has not landed, and whose inputs (the library and assignment
+/// repositories, the ALG-001 snapshot the build hashes) do not exist
+/// in the store yet. The §6.2 row alone decides exactly one half of
+/// the rule: DB-014's archived project is never counted as dirty.
+///
+/// For active projects, no database this app can produce holds
+/// unsynced changes today: nothing that writes assignments, library
+/// content or sync hashes exists yet (`last_synced_hash` starts NULL
+/// with no writer, and no assignment can exist), so DB-021's
+/// exception sentence shields every reachable row and the honest
+/// verdict is `false`. The boundary is temporal, not structural — the
+/// DB-022 pipeline task (or the first assignments command) takes the
+/// fact over by feeding [`eunomia_core::dirty::is_dirty`] the real
+/// build facts here; a silent constant past that point would be a
+/// lie this seam exists to prevent.
+fn dirty_verdict(project: &eunomia_store::projects::Project) -> bool {
+    match project.state {
+        // DB-014: an archived project takes part in no sync and is
+        // never counted as dirty — the rule's only row-decidable half.
+        ProjectState::Archived => false,
+        // Active: the DB-022 boundary above — false for every row any
+        // current writer can produce, and the documented seam the
+        // hash-pipeline task replaces.
+        ProjectState::Active => false,
+    }
+}
+
+/// Runs the D-084 availability probe and shapes its verdict onto the
+/// wire pair: the flag, plus the reason string when the folder failed
+/// (D-09/MAIN-028 mark an unavailable project with "an icon and
+/// text" — the text needs the failure class). The spellings are the
+/// wire's own snake_case names of the probe's verdicts, not stored
+/// database cells.
+fn availability_of(root: &Path) -> (bool, Option<String>) {
+    match eunomia_fs::paths::check_project_available(root) {
+        Ok(()) => (true, None),
+        Err(error) => (
+            false,
+            Some(
+                match error {
+                    ProjectUnavailableError::Missing { .. } => "missing",
+                    ProjectUnavailableError::NotADirectory => "not_a_directory",
+                    ProjectUnavailableError::NotReadable { .. } => "not_readable",
+                    ProjectUnavailableError::NoGitEntry => "no_git_entry",
+                }
+                .to_owned(),
+            ),
+        ),
+    }
+}
+
+/// Maps a store failure of the `projects_list` read onto the §7.10
+/// wire — the D-093 boundary: this is the first command consuming the
+/// projects repository, and it maps [`ProjectsError`] beside the
+/// `StorageError` shapes the commands above already unwrap (folding
+/// the two store error families together stays a recorded follow-up
+/// for a store-side task allowed to edit `src-tauri`). SQLite
+/// failures go through the shared base classifier; everything else is
+/// the recorded D-037 fallback — `E_DB_CORRUPT` remains the lie
+/// D-037 rejected (one bad cell must not force the destructive
+/// recovery screen). `pub(crate)` in the `activity_log_to_app_error`
+/// shape: the IPC tests map their store errors through it too, and
+/// the unit tests drive its arms directly.
+pub(crate) fn projects_store_to_app_error(error: ProjectsError) -> AppError {
+    match error {
+        ProjectsError::Sql(source) => db::sqlite_error_to_app_error(source),
+        // A stored cell outside its closed vocabulary: corruption, not
+        // caller input — the fallback with the family's corrupt label
+        // and a class-only diagnostic naming the column, never the
+        // stored value (the T-027 round-2 rule: a tampered cell is
+        // arbitrary database text, and `params`/`os_message` are
+        // exactly the surfaces the log line and the localized message
+        // read).
+        ProjectsError::Member { column, .. } => projects_fallback(
+            "ProjectsCorrupt",
+            &format!("a stored {column} cell is outside its vocabulary"),
+        ),
+        // The write-path outcomes a list read cannot produce; if one
+        // ever arrives, the same fallback keeps the family label and
+        // class-only text — never the `path_key` or id, which are
+        // stored, path-derived identifiers on the same SEC-008
+        // surfaces.
+        write_outcome => projects_fallback(
+            "ProjectsError",
+            match &write_outcome {
+                ProjectsError::DuplicatePathKey { .. } => {
+                    "a duplicate path key conflict reached a read command"
+                }
+                ProjectsError::NotFound { .. } => "a by-id write outcome reached a read command",
+                ProjectsError::ReorderMismatch { .. } => {
+                    "a reorder mismatch reached a read command"
+                }
+                ProjectsError::Member { .. } | ProjectsError::Sql(_) => {
+                    "an unexpected projects store outcome"
+                }
+            },
+        ),
+    }
+}
+
+/// Builds the D-037 fallback with a family label and a fixed,
+/// class-only diagnostic — the shared shape of the two
+/// [`projects_store_to_app_error`] fallback arms (the
+/// `storage_fallback` builder of the settings mappers).
+fn projects_fallback(kind: &str, message: &str) -> AppError {
+    let mut app_error = AppError::new(ErrorCode::DbLocked);
+    app_error.details = Some(ErrorDetails {
+        os_code: None,
+        os_kind: Some(kind.to_owned()),
+        os_message: Some(message.to_owned()),
+    });
+    app_error
+}
+
+// ---------------------------------------------------------------------------
 // `markdown_preview` (T-056, §7.10 Library module, SEC-005, D-15, D-009)
 // ---------------------------------------------------------------------------
 
@@ -1554,6 +1811,145 @@ mod tests {
                 Some(expected),
                 "the diagnostic names the class only, never the stored value"
             );
+        }
+    }
+
+    // ---- `projects_list` store-error mapping pins (T-072) --------------
+
+    #[test]
+    fn a_corrupt_projects_cell_maps_to_the_fallback_with_its_own_label() {
+        // Arrange: the store's corrupt-cells rejection — a stored
+        // vocabulary member outside the CHECK vocabulary (the D-039
+        // policy; only corruption or a newer app version can produce
+        // it, the CHECKs make the API path unreachable).
+        let stored = ProjectsError::Member {
+            column: "state",
+            found: "vanished".to_owned(),
+        };
+
+        // Act
+        let app_error = projects_store_to_app_error(stored);
+
+        // Assert: the D-037 fallback with the `ProjectsCorrupt`
+        // diagnostic — NOT E_VALIDATION (the §10 row would blame the
+        // user's input for database corruption) and NOT E_DB_CORRUPT
+        // (one bad cell must not force the destructive recovery
+        // screen), and no raw cell on any surface the log line or the
+        // localized message reads: `params` empty, `os_message` the
+        // fixed column-only diagnostic (the T-027 round-2 rule).
+        assert_eq!(app_error.code, ErrorCode::DbLocked);
+        assert_eq!(app_error.message_key, "errors.db_locked");
+        assert!(app_error.params.is_empty(), "no raw cell travels in params");
+        let details = app_error.details.expect("the details carry the cause");
+        assert_eq!(details.os_kind.as_deref(), Some("ProjectsCorrupt"));
+        assert_eq!(
+            details.os_message.as_deref(),
+            Some("a stored state cell is outside its vocabulary"),
+            "the diagnostic names the column and class only"
+        );
+    }
+
+    #[test]
+    fn unreachable_write_outcomes_map_to_the_fallback_without_stored_text() {
+        // Arrange: the three write-path outcomes a list read cannot
+        // produce, each carrying a stored, path-derived identifier.
+        let outcomes = [
+            ProjectsError::DuplicatePathKey {
+                path_key: "/repos/secret-project".to_owned(),
+            },
+            ProjectsError::NotFound {
+                id: "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f".to_owned(),
+            },
+            ProjectsError::ReorderMismatch {
+                unknown: vec!["0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f".to_owned()],
+                missing: 1,
+                duplicates: 0,
+            },
+        ];
+
+        // Act
+        for outcome in outcomes {
+            let app_error = projects_store_to_app_error(outcome);
+
+            // Assert: the same D-037 fallback with the family label and
+            // class-only text — the identifier never reaches `params`
+            // or `os_message` (SEC-008's surfaces; a stored id or
+            // path_key is database text, exactly what the rule keeps
+            // off the wire).
+            assert_eq!(app_error.code, ErrorCode::DbLocked);
+            assert_eq!(app_error.message_key, "errors.db_locked");
+            assert!(app_error.params.is_empty());
+            let details = app_error.details.expect("the details carry the cause");
+            assert_eq!(details.os_kind.as_deref(), Some("ProjectsError"));
+            let message = details.os_message.expect("the diagnostic is present");
+            assert!(
+                !message.contains("/repos/secret-project") && !message.contains("0193a2bb"),
+                "no stored identifier travels in the diagnostic, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_availability_reasons_carry_the_d084_verdict_classes() {
+        // The wire spellings of the D-084 verdicts: every arm of
+        // `availability_of` mapped from a real fixture, so a
+        // copy-paste regression in the spelling table fails here. The
+        // `missing` arm is additionally pinned end-to-end by the IPC
+        // test's never-created folder; these fixtures cover the other
+        // three.
+        use std::fs;
+        let temp = tempfile::tempdir().expect("a temp directory must be creatable");
+
+        // A healthy repository: available, no reason.
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).expect("the fixture repository must be creatable");
+        assert_eq!(availability_of(&repo), (true, None));
+
+        // A readable folder without `.git`: NoGitEntry.
+        let plain = temp.path().join("plain");
+        fs::create_dir_all(&plain).expect("the plain folder must be creatable");
+        assert_eq!(
+            availability_of(&plain),
+            (false, Some("no_git_entry".to_owned()))
+        );
+
+        // A plain file at the registered path: NotADirectory.
+        let file = temp.path().join("file");
+        fs::write(&file, b"not a folder").expect("the fixture file must be creatable");
+        assert_eq!(
+            availability_of(&file),
+            (false, Some("not_a_directory".to_owned()))
+        );
+
+        // A folder that cannot be listed: NotReadable — the mode-bit
+        // fixture the eunomia-fs suite uses, root-gated the same way
+        // (mode bits are not enforced for root, so the precondition
+        // cannot be set up there).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let locked = temp.path().join("locked");
+            fs::create_dir_all(&locked).expect("the locked fixture must be creatable");
+            let untestable = fs::metadata(&locked).is_ok_and(|metadata| metadata.uid() == 0);
+            if untestable {
+                eprintln!(
+                    "skipping the not_readable arm: running as root — mode \
+                     bits are not enforced, the precondition cannot be set up"
+                );
+            } else {
+                fs::set_permissions(&locked, fs::Permissions::from_mode(0o000))
+                    .expect("removing all mode bits must work");
+                let verdict = availability_of(&locked);
+                // Restore even when the assertion below panics, so
+                // TempDir's teardown can remove the directory.
+                fs::set_permissions(&locked, fs::Permissions::from_mode(0o755))
+                    .expect("restoring mode bits must work");
+                assert_eq!(
+                    verdict,
+                    (false, Some("not_readable".to_owned())),
+                    "a 000-mode folder must map to the not_readable reason"
+                );
+            }
         }
     }
 

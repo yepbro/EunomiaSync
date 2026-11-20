@@ -103,6 +103,45 @@ export const commands = {
 	 */
 	markdownPreview: (text: string, options?: InvokeOptions) => __TAURI_INVOKE<MarkdownPreview>("markdown_preview", { text }, options),
 	/**
+	 *  Lists the projects for the main window's columns and the "Archived
+	 *  projects" screen (§7.10 Projects module `projects_list`; §7.1; the
+	 *  §7.4 MAIN-028 column fields).
+	 * 
+	 *  Active projects come back in `sort_order` order (ALG-001's read
+	 *  order — the column order PRJ-019/020 persists); `include_archived:
+	 *  true` widens the same ordered read to every row: §6.4's archive
+	 *  keeps a row's position, so archived entries appear at their old
+	 *  places and carry `state: "archived"` for the screen to filter on
+	 *  (the D-10 restore screen). The read runs through [`Db::run`] like
+	 *  every database command (D-037), one transaction off the async
+	 *  runtime.
+	 * 
+	 *  Each entry's availability is probed fresh (DB-032: the window-open
+	 *  check point) with the D-084 four-metadata-probe check — read-only
+	 *  reuse of `eunomia_fs::paths::check_project_available`, the crate
+	 *  untouched. The probes are blocking file I/O over live folders, so
+	 *  they run on the blocking pool **after** the transaction (SYS-001):
+	 *  a slow or dead folder never holds the database lock, and an
+	 *  unavailable folder is the entry's flag + reason — D-09's
+	 *  icon-and-text marking, never an error of the read (the sync
+	 *  re-checks before writing, and "Locate…"/"Archive" stay available
+	 *  actions on the entry's id).
+	 * 
+	 *  `dirty` is served under the honest boundary [`dirty_verdict`]
+	 *  documents: DB-014's archived half is the one part of DB-021 the
+	 *  §6.2 row decides alone, and the live flag's owner is DB-022's
+	 *  background hash pipeline (`state://dirty`, MAIN-028), which has
+	 *  not landed — the DTO field is that pipeline's arrival point.
+	 * 
+	 *  No failure log edge yet: the logging facade grows per command task
+	 *  (`logging::activity_list_failed` is T-027's) and `logging.rs` is
+	 *  outside this task's file scope — the follow-up is whichever task
+	 *  adopts the Projects module's write commands into the facade. A
+	 *  successful read is never journaled (the `activity_list` rationale:
+	 *  reading is not an event).
+	 */
+	projectsList: (includeArchived: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<ProjectColumnEntry_Serialize[]>("projects_list", { includeArchived }, options),
+	/**
 	 *  Reads every §6.5 setting with its default applied (spec §7.10
 	 *  Settings module `settings_get`; the §7.2 window opens on this map).
 	 * 
@@ -798,6 +837,131 @@ export type MarkdownWarningKind =
  *  LIB-002's named example).
  */
 "unclosed_code_fence";
+
+/**
+ *  One project column entry on the `projects_list` wire (§7.4 MAIN-028,
+ *  §7.1): the facts the matrix column renders plus the identity the
+ *  column's actions (archive, reorder, "Locate…") call back with, and
+ *  the state the "Archived projects" screen filters on. The DB types
+ *  never cross the boundary (the `ActivityEntry` rule): every field is
+ *  a wire primitive, with the closed vocabularies in their stored
+ *  spellings the way the settings/action-log DTOs carry them.
+ */
+export type ProjectColumnEntry = ProjectColumnEntry_Serialize | ProjectColumnEntry_Deserialize;
+
+/**
+ *  One project column entry on the `projects_list` wire (§7.4 MAIN-028,
+ *  §7.1): the facts the matrix column renders plus the identity the
+ *  column's actions (archive, reorder, "Locate…") call back with, and
+ *  the state the "Archived projects" screen filters on. The DB types
+ *  never cross the boundary (the `ActivityEntry` rule): every field is
+ *  a wire primitive, with the closed vocabularies in their stored
+ *  spellings the way the settings/action-log DTOs carry them.
+ */
+export type ProjectColumnEntry_Deserialize = {
+	/**
+	 *  The row id (UUIDv7 TEXT, DB-002) — the identity every later
+	 *  project command (`project_archive`, `projects_reorder`, …)
+	 *  addresses.
+	 */
+	id: string,
+	/**
+	 *  The display name (§6.9) — DB-041/NFR-020: the label is always
+	 *  shown and the name travels with it for the column's tooltip.
+	 */
+	name: string,
+	/**  The color-badge label, 1–6 visible characters (DB-042). */
+	label: string,
+	/**  The palette color (DB-040) as its stored member string. */
+	color: string,
+	/**
+	 *  `active` or `archived` (§6.2 CHECK vocabulary): the default
+	 *  response carries actives only, so this is `"active"` there;
+	 *  an `include_archived` read uses it to tell the screens apart.
+	 */
+	state: string,
+	/**
+	 *  Whether the project folder passed the D-084 availability
+	 *  check at this read (D-09/MAIN-028: the column's icon-and-text
+	 *  marking for a moved, deleted or unreadable folder).
+	 */
+	available: boolean,
+	/**
+	 *  Why [`ProjectColumnEntry::available`] is `false`, as the wire's
+	 *  own snake_case names of the D-084 verdicts (`missing`,
+	 *  `not_a_directory`, `not_readable`, `no_git_entry`) — the text
+	 *  half of D-09's marking; `None` when the folder is available.
+	 */
+	unavailable_reason?: string | null,
+	/**
+	 *  DB-021's unsynced-changes flag at this read (MAIN-028's dot
+	 *  icon); see [`dirty_verdict`] for the boundary this command
+	 *  serves it under.
+	 */
+	dirty: boolean,
+	/**
+	 *  The last successful sync's time (LOG-007/OUT-020), DB-002 UTC
+	 *  shape; `None` until the first sync writes it.
+	 */
+	last_synced_at?: string | null,
+};
+
+/**
+ *  One project column entry on the `projects_list` wire (§7.4 MAIN-028,
+ *  §7.1): the facts the matrix column renders plus the identity the
+ *  column's actions (archive, reorder, "Locate…") call back with, and
+ *  the state the "Archived projects" screen filters on. The DB types
+ *  never cross the boundary (the `ActivityEntry` rule): every field is
+ *  a wire primitive, with the closed vocabularies in their stored
+ *  spellings the way the settings/action-log DTOs carry them.
+ */
+export type ProjectColumnEntry_Serialize = {
+	/**
+	 *  The row id (UUIDv7 TEXT, DB-002) — the identity every later
+	 *  project command (`project_archive`, `projects_reorder`, …)
+	 *  addresses.
+	 */
+	id: string,
+	/**
+	 *  The display name (§6.9) — DB-041/NFR-020: the label is always
+	 *  shown and the name travels with it for the column's tooltip.
+	 */
+	name: string,
+	/**  The color-badge label, 1–6 visible characters (DB-042). */
+	label: string,
+	/**  The palette color (DB-040) as its stored member string. */
+	color: string,
+	/**
+	 *  `active` or `archived` (§6.2 CHECK vocabulary): the default
+	 *  response carries actives only, so this is `"active"` there;
+	 *  an `include_archived` read uses it to tell the screens apart.
+	 */
+	state: string,
+	/**
+	 *  Whether the project folder passed the D-084 availability
+	 *  check at this read (D-09/MAIN-028: the column's icon-and-text
+	 *  marking for a moved, deleted or unreadable folder).
+	 */
+	available: boolean,
+	/**
+	 *  Why [`ProjectColumnEntry::available`] is `false`, as the wire's
+	 *  own snake_case names of the D-084 verdicts (`missing`,
+	 *  `not_a_directory`, `not_readable`, `no_git_entry`) — the text
+	 *  half of D-09's marking; `None` when the folder is available.
+	 */
+	unavailable_reason: string | null,
+	/**
+	 *  DB-021's unsynced-changes flag at this read (MAIN-028's dot
+	 *  icon); see [`dirty_verdict`] for the boundary this command
+	 *  serves it under.
+	 */
+	dirty: boolean,
+	/**
+	 *  The last successful sync's time (LOG-007/OUT-020), DB-002 UTC
+	 *  shape; `None` until the first sync writes it.
+	 */
+	last_synced_at: string | null,
+};
 
 /**
  *  One entry of the `settings_set` changes list. `deny_unknown_fields`
