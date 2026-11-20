@@ -32,6 +32,37 @@ Together, **EunomiaSync** represents order, consistency, and effortless rule man
 | File watching     | notify             |
 | Config            | serde + TOML       |
 
+### Development without Rust (mock IPC)
+
+The whole frontend talks to Tauri through one facade, `src/ipc`, and that
+facade can swap the real backend for an in-browser mock layer backed by
+deterministic fixtures — no Rust, no database, just `pnpm`:
+
+```sh
+VITE_IPC_MOCK=1 pnpm dev              # UI in a plain browser, mock backend
+VITE_IPC_MOCK=1 VITE_IPC_FIXTURES=l pnpm dev   # spec §12.2 set L (500 projects /
+                                        # 1000 instructions / 100 000 assignments) for scroll work
+pnpm e2e                              # Playwright, mock-backed (playwright.config.ts
+                                        # passes the flag to its Vite dev server)
+```
+
+- `VITE_IPC_MOCK=1` — every generated command in `src/bindings.ts` is served
+  by the mock layer (`src/ipc/mock/`); writes mutate an in-memory store that
+  reads back honestly, and error arms reject with the §7.10 `AppError` shape.
+  Component tests run under this flag automatically (`test.env` in
+  `vite.config.ts`). Unset (production, `tauri dev`), the real commands run.
+- `VITE_IPC_FIXTURES` — which fixture profile the mock store builds: `s`
+  (default), `m` or `l` (spec §12.2 sets). Fixtures are seeded and
+  reproducible: the same profile always yields the same data.
+- **Adding data**: extend the generator (`src/ipc/fixtures/generator.ts`) —
+  profiles are plain objects; `resetMockState(profile)` in tests seeds a
+  custom world. A command added to `bindings.ts` must gain a mock in
+  `src/ipc/mock/commands.ts` (the typecheck enforces it) and fixtures to
+  serve.
+
+Components never call `invoke()` directly and never import
+`src/bindings.ts` — everything goes through `src/ipc` (D-003).
+
 ## License
 
 EunomiaSync is dual-licensed under your choice of:

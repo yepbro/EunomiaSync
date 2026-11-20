@@ -12,6 +12,17 @@ export default defineConfig(() => ({
   test: {
     environment: 'happy-dom',
     include: ['src/**/*.spec.ts'],
+    // Component tests run against the mock IPC backend (spec §15.1: UI
+    // tests drive "a mocked IPC backend"; T-141): the same VITE_IPC_MOCK
+    // flag dev and e2e use, applied to import.meta.env before any module
+    // under test loads. The fixture profile is pinned to `s` too — a
+    // developer's VITE_IPC_FIXTURES must not leak set L into every test
+    // file's first mockState() call. Real-backend selection stays covered
+    // by the pure mode tests in src/ipc/mode.spec.ts.
+    env: {
+      VITE_IPC_MOCK: '1',
+      VITE_IPC_FIXTURES: 's',
+    },
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
@@ -38,8 +49,8 @@ export default defineConfig(() => ({
   build: {
     // The CSP (D-022) sets `img-src 'self'`: images must load from
     // same-origin files, never from `data:` URIs. Vite's default
-    // `assetsInlineLimit` (4096 bytes) would inline small SVGs into the
-    // JS bundle as data URIs where the CSP blocks them, so every asset
+    // `assetsInlineLimit` (4096 bytes) would inline small SVGs into
+    // the JS bundle as data URIs where the CSP blocks them, so every asset
     // is emitted as a real file instead.
     assetsInlineLimit: 0,
   },

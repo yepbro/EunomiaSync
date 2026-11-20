@@ -1,0 +1,558 @@
+import { beforeEach, describe, expect, it } from 'vitest'
+import { mockCommands } from './commands'
+import { mockState, resetMockState } from './state'
+import type { FixtureProfile } from '../fixtures/generator'
+
+/** A small pinned world: 4 projects (last one archived), 3 instructions. */
+const PROFILE: FixtureProfile = {
+  seed: 21,
+  projects: 4,
+  instructions: 3,
+  headings: 1,
+  assignments: 5,
+  archivedProjects: 1,
+  variantsPerInstruction: 1,
+  exclusions: 2,
+}
+
+const commands = mockCommands
+
+beforeEach(() => {
+  resetMockState(PROFILE)
+})
+
+describe('projectsList', () => {
+  it('serves active projects only by default, in column order', async () => {
+    const projects = await commands.projectsList(null)
+    const rows = mockState().projects
+    expect(projects).toHaveLength(rows.filter((r) => r.state === 'active').length)
+    // `sort_order` is not a wire field; the wire order itself is the
+    // contract (ALG-001), so the names must come back in row order.
+    const expected = [...rows]
+      .filter((r) => r.state === 'active')
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .map((r) => r.name)
+    expect(projects.map((p) => p.name)).toEqual(expected)
+  })
+
+  it('includes archived entries behind the flag, keeping their positions', async () => {
+    // Re-scatter: SWAP the archived row into a middle position (§6.4 keeps
+    // an archived row's place), then the widened read must serve the same
+    // order with it in place.
+    const rows = mockState().projects
+    const archived = rows.find((r) => r.state === 'archived')
+    expect(archived).toBeDefined()
+    const displaced = rows.find((r) => r.sortOrder === 2)
+    if (archived && displaced && archived !== displaced) {
+      const swap = archived.sortOrder
+      archived.sortOrder = displaced.sortOrder
+      displaced.sortOrder = swap
+    }
+    const all = await commands.projectsList(true)
+    const idsByOrder = all.map((p) => p.id)
+    const expected = [...rows].sort((a, b) => a.sortOrder - b.sortOrder).map((r) => r.id)
+    expect(idsByOrder).toEqual(expected)
+    expect(idsByOrder.indexOf(archived?.id ?? '')).toBe(1)
+  })
+
+  it('carries the full T-072 column shape', async () => {
+    const [first] = await commands.projectsList(null)
+    expect(first).toBeDefined()
+    expect(Object.keys(first ?? {}).sort()).toEqual([
+      'available',
+      'color',
+      'dirty',
+      'id',
+      'label',
+      'last_synced_at',
+      'name',
+      'state',
+      'unavailable_reason',
+    ])
+  })
+})
+
+describe('projectAddManual', () => {
+  it('adds a picked folder with derived fields and serves it back', async () => {
+    const before = await commands.projectsList(true)
+    const maxOrder = mockState().projects.reduce((m, p) => Math.max(m, p.sortOrder), 0)
+    const result = await commands.projectAddManual('/home/dev/src/new-repo', null)
+    expect(result.outcome).toBe('added')
+    expect(result.project?.name).toBe('new-repo')
+    expect(result.project?.label).toBe('NEW-RE')
+    expect(result.project?.added_via).toBe('manual')
+    expect(result.project?.scheme).toBe('A')
+    expect(result.project?.base_name).toBe('AGENTS.md')
+    expect(result.project?.write_access_warning).toBeNull()
+    expect(result.project?.sort_order).toBe(maxOrder + 1)
+    const after = await commands.projectsList(true)
+    expect(after.length).toBe(before.length + 1)
+    expect(after.some((p) => p.name === 'new-repo')).toBe(true)
+  })
+
+  it('copies the CURRENT default.* settings into the new row (PRJ-012)', async () => {
+    await commands.settingsSet([
+      { key: 'default.scheme', value: '"C"' },
+      { key: 'default.base_name', value: '"CLAUDE.md"' },
+    ])
+    const result = await commands.projectAddManual('/home/dev/src/defaults-repo', null)
+    expect(result.project?.scheme).toBe('C')
+    expect(result.project?.base_name).toBe('CLAUDE.md')
+    // Later default changes never reach it (DEF-005): the row keeps its own.
+    await commands.settingsSet([{ key: 'default.scheme', value: '"B"' }])
+    const reread = await commands.projectsList(true)
+    expect(reread.find((p) => p.name === 'defaults-repo')).toBeDefined()
+  })
+
+  it('derives the label with the DB-042 rule (upper-case first, 6 code points)', async () => {
+    const result = await commands.projectAddManual('/home/dev/src/straße', null)
+    expect(result.project?.name).toBe('straße')
+    expect(result.project?.label).toBe('STRASS')
+  })
+
+  it('picks the least-used palette color among active projects (D-29)', async () => {
+    // Whatever the fixture world wears, no active color may be used FEWER
+    // times than the one the mock chose (ties break by palette order).
+    const before = mockState().projects.filter((p) => p.state === 'active')
+    const counts = new Map<string, number>()
+    for (const row of before) counts.set(row.color, (counts.get(row.color) ?? 0) + 1)
+    const result = await commands.projectAddManual('/home/dev/src/color-repo', null)
+    const chosen = result.project?.color
+    expect(chosen).toBeDefined()
+    const chosenCount = counts.get(chosen ?? '') ?? 0
+    for (const [color, count] of counts) {
+      if (count < chosenCount) {
+        throw new Error(
+          `color ${color} is used ${count}x but ${chosen} (${chosenCount}x) was chosen`,
+        )
+      }
+    }
+  })
+
+  it('leaves the store and the journal untouched on the duplicate arm', async () => {
+    const [existing] = await commands.projectsList(null)
+    const before = mockState()
+    const beforeProjects = before.projects.length
+    const beforeJournal = before.activity.length
+    await commands.projectAddManual(pathOf(existing?.name ?? ''), null)
+    expect(mockState().projects).toHaveLength(beforeProjects)
+    expect(mockState().activity).toHaveLength(beforeJournal)
+  })
+
+  it('answers duplicate_active for a path an active project already owns', async () => {
+    const [existing] = await commands.projectsList(null)
+    const result = await commands.projectAddManual(pathOf(existing?.name ?? ''), null)
+    expect(result.outcome).toBe('duplicate_active')
+    expect(result.project).toBeNull()
+    expect(result.existing?.id).toBe(existing?.id)
+    expect(result.existing?.state).toBe('active')
+  })
+
+  it('answers archived_duplicate for a path an archived project owns', async () => {
+    const all = await commands.projectsList(true)
+    const archived = all.find((p) => p.state === 'archived')
+    expect(archived).toBeDefined()
+    const result = await commands.projectAddManual(pathOf(archived?.name ?? ''), null)
+    expect(result.outcome).toBe('archived_duplicate')
+    expect(result.existing?.state).toBe('archived')
+  })
+
+  it('rejects an empty path with E_VALIDATION', async () => {
+    await expect(commands.projectAddManual('   ', null)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'path' },
+    })
+  })
+
+  it('journals the add where activity_list can read it', async () => {
+    const added = await commands.projectAddManual('/home/dev/src/journaled-repo', null)
+    const page = await commands.activityList({})
+    const entry = page.entries.find(
+      (e) => e.action === 'project.added' && e.entity_id === added.project?.id,
+    )
+    expect(entry).toBeDefined()
+    expect(entry?.visibility).toBe('user')
+    expect(entry?.result).toBe('ok')
+  })
+
+  /** The mock row path is derived from the fixture name; read it via state. */
+  function pathOf(name: string): string {
+    const row = mockState().projects.find((p) => p.name === name)
+    expect(row, `a fixture project named ${name}`).toBeDefined()
+    return row?.path ?? ''
+  }
+})
+
+describe('settingsGet / settingsSet', () => {
+  it('serves the thirteen §6.5 keys in table order with spec defaults', async () => {
+    const settings = await commands.settingsGet()
+    expect(settings.map((s) => s.key)).toEqual([
+      'default.scheme',
+      'default.base_name',
+      'default.extra_local',
+      'default.extra_project',
+      'backup.retention',
+      'sync.skip_identical',
+      'scan.max_depth',
+      'scan.exclude_names',
+      'history.max_revisions',
+      'log.max_entries',
+      'log.max_days',
+      'ui.language',
+      'update.check_on_start',
+    ])
+    const byKey = new Map(settings.map((s) => [s.key, s.value] as const))
+    expect(byKey.get('default.scheme')).toBe('"A"')
+    expect(byKey.get('backup.retention')).toBe('10')
+    expect(byKey.get('scan.exclude_names')).toBe(
+      '["node_modules","vendor",".git","dist","build","target",".venv"]',
+    )
+    expect(byKey.get('ui.language')).toBe('"en"')
+  })
+
+  it('applies a valid change and answers the fresh full map', async () => {
+    const fresh = await commands.settingsSet([{ key: 'backup.retention', value: '30' }])
+    expect(fresh.find((s) => s.key === 'backup.retention')?.value).toBe('30')
+    const reread = await commands.settingsGet()
+    expect(reread.find((s) => s.key === 'backup.retention')?.value).toBe('30')
+    // Untouched keys keep their values (§7.2: applies without a restart).
+    expect(reread.find((s) => s.key === 'default.scheme')?.value).toBe('"A"')
+  })
+
+  it('journals one settings.changed entry per changed key', async () => {
+    const before = await commands.activityList({ actions: ['settings.changed'], limit: 500 })
+    await commands.settingsSet([
+      { key: 'backup.retention', value: '20' },
+      { key: 'scan.max_depth', value: '8' },
+    ])
+    const after = await commands.activityList({ actions: ['settings.changed'], limit: 500 })
+    const beforeIds = new Set(before.entries.map((e) => e.id))
+    const fresh = after.entries.filter((e) => !beforeIds.has(e.id))
+    expect(fresh).toHaveLength(2)
+    expect(fresh.map((e) => e.entity_id).sort()).toEqual(['backup.retention', 'scan.max_depth'])
+    expect(fresh.every((e) => e.result === 'ok' && e.visibility === 'user')).toBe(true)
+  })
+
+  it('rejects an unknown key with E_VALIDATION', async () => {
+    await expect(commands.settingsSet([{ key: 'nope.mode', value: '1' }])).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { key: 'nope.mode' },
+    })
+  })
+
+  it('rejects Object.prototype names as setting keys, journaling nothing', async () => {
+    const before = mockState().activity.length
+    await expect(commands.settingsSet([{ key: 'toString', value: '1' }])).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { key: 'toString' },
+    })
+    await expect(commands.settingsSet([{ key: 'constructor', value: '1' }])).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+    })
+    expect(mockState().activity).toHaveLength(before)
+  })
+
+  it('accepts the range ends (§6.5: backup.retention 1–200)', async () => {
+    const fresh = await commands.settingsSet([{ key: 'backup.retention', value: '200' }])
+    expect(fresh.find((s) => s.key === 'backup.retention')?.value).toBe('200')
+    const freshMin = await commands.settingsSet([{ key: 'backup.retention', value: '1' }])
+    expect(freshMin.find((s) => s.key === 'backup.retention')?.value).toBe('1')
+  })
+
+  it('rejects a wrong-shape value for another key (default.scheme)', async () => {
+    await expect(
+      commands.settingsSet([{ key: 'default.scheme', value: '"D"' }]),
+    ).rejects.toMatchObject({ code: 'E_VALIDATION', params: { key: 'default.scheme' } })
+  })
+
+  it('rejects an extra field inside the extra-hint object, journaling nothing', async () => {
+    const before = mockState().activity.length
+    await expect(
+      commands.settingsSet([
+        { key: 'default.extra_local', value: '{"enabled":true,"position":"start","typo":1}' },
+      ]),
+    ).rejects.toMatchObject({ code: 'E_VALIDATION', params: { key: 'default.extra_local' } })
+    expect(mockState().activity).toHaveLength(before)
+  })
+
+  it('stores the canonical form, not the caller spelling', async () => {
+    const fresh = await commands.settingsSet([
+      { key: 'default.extra_local', value: '{"position":"start","enabled":true}' },
+    ])
+    expect(fresh.find((s) => s.key === 'default.extra_local')?.value).toBe(
+      '{"enabled":true,"position":"start"}',
+    )
+  })
+
+  it('rejects a value outside the key range (§6.5: backup.retention 1–200)', async () => {
+    await expect(
+      commands.settingsSet([{ key: 'backup.retention', value: '0' }]),
+    ).rejects.toMatchObject({ code: 'E_VALIDATION', params: { key: 'backup.retention' } })
+  })
+
+  it('rejects a non-JSON value', async () => {
+    await expect(
+      commands.settingsSet([{ key: 'ui.language', value: 'not json' }]),
+    ).rejects.toMatchObject({ code: 'E_VALIDATION' })
+  })
+
+  it('applies nothing when any entry of the list is invalid (one transaction)', async () => {
+    await expect(
+      commands.settingsSet([
+        { key: 'backup.retention', value: '30' },
+        { key: 'log.max_days', value: '999999' },
+      ]),
+    ).rejects.toMatchObject({ code: 'E_VALIDATION' })
+    const reread = await commands.settingsGet()
+    expect(reread.find((s) => s.key === 'backup.retention')?.value).toBe('10')
+  })
+})
+
+describe('activityList', () => {
+  it('hides diagnostic entries unless explicitly requested (LOG-005)', async () => {
+    const userPage = await commands.activityList({ include_diagnostic: false })
+    expect(userPage.entries.every((e) => e.visibility === 'user')).toBe(true)
+    const fullPage = await commands.activityList({ include_diagnostic: true })
+    expect(fullPage.total).toBeGreaterThan(userPage.total)
+    expect(fullPage.entries.some((e) => e.visibility === 'diagnostic')).toBe(true)
+  })
+
+  it('orders newest first', async () => {
+    const page = await commands.activityList({ limit: 100 })
+    const stamps = page.entries.map((e) => e.ts)
+    const sorted = [...stamps].sort().reverse()
+    expect(stamps).toEqual(sorted)
+  })
+
+  it('pages by limit/offset with a filter-independent total', async () => {
+    const full = await commands.activityList({ limit: 500 })
+    const firstHalf = await commands.activityList({ limit: 2, offset: 0 })
+    const secondHalf = await commands.activityList({ limit: 2, offset: 2 })
+    expect(firstHalf.entries).toHaveLength(2)
+    expect(firstHalf.total).toBe(full.total)
+    expect(firstHalf.entries[0]?.id).toBe(full.entries[0]?.id)
+    expect(secondHalf.entries[0]?.id).toBe(full.entries[2]?.id)
+    // An offset past the end is an empty page, not an error.
+    const past = await commands.activityList({ limit: 2, offset: full.total + 10 })
+    expect(past.entries).toEqual([])
+    expect(past.total).toBe(full.total)
+  })
+
+  it('combines filters with AND', async () => {
+    const page = await commands.activityList({
+      actions: ['project.added'],
+      result: 'ok',
+    })
+    expect(page.entries.every((e) => e.action === 'project.added' && e.result === 'ok')).toBe(true)
+    expect(page.total).toBe(
+      (await commands.activityList({ limit: 500 })).entries.filter(
+        (e) => e.action === 'project.added' && e.result === 'ok',
+      ).length,
+    )
+  })
+
+  it('filters by project_id exactly', async () => {
+    const full = await commands.activityList({ limit: 500 })
+    const withProject = full.entries.find((e) => e.project_id !== null)
+    expect(withProject).toBeDefined()
+    const page = await commands.activityList({
+      project_id: withProject?.project_id ?? '',
+      limit: 500,
+    })
+    expect(page.entries.length).toBeGreaterThan(0)
+    expect(page.entries.every((e) => e.project_id === withProject?.project_id)).toBe(true)
+  })
+
+  it('treats the from_ts/to_ts bounds as inclusive', async () => {
+    const full = await commands.activityList({ limit: 500, include_diagnostic: true })
+    const stamps = full.entries.map((e) => e.ts).sort()
+    const oldest = stamps[0]
+    const newest = stamps[stamps.length - 1]
+    expect(oldest).toBeDefined()
+    expect(newest).toBeDefined()
+    const window = await commands.activityList({
+      from_ts: oldest,
+      to_ts: newest,
+      include_diagnostic: true,
+      limit: 500,
+    })
+    expect(window.total).toBe(full.total)
+    // One millisecond past the oldest stamp drops it (inclusive bound).
+    const plusOneMs = new Date(new Date(oldest ?? 0).getTime() + 1).toISOString()
+    const tightened = await commands.activityList({
+      from_ts: plusOneMs,
+      to_ts: newest,
+      include_diagnostic: true,
+      limit: 500,
+    })
+    expect(tightened.total).toBeLessThan(full.total)
+  })
+
+  it.each([
+    [{ limit: 0 }, { field: 'limit' }],
+    [{ limit: 501 }, { field: 'limit' }],
+    [{ limit: 2.5 }, { field: 'limit' }],
+    [{ offset: -1 }, { field: 'offset' }],
+    [{ offset: 0.5 }, { field: 'offset' }],
+    [{ from_ts: 'yesterday' }, { field: 'from_ts' }],
+    [{ from_ts: '2026-11-20T00:00:00Z' }, { field: 'from_ts' }],
+    [{ actions: ['sync.run.aborted'] }, { field: 'actions' }],
+    [{ result: 'nope' }, { field: 'result' }],
+  ])('rejects %j like the real boundary (E_VALIDATION, %j)', async (query, expected) => {
+    await expect(commands.activityList(query)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: expect.objectContaining(expected),
+    })
+  })
+
+  it('rejects an inverted date range naming from_ts', async () => {
+    await expect(
+      commands.activityList({
+        from_ts: '2026-11-20T10:00:00.000Z',
+        to_ts: '2026-11-19T10:00:00.000Z',
+      }),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'from_ts', reason: expect.stringContaining('inverted') },
+    })
+  })
+})
+
+describe('appInfo and the system commands', () => {
+  it('serves the About facts (§7.9/UPD-005 literals)', async () => {
+    const info = await commands.appInfo()
+    expect(info.identifier).toBe('pro.yepbro.eunomiasync')
+    expect(info.author).toBe('Den Brooks <denis@yepbro.pro>')
+    expect(info.license).toBe('MIT OR Apache-2.0')
+    expect(info.repository).toBe('https://github.com/yepbro/EunomiaSync')
+    expect(info.version).toBe('0.1.0')
+  })
+
+  it('lists db copies newest first', async () => {
+    const backups = await commands.dbBackupsList()
+    expect(backups.length).toBeGreaterThan(0)
+    const stamps = backups.map((b) => b.modified_utc)
+    expect(stamps).toEqual([...stamps].sort().reverse())
+  })
+
+  it('restores a known copy and rejects an unknown one', async () => {
+    const backups = await commands.dbBackupsList()
+    await expect(commands.dbRestoreBackup(backups[0]?.name ?? '')).resolves.toBeNull()
+    await expect(commands.dbRestoreBackup('nope.sqlite3')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { backup_name: 'nope.sqlite3' },
+    })
+  })
+
+  it('resolves db_recreate and app_open_data_folder as no-ops', async () => {
+    await expect(commands.dbRecreate()).resolves.toBeNull()
+    await expect(commands.appOpenDataFolder()).resolves.toBeNull()
+  })
+
+  it('dialog_pick_folder answers a path project_add_manual accepts', async () => {
+    const picked = await commands.dialogPickFolder()
+    expect(typeof picked).toBe('string')
+    const added = await commands.projectAddManual(picked ?? '', null)
+    expect(added.outcome).toBe('added')
+  })
+})
+
+describe('exclusionsList / exclusionRemove (the D-10 screen, T-078/D-106)', () => {
+  it('exclusionsList serves every ExclusionEntry field of the fixture rows', async () => {
+    const rows = await commands.exclusionsList()
+    expect(rows).toHaveLength(PROFILE.exclusions)
+    const [first] = rows
+    expect(first).toBeDefined()
+    expect(Object.keys(first ?? {}).sort()).toEqual([
+      'created_at',
+      'id',
+      'path',
+      'path_key',
+      'reason',
+    ])
+    expect(first?.path_key).toBe(first?.path)
+  })
+
+  it('exclusionsList orders oldest first with the id as the tiebreak inside one millisecond', async () => {
+    // Force the tiebreak case: two rows sharing a created_at must come
+    // back in id order (the store's stable (created_at, id) read).
+    const rows = mockState().exclusions
+    expect(rows.length).toBeGreaterThanOrEqual(2)
+    const shared = rows[0]?.created_at ?? ''
+    if (rows[0]) rows[0].created_at = shared
+    if (rows[1]) rows[1].created_at = shared
+    const listed = await commands.exclusionsList()
+    expect(listed.map((r) => r.created_at)).toEqual([
+      shared,
+      shared,
+      ...rows.slice(2).map((r) => r.created_at),
+    ])
+    const [a, b] = listed
+    expect(a && b && a.id < b.id).toBe(true)
+  })
+
+  it('exclusionRemove removes the row and the list reflects it', async () => {
+    const before = await commands.exclusionsList()
+    const victim = before[0]
+    expect(victim).toBeDefined()
+    await expect(commands.exclusionRemove(victim?.id ?? '')).resolves.toBeNull()
+    const after = await commands.exclusionsList()
+    expect(after).toHaveLength(before.length - 1)
+    expect(after.some((r) => r.id === victim?.id)).toBe(false)
+    // The untouched row survives verbatim.
+    expect(after[0]?.id).toBe(before[1]?.id)
+  })
+
+  it('exclusionRemove journals project.changed carrying the removed path (D-106)', async () => {
+    const victim = (await commands.exclusionsList())[0]
+    expect(victim).toBeDefined()
+    await commands.exclusionRemove(victim?.id ?? '')
+    const page = await commands.activityList({ actions: ['project.changed'], limit: 500 })
+    const entry = page.entries.find((e) => e.details === JSON.stringify({ path: victim?.path }))
+    expect(entry, 'one project.changed entry naming the removed path').toBeDefined()
+    expect(entry?.visibility).toBe('user')
+    expect(entry?.result).toBe('ok')
+    expect(entry?.entity_type).toBeNull()
+  })
+
+  it('exclusionRemove rejects an already-removed id with the typed envelope, changing nothing', async () => {
+    const victim = (await commands.exclusionsList())[0]
+    expect(victim).toBeDefined()
+    await commands.exclusionRemove(victim?.id ?? '')
+    const listLength = (await commands.exclusionsList()).length
+    const journalLength = mockState().activity.length
+
+    await expect(commands.exclusionRemove(victim?.id ?? '')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'id', value: victim?.id, reason: 'no exclusion with this id' },
+    })
+
+    expect(await commands.exclusionsList()).toHaveLength(listLength)
+    expect(mockState().activity).toHaveLength(journalLength)
+  })
+})
+
+describe('markdownPreview', () => {
+  it('renders paragraphs and escapes raw HTML (SEC-005)', async () => {
+    const preview = await commands.markdownPreview(
+      'Line one\n<script>alert(1)</script>\n\nLine two',
+    )
+    expect(preview.html).not.toContain('<script')
+    expect(preview.html).toContain('&lt;script&gt;')
+    expect(preview.warnings).toEqual([])
+    expect(preview.html).toContain('Line two')
+  })
+
+  it('renders fenced code blocks', async () => {
+    const preview = await commands.markdownPreview('Intro\n\n```bash\npnpm test\n```\n\nOutro')
+    expect(preview.html).toContain('<pre><code>pnpm test</code></pre>')
+    expect(preview.warnings).toEqual([])
+  })
+
+  it('warns about an unclosed code fence at its opening line (D-15)', async () => {
+    const preview = await commands.markdownPreview('First\n\n```ts\nconst x = 1')
+    expect(preview.warnings).toEqual([{ kind: 'unclosed_code_fence', line: 3 }])
+    // Everything after the opening fence renders as code.
+    expect(preview.html).toContain('const x = 1')
+  })
+})

@@ -14,6 +14,14 @@ export default defineConfig({
     command: 'node node_modules/vite/bin/vite.js --port 1420 --strictPort',
     url: 'http://localhost:1420',
     reuseExistingServer: !process.env.CI,
+    // Spec §15.1: e2e drives the UI against the Vite dev server with a
+    // MOCKED IPC backend — the same VITE_IPC_MOCK flag browser dev and
+    // Vitest use (T-141/D-108). Passed here so a plain `pnpm run e2e` (CI
+    // included) is mock-backed without remembering the flag.
+    env: {
+      ...process.env,
+      VITE_IPC_MOCK: '1',
+    },
   },
   projects: [
     {

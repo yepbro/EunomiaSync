@@ -8887,3 +8887,98 @@ DELETE back), and the registration pins for both §7.10 names.
   the peer edges have (`the_exclusion_failure_lines_carry_the_code_
 and_payload` in `logging.rs` — a wrong target or dropped field on
   either line now fails a test).
+
+### D-108 — Frontend mock IPC layer behind one facade and the `VITE_IPC_MOCK` flag — 2026-11-20
+
+Problem: spec §15.1 requires UI component tests and Playwright e2e to run
+"against the Vite dev server with a mocked IPC backend", and UI development
+in a plain browser has no Rust to talk to — but the frontend's only
+sanctioned IPC path (D-003) is the generated `commands` in `bindings.ts`,
+which need the Tauri webview. There was no mock layer, no fixture generator,
+and no single point a future "no direct invoke" lint pin could guard.
+
+Solution (T-141): `src/ipc/` is the app's single IPC access point.
+
+- **Facade.** `src/ipc/index.ts` exports `ipc` (`backend` + `commands`);
+  the ONLY module importing `src/bindings.ts` is `src/ipc/contract.ts`.
+  Components/stores import `src/ipc`, never bindings — D-003's no-raw-
+  `invoke()` line is now one lint rule away (recommended pin:
+  `no-restricted-imports` on `../bindings`/`../../bindings` outside
+  `src/ipc/**`; not added here — `eslint.config.js` was outside the task's
+  file scope).
+- **One flag.** `VITE_IPC_MOCK` (`1`/`true`) selects the mock backend at
+  module load: `pnpm dev` in a browser, `pnpm e2e` (playwright.config.ts
+  passes the flag to its webServer, so CI's plain `pnpm run e2e` is
+  mock-backed), and Vitest (always on via `test.env` in `vite.config.ts` —
+  the same mocks everywhere, per §15.1). Unset (production build,
+  `tauri dev`) the real commands run. The selection in `src/ipc/index.ts`
+  is a hand-inlined comparison, NOT a call into `mockEnabled()`: Vite
+  replaces `import.meta.env.VITE_IPC_MOCK` with a literal at build time,
+  the comparison folds, and the bundler drops the whole mock layer — a
+  function call would keep the branch opaque and ship ~5 kB gzip of dead
+  mock code (round-1 review P1-1 caught exactly that in the first cut;
+  verified after the fix: no mock strings in `dist/`). `VITE_IPC_FIXTURES`
+  (`s`/`m`/`l`) picks the fixture profile, default `s`; tests pin `s`
+  explicitly so a developer's env cannot leak set L into the suite.
+- **Mocks.** `src/ipc/mock/commands.ts` implements every generated command,
+  annotated `IpcCommands` (= `typeof commands`): a regenerated `bindings.ts`
+  with a new command FAILS `pnpm run typecheck` until a mock is written —
+  loud drift, same principle as the Rust-side bindings pins. First
+  exercise: T-078's `exclusions_list`/`exclusion_remove` joined
+  `bindings.ts` and the typecheck demanded their mocks at the T-141 rebase
+  — fixtures in the generator (S/M presets carry two rows each), the
+  store's `(created_at, id)` stable order, the typed stale-id
+  `E_VALIDATION`, and the D-106 journal shape (`project.changed` with the
+  path in `details`, no `exclusion.removed` member yet). Writes mutate
+  an in-memory store (`mock/state.ts`) that reads back honestly
+  (add→list, set→get, journal→activity_list); error arms reject with the
+  §7.10 `AppError` shape; read boundaries validate like the real ones
+  (`activity_list`: limit 1..=500, offset ≥ 0, DB-002 shapes, non-inverted
+  range, closed action/result vocabularies — the 21-member list mirrors
+  `action_log.rs`, extended together with the store; `settings_set`: known
+  key through a Map lookup — prototype names are not keys — §6.5 range
+  shapes, canonical re-serialization, all-or-nothing). Known mock limits,
+  documented in the module header: no filesystem (the `repo_root_offered`
+  arm never triggers; SEC-003 session gate and §6.9 name-length validation
+  not modelled), the write-access probe always answers "writable",
+  recovery commands skip the recovery-mode guard, `markdown_preview` is a
+  small escaper (SEC-005 policy) with the one D-15 warning, D-29's
+  tie-break is palette order, not an id hash.
+- **Fixtures.** `src/ipc/fixtures/generator.ts`: seeded mulberry32 PRNG
+  (in-house, ~40 lines — no new dependency; new deps are an owner
+  decision), fixed base timestamp, UUIDv7-shaped ids; fully parameterized
+  profiles with the §12.2 presets S/M/L (L = 500/1000+100/100 000/3,
+  opt-in only — the unit suite never builds it). Referential integrity and
+  id uniqueness are asserted at generation time (a broken fixture throws,
+  never reaches a test as a silent wrong fact). Library/assignment
+  fixtures use §6.2-DDL-shaped local types until the Library/Assignments
+  command groups generate wire DTOs; projects reuse the T-072 wire type.
+- **Events.** `bindings.ts` generates NO events today (checked): the five
+  §7.10/D-009 events arrive with the backend tasks that emit them, so the
+  facade serves commands only and `src/ipc/mock/events.ts` provides the
+  typed bus (subscribe/unsubscribe/emit) those wrappers and UI tests will
+  key with the generated payload types.
+- **Testing seam.** `resetMockState(profile)` seeds a custom world per
+  test; Vitest runs everything (including `App.spec.ts`, which reads the
+  version line through a real facade round-trip) against the same mocks.
+
+Review: two rounds (deepseek-v4.1-flash, then hy4-flash-free) — findings
+and fixes recorded in `.opencode/reviews/t141-round*.md` (owner-local).
+Round 1 (2×P1, 6×P2, 11×P3) was fully applied: the tree-shaking fix above
+(P1-1); the fixture journal's action vocabulary aligned to the store's
+closed 21-member list (`sync.run_finished`, no invented spellings, P1-2);
+DB-042's label derivation extracted as one shared `defaultLabel`
+(upper-case first, 6 code points — `straße` → `STRASS`, P2-1); archived
+rows never dirty (DB-014/DB-021, P2-2); `activity_list` boundary
+validation mirrored (P2-3); the settings-key Map lookup (P2-4); real
+hidden-instruction coverage — set S now includes one (P2-5); the label
+test re-pinned to rule literals (P2-6); plus the substantive P3s
+(archived-position ordering, D-29 least-used color, canonical setting
+storage, `app_info` version from package.json, Playwright's webServer env
+so plain `pnpm run e2e` is mock-backed, hermetic test fixture profile,
+event-bus reentrancy). Declined: a "set L actually generates" unit test —
+the task brief pins small sets in the suite, L stays opt-in.
+Round 2 (hy4-flash-free) verified every round-1 fix in code and approved;
+its P2 (the extra-hint shape must reject unknown fields like
+`extra_file_from_json`, not silently drop them) and P3 (integer
+`limit`/`offset`) were applied before the final amend.
