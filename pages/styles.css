@@ -7,6 +7,8 @@
    MAIN-024…031), § 7.2 DEF-001…005 (app settings modal, §6.5 keys),
    D-10 (archived + excluded paths modals, PRJ-013…018, §6.2
    exclusions, DB-014/015), § 7.7 LOG-001…006 (activity modal),
+   § 7.8 HLP-001…005 (help modal: two-pane FAQ, article list +
+   client-side search with <mark> highlights, §11.3 F1),
    UI-001, UI-011, UI-012, UI-021, UI-022, NFR-020.
    Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
    ========================================================================== */
@@ -125,14 +127,16 @@ body {
 }
 
 /* ----- Toolbar (D-14, UI: search + project filter + "Show hidden") ----- */
-/* Sized so the right cluster (Activity + Settings + the two add buttons,
-   labels never wrapped) fits the UI-001 minimum width of 960px: the
-   search input is the flex victim and may shrink to its small floor. */
+/* Sized so the right cluster fits the UI-001 minimum width of 960px:
+   Activity and Settings are compact icon buttons (28px, glyphs from the
+   ICONS idiom, accessible names kept), the gap is tightened to 8px, and
+   the search input is the flex victim — it may shrink to its small
+   floor at the minimum width. */
 
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 10px 12px;
   background: var(--surface);
   border-block-end: 1px solid var(--border);
@@ -175,12 +179,30 @@ body {
   max-inline-size: 180px;
 }
 
-/* Toolbar buttons keep their labels on one line (the Activity button
-   joined the right cluster) and never compress below their text */
+/* Toolbar buttons keep their labels on one line (the two add buttons)
+   and never compress below their text */
 .toolbar .btn {
   white-space: nowrap;
   flex: none;
   padding-inline: 8px;
+}
+
+/* Icon-only toolbar buttons (Activity, Settings): square ghost buttons
+   with the cell-icon 14px glyph. The accessible name is the aria-label,
+   the tooltip is the title attribute — no visible text is needed. */
+.toolbar .btn-icon {
+  inline-size: 28px;
+  block-size: 28px;
+  min-inline-size: 0;
+  padding: 0;
+  justify-content: center;
+  gap: 0;
+}
+
+.toolbar .btn-icon svg {
+  inline-size: 14px;
+  block-size: 14px;
+  fill: currentColor;
 }
 
 .toggle {
@@ -190,6 +212,7 @@ body {
   color: var(--text-muted);
   cursor: pointer;
   user-select: none;
+  white-space: nowrap; /* the label must not stack at the 960px minimum */
 }
 
 .spacer {
@@ -2385,6 +2408,204 @@ label.scan-row:hover {
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 10%, var(--surface));
   border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+/* ----- Help modal (HLP-001…004) ------------------------------------------- */
+/* The FAQ window: a fixed-height modal-xl two-pane body in the
+   instruction-editor idiom — article list + search on the left, the
+   selected article on the right. List items repeat the variant-list
+   idiom (.ie-variant-item: buttons with aria-pressed). Search matches
+   are wrapped in <mark> in both the list titles and the article body
+   (HLP-001): the accent-soft background is the standard highlight
+   idiom, readable in both themes (UI-021). Body typography mirrors the
+   editor preview (.ie-preview); article sections are <h4> under the
+   pane's <h3> title, which sits under the dialog's <h2>. */
+
+.help-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: grid;
+  grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.help-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-block-size: 0;
+  border-inline-end: 1px solid var(--border);
+  padding-inline-end: 14px;
+}
+
+.help-list {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* `hidden` must win over the flex display above (UI-012 empty state) */
+.help-list[hidden] {
+  display: none;
+}
+
+.help-item {
+  appearance: none;
+  font: inherit;
+  min-inline-size: 0;
+  min-block-size: 28px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  text-align: start;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.help-item:hover {
+  background: var(--row-hover);
+}
+
+.help-item[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* `hidden` must win over the flex display above */
+.help-item[hidden] {
+  display: none;
+}
+
+.help-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-inline-size: 0;
+}
+
+/* The client-side search (HLP-001) sits under the list, like the
+   editor's "Add variant" block */
+.help-search {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-block-start: 8px;
+  border-block-start: 1px solid var(--border);
+}
+
+.help-search input[type='search'] {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  min-block-size: 28px;
+}
+
+/* "N of M articles match" under the search box */
+.help-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.help-article-pane {
+  min-inline-size: 0;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.help-article-pane h3 {
+  flex: none;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.help-article {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+}
+
+.help-article p {
+  margin: 0 0 8px;
+}
+
+.help-article h3,
+.help-article h4,
+.help-article h5,
+.help-article h6 {
+  margin: 12px 0 6px;
+  line-height: 1.3;
+}
+
+.help-article h3 {
+  font-size: 14px;
+}
+.help-article h4 {
+  font-size: 13px;
+}
+.help-article h5,
+.help-article h6 {
+  font-size: 12.5px;
+}
+
+.help-article ul,
+.help-article ol {
+  margin: 0 0 8px;
+  padding-inline-start: 22px;
+}
+
+.help-article li {
+  margin: 2px 0;
+}
+
+.help-article pre {
+  margin: 0 0 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+
+.help-article code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.help-article :not(pre) > code {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+}
+
+/* Search matches (HLP-001) in the list titles and the article body:
+   the accent-soft background is the cue, the text color stays --text
+   for AA contrast in both themes */
+.help-item mark,
+.help-article mark {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-radius: 2px;
+  padding: 0 1px;
 }
 
 /* ----- Motion (UI-022: honor the OS "reduce motion" setting) ------------ */

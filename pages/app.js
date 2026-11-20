@@ -21,6 +21,10 @@
    activity modal (§7.7 LOG-001…006: user-visible entries only, live
    date/project/type/result filters, bulk ops logged with a change
    count),
+   help modal (HLP-001…005: two-pane FAQ — article list, client-side
+   search with <mark> highlights in the list and the rendered body,
+   articles rendered with the D-15 mini renderer; toolbar "?" button +
+   F1 per §11.3),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -1364,6 +1368,12 @@
     delete:
       '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>',
     main: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>',
+    /* Toolbar buttons (Activity, Settings): Material-style solid glyphs,
+       14px, filled with currentColor like the cell icons */
+    activity:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>',
+    settings:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>',
   }
 
   function refreshCellIcons(td) {
@@ -3296,6 +3306,276 @@
   /* Entry point: the toolbar ghost button (left of Settings) */
   document.getElementById('activity-btn').addEventListener('click', openActivity)
 
+  /* ---------- Help modal (HLP-001…004) -------------------------------------- */
+  /* The FAQ window, opened by the toolbar "?" ghost button and F1
+     (§11.3). Two-pane layout in the instruction-editor idiom: the
+     article list and the search on the left, the selected article on
+     the right. Article bodies are static demo documentation derived
+     from the spec, rendered with the same escape-first mini renderer
+     as the instruction preview (HLP-005: the FAQ is Markdown in
+     English). Every markdown block is one source line — the renderer
+     has no soft-wrap, so list items must not be hard-wrapped.
+     Search (HLP-001) matches the title and the body case-insensitively;
+     the corpus is the rendered plain text, cached once, so the list
+     filter and the <mark> highlights in the body always agree. All
+     highlighting splits DOM text (textContent / text nodes), so raw
+     input is never injected as HTML. Non-matching articles are hidden;
+     with zero matches the list shows the UI-012 empty state and the
+     body keeps the last article. The selection persists across opens
+     within the session. */
+
+  const helpDialog = document.getElementById('help-dialog')
+  const helpBtn = document.getElementById('help-btn')
+  const helpList = document.getElementById('help-list')
+  const helpEmpty = document.getElementById('help-empty')
+  const helpSearch = document.getElementById('help-search')
+  const helpSearchHint = document.getElementById('help-search-hint')
+  const helpArticleTitle = document.getElementById('help-article-title')
+  const helpArticle = document.getElementById('help-article')
+
+  const HELP = [
+    {
+      title: 'Quick start',
+      markdown: [
+        'EunomiaSync stores instructions for AI agents in one local library and, on an explicit sync command, builds an `AGENTS.md` or `CLAUDE.md` file in each selected Git project — you write a rule once and assign it to the projects that need it.',
+        '1. **Add a project** — pick a folder with `.git`, or run "Scan folder" to find repositories automatically (PRJ-001…007).',
+        '2. **Create an instruction** — "New instruction" opens the editor: a name, the text of the `Main` variant, Markdown preview on the "Preview" tab (LIB-002).',
+        '3. **Assign it** — click a cell in the assignment matrix; "Assign to projects…" covers many projects at once.',
+        '4. **Run sync** — the pinned bottom panel builds and writes the target files. Nothing on disk changes until you run it (G5, OUT-011).',
+        'A synced file ends with a `<!-- Created by EunomiaSync … -->` creation marker (D-23); a build identical to the file on disk is not rewritten (D-24).',
+      ].join('\n'),
+    },
+    {
+      title: 'Projects and scanning',
+      markdown: [
+        'A project is a local folder that is the root of a Git repository. A folder without `.git` is rejected with `E_NOT_A_REPO`; picking a subfolder offers the repository root (PRJ-001…004, D-08).',
+        '- **Scan** walks the chosen folder up to `scan.max_depth` (6 by default, range 1–20, D-04) and skips `node_modules`, `vendor`, `.git`, `dist`, `build`, `target`, `.venv` by default — the list is editable in Settings (D-05).',
+        '- A `.git` that is a **file** (submodule or linked worktree) is skipped with a reason; nested regular repositories become separate projects (D-06). Symlinks are not followed during a scan (D-07).',
+        '- Results come in three groups: "New" (checked by default), "Already added", and "Skipped" with a reason. A folder without access is skipped and the scan continues (PRJ-007); closing the window cancels the scan (NFR-015).',
+        '- A moved or deleted folder marks the project **unavailable** — "Locate…" or "Archive" (D-09); the sync skips it and finishes for the others.',
+        '- Archiving (PRJ-013…018) is confirmed by typing the project name: files are untouched, assignments are kept, and the path lands in the "Excluded paths" list (D-10).',
+      ].join('\n'),
+    },
+    {
+      title: 'Instructions and variants',
+      markdown: [
+        'The library is one ordered structure of instructions and headings (`##`–`######`) shared by all projects. An instruction has a main name and one or more variants; exactly one variant is the main one.',
+        '- The editor is a large two-pane modal: variants on the left, the text on the right, with "Edit" and "Preview" tabs (UI-003). Markdown warnings — for example an unclosed code fence — are shown but never block saving (D-15).',
+        '- "Add variant" creates a copy of the main one or an empty variant. An empty variant outputs no text but counts as assigned and keeps its heading (D-13); a project can have only one variant of an instruction (D-02).',
+        '- "Edit for this project" never changes a shared variant: it creates a project-local copy first and opens it (MAIN-007).',
+        '- Deleting a variant that is assigned anywhere asks for a replacement per project; the last variant cannot be deleted (LIB-023…025).',
+        '- "Hide" removes the instruction from builds but keeps its assignments (D-11); the "Show hidden" toggle and "Restore" bring it back.',
+      ].join('\n'),
+    },
+    {
+      title: 'Schemes A/B/C',
+      markdown: [
+        'Every project picks a write scheme and a target file (`AGENTS.md` or `CLAUDE.md`) in its settings; a new project copies the defaults (PRJ-012, DEF-005).',
+        '#### Scheme A — full overwrite',
+        'The target file is replaced entirely. Optional `<STEM>.local.md` and `<STEM>.project.md` reading lines can be included at the start or the end; local rules are read last and take priority (D-21).',
+        '#### Scheme B — marked area',
+        'The file must exist and contain exactly one pair of `<!-- EUNOMIASYNC:BEGIN -->` / `<!-- EUNOMIASYNC:END -->` markers, each on its own line (D-19). The app never creates them — use "Copy marker block" and paste the block by hand. Missing, repeated, or reversed markers give the `skipped` status with `E_MARKERS_INVALID`, and content outside the markers is kept byte for byte, including the BOM and line breaks.',
+        '#### Scheme C — separate file',
+        'The build goes to `<STEM>.project.md` in the project root, fully overwritten; the main file is never opened, and a ready snippet for it is shown in the project settings (D-20).',
+        'Each written file ends with a `<!-- Created by EunomiaSync … -->` creation marker (D-23); content identical to the file on disk is not rewritten (D-24).',
+      ].join('\n'),
+    },
+    {
+      title: 'Sync and unsynced changes',
+      markdown: [
+        'Files change only on the explicit "Run sync" command, which covers all active projects (G5, OUT-011). Any edit is saved to the database right away; project files are not touched until the sync (MAIN-011).',
+        '- The **dirty** flag is computed from the build hash — SHA-256 of the scheme, target path, extra-file flags and the build text without the creation marker (DB-020…021). It is recalculated about 150 ms after each change, at startup, and after a sync; the counter chip lists the dirty projects (OUT-013).',
+        '- Changing the scheme or the file name makes a project dirty; the old file with the previous name is not deleted (DB-023).',
+        '- A run goes: build from a snapshot → preflight → backups for all projects → atomic write → summary. A second start while running returns `E_SYNC_RUNNING` (MAIN-030, SYS-004).',
+        '- The summary groups every project as "Written", "Unchanged", "Skipped", or "Failed", with the path and reason (OUT-009, MAIN-031). An unchanged build (D-24) counts as synced and creates no backup.',
+        '- Externally edited target files are detected and shown — the app never merges them; the next sync overwrites the file as usual and makes a backup (OUT-014…015).',
+      ].join('\n'),
+    },
+    {
+      title: 'Backups',
+      markdown: [
+        'Before any file is written, backups of the existing target files are created and checked for all projects of the run; an error in even one backup cancels writing everywhere (OUT-006, BKP-005).',
+        '- Copies live in the data directory: `backups/<project_id>__<slug>/<file>.<UTC time>.<hash8>.bak` (BKP-001).',
+        '- A copy counts as created only after its size and SHA-256 are verified (BKP-010); if the source file matches the last backup, the existing copy is reused.',
+        '- Up to `backup.retention` copies (10 by default, range 1–200) are kept per "project and file" pair; the oldest extras are removed after the run (BKP-003).',
+        '- A failed backup stops the whole run before anything is written; copies made in that run are discarded, and there is no forced write without a backup (BKP-005).',
+        '- The "Backups" tab in project settings lists date, file, and size (BKP-004). Restoring a file from a backup in the UI is planned for the next stage (P1) — for now, restore by hand from the data directory.',
+      ].join('\n'),
+    },
+    {
+      title: 'History and versions',
+      markdown: [
+        'The app records versions of instructions and variants. A version is created only on a real change of the snapshot — saving without edits adds nothing (LIB-026…027, D-16).',
+        '- An instruction version stores the name and the active/hidden state; a variant version stores the name and the text. The main-variant flag and the library order are not part of snapshots.',
+        '- Up to `history.max_revisions` versions (200 by default, range 10–1000) are kept per entity; the oldest ones are deleted (D-16).',
+        '- The editor\'s "History" panel lists the versions with time, operation, and entity. A deleted variant can be brought back with "Restore variant".',
+        '- Diff between versions and "Restore this version" are planned for the next stage (P1); a restore will create a new `revert` version, and old versions are never erased (LIB-028…029).',
+        'Versions work next to the Activity log — the log records every user-visible action with time, type, object, and result (LOG-001…004).',
+      ].join('\n'),
+    },
+    {
+      title: 'Limits and common errors',
+      markdown: [
+        '- Variant text: Markdown, up to 262,144 characters; a line equal to a scheme B marker is rejected (`E_CONTENT_RESERVED`). CRLF is changed to LF on save (§6.9).',
+        '- Instruction name: 1–200 characters, unique among visible instructions; variant name: 1–100 characters, unique within the instruction.',
+        '- Scan depth 1–20 (6 by default); backup limit 1–200; versions per entity 10–1000; log 1,000–100,000 entries or 7–3,650 days (§6.5).',
+        '**Common sync errors** (§10):',
+        '- `E_MARKERS_INVALID` — scheme B markers are missing, repeated, or in the wrong order; paste the ready block with "Copy marker block".',
+        '- `E_FILE_LOCKED` — the target file is locked by another process (Windows); close the program and retry, the backup is kept.',
+        '- `E_NOT_A_REPO` — the folder has no `.git`; pick the repository root.',
+        '- `E_SYNC_RUNNING` — a sync is already running; wait until it finishes.',
+        'Every error is logged with its code, project, path, and OS reason; a sync is idempotent, so rerunning it after fixing the cause is safe (§10).',
+      ].join('\n'),
+    },
+  ]
+
+  /* Currently shown article; kept until the app reloads (session) */
+  let helpSelected = 0
+
+  /* The search corpus: rendered plain text, cached once per article */
+  const helpScratch = document.createElement('div')
+  for (const article of HELP) {
+    helpScratch.innerHTML = renderMarkdown(article.markdown)
+    article.plain = helpScratch.textContent
+  }
+
+  /* Append `text` into `into` (an element or a fragment), wrapping every
+     case-insensitive occurrence of `lowerQuery` in <mark>. An empty
+     query appends the text as is. HLP-001 highlight safety: the split
+     runs on plain strings and produces only text nodes and <mark>, so
+     no user input can become HTML. */
+  function appendHighlighted(into, text, lowerQuery) {
+    if (lowerQuery === '') {
+      into.append(text)
+      return
+    }
+    const lower = text.toLowerCase()
+    let pos = 0
+    for (let idx = lower.indexOf(lowerQuery); idx !== -1; idx = lower.indexOf(lowerQuery, pos)) {
+      if (idx > pos) into.append(text.slice(pos, idx))
+      const mark = document.createElement('mark')
+      mark.textContent = text.slice(idx, idx + lowerQuery.length)
+      into.append(mark)
+      pos = idx + lowerQuery.length
+    }
+    if (pos < text.length) into.append(text.slice(pos))
+  }
+
+  /* Highlight inside the rendered article: a TreeWalker collects the
+     text nodes first (already escapeHtml-escaped text — no tags can
+     hide in them), then each node is replaced with mark-wrapped slices.
+     The query is not highlighted across element boundaries (for example
+     around bold) — such occurrences still match the filter. */
+  function highlightArticle(root, lowerQuery) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+    const nodes = []
+    while (walker.nextNode()) nodes.push(walker.currentNode)
+    for (const node of nodes) {
+      if (!node.nodeValue.toLowerCase().includes(lowerQuery)) continue
+      const frag = document.createDocumentFragment()
+      appendHighlighted(frag, node.nodeValue, lowerQuery)
+      node.replaceWith(frag)
+    }
+  }
+
+  function renderHelpList(matches, lowerQuery) {
+    helpList.replaceChildren(
+      ...HELP.map((article, i) => {
+        const item = document.createElement('button')
+        item.type = 'button'
+        item.className = 'help-item'
+        item.dataset.idx = String(i)
+        item.hidden = !matches.includes(i)
+        item.setAttribute('aria-pressed', String(i === helpSelected))
+        const label = document.createElement('span')
+        label.className = 'help-item-label'
+        appendHighlighted(label, article.title, lowerQuery)
+        item.append(label)
+        return item
+      }),
+    )
+  }
+
+  function renderHelpBody(lowerQuery) {
+    const article = HELP[helpSelected]
+    helpArticleTitle.textContent = article.title
+    /* renderMarkdown escapes the source first, then adds its own tags */
+    helpArticle.innerHTML = renderMarkdown(article.markdown)
+    if (lowerQuery !== '') highlightArticle(helpArticle, lowerQuery)
+    helpArticle.scrollTop = 0
+  }
+
+  function applyHelpSearch() {
+    const lowerQuery = helpSearch.value.trim().toLowerCase()
+
+    /* HLP-001: match on the title or the rendered body text */
+    const matches = []
+    HELP.forEach((article, i) => {
+      if (
+        lowerQuery === '' ||
+        article.title.toLowerCase().includes(lowerQuery) ||
+        article.plain.toLowerCase().includes(lowerQuery)
+      ) {
+        matches.push(i)
+      }
+    })
+
+    /* When the selected article is filtered out, fall back to the first
+       match; with zero matches the body keeps the last article */
+    if (lowerQuery !== '' && matches.length > 0 && !matches.includes(helpSelected)) {
+      helpSelected = matches[0]
+    }
+
+    renderHelpList(matches, lowerQuery)
+    renderHelpBody(lowerQuery)
+
+    helpList.hidden = matches.length === 0
+    helpEmpty.hidden = matches.length !== 0
+    helpSearchHint.textContent =
+      lowerQuery === ''
+        ? `All ${HELP.length} articles`
+        : `${matches.length} of ${HELP.length} articles match`
+  }
+
+  function selectHelpArticle(i) {
+    if (i === helpSelected) return
+    helpSelected = i
+    for (const item of helpList.children) {
+      item.setAttribute('aria-pressed', String(Number(item.dataset.idx) === i))
+    }
+    renderHelpBody(helpSearch.value.trim().toLowerCase())
+  }
+
+  helpList.addEventListener('click', (e) => {
+    const item = e.target.closest('.help-item')
+    if (item) selectHelpArticle(Number(item.dataset.idx))
+  })
+
+  helpSearch.addEventListener('input', applyHelpSearch)
+
+  function openHelp() {
+    /* A fresh open clears the search; the last article stays selected */
+    helpSearch.value = ''
+    applyHelpSearch()
+    if (!helpDialog.open) helpDialog.showModal()
+    const selected = helpList.querySelector('[aria-pressed="true"]')
+    ;(selected ?? helpList.firstElementChild)?.focus()
+  }
+
+  /* Entry point 1: the toolbar ghost button */
+  helpBtn.addEventListener('click', openHelp)
+
+  /* Entry point 2 (§11.3): F1. Same guard idiom as Ctrl/Cmd + ,: ignored
+     while the help dialog is already open; if another dialog is open,
+     the native <dialog> stacking puts help on top. F1 is a dedicated
+     key that typing cannot produce, so text entry in any other dialog's
+     input never triggers it — no extra input-focused guard is needed. */
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'F1') return
+    e.preventDefault()
+    if (!helpDialog.open) openHelp()
+  })
+
   /* ---------- Placeholder dialogs (native <dialog>) ------------------------ */
 
   for (const btn of document.querySelectorAll('.js-open-dialog')) {
@@ -3321,6 +3601,11 @@
 
   /* Row drag-and-drop between sections */
   initRowDrag()
+
+  /* Toolbar icon buttons (Activity, Settings): glyphs from the ICONS
+     idiom; the accessible names and tooltips live in the markup */
+  document.getElementById('activity-btn').innerHTML = ICONS.activity
+  document.getElementById('settings-btn').innerHTML = ICONS.settings
 
   /* Per-project edit icon in the header: opens the project settings modal,
      prefilled from the demo data of that column */

@@ -15,6 +15,8 @@
   excluded paths modal (D-10: list + Remove flow, §6.2 exclusions),
   activity modal (§7.7 LOG-001…006: user entries only, live
   date/project/type/result filters),
+  help modal (HLP-001…005: two-pane FAQ, article list + client-side
+  search with <mark> highlights, toolbar "?" button + F1 per §11.3),
   placeholder modals.
   No dependencies, no build step.
   Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
@@ -23,8 +25,9 @@
   history) + § 7.5 OUT-009 + § 6.2 run statuses + § 7.2 DEF-001…005
   (settings, §6.5 keys, §11.3 Ctrl/Cmd+,) + D-10 (archived and
   excluded-paths screens, PRJ-013…018 restore, exclusion remove,
-  DB-014/015) + § 7.7 LOG-001…006 (activity modal) + UI-001 (window,
-  pinned sync panel), UI-021 (light/dark via OS setting), UI-022
+  DB-014/015) + § 7.7 LOG-001…006 (activity modal) + § 7.8 HLP-001…005
+  (help modal, §11.3 F1) + UI-001 (window, pinned sync panel), UI-012
+  (empty states), UI-021 (light/dark via OS setting), UI-022
   (reduced motion).
   Tooltips are native `title` attributes; accessible names are real labels.
 -->
@@ -76,22 +79,39 @@
 
         <span id="selected-chip" class="selected-chip" hidden></span>
 
-        <!-- Activity (§7.7 UI row): ghost button in the right cluster, left
-             of Settings per the spec toolbar sketch -->
-        <button id="activity-btn" type="button" class="btn btn-ghost">
-          Activity
-        </button>
+        <!-- Activity (§7.7 UI row) and Settings (DEF-001…004): icon ghost
+             buttons in the right cluster, per the spec toolbar sketch.
+             Icon-only keeps the cluster inside the UI-001 minimum width
+             of 960px; the glyphs are injected by app.js from the ICONS
+             idiom, the accessible names and tooltips are kept here. The
+             other Settings entry point is Ctrl/Cmd + , (§11.3). -->
+        <button
+          id="activity-btn"
+          type="button"
+          class="btn btn-ghost btn-icon"
+          title="Activity"
+          aria-label="Activity"
+        ></button>
 
-        <!-- Settings (DEF-001…004): ghost button in the right cluster, the
-             other entry point is Ctrl/Cmd + , (§11.3) -->
-        <button id="settings-btn" type="button" class="btn btn-ghost">
-          Settings
-        </button>
+        <button
+          id="settings-btn"
+          type="button"
+          class="btn btn-ghost btn-icon"
+          title="Settings (Ctrl+,)"
+          aria-label="Settings"
+        ></button>
         <button id="add-project-btn" type="button" class="btn btn-ghost">
           + Add project
         </button>
         <button id="new-instruction-btn" type="button" class="btn btn-ghost">
           + New instruction
+        </button>
+
+        <!-- Help (HLP-001): ghost button, the last toolbar button per the
+             §11.1 sketch (…[Activity] [Settings] [?]); the other entry
+             point is F1 (§11.3) -->
+        <button id="help-btn" type="button" class="btn btn-ghost" title="Help (F1)" aria-label="Help">
+          ?
         </button>
       </header>
 
@@ -3529,6 +3549,55 @@
               <tbody id="act-rows"></tbody>
             </table>
             <p id="act-empty" class="hist-empty" hidden>Nothing matches the current filters.</p>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Help (HLP-001…005, §11.3 F1): the FAQ window. Two-pane modal-xl
+           in the instruction-editor idiom: the article list and the
+           client-side search on the left (HLP-001 — text search runs on
+           the client, matches are highlighted in the list and in the
+           text with <mark>), the selected article on the right, rendered
+           from Markdown by app.js with the same escape-first mini
+           renderer as the editor preview (HLP-005 — the FAQ is Markdown).
+           Non-matching articles hide and the list shows the UI-012 empty
+           state. Demo article bodies are derived from the spec. -->
+      <dialog id="help-dialog" class="modal modal-xl" aria-labelledby="help-title">
+        <form id="help-form" method="dialog">
+          <h2 id="help-title">Help</h2>
+
+          <div class="help-body">
+            <!-- Left pane: article list + search, rendered by app.js -->
+            <aside class="help-nav" aria-label="Help articles">
+              <span class="field-label" id="help-list-label">Articles</span>
+              <div id="help-list" class="help-list" aria-labelledby="help-list-label"></div>
+              <p id="help-empty" class="hist-empty" hidden>
+                No articles match the current search.
+              </p>
+              <div class="help-search">
+                <label class="field-label" for="help-search">Search</label>
+                <input
+                  id="help-search"
+                  type="search"
+                  placeholder="Search articles…"
+                  autocomplete="off"
+                />
+                <p id="help-search-hint" class="help-hint" aria-live="polite"></p>
+              </div>
+            </aside>
+
+            <!-- Right pane: selected article, title + rendered Markdown.
+                 The title is an <h3> under the dialog's <h2>; article
+                 sections start at #### in the source so the body headings
+                 (<h4>) stay nested under it. -->
+            <div class="help-article-pane">
+              <h3 id="help-article-title"></h3>
+              <div id="help-article" class="help-article"></div>
+            </div>
           </div>
 
           <div class="modal-actions">
