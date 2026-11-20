@@ -19,6 +19,9 @@
   search with <mark> highlights, toolbar "?" button + F1 per §11.3),
   about modal (UPD-005, REL-004: product info rows, dependency-license
   demo list, simulated two-phase update check),
+  toolbar shortcuts (§11.3: Ctrl/Cmd+F search, Ctrl/Cmd+N new
+  instruction, Ctrl/Cmd+Shift+N add project, Ctrl/Cmd+Shift+Enter run
+  sync — all guarded while a dialog is open),
   project labels in the column headers (DB-041/042: a 1–6 character
   label next to the color dot, the full name only in the tooltip and
   a visually-hidden span for screen readers),
@@ -74,6 +77,7 @@
           class="search"
           type="search"
           placeholder="Search instructions…"
+          title="Search instructions (Ctrl+F)"
           autocomplete="off"
         />
 
@@ -127,10 +131,20 @@
           title="Settings (Ctrl+,)"
           aria-label="Settings"
         ></button>
-        <button id="add-project-btn" type="button" class="btn btn-ghost">
+        <button
+          id="add-project-btn"
+          type="button"
+          class="btn btn-ghost"
+          title="Add project (Ctrl+Shift+N)"
+        >
           + Add project
         </button>
-        <button id="new-instruction-btn" type="button" class="btn btn-ghost">
+        <button
+          id="new-instruction-btn"
+          type="button"
+          class="btn btn-ghost"
+          title="New instruction (Ctrl+N)"
+        >
           + New instruction
         </button>
 
@@ -2494,7 +2508,9 @@
 
       <!-- ===== Sync panel: pinned outside the scroll area (MAIN-024…027) ===== -->
       <footer class="syncbar">
-        <button id="run-sync" type="button" class="btn btn-primary">Run sync</button>
+        <button id="run-sync" type="button" class="btn btn-primary" title="Run sync (Ctrl+Shift+Enter)">
+          Run sync
+        </button>
 
         <!-- Run progress (MAIN-030): shown by app.js while the simulated
            run ticks; "k of N" is a polite live region, the spinner is

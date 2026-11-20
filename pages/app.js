@@ -43,6 +43,9 @@
    matrix keyboard navigation (MAIN-010, NFR-022, §11.3: roving-focus
    grid over the assign checkboxes, arrows/Enter/Shift+arrows, Escape
    from the variant select),
+   toolbar shortcuts (§11.3: Ctrl/Cmd+F search, Ctrl/Cmd+N new
+   instruction, Ctrl/Cmd+Shift+N add project, Ctrl/Cmd+Shift+Enter run
+   sync — all guarded while a dialog is open),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -4415,6 +4418,42 @@
     if (e.key !== 'F1') return
     e.preventDefault()
     if (!helpDialog.open) openHelp()
+  })
+
+  /* ---------- Toolbar shortcuts (§11.3) ------------------------------------- */
+  /* Ctrl/Cmd+F focuses the search and selects its text (shadowing the
+     browser find); Ctrl/Cmd+N opens the instruction editor in create mode
+     (what "+ New instruction" does); Ctrl/Cmd+Shift+N opens the scan (what
+     "+ Add project" does); Ctrl/Cmd+Shift+Enter runs the sync — the
+     syncRunning guard inside startSyncRun makes a second start while
+     running a no-op (MAIN-030). All four are ignored while a native
+     <dialog> is open: the rest of the page is inert then, so focusing the
+     search could not work anyway, and the browser find stays usable inside
+     the dialogs (e.g. the help FAQ). The exception from the task brief —
+     letting Ctrl/Cmd+F fire with a dialog open — is deliberately NOT
+     taken for exactly that reason. */
+
+  const anyDialogOpen = () => [...document.querySelectorAll('dialog')].some((d) => d.open)
+
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || anyDialogOpen()) return
+    const key = e.key.toLowerCase()
+    if (key === 'f') {
+      e.preventDefault()
+      searchInput.focus()
+      searchInput.select()
+    } else if (key === 'n') {
+      e.preventDefault()
+      if (e.shiftKey) {
+        startScan()
+        scanDialog.showModal()
+      } else {
+        openEditModal({ mode: 'create' })
+      }
+    } else if (e.key === 'Enter' && e.shiftKey) {
+      e.preventDefault()
+      startSyncRun() // MAIN-030: no second start while a sync is running
+    }
   })
 
   /* ---------- About modal (UPD-001…005) ------------------------------------ */
