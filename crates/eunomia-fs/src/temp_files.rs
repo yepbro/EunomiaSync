@@ -496,17 +496,21 @@ mod tests {
         path
     }
 
-    /// Backdates an existing file's modification time. Write mode is
-    /// required, not optional: on Windows `SetFileTime` needs
-    /// FILE_WRITE_ATTRIBUTES, which a read-only handle lacks (CI failure
-    /// 44692465967, Windows leg: `Access is denied`, 2026-11-20); on Unix
-    /// `O_WRONLY` satisfies `futimens`. Only file fixtures use this
-    /// helper — Windows cannot open a directory by handle at all.
+    /// Backdates an existing fixture's modification time. The open mode
+    /// follows the platform's needs: files open with write access because
+    /// Windows' `SetFileTime` requires FILE_WRITE_ATTRIBUTES, which a
+    /// read-only handle lacks (CI failure 44692465967, Windows leg:
+    /// `Access is denied`, 2026-11-20); directory fixtures — which only
+    /// the Linux-gated tests create, since Windows cannot open a directory
+    /// by handle at all — keep a read handle, which is enough for
+    /// `futimens` on Linux and cannot open for writing anywhere (EISDIR).
     fn set_mtime(path: &Path, mtime: SystemTime) {
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .expect("opening the fixture for set_times must work");
+        let open = if path.is_dir() {
+            fs::File::open(path)
+        } else {
+            fs::OpenOptions::new().write(true).open(path)
+        };
+        let file = open.expect("opening the fixture for set_times must work");
         file.set_times(std::fs::FileTimes::new().set_modified(mtime))
             .expect("setting the fixture's modification time must work");
     }
