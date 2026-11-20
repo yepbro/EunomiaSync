@@ -125,13 +125,13 @@ The UI does not access the file system. Rust does all file and database operatio
 
 ### 5.2. Modules
 
-| Module (crate)  | Responsibility                                                                                              | Dependencies                                                             |
-| --------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `eunomia-core`  | Domain types, text build, rendering schemes A/B/C, marker parser, build hash, validators                    | only `serde`, `sha2`, `thiserror`                                        |
-| `eunomia-store` | DB schema, migrations, repositories, transactions                                                           | `rusqlite`, `core`                                                       |
-| `eunomia-fs`    | Repository scan, path canonicalization, backup and copy checks, atomic write, retries, target-file watching | `ignore`/`walkdir`, `tempfile`, `dunce`, `notify-debouncer-full`, `core` |
-| `eunomia-app`   | Services (sync, watch, dirty-tracker), Tauri commands and events, app state                                 | the other crates, `tauri`                                                |
-| `ui/`           | Vue app, Pinia stores, i18n, matrix, modal windows                                                          | Vue, Pinia, Tailwind                                                     |
+| Module (crate)  | Responsibility                                                                                              | Dependencies                                                                                                  |
+| --------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `eunomia-core`  | Domain types, text build, rendering schemes A/B/C, marker parser, build hash, validators                    | only `serde`, `sha2`, `thiserror`                                                                             |
+| `eunomia-store` | DB schema, migrations, repositories, transactions                                                           | `rusqlite`, `core`                                                                                            |
+| `eunomia-fs`    | Repository scan, path canonicalization, backup and copy checks, atomic write, retries, target-file watching | `ignore`/`walkdir`, `tempfile`, `dunce`, `notify-debouncer-full`, `unicode-normalization`, `focaccia`, `core` |
+| `eunomia-app`   | Services (sync, watch, dirty-tracker), Tauri commands and events, app state                                 | the other crates, `tauri`                                                                                     |
+| `ui/`           | Vue app, Pinia stores, i18n, matrix, modal windows                                                          | Vue, Pinia, Tailwind                                                                                          |
 
 Rule: `core` does no input/output and is tested without the file system or the database.
 
@@ -398,7 +398,7 @@ Changing `default.*` does not affect existing projects (DEF-005).
 
 ### 6.7. Paths
 
-- **DB-030 (P0).** A project path is converted to canonical form (`dunce::canonicalize`, without the Windows extended-length path prefix). The `path_key` key: `/` separators, no trailing separator; on Windows and macOS also Unicode NFC and case folding; on Linux, case is kept.
+- **DB-030 (P0).** A project path is converted to canonical form (`dunce::canonicalize`, without the Windows extended-length path prefix); the stored path is the verbatim canonicalize output. The `path_key` key: `/` separators, no trailing separator; on Windows and macOS also Unicode NFC and **simple** case folding — the filesystem-faithful rule: 1:1 mappings only, no ligature unfolding (`ﬁ` stays distinct from `fi`), so names NTFS/APFS keep distinct keep distinct keys; on Windows this simple folding is the faithful stand-in for the NTFS `$UpCase` comparison; on Linux, case is kept and no normalization is applied. NFC and folding apply to the key only, never to the stored path (owner ruling, 2026-11-19).
 - **DB-031 (P0).** Two paths that lead to the same folder through a symlink count as one project.
 - **DB-032 (P0).** Network and removable drives are allowed. Unavailability is checked at startup, when the window opens, and before a sync (PRJ-004, D-09).
 
