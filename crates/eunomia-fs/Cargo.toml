@@ -37,6 +37,17 @@ publish = false
 #   deny.toml's allow list.
 unicode-normalization = "0.1"
 unicode-case-mapping = "1"
+
+# - `rustix` queries free space on the data-directory volume (free_space,
+#   spec 9.4 phase 1, 10): its `fs` feature exposes `statvfs`
+#   (f_bavail × f_frsize). Sanctioned by the §5.2 fs row as amended in
+#   f3db54f and owner-approved in chat (2026-11-19); rustix 1.x is already
+#   in Cargo.lock as a transitive dependency of `tempfile`, so the
+#   promotion adds zero new crates to the graph. NOTE: rustix has no `fs`
+#   module on Windows — the Windows production call is an open escalation
+#   recorded in DECISIONS.md.
+rustix = { version = "1", features = ["fs"] }
+
 # Target-file watching (spec 5.7) needs `notify-debouncer-full`; it is not
 # part of this dependency set yet and joins with its own module and task.
 ignore = "0.4"

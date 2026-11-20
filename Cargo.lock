@@ -1109,6 +1109,7 @@ dependencies = [
  "dunce",
  "eunomia-core",
  "ignore",
+ "rustix",
  "tempfile",
  "unicode-case-mapping",
  "unicode-normalization",

@@ -6304,3 +6304,128 @@ tree (which also still shows `paths` as a skeleton) and the
 `atomic` skeleton's doc block all deliberately did NOT gain a
 `temp_files` entry — parallel tasks (T-058/T-061/T-066) edit those
 blocks; reconcile the lists when the files are next free.
+
+### D-089 — The data-directory free-space check: the rustix probe, the injected free-space source, and the Windows escalation — 2026-11-19
+
+Problem: T-064 implements §9.4 phase 1's closing rule — "Free space for
+backups is checked on the volume of the data directory: if there is less
+space than the total size of the copies plus a 20% margin, the run ends
+as `aborted` with `E_DISK_FULL`" — as the check ONLY: the run-abort
+wiring is a later pipeline task, and the §10 `E_DISK_FULL` mapping
+belongs to the command layer (the D-062 posture). Four design points
+were open: (1) the production free-space probe — the pre-ruling named
+`rustix` (sanctioned in the §5.2 fs row by docs commit f3db54f;
+owner-approved in chat the same day, "одобряю", 2026-11-19), but the
+exact call, the fields, and their cross-platform sufficiency had to be
+verified against rustix 1.1.6's actual API; (2) which of the two statvfs
+free-block counts and which of the two block-size fields answer "can
+this process still write the copies"; (3) the exact margin arithmetic —
+"20% of what, rounded how, and what happens near `u64::MAX`"; (4) the
+card's acceptance seam: "a test with a substituted free-space source"
+must drive the whole decision path without a filesystem.
+
+Solution: `crates/eunomia-fs/src/free_space.rs` — `MARGIN_PERCENT`,
+`required_for(copies) -> u64`, `check_space(free, required) ->
+Result<(), FreeSpaceError>`, `check_backup_space(copies, free_space)`
+(the seam), and `free_bytes(path)` (the production probe), with one
+hand-rolled error enum (the D-017/D-084 precedent; no `thiserror`).
+
+- RUSTIX PROMOTION, VERIFIED THEN PINNED: `rustix = { version = "1",
+features = ["fs"] }` — exactly the locked 1.1.6 line (already in
+  Cargo.lock as a transitive dependency of `tempfile`, so the promotion
+  adds zero new crates to the graph; `fs` is the only feature needed and
+  the only one pinned; `std` rides on rustix's defaults). The compile
+  check corrected one API expectation: on the linux_raw backend
+  `statvfs` answers with `rustix::io::Errno`, not `std::io::Error`, so
+  the probe converts `Errno → io::Error` explicitly — `raw_os_error()`
+  survives for §10's log line. The docs.rs target set confirmed the
+  pre-ruled call exists on both remaining P0 unix platforms (Linux,
+  macOS).
+- THE WINDOWS GAP (ESCALATED, NOT SOLVED): **rustix 1.1.6 has no `fs`
+  module on Windows at all** — `#[cfg(not(windows))] pub mod fs;` in its
+  lib.rs — and the libc crate exposes no `statvfs` for
+  `x86_64-pc-windows-msvc` either. Windows is a P0 platform (NFR-001…003)
+  and D-060's CI matrix compiles the crate on a Windows leg, so the
+  module carries a `#[cfg(windows)]` arm of `free_bytes` that returns a
+  new typed variant `ProbeUnavailable` — no fabricated data, no unsafe,
+  no substituted dependency — solely so the crate compiles there. This
+  is an escalation to the orchestrator (the brief forbids substituting a
+  crate on my own authority): the production call will likely be
+  `GetDiskFreeSpaceExW`, for which `windows-sys` (already locked at
+  0.61.2) is a zero-new-crates route but an unsafe-FFI decision — the
+  project's first since D-058 — and is the owner's to sanction. Until
+  then the caller-facing contract is unchanged: probe failure semantics
+  are the caller's decision, on every platform.
+- BAVAIL × FRSIZE: `f_bavail` ("available to unprivileged users"), not
+  `f_bfree` (total free including the reserved blocks a healthy
+  filesystem keeps and a non-root write must not consume); `f_frsize`
+  (the fundamental block size the counts are denominated in), not
+  `f_bsize` (the "optimal transfer size", which need not equal the
+  unit). The multiplication saturates — an absurd statvfs yields the
+  `u64` ceiling, never a wrapped number. Both rulings pinned against
+  hand-built `StatVfs` fixtures (bfree-vs-bavail and bsize-vs-frsize
+  each get a fixture where the wrong field gives a different answer),
+  not a live volume.
+- MARGIN ARITHMETIC, PINNED BYTE FOR BYTE: the margin is 20% OF the
+  sum, added on top; the multiplication runs in `u128` (`sum × 20 /
+100`) because a `saturating_mul`-then-divide would distort the margin
+  near the ceiling, and the quotient is one fifth of the sum, so it
+  always fits `u64`; the final `sum + margin` saturates via
+  `u64::try_from(..).unwrap_or(u64::MAX)`, so a near-ceiling copy list
+  demands the ceiling and never wraps into a "fits" number (the
+  wrapping bug is pinned by name: `[u64::MAX - 10, 20]` summed with `+`
+  would read as 9 bytes). The floor rule is pinned exactly
+  (`required_for(&[101]) == 121`). The decision is strictly
+  `free < required`: §9.4 aborts only when there is LESS space, so
+  exact equality passes (`0 == 0` included).
+- THE SEAM: `check_backup_space(copies, free_space: FnOnce() ->
+Result<u64, FreeSpaceError>)` — a plain closure, the weakest contract
+  that works (the scan's `on_event` posture), because the card's
+  acceptance test substitutes a fake without a filesystem and must
+  exercise sum, margin and decision in one call. The pure core
+  (`required_for`, `check_space`) does no I/O, reads no clock, reads no
+  configuration (`MARGIN_PERCENT` is a named spec-fixed const, not a
+  setting); the production probe is the only I/O in the module.
+- ERROR SHAPE (D-084's sibling shape): `#[derive(Debug)]` enum +
+  `Display` (lowercase, no trailing punctuation) + `std::error::Error`
+  with `source()` chaining the carried io error on the io-backed variant
+  only, plus the `io_error()`/`os_code()` accessors the app layer's
+  §10 log facts consume. `NotEnoughSpace { free, required }` carries
+  both numbers for the "Free up space" message; `ProbeFailed` keeps the
+  OS code; `ProbeUnavailable` carries none (no OS call was made).
+  `From<io::Error>` feeds the probe conversion. Probe failures pass
+  through `check_backup_space` verbatim — a failed query is never
+  reported as "no space".
+- PLACEMENT: a NEW module `free_space`, the crate's fifth (lib.rs gains
+  exactly one `pub mod` line). The name is the spec's own term for the
+  quantity (§9.4's "free space"), not the error code and not a broader
+  "disk" scope the module does not have; the §5.2 skeleton named none of
+  the module files, and the four-probe availability check (D-084) lives
+  in `paths` because it is a path validation — space is a property of
+  the volume, a different probe family. The shared lib.rs doc sentence
+  ("scan, backup and atomic are still skeletons") is left stale on
+  purpose (the D-087 merge-window posture); the orchestrator's merge can
+  refresh it.
+
+Tests: 18 in `free_space.rs`, colocated, the card's substituted-source
+battery first: enough (400 vs 360), the exact-equality boundary
+(including `0 == 0`), one byte short (fields `free: 359, required: 360`
+pinned), way short (3.6 MB against 10 bytes, Display prefix pinned),
+the 20%-of-the-sum margin (3_000_000 → 3_600_000), the floor rule
+(101 → 121, 99 → 118), the empty list (0 required, passes on a full
+volume), the saturation pair (near-ceiling demand fails at
+`u64::MAX - 1`, passes only at the ceiling), the exact-multiplication
+pin below the ceiling (a five-exabyte copy demands 6 EB, killing the
+`saturating_mul` mutant, whose distorted margin would read 184 PB),
+probe-error passthrough (ENOSPC = 28 surfaces as `ProbeFailed`, the
+decision never runs on unfetched data), `ProbeUnavailable` passthrough
+(the Windows verdict, `os_code() == None`), the probe-first order
+(a failed query fails an empty-list check — reordering to skip the
+probe when nothing is needed would flip the verdict), the
+`From<io::Error>` mapping (EACCES = 13), the two statvfs fixtures
+(bavail × frsize = 409_600 where bfree would give 4_096_000; frsize
+where bsize would give 819_200; the absurd fixture saturates instead of
+panicking or wrapping), the live-probe smoke test (tempdir, positive),
+the missing-path probe (ENOENT = 2 on the typed error), and the
+Display/source-chain contract (all three texts, the source() chain
+Some on `ProbeFailed` only).

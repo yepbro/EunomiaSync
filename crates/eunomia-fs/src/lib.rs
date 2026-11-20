@@ -28,6 +28,7 @@
 
 pub mod atomic;
 pub mod backup;
+pub mod free_space;
 pub mod paths;
 pub mod scan;
 pub mod temp_files;
