@@ -6,6 +6,7 @@
 //! tested independently of the UI layer (see DECISIONS.md D-010).
 
 pub mod action_log;
+pub mod build_snapshot;
 pub mod library;
 pub mod library_versions;
 pub mod projects;

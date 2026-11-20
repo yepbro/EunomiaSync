@@ -8570,3 +8570,112 @@ taken): the guard's exact ±24:00 pass-through boundary was not pinned
 Now pinned by
 `the_run_guard_passes_exactly_twenty_four_hours_through` (both signs,
 plus the full `2026-11-18 13:03:22 UTC+24:00` line a whole day over).
+
+### D-105 — The build snapshot read: a caller-joined read transaction, the first store→core edge wired, and the SYS-005 isolation criterion pinned deterministically through WAL — 2026-11-20
+
+Problem: T-100 turns ALG-001/SYS-005 into store code: one read
+transaction that hands `eunomia-core`'s
+`BuildSnapshot` the active projects in `sort_order` order, all
+library items in `position` order, their active variants, and the
+assignments. Open questions: who owns the transaction boundary; whether
+the store→core edge D-017 reserved ("added by the first task whose
+store code actually references core types") is finally wired, and
+what it costs; how the acceptance criterion — a library edit
+committed "during the read" stays out of the snapshot — is pinned
+honestly rather than by racing a fast reader against a slow writer;
+and which repository reads are reused versus added.
+
+Solution: `eunomia_store::build_snapshot`, one function
+`read(&Connection) -> Result<BuildSnapshot, BuildSnapshotError>`.
+
+- _The transaction is joined, not owned_ (the D-037/D-051 rule, kept
+  even though this is a read): `read` takes `&Connection` and runs
+  its four SELECTs inside whatever transaction the caller holds; the
+  production shape is `Db::run(|tx| build_snapshot::read(tx))`. WAL
+  (DB-001, applied by `open_db`) is what makes that the SYS-005
+  guarantee: a read transaction's view of the database is pinned at
+  its **first** read statement, so everything committed afterwards —
+  through any connection — is invisible until the transaction ends.
+  The module docs record the calling contract a type cannot carry:
+  called bare, each SELECT gets its own implicit read transaction and
+  the four reads could tear; the integration suite calls it bare only
+  where no write can interleave.
+- _The core edge, wired by its first consumer._ D-017's rule executed
+  to the letter: `Cargo.toml` gains the path-only
+  `eunomia-core` edge with a comment naming this entry, the
+  repositories stay TEXT in/out with store-local vocabularies
+  (D-093/D-097), and the row→domain mapping lives in `build_snapshot`
+  alone — `SnapshotProject` (id, name, the canonical root verbatim,
+  write settings), `LibraryItem` (heading level via
+  `HeadingLevel::try_from`, instruction state, variants),
+  `Assignment`. The vocabulary translations are total
+  member-by-member matches; a unit test pins them by schema literal
+  in both directions (the literals are the oracle, not the variant
+  names), so a swapped mapping fails the suite even though both sides
+  compile. No `thiserror` rides the edge into the store:
+  `BuildSnapshotError` keeps the house hand-rolled impls, returned
+  directly (the D-093 boundary — not nested in `StorageError`).
+- _Reads reused and reads added._ `projects::list(Active)` is reused
+  unchanged — D-093 already calls it "ALG-001's subset read". The
+  library repository gained two pinpoint reads because the existing
+  ones are per-entity: `list_active_variants` (every active variant of
+  every instruction, `ORDER BY instruction_id, created_at, id` — one
+  statement instead of a `list_variants` call per instruction; the
+  snapshot is hot: every sync and every DB-022 hash recompute reads
+  it) and `list_assignments_for_active_projects` (a JOIN over
+  `projects WHERE state = 'active'`, `ORDER BY p.sort_order,
+i.position` — the DB-014 scoping lives in SQL, not in caller
+  memory, because core's snapshot validation rejects an assignment of
+  a project the snapshot does not hold). Hidden instructions' active
+  variants are included: ALG-001 reads "all library items … active
+  variants" with no visibility filter, and DB-013 assignments may
+  still point at them.
+- _The isolation test is deterministic, not a race._ WAL pins a
+  transaction's view at its first read — so the test pins exactly
+  that, through the public API only: `unchecked_transaction`, one
+  full `read` (the snapshot is now pinned), a **second** `open_db`
+  connection commits a variant-content edit in autocommit, a second
+  full `read` inside the still-open transaction must equal the first
+  (whole-value equality plus the named content), and only after
+  `rollback` does a fresh read see the edit — the non-vacuous half
+  proving the commit was real. The scenario's precondition
+  (`journal_mode = wal`) is asserted up front: in rollback-journal
+  mode the writer would block on the reader's lock instead of
+  committing, and the scenario this task must prove would not exist.
+- _Validation and corrupt cells._ `BuildSnapshot::new` runs at the
+  boundary, so a committed bare instruction (DB-010's transient
+  window escaping its producer transaction) surfaces as
+  `Invalid(NoActiveVariants)` at sync start, and a corrupt vocabulary
+  cell arrives wrapped as `Projects(Member)`/`Library(Member)` with
+  column and value intact (D-039). One nuance recorded honestly: a
+  corrupt `projects.state` cell **cannot** surface through this read —
+  the Active scope's `WHERE state = 'active'` drops the row before
+  any decode, so the project silently leaves the snapshot (and its
+  assignments with it). That is D-093's scope semantics, not a new
+  policy; the corrupt-cell propagation test therefore corrupts
+  `scheme`, a cell the active-scoped read still selects and decodes.
+  `list_active_variants`' `WHERE state = 'active'` has the same shape
+  (round-1 review): a corrupt variant `state` cell drops the row
+  silently — for an active instruction left with no returned variants
+  the read then fails as `Invalid(NoActiveVariants)`, a misleading
+  cause — and its `# Errors` docs say so instead of promising an
+  unreachable `Member`. The crate-level "no core edge" claims that
+  D-017's reserved edge made stale (`library.rs`, `library_versions.rs`
+  module docs) were reworded to point at this module as the crate's
+  one core consumer.
+- _Tests._ 2 unit tests in the module (vocabulary literals; error
+  Display shapes) and 10 integration tests in
+  `tests/build_snapshot.rs` on a real `open_db` + `run_migrations`
+  database: the empty database → empty snapshot; active projects in
+  `sort_order` with archived excluded and every write-settings
+  member mapped (scheme B, `CLAUDE.md`, both extra files on, one per
+  position); all items in the **current** position order after a
+  heading move, hidden instructions included and marked; only active
+  variants in creation order, the soft-deleted twin gone; variant
+  text exactly as stored (the save-time CRLF fold already applied,
+  edge whitespace untouched — ALG-002 is downstream); assignments
+  scoped to active projects in the snapshot's reading order; the
+  isolation criterion; the bare-instruction and corrupt-cell error
+  paths; and a cross-check that the snapshot's sets equal the
+  repositories' own active/all reads (a filter drift in either
+  direction fails).

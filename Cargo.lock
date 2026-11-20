@@ -1123,6 +1123,7 @@ dependencies = [
 name = "eunomia-store"
 version = "0.1.0"
 dependencies = [
+ "eunomia-core",
  "jiff 1.0.1",
  "rusqlite",
  "rusqlite_migration",

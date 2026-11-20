@@ -143,9 +143,11 @@
 //! [`delete_heading`], [`set_main_variant`], [`delete_variant`]) are
 //! atomic **only** inside the caller's transaction — their docs say
 //! so, and the integration suite pins the rollbacks. All signatures
-//! stay TEXT and store-local enums (D-017/D-093: no `eunomia-core`
-//! edge, no `StorageError` nesting — the first command task maps
-//! `LibraryError` beside the errors it already unwraps). A stored
+//! stay TEXT and store-local enums (D-017/D-093: no `StorageError`
+//! nesting — the first command task maps `LibraryError` beside the
+//! errors it already unwraps; the crate's one `eunomia-core` edge
+//! lives in [`crate::build_snapshot`], wired by its first core
+//! consumer, D-105 — this module keeps TEXT in/out). A stored
 //! cell outside its closed vocabulary (`kind`, `state`, a variant
 //! `state`, the heading-level matrix) fails the read with
 //! [`LibraryError::Member`] — corruption or a newer app version
@@ -1551,6 +1553,45 @@ pub fn list_variants(
     Ok(rows)
 }
 
+/// Lists every **active** variant of **every** instruction — the
+/// ALG-001 snapshot's variant read, one statement instead of a
+/// [`list_variants`] call per instruction (the snapshot is hot: every
+/// sync and every DB-022 hash recompute reads it).
+///
+/// The order is `instruction_id, created_at, id`: grouped per
+/// instruction, and within one instruction the same creation order
+/// [`list_variants`] produces (`created_at, id` — the DB-002
+/// fixed-width UTC shape orders chronologically, the UUIDv7 id breaks
+/// same-millisecond ties in insertion order, D-031). Soft-deleted
+/// variants never reach a build (§9.1: "active variants") and stay
+/// out; hidden instructions' active variants are included — ALG-001
+/// reads "all library items … active variants" with no visibility
+/// filter, and assignments may still point at a hidden instruction
+/// (DB-013).
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Sql`] when the query fails. A corrupt
+/// `state` cell cannot surface here: the `WHERE` filter selects only
+/// the `'active'` literal, so [`LibraryError::Member`] is unreachable
+/// in this read and the corrupt row simply drops out (the D-105
+/// nuance — the same one the active project scope has for
+/// `projects.state`).
+pub fn list_active_variants(conn: &Connection) -> Result<Vec<Variant>, LibraryError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {VARIANT_COLUMNS} FROM instruction_variants \
+         WHERE state = 'active' ORDER BY instruction_id, created_at, id"
+    ))?;
+    let rows = statement
+        .query_map([], VariantRow::from_row)?
+        .map(|raw| {
+            raw.map_err(LibraryError::Sql)
+                .and_then(|row| row.into_variant())
+        })
+        .collect::<Result<Vec<_>, LibraryError>>()?;
+    Ok(rows)
+}
+
 // ---- Variants: update, main flag, delete, restore ---------------------------------
 
 /// The mutable fields of a variant (LIB-009…016), as an update
@@ -2001,6 +2042,49 @@ pub fn list_assignments_for_project(
     )?;
     let rows = statement
         .query_map([project_id], |row| {
+            Ok(Assignment {
+                project_id: row.get(0)?,
+                instruction_id: row.get(1)?,
+                variant_id: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?
+        .map(|raw| raw.map_err(LibraryError::Sql))
+        .collect::<Result<Vec<_>, LibraryError>>()?;
+    Ok(rows)
+}
+
+/// Lists the assignments of **every active project** — the ALG-001
+/// snapshot's assignment read, scoped to the projects the snapshot
+/// carries (DB-014: an archived project keeps its assignment rows but
+/// takes part in no sync; core's snapshot validation rejects an
+/// assignment of a project it does not hold, so the scoping is this
+/// read's, not the caller's memory).
+///
+/// The order is the snapshot's own reading order: projects by
+/// `sort_order`, and within one project the assigned instructions in
+/// library `position` order (OUT-001, the same order
+/// [`list_assignments_for_project`] produces for a single project).
+/// Assignments of hidden instructions are included (DB-013) — the
+/// build filters them (D-11), the snapshot carries them.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Sql`] when the query fails.
+pub fn list_assignments_for_active_projects(
+    conn: &Connection,
+) -> Result<Vec<Assignment>, LibraryError> {
+    let mut statement = conn.prepare(
+        "SELECT a.project_id, a.instruction_id, a.variant_id, a.created_at, a.updated_at
+         FROM project_instructions a
+         JOIN projects p ON p.id = a.project_id
+         JOIN library_items i ON i.id = a.instruction_id
+         WHERE p.state = 'active'
+         ORDER BY p.sort_order, i.position",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
             Ok(Assignment {
                 project_id: row.get(0)?,
                 instruction_id: row.get(1)?,

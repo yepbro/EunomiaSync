@@ -102,10 +102,10 @@
 //!
 //! # The snapshot boundary (D-017)
 //!
-//! The store stays TEXT-in/TEXT-out with no `eunomia-core` edge —
-//! D-017's rule that the edge is added by the first task whose store
-//! code references core types is not triggered here: this module
-//! compares and stores the pair, it never builds one. The contract
+//! This module stays TEXT-in/TEXT-out — the crate's one
+//! `eunomia-core` edge lives in `crate::build_snapshot` (wired by its
+//! first core consumer, D-105), and this module does not use it:
+//! it compares and stores the pair, it never builds one. The contract
 //! on the caller is that `snapshot_hash` is the SHA-256 of
 //! `snapshot` in the T-055 canonical form (the core builders produce
 //! the pair together; the service cannot verify it and does not try

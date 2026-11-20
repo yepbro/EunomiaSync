@@ -32,3 +32,10 @@ jiff = { version = "1", default-features = false, features = ["std"] }
 # src-tauri), so this adds no new crate version to the graph — the
 # same lockfile-reuse pattern as `uuid` (D-031).
 serde_json = "1"
+# The domain types of the build snapshot (spec §9.1 ALG-001). The edge
+# D-017 reserved for this crate's first core consumer is wired by the
+# snapshot read (T-100, DECISIONS.md D-105): `build_snapshot` maps the
+# repositories' TEXT rows into `eunomia_core::snapshot::BuildSnapshot`.
+# Path-only, no version to align; the repositories stay TEXT in/out
+# (D-093/D-097) — the mapping lives in that one module.
+eunomia-core = { path = "../eunomia-core" }
