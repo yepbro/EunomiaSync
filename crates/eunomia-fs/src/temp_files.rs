@@ -496,9 +496,17 @@ mod tests {
         path
     }
 
-    /// Backdates an existing file's (or directory's) modification time.
+    /// Backdates an existing file's modification time. Write mode is
+    /// required, not optional: on Windows `SetFileTime` needs
+    /// FILE_WRITE_ATTRIBUTES, which a read-only handle lacks (CI failure
+    /// 44692465967, Windows leg: `Access is denied`, 2026-11-20); on Unix
+    /// `O_WRONLY` satisfies `futimens`. Only file fixtures use this
+    /// helper — Windows cannot open a directory by handle at all.
     fn set_mtime(path: &Path, mtime: SystemTime) {
-        let file = fs::File::open(path).expect("opening the fixture for set_times must work");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("opening the fixture for set_times must work");
         file.set_times(std::fs::FileTimes::new().set_modified(mtime))
             .expect("setting the fixture's modification time must work");
     }
