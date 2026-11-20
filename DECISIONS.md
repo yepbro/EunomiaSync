@@ -7446,3 +7446,131 @@ branch, which a single regular-file write need not exercise) was
 taken: the comment now claims only the verifier's chunk boundary. The
 reviewer independently recomputed the 64 KiB+7 oracle and verified
 the `MoveFileExW` call against the pinned windows-sys 0.61.2 source.
+
+### D-097 — The library repository: constructive DB-010, the position move as the DB-005 primitive, delete-with-replacement as one boundary, and `updated_at` aligned with the snapshot notion — 2026-11-20
+
+Problem: T-081 adds CRUD for the three library tables
+(`library_items`, `instruction_variants`, `project_instructions`) on
+top of the v1 schema (T-016). Open questions: how the DB-010
+"at least one active variant and exactly one active main" invariant —
+only half of which the partial index `ux_variant_main` enforces — is
+kept without a validator pass; which reordering primitive DB-005
+implies for the library (a full-permutation `reorder` like projects,
+or something else); where LIB-023's "replacement chosen per project,
+main successor required, everything in one transaction" lives; and
+which writes restamp `updated_at` when §9.8/D-16 explicitly exclude
+the main flag and the library order from snapshots.
+
+Solution: `eunomia_store::library`, one module for the three tables
+(the projects/T-071 repository pattern: store-local vocabularies with
+`as_str`/`from_member`, hand-rolled `LibraryError` returned directly —
+the D-093 `StorageError` surface freeze — every function joining the
+caller's transaction, ids/timestamps from `values`, Cargo.toml
+untouched, D-017's no-core-edge rule intact).
+
+- _DB-010 made constructive, not validated after the fact._ The API
+  cannot talk its way out of the invariant: the first active variant
+  of an instruction must be its main (`MainRequired`), a second
+  active main is typed (`MainVariantExists`, the index stays the
+  floor), `set_main_variant` demotes-then-promotes (never two active
+  mains mid-sequence; promote-first could trip the partial index in
+  either row order), and `delete_variant` refuses the last active
+  variant (LIB-025). A bare `create_item` on an instruction
+  deliberately leaves DB-010 unmet until the main variant lands: the
+  LIB-002 create dialog produces the pair, and the command task
+  composes both calls in its one transaction — the same
+  producer-composition boundary as archive + exclusion (D-093); the
+  transient window is invisible inside the transaction and is
+  documented on `create_item`.
+- _`move_item(id, to_position)` instead of a projects-style
+  full-permutation `reorder`._ DB-005's own wording is "reordering
+  renumbers the affected range" — a single-item move to a target
+  position is the primitive the drag-and-drop UI (LIB-003/004) and
+  the branch move (LIB-032, a command-layer composition) need, and it
+  cannot express a non-permutation: the target range is validated
+  `1..=COUNT(*)` (`PositionOutOfRange`, table untouched), a
+  same-position move writes nothing. Creation appends `MAX+1` inside
+  the single INSERT (the `projects::create` shape), a heading's
+  physical delete closes the gap by shifting the tail, hide keeps the
+  position (the archive precedent — DB-011's 1..=N is table-wide, not
+  active-only).
+- _LIB-023's dialog flow is one repository boundary._
+  `delete_variant(id, replacement: Option<&str>)` moves the
+  assignments to the replacement _before_ the soft delete (DB-012; no
+  assignment disappears silently), clears `is_main` on the dead row
+  (a deleted row must not count as the main; demoting first also
+  keeps `ux_variant_main` satisfiable mid-sequence), and promotes the
+  replacement when the deleted variant was main. `None` defaults to
+  the current active main — the dialog's own default — and is
+  rejected for a main variant (`ReplacementRequired`); a replacement
+  that is not an active sibling is `ReplacementInvalid`; LIB-025
+  (`LastVariant`) is checked first as the absolute refusal. The NOCASE
+  name twin (`ux_variant_name`'s scope) is typed on create, rename
+  and restore via pre-checks — the table's several unique indexes
+  share one extended code, so SQLite's code alone cannot
+  disambiguate them and message matching stays banned; the
+  pre-check-plus-index safety net is the same one-connection argument
+  as the rest of the crate (D-037).
+- _`updated_at` follows the snapshot notion of a real change (D-16)._ Renames,
+  content edits, heading-level changes and every state transition
+  (hide/restore, delete/restore) restamp; a pure position move, the
+  tail renumbering it causes, and a main-flag promotion restamp
+  nothing — the `projects::reorder` precedent generalized into a
+  rule, so the library's "change date" column (LIB-001) does not
+  churn for hundreds of rows on one drag.
+- _Assignments._ `assign` pre-checks and types what the composite PK
+  and FK only floor: `AlreadyAssigned` (D-02, one variant of one
+  instruction per project), `VariantNotAssignable` (DB-012: unknown,
+  cross-instruction or soft-deleted variant), `NotAnInstruction`
+  (MAIN-001: headings have no cells), `NotFound` for unknown
+  project/instruction ids. `reassign` changes one project's variant
+  only (MAIN-005), checks the assignment's existence before the
+  variant, and re-assigning the held variant is a verified no-op;
+  `unassign` removes without touching the variant (LIB-020); hidden
+  instructions keep and gain assignments (DB-013 — the build filter
+  is the caller's); `list_assignments_for_project` orders by
+  `library_items.position` (OUT-001: the file order equals the
+  library order).
+- _The two §6.9 clauses D-076 assigns to "the library create/update
+  STORE task" — this one — landed here (round-1 review)._ (a) The
+  main-instruction-name uniqueness among _visible_ instructions,
+  case-insensitive (a cross-row query the field validators cannot
+  run): `DuplicateInstructionTitle`, probed on `create_item`,
+  `update_item` and `restore_item` — a hidden twin does not block
+  (not visible), and the conflict surfaces at restore, mirroring
+  `restore_variant`'s name check; heading titles are exempt (the
+  §6.9 row is the instruction name's). (b) The save-time CRLF→LF
+  fold of variant text (CRLF only — the lone-CR/BOM/edge pass stays
+  build-time with ALG-002): the stored form is the folded form, so
+  the DB-006 CHECK measures what is actually stored — a raw text over
+  the limit whose folded form fits is accepted (D-076's recorded
+  asymmetry, pinned by a test).
+- _Round-1 hardenings._ The `NoActiveMain` typed outcome replaces
+  `delete_variant`'s default-replacement panic: the main flag is
+  reachable by a plain out-of-band `UPDATE … SET is_main = 0` that
+  violates no CHECK, so DB-010 can be broken without any corrupt
+  cell — surfaced per DB-017 (no automatic repair) instead of guessed
+  around. `delete_variant`'s replacement is documented as
+  one-for-all: LIB-023's per-project choices compose `reassign` calls
+  after the delete in the same transaction (pinned by a test).
+  `restore_item` on a heading (always active) is the documented
+  idempotent no-op, and the ABORT pin now exercises a genuinely
+  rejected statement (the §6.2 CHECK floor), not only a typed
+  pre-check refusal.
+- _Tests._ 3 unit tests in the module (vocabulary round trip, the
+  heading-level CHECK matrix decode, error Display shapes) and 46
+  integration tests in `tests/library.rs` on a real `open_db` +
+  `run_migrations` database: full-column round trips for all three
+  tables with UUIDv7/DB-002 pins; the gapless sequence under append,
+  middle/end moves, heading delete and hide; the constructive DB-010
+  rules and every LIB-023/025 rejection shape with the surviving rows
+  verified; assignment CRUD with the D-02 duplicate, the three
+  DB-012 causes, MAIN-005 isolation and the position-ordered read;
+  the DB-006 boundary through both create and update plus the
+  CRLF-fold measurement; the §6.9 title-uniqueness NOCASE scope
+  (create, rename, restore-into-twin, hidden twin, heading exempt);
+  corrupt cells (kind/state/heading_level/variant state) as typed
+  `Member` through the `ignore_check_constraints` seam; and the
+  transaction contracts (move and delete-variant roll back as sets, a
+  failed statement — CHECK-rejected, not pre-checked — keeps the
+  transaction usable).
