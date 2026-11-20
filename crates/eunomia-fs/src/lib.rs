@@ -35,3 +35,4 @@ pub mod free_space;
 pub mod paths;
 pub mod scan;
 pub mod temp_files;
+pub mod write_access;

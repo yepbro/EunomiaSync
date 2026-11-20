@@ -7078,3 +7078,117 @@ reads; the round trip is unit-pinned).
   `NotFound` typing on every by-id writer; the CHECK floor as `Sql`;
   corrupt `state`/`added_via`/`reason` cells as typed `Member` on
   `get` and both `list`s.
+
+### D-094 — The write-access preflight: file-flag-first order, std's read-only definition, the staging-grammar probe with sweepable debris, and collisions as probe failures — 2026-11-20
+
+Problem: T-063 implements §9.4 preflight step 3 (OUT-007/008, T-F5):
+"Check rights: whether a temporary file can be created in the folder,
+and whether the existing file is marked read-only. If not: `skipped`,
+`E_NO_WRITE_ACCESS`." The spec pins the verdict but leaves open:
+(1) the order of the two checks (the sentence lists the folder first);
+(2) what "marked read-only" means cross-platform — the concept is
+Windows' `FILE_ATTRIBUTE_READONLY` wearing a Unix costume; (3) whether
+the probe's temporary file may use any convenient name; (4) what a
+`create_new` collision means; (5) where probe refusals that are not
+rights facts go (missing folder, full volume); (6) whether an absent
+target is an error.
+
+Solution: `crates/eunomia-fs/src/write_access.rs` —
+`check_write_access(target) -> Result<(), WriteAccessError>`, next to
+the preflight's step-1/step-2 modules.
+
+- INPUT: the RESOLVED write path of `resolve_target_path` (D-092) —
+  one argument is all step 3 needs: the flag is a fact about the path,
+  the folder is its parent, the staging name is its file name.
+  `fs::metadata` FOLLOWS a remaining link, so the flag judged belongs
+  to the real file the write replaces.
+- ORDER: the FILE flag first, then the folder probe. The spec sentence
+  is a conjunction; this order keeps the check's only mutating step
+  (the probe) from running once the verdict is decided (the phase's
+  "changes nothing" spirit), and the file flag is the nearer cause — a
+  fact about the exact file being replaced (D-092's precedence style).
+  Pinned by a both-refuse test (read-only file + 0o555 folder answers
+  `FileReadOnly`).
+- READ-ONLY DEFINITION: std's `fs::Permissions::readonly()` — the
+  cross-platform marked-read-only fact (Unix: `mode & 0o222 == 0`,
+  what `chmod a-w` produces; Windows: `FILE_ATTRIBUTE_READONLY`, which
+  std's own metadata probe reads — the idiomatic cfg handling lives in
+  std, so the module carries no cfg). The flag is the MARKED state,
+  not an OS prediction: a Unix `rename` could in fact replace a
+  write-disabled file, but T-F5 pins the read-only target as a skip
+  regardless — the user's mark is a "do not touch" signal honored
+  before any bytes move. An absent target skips the flag check
+  entirely (the creation case, D-092; the card: rights, not
+  existence).
+- THE PROBE IS REAL, and its name is the app staging grammar
+  (`temp_files::tmp_file_name`, D-088): `.<name>.eunomia-<8 lowercase
+hex>.tmp`, `create_new`, drop the handle (Windows cannot delete an
+  open file), remove. The grammar is not decoration: debris that a
+  crashed or refused cleanup leaves is recognized by the step-7 sweep
+  (`remove_stale_tmp_files`) and deleted once an hour old — the
+  probe's net effect converges to zero (the D-088 idempotency
+  posture). A failed or raced removal never flips the verdict:
+  creation, not removal, answered the rights question. Tokens: clock ×
+  pid × attempt folded into 8 lowercase hex characters (no rand crate
+  — freshness is all a staging name needs, and `create_new` plus the
+  bounded retry is the real safety), `PROBE_ATTEMPTS = 3` — this
+  module's own bound (one fresh token rules out an accidental
+  collision, three cap the cost), mirroring rather than citing 9.5
+  step 4's three-retry pattern (that clause is about rename sharing
+  violations, not staging-name collisions).
+- CLASSIFICATION: a pure `classify_creation_refusal`, pinned by
+  synthetic-kind tests (the D-089 `probe_result` posture — the real
+  probe cannot be made to fail on command). `PermissionDenied` |
+  `ReadOnlyFilesystem` → `FolderNotWritable` (the EROFS reading: a
+  read-only mount IS "no write rights to the folder", §10); the
+  `ErrorKind` variants are stable on the 1.99 toolchain.
+  `AlreadyExists` → retry with the next token; exhaustion of all
+  attempts → `ProbeFailed` (a collision is never a fabricated rights
+  verdict). Everything else — `NotFound` (step 1's availability check
+  owns the missing-folder story), `StorageFull` (§10's `E_DISK_FULL`
+  write-phase row), a dropped drive — is `ProbeFailed` with the exact
+  `io::Error` riding along (the D-090 refusal split).
+- ERROR SHAPE: `WriteAccessError` — `FolderNotWritable` and
+  `FileReadOnly` (both the §10 `E_NO_WRITE_ACCESS` facts, mapped by
+  the command layer to `ErrorCode::NoWriteAccess`; the registry stays
+  out of this crate, D-062) plus `ProbeFailed`; every variant carries
+  the lossy target path, the io-backed ones the `io::Error`
+  (`path()`/`io_error()`/`os_code()` accessors, hand-rolled impls,
+  D-017). Degenerate inputs (no parent folder or file name — a
+  relative bare name, a root, `..`) are refused as
+  `ProbeFailed` (Unsupported) BEFORE anything is created: a guessed
+  folder (the process's working directory) must never be probed, and
+  never littered.
+- WINDOWS: no cfg anywhere in the production code — std's
+  `Permissions` and `OpenOptions` are the portable facts;
+  `cargo check --target x86_64-pc-windows-msvc --all-targets` is
+  clean. The T-F5 fixture uses `set_readonly`, so the acceptance test
+  itself runs on the Windows CI leg unchanged.
+- KNOWN OPEN (the D-088/D-090/D-092 posture): lib.rs's `//!` module
+  list and ARCHITECTURE.md's fs enumeration stay untouched (exactly
+  one `pub mod write_access;` line added — parallel siblings are
+  landing in `atomic.rs`); the orchestrator's refresh reconciles both
+  lists.
+
+Tests: 17 unit tests + 1 doctest, inline in the module, through the
+public function on real temp fixtures (the private token seam drives
+the collision paths deterministically): the T-F5 acceptance (read-only
+file → `FileReadOnly`, `os_code` None, no probe debris — the order
+itself is pinned by the both-refuse test); a writable target in a
+writable folder passes with zero debris and its content untouched;
+the absent-target creation case (nothing created); the symlink follow
+(judged by the real file); a 0o555 folder → `FolderNotWritable` with
+EACCES = 13 (Unix-gated, permissions restored before the assertions,
+loud root skip — the D-088 test posture); an untraversable 0o644
+folder → the refused metadata probe is `ProbeFailed` with EACCES
+riding, never a fabricated rights verdict; the both-refuse order pin;
+a missing folder → `ProbeFailed` with `NotFound` riding; the
+degenerate relative name → `ProbeFailed` (Unsupported) with the
+working directory scanned clean of staging-grammar debris; the
+collision retry (a pre-created `...eunomia-00000000.tmp` passes on
+`...00000001`, the fixture survives, the probe cleans up after
+itself); token exhaustion → `ProbeFailed` with the last collision
+riding; the refusal classification pinned kind by kind; the token
+grammar over 100 draws; the error contract (Display texts, `path()`,
+the io/fact split, the `source()` chain); and a Linux-gated non-UTF-8
+target name (the lossy spelling probes its folder fine).
