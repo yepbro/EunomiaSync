@@ -40,6 +40,9 @@
    bulk assignment operations (§7.4 UI bulk operations, UI-010, NFR-021:
    #bulk-dialog with project multi-select and a single-row variant
    choice, per-column "⋮" menu, #bulk-confirm-dialog for 10+ changes),
+   matrix keyboard navigation (MAIN-010, NFR-022, §11.3: roving-focus
+   grid over the assign checkboxes, arrows/Enter/Shift+arrows, Escape
+   from the variant select),
    dirty-state tracking. No deps, no build step.
    ========================================================================== */
 
@@ -1126,6 +1129,184 @@
   document.querySelector('.matrix-wrap').addEventListener('scroll', closeColumnMenu, {
     capture: true,
     passive: true,
+  })
+
+  /* ---------- Matrix keyboard navigation (MAIN-010, NFR-022, §11.3) -------- */
+  /* Roving-focus grid over the leading .assign checkboxes. Every checkbox
+     gets tabindex="-1" except one roving cell with tabindex="0"; focusing
+     the matrix region (it keeps its own tabindex="0") lands on that cell.
+     Arrows move focus logically — Left/Right between the row's columns,
+     Up/Down between rows in the same column — skipping heading rows
+     (they have no cells per spec), row-off rows and unavailable columns'
+     disabled checkboxes. Space keeps its native toggle. Enter opens the
+     variant picker (focus + showPicker when available); Escape from the
+     select returns focus to the checkbox. Shift+Up/Down extends a range
+     selection of ROWS from the anchor row (the exact range between anchor
+     and current row: leading .row-sel boxes + row-selected class), plain
+     arrows move focus without touching the selection, clicking a checkbox
+     resets the anchor. Arrows/Enter are handled only inside the matrix
+     region and only on the roving checkbox or the region itself — the
+     search field, modal fields and variant selects keep native behavior. */
+
+  const matrixWrap = document.querySelector('.matrix-wrap')
+  const GRID_COLUMNS = projectCols.length
+  let gridCell = null
+  let gridAnchorRow = null
+
+  const gridRows = () =>
+    rows().filter((tr) => !isHeading(tr) && !tr.classList.contains('row-off'))
+
+  /* The enabled checkbox of a navigable row's project column, else null */
+  const gridCellAt = (tr, colIdx) => {
+    const td = tr.cells[2 + colIdx]
+    const input = td?.querySelector('.assign')
+    return input && !input.disabled ? input : null
+  }
+
+  const gridColumnOf = (checkbox) => checkbox.closest('td').cellIndex - 2
+
+  function firstGridCell() {
+    for (const tr of gridRows()) {
+      for (let c = 0; c < GRID_COLUMNS; c += 1) {
+        const input = gridCellAt(tr, c)
+        if (input) return input
+      }
+    }
+    return null
+  }
+
+  function setRovingCell(target) {
+    if (gridCell && gridCell !== target) gridCell.tabIndex = -1
+    target.tabIndex = 0
+    gridCell = target
+    target.scrollIntoView({ block: 'nearest' })
+  }
+
+  function initGridNavigation() {
+    for (const checkbox of tbody.querySelectorAll('.assign')) checkbox.tabIndex = -1
+    gridCell = firstGridCell()
+    if (gridCell) gridCell.tabIndex = 0
+  }
+
+  /* MAIN-010: focusing the region lands on the current cell — but only
+     for keyboard-initiated focus (Tab): a pointer press on a blank cell
+     also focuses the region, and stealing focus here would scroll mid-drag
+     and break drag-and-drop. */
+  let gridPointerDownAt = 0
+  document.addEventListener('pointerdown', () => {
+    gridPointerDownAt = Date.now()
+  }, true)
+  matrixWrap.addEventListener('focusin', (e) => {
+    if (e.target !== matrixWrap || !gridCell) return
+    if (Date.now() - gridPointerDownAt < 150) return
+    if (gridCell.disabled || gridCell.closest('tr').classList.contains('row-off')) {
+      gridCell = firstGridCell() ?? gridCell
+    }
+    gridCell.focus()
+  })
+
+  /* Clicking (or otherwise focusing) a checkbox makes it the roving cell */
+  tbody.addEventListener('focusin', (e) => {
+    const box = e.target.closest?.('.assign')
+    if (box && box !== gridCell) setRovingCell(box)
+  })
+
+  function moveGridFocus(key, shiftKey) {
+    const navRows = gridRows()
+    if (!navRows.length) return
+    /* Recover when the current cell's row was hidden by a filter */
+    if (!gridCell || !navRows.includes(gridCell.closest('tr'))) {
+      gridCell = firstGridCell()
+      if (!gridCell) return
+    }
+    if (shiftKey && (key === 'ArrowUp' || key === 'ArrowDown') && !gridAnchorRow) {
+      gridAnchorRow = gridCell.closest('tr')
+    }
+    const fromRow = gridCell.closest('tr')
+    let rIdx = navRows.indexOf(fromRow)
+    let cIdx = gridColumnOf(gridCell)
+
+    if (key === 'ArrowRight' || key === 'ArrowLeft') {
+      const dir = key === 'ArrowRight' ? 1 : -1
+      let c = cIdx + dir
+      while (c >= 0 && c < GRID_COLUMNS && !gridCellAt(navRows[rIdx], c)) c += dir
+      if (c < 0 || c >= GRID_COLUMNS) return /* clamp at the row edge */
+      cIdx = c
+    } else {
+      const dir = key === 'ArrowDown' ? 1 : -1
+      let r = rIdx + dir
+      while (r >= 0 && r < navRows.length && !gridCellAt(navRows[r], cIdx)) r += dir
+      if (r < 0 || r >= navRows.length) return
+      rIdx = r
+    }
+    const target = gridCellAt(navRows[rIdx], cIdx)
+    if (!target || target === gridCell) return
+    setRovingCell(target)
+    target.focus()
+    if (shiftKey && (key === 'ArrowUp' || key === 'ArrowDown')) {
+      extendGridSelection(navRows, rIdx)
+    }
+  }
+
+  /* The selection becomes the exact row range between the anchor and the
+     current row (visible, non-heading rows only) */
+  function extendGridSelection(navRows, rIdx) {
+    const currentRow = navRows[rIdx]
+    if (!gridAnchorRow || !navRows.includes(gridAnchorRow)) gridAnchorRow = currentRow
+    const aIdx = navRows.indexOf(gridAnchorRow)
+    const from = Math.min(aIdx, rIdx)
+    const to = Math.max(aIdx, rIdx)
+    navRows.forEach((tr, i) => {
+      const box = tr.querySelector('.row-sel')
+      if (!box) return
+      const inRange = i >= from && i <= to
+      box.checked = inRange
+      tr.classList.toggle('row-selected', inRange)
+    })
+    syncSelectionUI()
+  }
+
+  matrixWrap.addEventListener('keydown', (e) => {
+    const t = e.target
+    const onGridCell = t instanceof HTMLElement && t.classList.contains('assign')
+    if (!(t === matrixWrap || onGridCell)) return
+    if (
+      e.key === 'ArrowRight' ||
+      e.key === 'ArrowLeft' ||
+      e.key === 'ArrowUp' ||
+      e.key === 'ArrowDown'
+    ) {
+      e.preventDefault()
+      moveGridFocus(e.key, e.shiftKey)
+      return
+    }
+    /* Enter opens the variant picker (§11.3); Space stays native */
+    if (e.key === 'Enter' && onGridCell) {
+      const select = t.closest('td')?.querySelector('.variant-select')
+      if (!select) return
+      e.preventDefault()
+      select.focus()
+      try {
+        if (typeof select.showPicker === 'function') select.showPicker()
+      } catch {
+        select.click() /* no picker support: focus is the fallback */
+      }
+    }
+  })
+
+  /* Escape from the variant select returns focus to the checkbox */
+  tbody.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return
+    const select = e.target.closest?.('.variant-select')
+    if (!select) return
+    select.closest('td')?.querySelector('.assign')?.focus()
+  })
+
+  /* Clicking any checkbox resets the range anchor (keyboard Space too) */
+  tbody.addEventListener('click', (e) => {
+    if (e.target.closest('.assign, .row-sel')) {
+      gridAnchorRow = e.target.closest('tr')
+    }
   })
 
   /* ---------- Instruction editor modal (UI-003, LIB-002) ------------------- */
@@ -4439,6 +4620,9 @@
 
   /* "Show hidden" badge: how many instructions are hidden */
   setHiddenCount()
+
+  /* Matrix keyboard grid (MAIN-010): roving tabindex over the cells */
+  initGridNavigation()
 
   applyColumnFilter()
   applyFilters()
