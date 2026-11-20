@@ -5886,6 +5886,139 @@ an input the save path would normalize anyway). Full suite: 798 tests
 green; fmt, clippy `-D warnings`, `cargo deny check`, pnpm lint /
 format:check / typecheck / test all green.
 
+### D-086 — Project path canonicalization and the `path_key`: dunce stored verbatim, NFC + simple-fold key per OS, the two-escalation dependency saga, and the format-stability contract — 2026-11-19
+
+Problem: T-058 implements DB-030/DB-031/D-07 in `crates/eunomia-fs::paths`
+(`canonicalize`, `canonical_path_key`, `path_key`, `path_key_with_rule`,
+`PathKeyRule`, `CanonicalizeError`). The spec pinned the mechanics
+(`dunce::canonicalize`, `/` separators, no trailing separator, per-OS
+normalization) but left five points open, three of which needed owner
+rulings across two escalations: (1) the normalizer dependency — §5.2's fs
+row named no Unicode crate while DB-030 mandated Unicode NFC and case
+folding, and std has neither (no normalization, and `to_lowercase` is a
+lowercase MAPPING, not folding: İ, ſ and the mathematical-alphanumerics
+block differ); (2) WHICH folding — simple vs full case folding vs
+lowercase, each provably different on real names; (3) whether NFC applies
+to the stored path or only to the key; plus (4) two factual corrections
+surfaced during verification, and (5) two unspecified corners (the fold/
+NFC pipeline order, and Unix non-UTF-8 path bytes).
+
+Solution:
+
+- THE DEPENDENCY SAGA (two escalations, both resolved by owner rulings
+  recorded on the INBOX card and then in spec commits): escalation 1 —
+  §5.2 pinned the fs set without any normalization crate, and D-017/D-082
+  forbid inventing deps → the owner ruled (2026-11-19): NFC + SIMPLE case
+  folding per OS (the filesystem-faithful rule), stored path verbatim
+  (reading A), and named `focaccia` as the fold crate (spec commit
+  1e1b930). Verification killed that premise: focaccia 2.6.0 exposes only
+  `CaseFold { Full, Ascii, Turkic, Lithuanian }` — no simple variant, no
+  feature flags — and is comparison-only (`casecmp`/`case_eq`), so it
+  cannot even materialize a folded string, which a stored TEXT key needs.
+  Escalation 2 landed the swap the ruling's semantics require: the owner
+  adopted `unicode-case-mapping` 1.0.0 (Apache-2.0, already allow-listed;
+  zero deps; yeslogic) whose `case_folded(char) -> Option<NonZeroU32>` IS
+  simple folding by construction (single-code-point signature; `None` =
+  maps to itself), with `unicode-normalization` 0.1 (Unicode-3.0, already
+  allow-listed) for NFC (spec commit 9a953d9; §5.2's fs row now names both
+  and focaccia is out). Recess lesson recorded for crate recommendations:
+  verify a candidate's actual API before naming it in a ruling — the
+  focaccia detour cost one full escalation round.
+- THE FOLD IS SIMPLE, AND THAT IS LOAD-BEARING (ruling 2, 2026-11-19):
+  simple = exactly the 1:1 mappings (CaseFolding.txt statuses C and S).
+  Full folding (F entries) would unfold ligatures — ﬁ→fi, ß→ss — and
+  thereby MERGE folder names the target filesystems keep distinct (APFS
+  simple-fold, NTFS `$UpCase`), colliding two real projects on one unique
+  `path_key`. Both sides are pinned in tests: ﬁ≠fi, straße≠STRASSE,
+  İstanbul≠Istanbul; AND ſ→s, ẞ→ß, KELVIN SIGN→k (1:1 mappings do fold).
+  The spec's committed text ("1:1 mappings only") governs over the chat
+  ruling's stray "ſ stays distinct" phrase — ſ carries a C entry
+  (`017F; C; 0073`, verified against UCD CaseFolding.txt) and both
+  filesystems fold it; the card comment is the erroneous one. ẞ (S entry,
+  folds to ß while its full fold is ss) is the counterexample that kills
+  the tempting "derive simple from full-fold-if-1-char" shortcut — the
+  shortcut is provably NOT simple folding, which is also why `caseless`
+  (full-fold iterators only) was rejected without escalation.
+- READING A (ruling 1): the stored `projects.path` is the verbatim
+  `dunce::canonicalize` output; NFC and folding apply to the KEY only.
+  Pinned by a byte-level test: a decomposed folder name stays decomposed
+  in the canonical path on Linux while the folding rules merge its
+  spellings in the key. Dunce's own safety rule is part of the verbatim
+  contract (review round 1): the `\\?\` prefix is stripped only where
+  Win32 could open the stripped spelling — plain drive paths always
+  strip; verbatim UNC shares (`\\?\UNC\…`), paths beyond 260 characters
+  and reserved DOS component names keep it (dunce 1.0.5's
+  `is_safe_to_strip`), so DB-030's parenthetical reads as dunce's
+  best-effort rule, not an unconditional claim. Identity is unaffected
+  (both spellings of such a folder canonicalize to the same verbatim
+  form); the key of a verbatim UNC spelling is pinned (`//?/unc/…`).
+- THE KEY PIPELINE: NFC → simple fold → NFC, per module docs. Folding
+  does not preserve normalization formats (CaseFolding.txt's own header),
+  so the folded text is normalized again; the leading NFC makes decomposed
+  spellings fold like their precomposed twins (pinned: NFC and NFD
+  spellings of café and École collapse under Windows/macOS rules and stay
+  distinct under Linux, where they ARE two different folders). The
+  pipeline is a pinned fixed point (key of a key = the key) and total over
+  arbitrary text.
+- SEPARATORS ARE RULE-SCOPED: `\` is a separator on Windows and a legal
+  NAME byte on Unix, so the Windows rule splits on both `/` and `\` while
+  Linux/macOS split on `/` only — a Unix folder `a\b` never collides with
+  a sibling `a/b` (pinned). Leading markers survive: `/` keys to `/` (not
+  the empty string) and a UNC `//server/share` keeps its double marker;
+  interior/trailing runs collapse.
+- TEXT KEYS OVER BYTE PATHS: Unix paths are bytes, the key is a SQLite
+  TEXT column — non-UTF-8 bytes reach the key as U+FFFD via
+  `to_string_lossy` (the same lossy form logs and dialogs show), pinned so
+  a silent switch to panic/drop cannot slip in. The documented cost
+  (review round 1): two byte names differing only in invalid-byte
+  sequences collapse to one key, so the second add hits the UNIQUE column
+  and a scan can classify such a folder as a known project — whether to
+  reject non-UTF-8 paths at the add/scan seam instead is a
+  format-contract decision left with the owner, not made here.
+- FORMAT-STABILITY WARNING (the D-082 posture for snapshot hashes):
+  `path_key` is stored (`projects.path_key`, `project_exclusions.path_key`,
+  both UNIQUE per DB-015) and compared across app versions — the rule set
+  (simple-fold flavor, NFC, separator shape, lossy-UTF-8 handling) is now
+  a format contract. Changing any of it later silently splits or merges
+  project identities; a change is a DECISIONS.md event, and existing rows
+  would need a migration, not a rebuild-on-read.
+- BOUNDARY AND OWNERSHIP: `canonicalize`/`canonical_path_key` are the
+  entry points the add/relabel flows will call when they land (a later
+  task); `path_key` keys an
+  ALREADY-canonicalized path (the scan's use, ALG-053 — real paths by
+  construction since the scan follows no links, D-07) and is total; the
+  pure `path_key_with_rule` + public `PathKeyRule` keep the spec's per-OS
+  wording visible in the API and give every rule unit coverage on every OS
+  (Linux here, Windows/macOS literals on the CI matrix). `platform_rule()`
+  stays pub(crate) — the selection is internal, the rule enum is the
+  surface. `CanonicalizeError` is hand-rolled (path text + io source +
+  `os_code()`), mirroring D-084's `ProjectUnavailableError` shape; no
+  `thiserror` — the crate's §5.2 list has none (D-017 store precedent).
+  Availability (D-084) is untouched; DB-031's aliasing lives in
+  canonicalize-first keying, as D-084's symlink test comment anticipated.
+
+Tests: 21 unit tests + 5 doctests in `paths.rs` — the dotted/relative
+canonical form equality; symlink resolution to the target form and the
+Windows-leg twin (skip only on capability absence: unsupported/EPERM/
+ENOSYS/ENOTSUP on Unix, ERROR_PRIVILEGE_NOT_HELD = 1314 on Windows — any
+other fixture failure panics, so DB-031 coverage cannot silently vanish);
+the typed canonicalize failure (path text, ENOENT = 2, Display prefix,
+source chain) and the ENOTDIR under-a-plain-file case; the verbatim stored
+path (decomposed name survives byte-for-byte); the Windows-leg verbatim
+prefix strip with the drive-letter key shape; ASCII folding per rule;
+Windows `\`+`/` rewriting with trailing-separator drop; the Unix backslash
+identity; separator-run collapse with `/` and UNC markers surviving plus
+the verbatim-UNC key spelling dunce actually hands back; the NFC/NFD
+collapse pairs under Windows/macOS and their Linux distinctness; the
+simple-fold fidelity battery (ﬁ/ß/İ stay; ſ/ẞ/KELVIN fold); the
+fixed-point property over a mixed battery; total posture (no trailing
+separator, no `\` under the Windows rule, empty text OK); the Linux
+platform-wrapper literal (Windows/macOS literals cfg-gated for the CI
+matrix); the lossy U+FFFD contract; and the card's acceptance test —
+one real folder, a symlink to it, ONE `path_key` through both
+`canonical_path_key` and the canonicalize+key halves, with the
+`assert_ne` proving only canonicalization collapses the alias.
+
 ### D-087 — The repository scan walker: probe-based ALG-052 classification, Quit-token cancellation, and parameters-not-configuration — 2026-11-19
 
 Problem: T-061 implements the folder traversal of §9.6 (ALG-050..054,

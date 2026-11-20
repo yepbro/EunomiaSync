@@ -7,20 +7,38 @@ license.workspace = true
 publish = false
 
 [dependencies]
-# Dependency set pinned by the T-003 card and the spec (docs/spec.md 5.2);
-# the modules are skeleton stubs, so each dependency below is intentionally
-# idle until the task that implements its module lands (precedent: the
-# spec-pinned allow-list of eunomia-core, DECISIONS.md D-017):
+# Dependency set pinned by the spec (docs/spec.md 5.2) and the owner
+# rulings of 2026-11-19 (DB-030 as amended in spec commits 1e1b930 and
+# 9a953d9; the DECISIONS.md entry of this task records the adoption).
+# The `ignore`/`walkdir`/`tempfile` modules are skeleton
+# stubs, so those three stay intentionally idle until the task that
+# implements their module lands (precedent: the spec-pinned allow-list
+# of eunomia-core, DECISIONS.md D-017):
 # - `ignore` drives the repository scan (spec 9.6, ALG-050): its parallel
 #   WalkBuilder, run with .gitignore reading disabled;
 # - `walkdir` covers plain recursive traversal outside the repository-scan
 #   algorithm, e.g. the app's own data directory (scan, backup);
 # - `tempfile` stages same-folder write-then-rename file updates (atomic,
 #   spec 9.5);
-# - `dunce` canonicalizes paths without Windows verbatim (`\\?\`) prefixes,
-#   so canonical paths compare equal across the app (paths).
+# - `dunce` canonicalizes paths without Windows verbatim (`\\?\`) prefixes
+#   — the DB-030 canonical form (paths), and the stored path is its
+#   verbatim output; active since the canonicalization task landed;
+# - `unicode-normalization` applies DB-030's Unicode NFC to the path_key
+#   on Windows and macOS (paths); the stored path stays verbatim — NFC
+#   and folding are key-only by the owner ruling of 2026-11-19. License:
+#   Unicode-3.0, already in deny.toml's allow list;
+# - `unicode-case-mapping` provides Unicode SIMPLE case folding for the
+#   same key rule — exactly the 1:1 mappings (CaseFolding.txt statuses C
+#   and S), the filesystem-faithful fold where ligatures stay distinct
+#   (ﬁ ≠ fi, ß stays ß, İ stays İ) while 1:1 mappings fold (ſ → s, ẞ → ß).
+#   The first candidate, `focaccia`, turned out comparison-only with no
+#   simple-folding variant; the owner ruling swapped it for this crate
+#   (spec commits 1e1b930 and 9a953d9). License: Apache-2.0, already in
+#   deny.toml's allow list.
+unicode-normalization = "0.1"
+unicode-case-mapping = "1"
 # Target-file watching (spec 5.7) needs `notify-debouncer-full`; it is not
-# part of this card's dependency set and joins with its own module and task.
+# part of this dependency set yet and joins with its own module and task.
 ignore = "0.4"
 walkdir = "2"
 tempfile = "3"
