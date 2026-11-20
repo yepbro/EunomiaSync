@@ -29,24 +29,25 @@
 //! §9.4's rule is about the RUN outcome, which is the pipeline's concern:
 //! this module only reports what it observed. A failed volume query is
 //! not "no space" — it surfaces as [`FreeSpaceError::ProbeFailed`] with
-//! the OS code riding in the source error (§10's first-class log fact),
-//! and [`FreeSpaceError::ProbeUnavailable`] marks the platform where no
-//! production probe exists yet (see "Windows" below). The caller decides
-//! skip/abort semantics per variant.
+//! the OS code riding in the source error (§10's first-class log fact).
+//! The caller decides skip/abort semantics per variant.
 //!
 //! # Windows
 //!
-//! The production probe is `#[cfg(unix)]`. **rustix 1.1.6 has no `fs`
-//! module on Windows at all** (`#[cfg(not(windows))] pub mod fs;` in its
-//! lib.rs), so the pre-ruled probe simply cannot exist there, and the
-//! brief forbids substituting a dependency on my own authority. The
-//! `#[cfg(windows)]` arm of [`free_bytes`] exists only so the crate
-//! compiles on the Windows CI leg; it returns
-//! [`FreeSpaceError::ProbeUnavailable`] — no fabricated data, no unsafe,
-//! no new dependency. This is an ESCALATION POINT recorded in
-//! DECISIONS.md for the orchestrator, not a settled design: the Windows
-//! production call (e.g. `GetDiskFreeSpaceExW` via the already-locked
-//! `windows-sys`, an unsafe-FFI decision) is the owner's to sanction.
+//! The Windows production probe is `GetDiskFreeSpaceExW` over
+//! `windows-sys` (target-gated in Cargo.toml; already in Cargo.lock via
+//! the tauri stack, so the direct edge adds zero new crates). The call is
+//! ONE `unsafe` FFI block — the crate's first unsafe — sanctioned by the
+//! owner in chat (2026-11-19) and recorded as D-089's addendum, with the
+//! invariants stated at the block per the D-058 documentation discipline.
+//! The available-to-caller figure answers the same question the unix
+//! ruling answers with `f_bavail` (what THIS process's token can still
+//! allocate, quotas included); the two volume totals are passed as NULL —
+//! the API marks them `[out, optional]` — because §9.4 needs only the
+//! available figure. The former placeholder variant — "a platform
+//! without a production probe" — is gone: with both platform arms real,
+//! no code path can produce it (removed while the enum had no external
+//! consumers; D-089's addendum records the decision).
 //!
 //! # Testing plan
 //!
@@ -138,8 +139,8 @@ pub fn check_space(free: u64, required: u64) -> Result<(), FreeSpaceError> {
 ///
 /// # Errors
 ///
-/// - [`FreeSpaceError::ProbeFailed`] / [`FreeSpaceError::ProbeUnavailable`]
-///   pass through verbatim when the SOURCE fails — including for an empty
+/// - [`FreeSpaceError::ProbeFailed`] passes through verbatim when the
+///   SOURCE fails — including for an empty
 ///   copy list: the source is consulted first, a failed query fails the
 ///   check regardless of how little space would be needed, and the caller
 ///   decides what a run does about it (§9.4's `aborted` outcome is the
@@ -173,10 +174,9 @@ where
 ///
 /// # Platform support
 ///
-/// Unix (Linux and macOS, the pre-ruled `rustix::fs::statvfs`). On
-/// Windows the function returns [`FreeSpaceError::ProbeUnavailable`] —
-/// rustix has no `fs` module there; see the module docs and the
-/// DECISIONS.md entry for the escalation.
+/// Unix (Linux and macOS, the pre-ruled `rustix::fs::statvfs`); the
+/// Windows twin below asks `GetDiskFreeSpaceExW` under the same
+/// contract.
 ///
 /// # Errors
 ///
@@ -194,21 +194,109 @@ pub fn free_bytes(path: &Path) -> Result<u64, FreeSpaceError> {
     Ok(available_bytes(&stats))
 }
 
-/// The Windows arm exists only so the crate compiles on the Windows CI
-/// leg (D-060's four-OS matrix): rustix 1.1.6 has no `fs` module on
-/// Windows, and no substitute is sanctioned yet. It fabricates no data —
-/// the caller sees [`FreeSpaceError::ProbeUnavailable`] and decides the
-/// run semantics, exactly as for any other probe failure. ESCALATION
-/// POINT: the production call (e.g. `GetDiskFreeSpaceExW` over the
-/// already-locked `windows-sys`) is recorded in DECISIONS.md for the
-/// orchestrator.
+/// The Windows production probe: free bytes available to the caller on
+/// the volume holding `path`, via `GetDiskFreeSpaceExW`.
+///
+/// The ruling mirrors the unix arm's `f_bavail` choice: the figure that
+/// matters is what THIS process can still allocate for backup copies —
+/// `lpFreeBytesAvailableToCaller`, the bytes available to the user
+/// associated with the calling thread's token (per-user quotas already
+/// subtracted, in Microsoft's own wording). The two volume totals are
+/// passed as NULL: the API marks them `[out, optional]` ("This parameter
+/// can be NULL"), and §9.4 needs only the available figure — reading
+/// less is this module's posture (the unix arm reads `f_bavail ×
+/// f_frsize` and nothing else).
+///
+/// The path is passed verbatim as a directory name: the API "accepts any
+/// directory on a disk" and resolves the volume from it, so no root
+/// rewriting happens here (a NULL would mean "the current disk" — a
+/// different volume than the data directory's, never what §9.4 asks
+/// about). UNC note from the contract: the trailing-backslash rule binds
+/// only the bare `\\server\share` name form — a share root passed
+/// without the trailing backslash fails the call and surfaces as
+/// [`FreeSpaceError::ProbeFailed`] (honest: a refusal, never fabricated
+/// data); a directory under a share is a directory like any other, and
+/// a directory is what the caller supplies (the DB-030 canonical form,
+/// D-086).
+///
+/// # Platform support
+///
+/// Windows only (the unix twin above). The call is ONE `unsafe` block —
+/// the crate's first, owner-sanctioned (D-089's addendum, 2026-11-19;
+/// the D-058 precedent for the documentation discipline) — with every
+/// invariant stated at the call site.
 ///
 /// # Errors
 ///
-/// Always [`FreeSpaceError::ProbeUnavailable`].
+/// [`FreeSpaceError::ProbeFailed`] when the call fails: a missing path,
+/// an unreachable drive (ERROR_NOT_READY), denied access — the Win32
+/// error code rides in `io::Error::last_os_error()` and the typed
+/// error's `os_code()`. Never panics.
 #[cfg(windows)]
-pub fn free_bytes(_path: &Path) -> Result<u64, FreeSpaceError> {
-    Err(FreeSpaceError::ProbeUnavailable)
+pub fn free_bytes(path: &Path) -> Result<u64, FreeSpaceError> {
+    // The wide buffer must outlive the call (see the SAFETY comment): a
+    // named local, not a temporary inside the call expression.
+    let wide = wide_path(path);
+    let mut available: u64 = 0;
+    // SAFETY: `GetDiskFreeSpaceExW(lpDirectoryName: LPCWSTR,
+    // lpFreeBytesAvailableToCaller / lpTotalNumberOfBytes /
+    // lpTotalNumberOfFreeBytes: PULARGE_INTEGER) -> BOOL` — one call,
+    // no retained state, no callbacks (`extern "system"` ABI, Kernel32).
+    // The Microsoft contract (fileapi.h) and how each invariant is met:
+    // 1. `lpDirectoryName` must be a valid NUL-terminated wide string for
+    //    the duration of the call — `wide` is exactly that (`wide_path`
+    //    appends the terminator), its buffer stays alive and unmutated
+    //    across the call (borrowed `as_ptr()` only), and `PCWSTR` is
+    //    `*const u16`, the element type.
+    // 2. Every out-parameter must be NULL or valid for writes of one
+    //    ULARGE_INTEGER. windows-sys 0.61 models ULARGE_INTEGER as `u64`,
+    //    so `&mut available` is an aligned, initialized 8-byte local
+    //    (never truncated to 32 bits — the docs' own warning); the two
+    //    totals are NULL, which the contract explicitly allows.
+    // 3. The function writes only through the non-NULL out-pointers, so
+    //    `available` is freshly written on success and read only after
+    //    the `BOOL` verdict below; the call writes no caller memory
+    //    beyond the non-NULL out-pointers.
+    // 4. On failure the reason is in `GetLastError` — it is read
+    //    immediately after the call returns (`io::Error::last_os_error()`
+    //    in the very next statement) before anything can overwrite it.
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    probe_result(ok, io::Error::last_os_error()).map(|()| available)
+}
+
+/// The path as a NUL-terminated UTF-16 buffer: the `LPCWSTR` shape every
+/// `*W` file-API entry point consumes. `encode_wide` yields the path's
+/// code units verbatim (no canonicalization here — that is `paths`'s
+/// job, DB-030); the appended `0` is the terminator the FFI contract
+/// reads. The buffer is a named local so its lifetime covers the call.
+#[cfg(windows)]
+fn wide_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt as _;
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    wide
+}
+
+/// The Win32 `BOOL` convention mapped onto the crate's error contract:
+/// nonzero is success; zero is failure, with the reason in the
+/// caller-read `GetLastError` (`io::Error::last_os_error()` at the call
+/// site, the std mapping of it). The plain `i32`/`io::Error` shape keeps
+/// the mapping pure and off-Windows-testable: the Linux suite pins it
+/// deterministically, because the real probe cannot fail on command.
+#[cfg(any(test, windows))]
+fn probe_result(ok: i32, last_error: io::Error) -> Result<(), FreeSpaceError> {
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(FreeSpaceError::from(last_error))
+    }
 }
 
 /// The `bavail` × `frsize` arithmetic, split from the syscall so a test
@@ -223,11 +311,12 @@ fn available_bytes(stats: &rustix::fs::StatVfs) -> u64 {
 /// One variant per situation the §9.4 phase-1 check can end in, so the
 /// command layer can map [`FreeSpaceError::NotEnoughSpace`] to
 /// `E_DISK_FULL` (§10: "No space: on the backups volume in phase 1") and
-/// log the other two with their OS facts without re-deriving them from
-/// strings. The probe-backed variant carries the [`io::Error`] itself as
-/// its `source` — its `raw_os_error` and `ErrorKind` are §10's
-/// first-class log facts, and `ErrorDetails::from_io_error` in the app
-/// layer consumes exactly that shape.
+/// log [`FreeSpaceError::ProbeFailed`] with its OS facts without
+/// re-deriving them from strings. The probe-backed variant carries the
+/// [`io::Error`] itself as its `source` — its `raw_os_error` and
+/// `ErrorKind` are §10's first-class log facts, and
+/// `ErrorDetails::from_io_error` in the app layer consumes exactly that
+/// shape.
 #[derive(Debug)]
 pub enum FreeSpaceError {
     /// The volume cannot hold the copies plus the margin: `free` is
@@ -246,20 +335,16 @@ pub enum FreeSpaceError {
         /// The OS failure, carrying the raw error code.
         source: io::Error,
     },
-    /// The platform has no production probe (Windows, pending the
-    /// orchestrator ruling recorded in DECISIONS.md). No OS call was
-    /// made, so no OS code exists for this verdict.
-    ProbeUnavailable,
 }
 
 impl FreeSpaceError {
     /// The I/O error behind this failure, when the OS refused the probe;
     /// `None` for the verdicts that are plain facts (the shortage
-    /// numbers, the platform gap) rather than OS failures.
+    /// numbers) rather than OS failures.
     pub fn io_error(&self) -> Option<&io::Error> {
         match self {
             FreeSpaceError::ProbeFailed { source } => Some(source),
-            FreeSpaceError::NotEnoughSpace { .. } | FreeSpaceError::ProbeUnavailable => None,
+            FreeSpaceError::NotEnoughSpace { .. } => None,
         }
     }
 
@@ -288,9 +373,6 @@ impl fmt::Display for FreeSpaceError {
             }
             FreeSpaceError::ProbeFailed { source } => {
                 write!(f, "free-space probe failed: {source}")
-            }
-            FreeSpaceError::ProbeUnavailable => {
-                write!(f, "free-space probe is unavailable on this platform")
             }
         }
     }
@@ -455,22 +537,35 @@ mod tests {
     }
 
     #[test]
-    fn a_probe_unavailable_verdict_passes_through_untouched() {
-        // The Windows arm's verdict (pending the orchestrator ruling
-        // recorded in D-089) is a probe failure like any other: the seam
-        // surfaces it verbatim and the caller decides the run semantics
-        // — the contract must hold on the platform where the variant is
-        // produced.
-        let source = || -> Result<u64, FreeSpaceError> { Err(FreeSpaceError::ProbeUnavailable) };
-        let err = check_backup_space(&[100], source).expect_err("an unavailable probe must fail");
+    fn a_nonzero_win32_bool_maps_to_ok_even_with_a_garbage_last_error() {
+        // probe_result's two inputs are independent at the call site:
+        // `io::Error::last_os_error()` is read unconditionally after the
+        // FFI call, so on success its value is leftover garbage. The
+        // mapping must discard it — ANY nonzero BOOL stays Ok (Win32
+        // promises only "nonzero" for success; the sign and magnitude
+        // are not defined).
+        probe_result(1, io::Error::from_raw_os_error(2)).expect("a BOOL of 1 is success");
+        probe_result(-1, io::Error::from_raw_os_error(2))
+            .expect("any nonzero BOOL is success, not just 1");
+    }
+
+    #[test]
+    fn a_zero_win32_bool_maps_to_the_probe_error_carrying_the_os_code() {
+        // The failure half: a zero BOOL must become ProbeFailed (NOT
+        // NotEnoughSpace — a failed query is never a "no space" verdict)
+        // with the last error's raw code riding through for the §10 log
+        // line. The raw code is arbitrary here: the mapping, not the
+        // platform's errno table, is what is pinned.
+        let err = probe_result(0, io::Error::from_raw_os_error(21))
+            .expect_err("a zero BOOL is a probe failure");
         assert!(
-            matches!(&err, FreeSpaceError::ProbeUnavailable),
-            "the verdict must pass through, got: {err:?}"
+            matches!(&err, FreeSpaceError::ProbeFailed { .. }),
+            "the failure must be ProbeFailed, got: {err:?}"
         );
         assert_eq!(
             err.os_code(),
-            None,
-            "no OS call was made, so no OS code exists"
+            Some(21),
+            "the raw OS code must ride through unchanged"
         );
     }
 
@@ -605,11 +700,6 @@ mod tests {
             shortage.to_string(),
             "not enough free space: 10 bytes available, 360 required"
         );
-        let unavailable = FreeSpaceError::ProbeUnavailable;
-        assert_eq!(
-            unavailable.to_string(),
-            "free-space probe is unavailable on this platform"
-        );
 
         let probe = FreeSpaceError::ProbeFailed {
             source: io::Error::from_raw_os_error(13),
@@ -626,6 +716,74 @@ mod tests {
             Some(io::Error::from_raw_os_error(13).to_string())
         );
         assert!(shortage.source().is_none());
-        assert!(unavailable.source().is_none());
+    }
+
+    // The Windows-leg pins: they execute on the CI Windows test leg
+    // (D-060's matrix) and cannot run on this Linux host — each asserts
+    // a concrete bound so it can fail there.
+
+    #[cfg(windows)]
+    #[test]
+    fn the_real_windows_probe_reports_a_positive_amount_on_a_live_directory() {
+        // The wiring check for the GetDiskFreeSpaceExW path (the
+        // substituted-source tests are the contract, this is the real
+        // call): a mountable volume must report a positive amount of
+        // bytes available to this process's token.
+        let dir = tempfile::TempDir::new().expect("a temporary directory must be creatable");
+        let free =
+            free_bytes(dir.path()).expect("GetDiskFreeSpaceExW on a live directory must succeed");
+        assert!(
+            free > 0,
+            "a mountable volume reports a positive amount, got {free}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_missing_windows_path_surfaces_the_os_error() {
+        // The error contract on the real probe: a nonexistent directory
+        // must be ProbeFailed (never NotEnoughSpace — a failed query is
+        // not a "no space" verdict) with the Win32 error code riding in
+        // the typed error for the §10 log line. The concrete code
+        // (ERROR_FILE_NOT_FOUND vs ERROR_PATH_NOT_FOUND) is the OS's to
+        // pick; the contract is that SOME OS code surfaces.
+        let dir = tempfile::TempDir::new().expect("a temporary directory must be creatable");
+        let gone = dir.path().join("never-created");
+
+        let err =
+            free_bytes(&gone).expect_err("a probe on a missing path must fail with the OS error");
+        assert!(
+            matches!(&err, FreeSpaceError::ProbeFailed { .. }),
+            "a missing path must be ProbeFailed, got: {err:?}"
+        );
+        assert!(
+            matches!(err.os_code(), Some(code) if code != 0),
+            "a nonzero Win32 error code must ride in the typed error: {err:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wide_paths_are_null_terminated_utf16_units_of_the_verbatim_path() {
+        // The FFI input contract, pinned against literal code units: the
+        // path's UTF-16 encoding, verbatim, plus exactly one trailing
+        // NUL — the terminator GetDiskFreeSpaceExW's LPCWSTR reads. The
+        // literals keep the expected units hand-computed, not re-derived
+        // by the method under test.
+        let wide = wide_path(Path::new(r"C:\dir"));
+        assert_eq!(
+            wide,
+            [0x0043, 0x005C, 0x0064, 0x0069, 0x0072, 0],
+            "the path's UTF-16 units, verbatim, then the NUL"
+        );
+        // One non-ASCII unit pins "code units, not UTF-8 bytes": Ж is
+        // U+0416 — one UTF-16 unit, but two UTF-8 bytes — so a bug that
+        // widened bytes instead of units cannot produce this shape.
+        let wide = wide_path(Path::new("C:\\\u{0416}"));
+        assert_eq!(
+            wide,
+            [0x0043, 0x005C, 0x0416, 0],
+            "non-ASCII text must arrive as UTF-16 units, not widened UTF-8 bytes"
+        );
     }
 }

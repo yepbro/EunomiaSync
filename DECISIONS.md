@@ -6430,6 +6430,58 @@ the missing-path probe (ENOENT = 2 on the typed error), and the
 Display/source-chain contract (all three texts, the source() chain
 Some on `ProbeFailed` only).
 
+Addendum (2026-11-19, T-064/D-089): the Windows
+escalation above is RESOLVED. The owner sanctioned the production probe
+in chat, 2026-11-19: `windows-sys 0.61.2`, target-gated under
+`[target.'cfg(windows)'.dependencies]` in `eunomia-fs`'s manifest —
+already in Cargo.lock via the tauri stack, so the direct edge adds zero
+new packages (the lock's diff is one line: the edge in `eunomia-fs`'s
+dependency list) and Linux/macOS builds do not resolve the dependency
+at all. `Win32_Storage_FileSystem` is the only feature gate needed:
+docs.rs 0.61.2 places `GetDiskFreeSpaceExW` in
+`windows_sys::Win32::Storage::FileSystem`, and the `BOOL`/`PCWSTR`
+types it references live in `windows_sys::core`, which is not
+feature-gated (the 0.61 generation moved them out of
+`Win32::Foundation`). The §5.2 fs row as amended in docs commit 332fc8b
+sanctions exactly this call. THE UNSAFE BLOCK: `free_bytes`'s Windows
+arm is ONE `unsafe` block — the crate's first, the workspace's second
+after D-058's `geteuid` — a direct `GetDiskFreeSpaceExW` call whose
+SAFETY comment states every invariant against the Microsoft contract
+(fileapi.h): the NUL-terminated wide buffer alive and unmutated across
+the call (`wide_path` appends the terminator; a named local, not a
+temporary); the out-pointer an aligned, initialized `u64` local
+(windows-sys models ULARGE_INTEGER as `u64` — no 32-bit truncation, the
+docs' own warning); the two volume totals passed NULL per the API's
+`[out, optional]` (§9.4 needs only the available-to-caller figure — the
+quota-aware analogue of the `f_bavail` ruling); the `BOOL`/`GetLastError`
+convention mapped by a pure `probe_result` helper (`#[cfg(any(test,
+windows))]`, the D-058 `is_root` gate precedent) so the Linux suite pins
+the mapping deterministically. The path is passed verbatim as a
+directory — the API "accepts any directory on a disk"; NULL would mean
+"the current disk", never §9.4's data-directory volume; the trailing-
+backslash rule binds only the bare `\\server\share` name form. No pure
+u64 math exists to extract: windows-sys hands ULARGE_INTEGER over
+already as one `u64`, so the unsafe surface moves bytes only — the
+extraction clause's goal is met vacuously, and the testable pieces
+(the BOOL mapping, the NUL-terminated wide shape) are pinned instead.
+PROBEUNAVAILABLE REMOVED: with both platform arms real, no code path
+can produce the variant (workspace grep: it lived only in this module;
+`free_bytes` was its only producer, and the enum has no consumers
+outside it — T-064 merged hours earlier), so the variant is deleted
+rather than left dead to misstate the module ("a platform without a
+probe" that no longer exists). Tests: the battery is 22 now — the
+unavailable-passthrough test is replaced by the `probe_result` mapping
+pair (any nonzero BOOL stays Ok even with a garbage last-error
+argument; a zero BOOL becomes `ProbeFailed` carrying the raw code
+unchanged), the Display/source contract test drops the third text, and
+the Windows CI leg (D-060's test matrix) gains three concrete,
+falsifiable pins: the live positive probe, the missing-path
+`ProbeFailed`-with-OS-code, and the NUL-terminated UTF-16 path shape
+against literal code units. Proof honesty: the Windows probe executes
+only on the CI Windows leg — this Linux host proves the Linux suite
+green, plus `cargo check`/`clippy -D warnings` for
+`x86_64-pc-windows-msvc` compiling the real arm.
+
 ### D-090 — The Git repository root lookup: canonicalize-first walk-up in `paths`, the negative-lookup/io-refusal split, and the nearest-root consumer split — 2026-11-19
 
 Problem: T-059 implements PRJ-003/D-08's add-project precondition — the

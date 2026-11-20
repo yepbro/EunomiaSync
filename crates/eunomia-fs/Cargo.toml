@@ -45,8 +45,9 @@ unicode-case-mapping = "1"
 #   f3db54f and owner-approved in chat (2026-11-19); rustix 1.x is already
 #   in Cargo.lock as a transitive dependency of `tempfile`, so the
 #   promotion adds zero new crates to the graph. NOTE: rustix has no `fs`
-#   module on Windows — the Windows production call is an open escalation
-#   recorded in DECISIONS.md.
+#   module on Windows — the Windows free-space probe is the target-gated
+#   `GetDiskFreeSpaceExW` call at the bottom of this manifest (D-089's
+#   addendum), so this edge is unix-effective only.
 rustix = { version = "1", features = ["fs"] }
 
 # Target-file watching (spec 5.7) needs `notify-debouncer-full`; it is not
@@ -62,3 +63,20 @@ dunce = "1"
 # name builders of `backup_name` and the incremental SHA-256 of `hash` —
 # fs hashes through core and never names `sha2` itself).
 eunomia-core = { path = "../eunomia-core" }
+
+# --- Windows free-space probe (free_space, spec 9.4 phase 1) ------------
+# `GetDiskFreeSpaceExW` answers the same §9.4 question as the unix
+# `statvfs` probe above: the bytes available to the caller on the volume
+# of the data directory. Owner-sanctioned in chat (2026-11-19) as the
+# resolution of D-089's escalation (see the D-089 addendum; the §5.2 fs
+# row as amended in docs commit 332fc8b sanctions exactly this call).
+# windows-sys 0.61.2 is already in Cargo.lock via the tauri stack, so the
+# direct edge adds zero new crates; target-gated so Linux and macOS
+# builds do not resolve it (the `[dependencies]` block above is
+# untouched). `Win32_Storage_FileSystem` is the only feature gate needed:
+# `GetDiskFreeSpaceExW` lives in
+# `windows_sys::Win32::Storage::FileSystem`, and the `BOOL`/`PCWSTR`
+# types it references come from `windows_sys::core`, which is not
+# feature-gated.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
