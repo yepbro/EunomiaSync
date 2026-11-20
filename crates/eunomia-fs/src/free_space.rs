@@ -783,7 +783,7 @@ mod tests {
         let wide = wide_path(Path::new("C:\\\u{0416}"));
         assert_eq!(
             wide,
-            [0x0043, 0x005C, 0x0416, 0],
+            [0x0043, 0x003A, 0x005C, 0x0416, 0],
             "non-ASCII text must arrive as UTF-16 units, not widened UTF-8 bytes"
         );
     }
