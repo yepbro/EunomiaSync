@@ -1,0 +1,13 @@
+{
+  "app": {
+    "title": "EunomiaSync",
+    "versionLine": "v{version}",
+    "tagline": "Click on the Tauri, Vite, and Vue logos to learn more.",
+    "logoAlt": {
+      "vite": "Vite logo",
+      "tauri": "Tauri logo",
+      "vue": "Vue logo"
+    },
+    "trackedProjects": "no projects tracked yet | {count} project tracked | {count} projects tracked"
+  }
+}

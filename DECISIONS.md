@@ -9117,3 +9117,141 @@ rollback; stabilized corrupt-cell propagation through the
 `ignore_check_constraints` seam) and 2 unit + 4 integration in
 `tests/temp_repos.rs` (naming, unsafe labels, layout, canonical
 keys, the scan finding every root, teardown, empty fixture).
+
+### D-110 — vue-i18n 11 with the in-repo `eunomia/no-raw-ui-text` lint gate; pipe plurals as UI-020's "ICU plurals" — 2026-11-20
+
+Problem: UI-020 (spec §11.5) requires vue-i18n with an `en.json` catalog
+of dotted feature keys, pluralization ("ICU plurals"), and — per the
+card's acceptance criteria — a linter or test that catches a template
+string that is not going through a key. Three decisions were open: the
+vue-i18n version, the plural format reading, and the enforcement
+mechanism (`vue/no-raw-text` was suggested, but eslint-plugin-vue 10.12.1
+ships no such rule — verified against the installed package's 256-rule
+list; the rule of that name lives in `@intlify/eslint-plugin-vue-i18n`,
+an extra dependency outside the card's vue-i18n-only allow-list).
+
+Solution (T-142):
+
+- **Dependency.** `vue-i18n@^11.4.23` (dependencies) — the current v11
+  stable line on the registry (`latest` dist-tag), peer `vue ^3.0.0`,
+  `node >= 22` (the repo pins node 22/pnpm 12). v12 is alpha-only; v9/v10
+  lines carry `legacy9`/`legacy10` dist-tags. Composition API mode
+  (`legacy: false`), one instance in `src/i18n/index.ts`, installed in
+  `main.ts`; components use `useI18n()`, no global `$t` reliance.
+- **Catalog and keys.** `src/locales/en.json`, nested namespaces per UI
+  feature reached as dotted paths (UI-020's `project.settings.title`
+  convention): `app.*` for the shell today (title, version line,
+  tagline, logo alts, tracked-projects plural), later screens add their
+  own namespaces. The catalog generic (`MessageSchema = typeof en`)
+  feeds vue-i18n's key autocomplete only — its `t()` accepts any string,
+  so unknown keys are NOT a compile error; typo protection is behavioral:
+  a catalog-coverage test asserts every `t('…')` literal in `.vue`
+  templates exists (`te(key)`), and App.spec pins the rendered tagline
+  and alts (a missing key renders as the literal key string, warned
+  only). `en` is the single locale and the fallback; NFR-004…006's
+  backend error texts will resolve against this same catalog when their
+  `message_key` consumers land.
+- **Plurals.** vue-i18n's pipe-separated plural forms (`zero | one |
+other` for English, `{count}` interpolation, count passed as the
+  plural choice) — vue-i18n's CLDR plural-rule message format, which is
+  the tool-native reading of UI-020's "ICU plurals"; adopting ICU
+  MessageFormat syntax literally would need an extra message-compiler
+  dependency outside the allow-list. The working UI-visible example is
+  the tracked-projects line in App.vue: count from `projects_list`
+  through the ipc facade, rendered with
+  `t('app.trackedProjects', { count: n(projectCount) }, projectCount)` —
+  the explicit numeric argument selects the plural form, `n()` formats
+  the interpolated count.
+- **The lint gate.** A custom rule, `eunomia/no-raw-ui-text`
+  (`src/i18n/no-raw-ui-text.ts`, registered in eslint.config.js for
+  `**/*.vue`): a template text node containing any Unicode letter or
+  digit is a violation — punctuation/symbols are layout — and so is the
+  literal of a user-facing attribute (`alt`, `title`, `placeholder`,
+  `label`, `aria-label`, `aria-placeholder`, `aria-description`,
+  `aria-roledescription`, `aria-valuetext`, `aria-braillelabel`,
+  `aria-brailleroledescription`, plus `value` on submit-style inputs,
+  where the browser renders it as the control's label) and an
+  interpolation or bound expression that shows bare literal copy —
+  `{{ 'Save' }}`, `{{ 'Sa' + 've' }}`, ``{{ `Save` }}``,
+  `{{ t('k') + ' — Beta' }}`, `:title="'Save'"`: only `+`
+  concatenations, template literals and lone literals are walked, and
+  everything inside a `t`/`n`/`$t` call counts as translation data, so
+  comparisons (`x === 'en'`) and filter calls never fire; bound key
+  expressions (`:alt="t('…')"`) are the sanctioned form. A copy prefix
+  around an interpolation (`v{{ version }}` — text-node half — or
+  ``{{ `v${version}` }}`` — expression half) is caught too, which is
+  why the version line moved into the `app.versionLine` message with a
+  `{version}` placeholder. Options `ignorePattern`/`ignoreText` exist
+  for the day a genuinely text-like literal needs an exemption. Known
+  limit, accepted: copy computed in `<script setup>` and rendered via
+  `{{ label }}` is invisible to this template-only rule, and so is copy
+  smuggled through non-copy expression shapes (method calls returning
+  literals, ternary arms); the catalog-coverage test catches the typo
+  half, and a script-side scan would be its own rule if real screens
+  start doing it. eslint.config.js
+  imports the rule with an explicit `.ts` extension — Node's type
+  stripping (default since Node 22.18; CI floats `node-version: 22`,
+  local is 22.23) loads it at lint time, and vue-tsc checks the rule
+  file itself (under `src/`); the config file belongs to no tsconfig
+  project, so its import is unchecked wiring (verified end to end:
+  eslint red on a planted raw string, green after removal).
+- **The keyed/unkeyed boundary.** Not keyed, by design: mock-layer and
+  fixture data (`src/ipc/**` — project names, journal actions, error
+  message keys — data the UI renders, not UI chrome), the generated
+  `src/bindings.ts`, `index.html` (plain HTML, no Vue template; the
+  window title is Tauri's), URLs, CSS classes, and code identifiers.
+  The rule scans `.vue` templates only, which matches that boundary.
+- **Tests.** `src/i18n/no-raw-ui-text.spec.ts` pins the rule red/green
+  with ESLint RuleTester (the card's "red example": a raw template
+  string must fail; also the copy-prefix, attribute-literal,
+  expression-literal and submit-input `value` cases, plus both exemption
+  valves and a non-matching `ignorePattern`) and the eslint.config.js
+  wiring (rule present at error severity for `**/*.vue`, guarded by a
+  `@ts-expect-error` import of the JS config — no declaration file by
+  design); `src/i18n/i18n.spec.ts` pins nested keys, named
+  interpolation, the 0/1/2/5 plural forms, the `n()`-formatted count at
+  the message level, and the catalog coverage over every `t('…')`
+  literal in `.vue` templates; `App.spec.ts` mounts through the i18n
+  plugin and proves the plural line end to end over the mock facade with
+  exactly 1/2/5/0 active projects, an active-vs-archived counting case
+  (3 rows, 2 archived → "1 project tracked"), and the rendered tagline
+  and alts (per-test `resetMockState` worlds). The T-141
+  mock layer is untouched — all its suites stay green; e2e assertions
+  (title, heading text, `v\d` version line) keep holding because the
+  keyed rendering produces the same strings.
+
+Review: two rounds — findings and fixes in `.opencode/reviews/t142-round*.md`
+(owner-local). Round 1 (deepseek-v4.1-flash): no P0/P1; 2 × P2, 5 × P3,
+all applied. P2-1 — the "typed catalog" claim was false (vue-i18n's `t`
+accepts any string, so a key typo passed lint, typecheck and every
+test): the claim is corrected here and in `src/i18n/index.ts`, and the
+real guards added (the catalog-coverage `te()` test and the tagline/alt
+assertions in App.spec). P2-2 — the rule missed string literals inside
+template expressions (`{{ 'Save' }}`, `:title="'Save'"`): the
+`VExpressionContainer` literal case added with red/green pins; the
+script-side constant remains a documented known limit. P3s applied:
+`aria-valuetext`/braille attributes and submit-input `value` joined the
+attribute set (with text-input/option non-cases pinned); the
+`ignorePattern`/`ignoreText` exemption valves are tested (including a
+non-matching pattern); the plural tests gained an archived-rows case
+that separates counting active from counting everything; the eslint
+config comment now states the real Node floor (type stripping default
+since 22.18) and drops the incorrect `allowImportingTsExtensions`
+rationale (the config belongs to no tsconfig project); the count
+interpolates through the composer's `n()` ("1,000 projects tracked",
+pinned). Declined: reconciling spec §12's dangling NFR-004…006 IDs —
+`docs/spec.md` is outside this task's file scope (a docs card material).
+Round 2 (hy4-flash-free): no P0/P1/P2; 4 × P3, all applied. The
+submit-input `value` check compared the element's source-cased
+`rawName` (an uppercase `<INPUT type="submit">` slipped by) — it now
+compares the parser's lowercased `name`, with an uppercase red pin;
+the expression gate only fired on literal roots (`t('k') + ' — Beta'`,
+`'Sa' + 've'`, `` `Save` `` passed clean) — the visitor now walks the
+narrow copy-only shapes (`+` chains, template literals, lone literals,
+skipping `t`/`n`/`$t` call subtrees), with red pins for all three forms
+plus `` `v${version}` `` and green pins for comparisons/filters; the
+catalog-coverage scan read raw sources (a `t('…')` mention inside a
+comment counted as a usage) — comments are stripped before matching and
+the raw-scan intent plus its false-negative surface (aliased `t`,
+dynamic keys) documented in the spec; D-110's plural call form was a
+wrong shorthand (`t(key, n)`) — it now quotes the real expression.

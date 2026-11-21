@@ -63,6 +63,27 @@ pnpm e2e                              # Playwright, mock-backed (playwright.conf
 Components never call `invoke()` directly and never import
 `src/bindings.ts` — everything goes through `src/ipc` (D-003).
 
+## Localization
+
+The UI is localized with vue-i18n (spec UI-020): one catalog per locale
+under `src/locales/` (`en.json` today — the app's single locale), wired in
+Composition API mode (`legacy: false`) by `src/i18n/index.ts`. Keys live
+in a nested namespace per UI feature (`app.title`,
+`app.trackedProjects`; later screens add `project.*`, `library.*`, …),
+pluralization uses vue-i18n's pipe plural forms (`zero | one | other`
+for English), parameters interpolate as `{name}`, and counts go through
+the composer's `n()` so numbers format per locale (1,000).
+
+Every user-visible string in a `.vue` template must come from a key: the
+`eunomia/no-raw-ui-text` ESLint rule (eslint.config.js) fails lint on
+raw template text, on literals of user-facing attributes (`alt`,
+`title`, `placeholder`, `aria-label`, …), and on string-literal
+interpolations (`{{ 'Save' }}`) — including copy prefixes around
+interpolations like `v{{ version }}` (use a message with a placeholder
+instead). The rule is pinned by `src/i18n/no-raw-ui-text.spec.ts`, and
+key typos (a missing key renders as the literal key string) are caught
+by the catalog-coverage test in `src/i18n/i18n.spec.ts`.
+
 ## License
 
 EunomiaSync is dual-licensed under your choice of:

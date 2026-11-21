@@ -3,12 +3,24 @@
 // `commands` live in src/bindings.ts; no component calls invoke()
 // directly). The mock backend — same facade, fixture data, no Rust — is
 // one flag away: VITE_IPC_MOCK=1 (README → "Development without Rust").
+//
+// All user-visible strings come from the i18n catalog (`src/locales/`,
+// UI-020): `t('app.title')` etc., with the pluralized project count as
+// the working pipe-plural example (`app.trackedProjects`). The
+// `eunomia/no-raw-ui-text` lint rule keeps raw copy out of templates.
 import { onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { ipc } from './ipc'
+
+const { t, n } = useI18n()
 
 // The About-window facts (§7.10 `app_info`); the version line proves the
 // IPC chain end to end — facade → backend → typed wire DTO.
 const version = ref<string | null>(null)
+
+// Active projects (§7.10 `projects_list`) — drives the pluralized count
+// line. `null` while unanswered (or no backend): the line stays hidden.
+const projectCount = ref<number | null>(null)
 
 onMounted(async () => {
   try {
@@ -18,31 +30,40 @@ onMounted(async () => {
     // keep the shell rendered rather than half-crashed.
     version.value = null
   }
+  try {
+    projectCount.value = (await ipc.commands.projectsList(false)).length
+  } catch {
+    projectCount.value = null
+  }
 })
 </script>
 
 <template>
   <main class="container">
-    <h1>EunomiaSync</h1>
-    <p v-if="version" class="version">v{{ version }}</p>
+    <h1>{{ t('app.title') }}</h1>
+    <p v-if="version" class="version">{{ t('app.versionLine', { version }) }}</p>
+    <p v-if="projectCount !== null" class="projects">
+      {{ t('app.trackedProjects', { count: n(projectCount) }, projectCount) }}
+    </p>
 
     <div class="row">
       <a href="https://vite.dev" target="_blank">
-        <img src="/vite.svg" class="logo vite" alt="Vite logo" />
+        <img src="/vite.svg" class="logo vite" :alt="t('app.logoAlt.vite')" />
       </a>
       <a href="https://tauri.app" target="_blank">
-        <img src="/tauri.svg" class="logo tauri" alt="Tauri logo" />
+        <img src="/tauri.svg" class="logo tauri" :alt="t('app.logoAlt.tauri')" />
       </a>
       <a href="https://vuejs.org/" target="_blank">
-        <img src="./assets/vue.svg" class="logo vue" alt="Vue logo" />
+        <img src="./assets/vue.svg" class="logo vue" :alt="t('app.logoAlt.vue')" />
       </a>
     </div>
-    <p>Click on the Tauri, Vite, and Vue logos to learn more.</p>
+    <p>{{ t('app.tagline') }}</p>
   </main>
 </template>
 
 <style scoped>
-.version {
+.version,
+.projects {
   margin: 0 0 0.5em;
   opacity: 0.6;
 }
