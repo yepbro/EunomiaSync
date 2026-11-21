@@ -14,6 +14,13 @@
 //! `dialog_pick_folder`, `project_add_manual`, `exclusions_list`,
 //! `exclusion_remove`, `projects_reorder`.
 //!
+//! Since T-105 the three project-*changing* commands
+//! (`project_add_manual`, `exclusion_remove`, `projects_reorder`)
+//! run the SYS-005 gate first: while a sync holds the global
+//! `sync_running` flag (SYS-004, `sync_running.rs`), they answer the
+//! typed `E_SYNC_RUNNING` refusal and write nothing — see
+//! [`reject_during_sync`].
+//!
 //! Every command returns `Result<T, AppError>` (§7.10) and is generic
 //! over the Tauri runtime — the documented tauri-specta shape for
 //! commands that take an [`AppHandle`], which is also what lets the
@@ -75,6 +82,7 @@ use crate::logging;
 use crate::markdown;
 use crate::recovery::{self, DbBackupInfo};
 use crate::session_paths;
+use crate::sync_running;
 
 use eunomia_core::project::{Color, ProjectId};
 use eunomia_fs::paths::NotARepoError;
@@ -526,6 +534,96 @@ pub(crate) fn managed_db<R: Runtime>(app: &AppHandle<R>) -> Result<Db, AppError>
             });
             error
         })
+}
+
+/// The §7.10 envelope of the `E_SYNC_RUNNING` refusal (§10's row:
+/// "A second run, or a project edit during a sync" → "Command
+/// rejected"): the code with its default `message_key`, empty params
+/// and no details. Empty on purpose: the §10 row names no path,
+/// project or field for this situation — the message is the same
+/// "a sync is in progress, wait for it to finish" whatever the
+/// command was — and there is no OS fact to attach (the refusal is a
+/// policy answer, not a failure of the system). `pub(crate)`: the
+/// IPC tests tie this envelope to the seam refusal the sync pipeline
+/// (T-112+) will render the same way.
+pub(crate) fn sync_running_refusal() -> AppError {
+    AppError::new(ErrorCode::SyncRunning)
+}
+
+/// The managed global flag, with the honest missing-state answer (the
+/// `managed_db`/`managed_session` shape): the state is managed by
+/// `setup` before anything that could fail, so its absence is an
+/// uninitialized-app bug — the recorded D-037 fallback with a
+/// diagnostic naming it, not a panic, and not a silently-permissive
+/// gate. The returned [`tauri::State`] derefs to `&SyncRunning`, so
+/// callers use the seam directly.
+fn managed_sync_flag<'a, R: Runtime>(
+    app: &'a AppHandle<R>,
+) -> Result<tauri::State<'a, sync_running::SyncRunning>, AppError> {
+    app.try_state::<sync_running::SyncRunning>().ok_or_else(|| {
+        let mut error = AppError::new(ErrorCode::DbLocked);
+        error.details = Some(ErrorDetails {
+            os_code: None,
+            os_kind: Some("SyncRunningMissing".to_owned()),
+            os_message: Some("the sync-running flag was not managed at startup".to_owned()),
+        });
+        error
+    })
+}
+
+/// The SYS-004 start seam: what the future `sync_run` command
+/// (T-112+) calls as §9.4 phase 0 step 1 — "atomically take
+/// `sync_running`; otherwise `E_SYNC_RUNNING`". `Ok` carries the
+/// [`sync_running::SyncGuard`] the pipeline holds for the whole run,
+/// snapshot to summary (phase 4 step 5's "Reset `sync_running`" is
+/// the guard's drop); `Err` is the typed refusal already rendered as
+/// the §7.10 envelope through [`sync_running_refusal`] — the one
+/// mapping from the seam's [`sync_running::AlreadyRunning`] marker,
+/// so the second start's wire answer and the commands' gate answer
+/// cannot drift apart (deliberately not a `From`: the errors.rs
+/// no-blanket-conversion rule). The phase-0 snapshot the run then
+/// builds MUST be one `Db::run` read transaction — the
+/// serialization argument in `sync_running.rs`'s module docs rests
+/// on it.
+#[allow(dead_code)] // consumed by the sync-run command task (T-112+); tested today
+pub(crate) fn begin_sync<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<sync_running::SyncGuard, AppError> {
+    // The marker carries no payload; the envelope is the whole wire
+    // answer (see `sync_running_refusal`).
+    managed_sync_flag(app)?
+        .try_acquire()
+        .map_err(|_| sync_running_refusal())
+}
+
+/// The SYS-005 gate every project-*changing* command runs as its
+/// first act: while a sync holds the global `sync_running` flag
+/// (SYS-004), the command answers the typed `E_SYNC_RUNNING`
+/// refusal instead of mutating — "commands that change projects …
+/// return `E_SYNC_RUNNING` during a sync". Today that is
+/// [`project_add_manual`], [`exclusion_remove`] and
+/// [`projects_reorder`] (the mutation commands that exist); the
+/// spec's `project_update`/`project_remove`/`project_relink` and P1
+/// `backup_restore` join this gate as they land. Reads are never
+/// gated (SYS-005 names the changing commands only).
+///
+/// A **check**, not an acquire: only the sync pipeline holds the
+/// guard ([`begin_sync`], `sync_running.rs` module docs) — the flag
+/// means "a sync is running", and a mutation holding it would make
+/// the status lie and block a sync start behind an edit. The check
+/// is a plain atomic load, deliberately the cheapest act of the
+/// command: during a sync the refusal is the answer whatever the
+/// input is (the mode gate precedes per-input validation — SEC-003
+/// for the add flow — which a foreign path still never passes, it
+/// just meets the mode answer first), and a command that slips in
+/// just before a sync starts commits cleanly on either side of the
+/// snapshot: the D-037 executor serializes it against the snapshot
+/// read on the one connection.
+fn reject_during_sync<R: Runtime>(app: &AppHandle<R>) -> Result<(), AppError> {
+    if managed_sync_flag(app)?.is_running() {
+        return Err(sync_running_refusal());
+    }
+    Ok(())
 }
 
 /// The body of [`activity_list`], split from the command wrapper the
@@ -1551,12 +1649,16 @@ pub(crate) struct ExistingProject {
 /// fixed name; §7.1 PRJ-001; scenario S1).
 ///
 /// `path` is the folder the UI's `dialog_pick_folder` answer named,
-/// and the command's first act is the SEC-003 gate on it —
-/// [`session_paths::validate_ui_path`], the T-073/D-100 boundary: a
-/// path that neither canonicalizes onto a registered project nor onto
-/// a folder picked in this session is rejected with `E_VALIDATION`
-/// before anything else runs (a foreign folder never reaches the
-/// `.git` check, the database, or the disk probes).
+/// and the command's first act is the SYS-005 sync gate on it —
+/// while a sync holds `sync_running`, the answer is the typed
+/// `E_SYNC_RUNNING` refusal before anything else runs (see
+/// [`reject_during_sync`]); with the flag down, the SEC-003 gate —
+/// [`session_paths::validate_ui_path`], the T-073/D-100 boundary —
+/// is the first per-input act: a path that neither canonicalizes
+/// onto a registered project nor onto a folder picked in this
+/// session is rejected with `E_VALIDATION` before anything else
+/// runs (a foreign folder never reaches the `.git` check, the
+/// database, or the disk probes).
 ///
 /// The spec flow, in order (S1: "pick a folder, `.git` check,
 /// duplicate check, create the entry with default settings and a
@@ -1596,9 +1698,12 @@ pub(crate) struct ExistingProject {
 ///    and the `project.added` journal entry (LOG-001…004,
 ///    info/user/ok, entity project) **inside the same transaction** —
 ///    a rolled-back add leaves no entry claiming it happened. The
-///    `E_SYNC_RUNNING` guard of SYS-005 does not apply: that rule
-///    lists the project-*editing* commands, and no sync writer exists
-///    yet; the guard joins with the sync-run task.
+///    SYS-005 sync gate runs before the whole flow (the command's
+///    first act above): during a sync the add answers
+///    `E_SYNC_RUNNING` and nothing is written; the spec's own
+///    project-*editing* list (`project_update`,
+///    `project_remove`, `project_relink`, `backup_restore`) joins
+///    the same gate as those commands land.
 /// 5. **Write-access warning** (§6.9, T-063/D-094): after the commit,
 ///    [`eunomia_fs::write_access::check_write_access`] over the
 ///    root's future target file, on the blocking pool (never inside
@@ -1631,6 +1736,13 @@ async fn project_add_manual_impl<R: Runtime>(
     path: String,
     accept_repo_root: Option<bool>,
 ) -> Result<ProjectAddResult, AppError> {
+    // SYS-005 (§5.4): the mode gate runs before everything — while a
+    // sync holds `sync_running`, the add is refused with
+    // `E_SYNC_RUNNING` whatever the input is (see
+    // `reject_during_sync`; the SEC-003 gate below is the input gate
+    // and still never lets a foreign folder through — during a sync
+    // the foreign path simply meets the mode answer first).
+    reject_during_sync(&app)?;
     // SEC-003 (§5.6): the input gate. The canonical form comes back
     // from the check; the walk below then re-resolves that
     // already-canonical form (its own first step, D-086) — idempotent
@@ -2116,7 +2228,10 @@ async fn exclusions_list_impl<R: Runtime>(
 /// state behind, so a retry after a refresh is always safe (the
 /// make-operations-idempotent rule: the store's `delete_exclusion`
 /// owns the same rule one layer down — an absent row deletes
-/// nothing).
+/// nothing). While a sync holds the global `sync_running` flag, the
+/// removal is refused up front with the typed `E_SYNC_RUNNING`
+/// envelope instead (SYS-005, [`reject_during_sync`]) — nothing is
+/// written, and the screen's retry after the run ends converges.
 ///
 /// One transaction (D-037/D-051, §6.9 "the whole operation runs in
 /// one transaction"): the by-id lookup through the repository's
@@ -2156,6 +2271,11 @@ pub(crate) async fn exclusion_remove<R: Runtime>(
 /// The body of [`exclusion_remove`], split so the one logging edge
 /// covers every failure path (the `activity_list` shape).
 async fn exclusion_remove_impl<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), AppError> {
+    // SYS-005 (§5.4): a path exclusion is a project-changing write —
+    // while a sync holds `sync_running`, the removal is refused with
+    // `E_SYNC_RUNNING` before the database is even resolved (see
+    // `reject_during_sync`).
+    reject_during_sync(&app)?;
     let database = managed_db(&app)?;
     database
         .run(move |transaction| {
@@ -2388,7 +2508,11 @@ fn rejected_reorder(forms: &ReorderForms, sent: usize) -> AppError {
 /// passing validation (one connection serializes the read and the
 /// write, D-037) but is mapped through the same refusal if it ever
 /// fires anyway — convergence, never a masked conflict (the D-103
-/// duplicate-race rule).
+/// duplicate-race rule). While a sync holds the global `sync_running`
+/// flag, the drag is refused before any of this with the typed
+/// `E_SYNC_RUNNING` envelope (SYS-005, [`reject_during_sync`]) — the
+/// table is untouched, and the UI's re-send after the run ends
+/// converges on the then-current order.
 ///
 /// Failures reach the log with their §10 code
 /// ([`logging::projects_reorder_failed`]); a successful reorder is the
@@ -2411,6 +2535,11 @@ async fn projects_reorder_impl<R: Runtime>(
     app: AppHandle<R>,
     ordered_ids: Vec<String>,
 ) -> Result<(), AppError> {
+    // SYS-005 (§5.4): the column order is project-changing state —
+    // while a sync holds `sync_running`, the drag is refused with
+    // `E_SYNC_RUNNING` before the database is even resolved (see
+    // `reject_during_sync`); the UI re-sends it when the run ends.
+    reject_during_sync(&app)?;
     let database = managed_db(&app)?;
     database
         .run(move |transaction| {

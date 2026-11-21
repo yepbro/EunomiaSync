@@ -62,6 +62,13 @@ pub(crate) mod markdown;
 // session diff cache, and the startup/focus triggers wired below.
 pub(crate) mod availability;
 
+// The global `sync_running` flag (spec §5.4 SYS-004/MAIN-030, §9.4
+// phase 0/phase 4, §10's `E_SYNC_RUNNING` row; T-105): the atomic
+// take-once flag the future sync pipeline (T-112+) acquires at its
+// start and releases by RAII at its finish, plus the status read the
+// project-changing commands' SYS-005 gate checks.
+pub(crate) mod sync_running;
+
 // The dirty-flag recalculation service (spec §7.10's `state://dirty`
 // event; DB-021/DB-022's three recalculation points; T-101): the
 // DB-021 verdict over the T-100 snapshot, the session diff cache, the
@@ -268,6 +275,18 @@ pub fn run() {
             // mode (recovery included: no database is involved in
             // opening a picker).
             app.manage(session_paths::SessionPaths::new());
+
+            // The global sync-running flag (SYS-004/MAIN-030, T-105):
+            // taken atomically by the future sync pipeline's start
+            // (§9.4 phase 0 step 1), released by the guard's RAII drop
+            // at its finish (phase 4 step 5), and read by the
+            // project-changing commands' SYS-005 gate. Managed here
+            // for the same reason as the allowlist — infallible,
+            // needed in every mode: the gate runs before the
+            // `managed_db` honest-recovery answer, so the flag state
+            // must exist even in recovery mode, where no sync can run
+            // (no database) and the flag simply stays down.
+            app.manage(sync_running::SyncRunning::new());
 
             // The availability session cache (D-09/DB-032, T-079):
             // the last D-084 verdicts per active project, plus the

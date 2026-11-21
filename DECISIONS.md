@@ -10661,3 +10661,150 @@ checklist. The rules deliberately duplicate nothing governed by the
 global AGENTS.md (the DECISIONS duty, one commit per task, check
 gates); each rule is phrased to be checkable at review. This entry is
 the traceable link the section cites back to.
+
+### D-123 — The global `sync_running` flag: take-once atomic + RAII guard as managed state, and the SYS-005 gate as a check (not a hold) in front of the three project-mutation commands — 2026-11-21
+
+Problem: T-105 turns SYS-004/MAIN-030 (§5.4) into code: parallel
+syncs are impossible — the global `sync_running` flag is taken
+atomically, a second start answers `E_SYNC_RUNNING` (§9.4 phase 0
+step 1, released at phase 4 step 5) — and SYS-005 makes the
+project-changing commands answer the same typed §10 refusal while a
+sync runs. Four points were open: who owns the flag and how it
+survives a panicking or cancelled run; whether the gated commands
+take the flag or only read it; where the gate sits in each command's
+act order; and what the refusal's §7.10 envelope carries.
+
+Solution: `src-tauri/src/sync_running.rs` + the gate in
+`commands.rs`.
+
+- _The flag is the availability slot, pointed at exclusion._
+  `SyncRunning` (managed state, the D-112 service shape) wraps one
+  `Arc<SyncFlag { AtomicBool }>`; `try_acquire` is a
+  `compare_exchange(false, true, AcqRel, Acquire)` — the atomicity
+  IS the mutual exclusion — and returns the RAII `SyncGuard`, whose
+  `Drop` stores `false` with `Release`. The guard owns an `Arc`
+  (`Send + Sync` by construction), so the future pipeline holds it
+  across `.await`s for the whole run; a panic, an early `?` or a
+  cancelled task unwinds through the same drop, so the flag can
+  never stay "running" behind a dead pipeline. `is_running()` is
+  the read-side status; `try_acquire` is the tested-today/
+  consumed-later seam for T-112+ (the `errors.rs` posture, with
+  `#[allow(dead_code)]`) — no sync writer exists yet.
+- _Typed refusal, envelope at the boundary._ `try_acquire` answers
+  `Result<SyncGuard, AlreadyRunning>` — a marker type, not a wire
+  value; `commands::begin_sync(app)` is the app-layer start seam
+  (§9.4 phase 0 step 1) the future `sync_run` command calls, and
+  `commands::sync_running_refusal()` renders the §7.10 envelope
+  (`AppError::new(SyncRunning)`) — the one mapping from the marker,
+  shared by the seam and the gate so the two answers cannot drift.
+  Params empty and details `None`, on purpose: the §10 row names no
+  path, project or field for this situation, and the refusal is a
+  policy answer, not an OS failure. `pub(crate)` so the IPC tests
+  pin seam and wire form to each other.
+- _The gate is a check, not a hold._ Only the sync pipeline ever
+  holds the guard: the flag means "a sync is running", so a mutation
+  holding it would make `is_running` lie and block a sync START
+  behind an edit. `reject_during_sync` loads the flag and answers
+  the refusal when it is up; a command that slips in just before a
+  sync starts commits cleanly on either side of the snapshot — the
+  D-037 executor serializes it against the snapshot read on the one
+  connection, and SYS-005's "stays dirty" half is the dirty-recalc
+  service's (D-121).
+- _The guarded set._ Today exactly the three mutation commands that
+  exist: `project_add_manual`, `exclusion_remove`, `projects_reorder`
+  — reads (`projects_list`, `exclusions_list`, settings, history)
+  are never gated (SYS-005 names the changing commands only); the
+  spec's own `project_update`/`project_remove`/`project_relink`/
+  `backup_restore` join the gate as those commands land. The T-074
+  doc claim "the guard does not apply" is superseded here.
+- _Order: the mode gate is the first act._ Before SEC-003 for the
+  add flow and before `managed_db` for the other two: during a sync
+  the refusal is the answer whatever the input is; SEC-003's
+  invariant (a foreign folder never reaches the `.git` check, the
+  database, the probes) holds either way — pinned by a test where a
+  never-picked path meets `E_SYNC_RUNNING`, not `E_VALIDATION`.
+- _Missing state is the `managed_session` answer._ The flag is
+  managed by `setup` before anything that could fail (needed in
+  every mode: the gate runs before the honest recovery-mode
+  `NoDatabase` answer); its absence is an uninitialized-app bug —
+  the D-037 fallback with a `SyncRunningMissing` diagnostic, never a
+  panic and never a silently-permissive gate. The healthy-app and
+  no-database IPC fixtures now manage the state (they model the app
+  `setup` builds); recovery mode is not reinterpreted — with no
+  database no sync can run, the flag stays down, the commands keep
+  their `NoDatabase` answers.
+- _Envelope rendering stays in the existing logging edges._ The
+  refusal flows through each command's `inspect_err` edge
+  (`project_add_failed`/`exclusion_remove_failed`/
+  `projects_reorder_failed`); their facade docs now list
+  `E_SYNC_RUNNING` among the reachable §10 answers.
+
+Tests: 3 unit tests in `sync_running.rs` (take-once/hold/release;
+the panic unwind frees the flag via `catch_unwind`; 8 parallel
+starts elect exactly one winner — deterministic two-barrier overlap,
+no sleep) and 7 IPC tests in `ipc_tests.rs` (the card's criterion
+through the `begin_sync` production seam — first `Ok`, the second
+start's refusal serialized against a spec-literal JSON, so the
+marker→envelope mapping cannot drift; per-command refusal under an
+externally-held `begin_sync` guard with the read side proven alive
+(`exclusions_list` and `projects_list`), the tables proven
+untouched, and the same call converging after the drop; the add
+flow's gate-before-SEC-003 ordering (a never-picked path meets
+`E_SYNC_RUNNING`, not `E_VALIDATION`); the gate's honest
+missing-state answer (`SyncRunningMissing`) with the database
+present, pinning the gate-before-`managed_db` ordering; and a
+`lib.rs` manage-line marker pin — without it, dropping the setup
+`manage` left every suite green). `src/bindings.ts` re-exported
+(doc-mirror only, D-034/D-118 — no command signature changed).
+
+Round-1 review (deepseek-v4.1-flash) — REQUEST CHANGES, no P0/P1,
+three P2, two P3; all processed:
+
+- P2-1 taken (missing-state branch and setup wiring untested): the
+  `SyncRunningMissing` fallback had zero coverage and a deleted
+  `manage` line in `lib.rs` stayed green. Added the honest-fallback
+  test (healthy `Db`, no flag state — the `E_DB_LOCKED` can then
+  only come from the gate, pinning the ordering) and the
+  exactly-once `lib.rs` marker pin.
+- P2-2 taken (the criterion was not pinned structurally): the test
+  observed the seam's `is_err()` and separately compared the
+  constructor's output — no production path mapped
+  `AlreadyRunning` to the envelope. Added
+  `commands::begin_sync(app) -> Result<SyncGuard, AppError>` — §9.4
+  phase 0 step 1's app-layer seam for the future `sync_run`
+  command, `#[allow(dead_code)]` like `try_acquire`, mapping the
+  marker through `sync_running_refusal` (no `From`, the errors.rs
+  rule) — and the criterion now drives it twice, the second
+  refusal asserted against the spec literal. The per-command
+  helpers hold the flag through the same seam.
+- P2-3 taken (the parallel race was sleep-based and could flake):
+  rewritten with two `Barrier`s — everyone attempts between them,
+  the winner cannot drop before all have attempted. The rewrite
+  immediately caught its own first draft reproducing the
+  availability slot's round-1 trap verbatim: an `if let Ok(_guard)`
+  body scope drops the winner's guard before the barrier (8
+  winners); the guard binding now lives to an explicit `drop`
+  after the barrier (project rule 7 — a guard protects its whole
+  region).
+- P3-1 taken (`projects_list` not proven alive under the flag):
+  added the read-half twin of the `exclusions_list` pin.
+- P3-2 taken (the serialization claim rested on an unpinned T-112
+  property): the module docs now state the requirement explicitly —
+  the phase-0 snapshot must be ONE `Db::run` read transaction on
+  the shared connection, or the "either side of the snapshot"
+  argument voids; recorded here as the T-112 calling contract.
+
+Round-2 review (hy4-flash-free) — APPROVE, no P0/P1/P2/P3. All five
+round-1 fixes verified in the committed tree (including the
+`strip_comments` coverage of the marker pin and the happens-before
+of the barrier join); the criterion's spec literal corroborated
+against the pre-existing `errors.rs` pins; the check-not-hold
+serialization argument verified sound against D-037's single
+`Arc<Mutex<Connection>>`. One non-blocking low-confidence
+observation (a future refactor could extract the spec-literal JSON
+into one shared fixture to make the two-step test oracle's
+independence explicit in code) — noted for the T-112 task, no
+change now: the chain is sound while the suites live in one binary.
+The round-2 reviewer artifact (`REVIEW-T-105-round2.md`, written
+into the worktree despite the read-only brief) was moved into the
+round-2 report file and deleted from the tree.

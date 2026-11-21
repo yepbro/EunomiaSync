@@ -149,6 +149,20 @@
 //! untouched, the corrupt-cell fallback, the empty and single-column
 //! boundaries, the honest no-database answer, and the registration
 //! pin.
+//!
+//! The `sync_running` gate tests (T-105, §5.4 SYS-004/SYS-005, §7.4
+//! MAIN-030, §9.4 phase 0/phase 4, §10 `E_SYNC_RUNNING`) drive the
+//! global flag through the acquire seam the future sync pipeline
+//! (T-112+) will call: the card's criterion (a second start while
+//! one runs is refused, and the refusal renders as the §7.10
+//! `E_SYNC_RUNNING` envelope the commands answer with), each
+//! project-changing command refused while an externally-held guard
+//! keeps the flag up — with the read side proven alive, the tables
+//! proven untouched, and the same call converging once the guard
+//! drops — and the add flow's gate ordering (the mode gate precedes
+//! SEC-003: during a sync even a validly-picked path meets
+//! `E_SYNC_RUNNING`). The take-once/RAII/panic/parallel-race halves
+//! of the seam itself live in `sync_running.rs`'s own suite.
 
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -3026,6 +3040,10 @@ fn add_manual_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>)
         .expect("failed to build mock app");
     app.manage(database);
     app.manage(crate::session_paths::SessionPaths::new());
+    // The SYS-005 gate state the healthy app manages at startup
+    // (T-105): without it the add flow would meet the gate's honest
+    // missing-state fallback instead of the real path under test.
+    app.manage(crate::sync_running::SyncRunning::new());
     (temp, app)
 }
 
@@ -3824,6 +3842,10 @@ fn project_add_manual_answers_honestly_without_a_database() {
         .build(mock_context(noop_assets()))
         .expect("failed to build mock app");
     app.manage(crate::session_paths::SessionPaths::new());
+    // The SYS-005 gate state recovery mode also manages (T-105) —
+    // the honest no-database answer below must come from
+    // `managed_db`, not from the gate's missing-state fallback.
+    app.manage(crate::sync_running::SyncRunning::new());
     let repo = repo_dir(temp.path(), "recovery-repo");
     let picked = pick_folder(&app, &repo);
     let webview = main_webview(&app);
@@ -3877,6 +3899,9 @@ fn exclusions_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>)
         .build(mock_context(noop_assets()))
         .expect("failed to build mock app");
     app.manage(database);
+    // The SYS-005 gate state the healthy app manages at startup
+    // (T-105) — the removal under test must meet the real gate.
+    app.manage(crate::sync_running::SyncRunning::new());
     (temp, app)
 }
 
@@ -4285,6 +4310,10 @@ fn the_exclusion_commands_answer_honestly_without_a_database() {
         ])
         .build(mock_context(noop_assets()))
         .expect("failed to build mock app");
+    // The SYS-005 gate state recovery mode also manages (T-105): the
+    // honest `NoDatabase` answers below must come from `managed_db`,
+    // not from the gate's missing-state fallback.
+    app.manage(crate::sync_running::SyncRunning::new());
     let webview = main_webview(&app);
     let error =
         invoke_exclusions_list(&webview).expect_err("the no-database state must fail honestly");
@@ -5069,6 +5098,9 @@ fn reorder_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
         .build(mock_context(noop_assets()))
         .expect("failed to build mock app");
     app.manage(database);
+    // The SYS-005 gate state the healthy app manages at startup
+    // (T-105) — the reorder under test must meet the real gate.
+    app.manage(crate::sync_running::SyncRunning::new());
     (temp, app)
 }
 
@@ -5706,6 +5738,10 @@ fn projects_reorder_answers_honestly_without_a_database() {
         .invoke_handler(tauri::generate_handler![crate::commands::projects_reorder])
         .build(mock_context(noop_assets()))
         .expect("failed to build mock app");
+    // The SYS-005 gate state recovery mode also manages (T-105): the
+    // honest `NoDatabase` answer below must come from `managed_db`,
+    // not from the gate's missing-state fallback.
+    app.manage(crate::sync_running::SyncRunning::new());
     let error = invoke_projects_reorder(
         &main_webview(&app),
         &["0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f"],
@@ -5727,4 +5763,302 @@ fn the_projects_reorder_command_is_registered_with_the_specta_builder() {
         1,
         "lib.rs must register the `projects_reorder` command exactly once (§7.10, D-009)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The `sync_running` gate (T-105, §5.4 SYS-004/SYS-005, §7.4 MAIN-030,
+// §9.4 phase 0/phase 4, §10 `E_SYNC_RUNNING`)
+// ---------------------------------------------------------------------------
+
+/// The wire form of the `E_SYNC_RUNNING` refusal the three
+/// per-command tests compare their errors against — the §7.10
+/// envelope `sync_running_refusal` builds. The chain is anchored, not
+/// circular: the criterion test above pins this envelope to a
+/// spec-literal JSON, so a command answering anything else (or the
+/// constructor drifting) turns one of the two red.
+fn sync_running_envelope() -> serde_json::Value {
+    serde_json::to_value(crate::commands::sync_running_refusal())
+        .expect("serializing the refusal envelope must work")
+}
+
+/// Holds "a sync is running" for a test's duration: the guard taken
+/// through `begin_sync` — the same start seam the sync pipeline
+/// (T-112+) calls — dropped at the end of the scope, §9.4 phase 4
+/// step 5's release (the availability suite's externally-held-slot
+/// shape: two real syncs racing for the flag cannot be made
+/// deterministic).
+fn held_sync_flag(app: &tauri::App<tauri::test::MockRuntime>) -> crate::sync_running::SyncGuard {
+    crate::commands::begin_sync(app.app_handle()).expect("the test's flag must be free to take")
+}
+
+#[test]
+fn the_second_sync_start_is_refused_with_e_sync_running() {
+    // The card's criterion through the production start seam: the
+    // first `begin_sync` takes the flag (a guard comes back), and
+    // the SECOND — the parallel start SYS-004 forbids — is refused
+    // with exactly the §7.10 `E_SYNC_RUNNING` envelope the gated
+    // commands answer with (asserted against a spec-literal JSON,
+    // not the constructor's own output, so the mapping cannot drift
+    // from the wire form). No command is invoked here (the
+    // `availability_app` shape — the seam test needs only the
+    // managed state).
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(crate::sync_running::SyncRunning::new());
+
+    let first =
+        crate::commands::begin_sync(app.app_handle()).expect("the first start must take the flag");
+    let error = crate::commands::begin_sync(app.app_handle())
+        .expect_err("a second start while one runs must be refused");
+    assert_eq!(
+        serde_json::to_value(&error).expect("serializing the refusal must work"),
+        serde_json::json!({
+            "code": "E_SYNC_RUNNING",
+            "message_key": "errors.sync_running",
+            "params": {},
+            "details": null,
+        }),
+        "the refusal's envelope is the §10/§7.10 wire form"
+    );
+    drop(first);
+    assert!(
+        !app.state::<crate::sync_running::SyncRunning>().is_running(),
+        "the guard's drop resets the flag"
+    );
+}
+
+#[test]
+fn the_gate_answers_the_honest_fallback_without_the_flag_state() {
+    // The uninitialized-app bug the gate answers honestly (the
+    // `the_missing_session_state_answers_the_honest_fallback`
+    // shape): a healthy database but no `SyncRunning` state —
+    // `setup` manages the flag before anything that could fail, so
+    // this state cannot occur in a real launch, and the mutation
+    // commands answer the recorded fallback with a diagnostic naming
+    // it (never a panic, never a silently-permissive gate). The
+    // database being present pins the ordering too: the `E_DB_LOCKED`
+    // here can only come from the gate's missing state, since
+    // `managed_db` would have answered `Ok`.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::exclusions_list,
+            crate::commands::exclusion_remove
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    // Deliberately NOT managing `SyncRunning` — the state under test.
+    let webview = main_webview(&app);
+
+    let error = invoke_exclusion_remove(&webview, "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f")
+        .expect_err("the gate must fail honestly without its state");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"), "{error}");
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("SyncRunningMissing"),
+        "the diagnostic names the state, got {error}"
+    );
+    // The read side never touches the gate: `exclusions_list` answers
+    // the healthy empty list over the healthy database.
+    assert_eq!(
+        invoke_exclusions_list(&webview)
+            .expect("the read needs no gate state")
+            .len(),
+        0
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_sync_running_flag_is_managed_at_startup() {
+    // The setup wiring pin (the `config_tests` marker shape, the
+    // registration pins' rationale): `lib.rs` must manage the flag
+    // exactly once — without this, dropping the `manage` line would
+    // leave every suite green while production turns all three
+    // mutation commands into the missing-state fallback.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("sync_running::SyncRunning::new").count(),
+        1,
+        "lib.rs must manage the sync-running flag exactly once (SYS-004, T-105)"
+    );
+}
+
+#[test]
+fn projects_list_keeps_working_during_a_sync() {
+    // SYS-005's read half (the `exclusions_list` pin's twin): the
+    // columns the matrix renders stay readable while the flag is up
+    // — a UI frozen mid-sync with no data to show would serve
+    // nothing, and no future gate may appear on this read path
+    // without this test going red.
+    let (temp, app) = projects_app();
+    app.manage(crate::sync_running::SyncRunning::new());
+    let database = app.state::<crate::db::Db>().inner().clone();
+    seed_project(
+        &database,
+        repo_dir(temp.path(), "alpha").display().to_string(),
+        "/alpha",
+        "Alpha",
+        "ALP",
+        "red",
+    );
+    let webview = main_webview(&app);
+
+    let _guard = held_sync_flag(&app);
+    let columns = invoke_projects_list(&webview, serde_json::json!(null))
+        .expect("the read must keep working during a sync");
+    assert_eq!(columns.len(), 1, "the column is served from the live read");
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn exclusion_remove_is_refused_during_a_sync_and_recovers_after_it() {
+    // SYS-005 end to end over the real IPC path: while the flag is
+    // up, the removal answers `E_SYNC_RUNNING` and writes nothing
+    // (the row survives), the READ on the same screen keeps working
+    // (reads are never gated), and the moment the run ends the same
+    // call converges — the retry the refusal's "wait until it
+    // finishes" action promises.
+    let (temp, app) = exclusions_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let id = seed_exclusion(
+        &database,
+        temp.path().join("excluded-repo").display().to_string(),
+        "/excluded-repo".to_owned(),
+        eunomia_store::projects::ExclusionReason::Manual,
+    );
+    let webview = main_webview(&app);
+
+    let guard = held_sync_flag(&app);
+    let error = invoke_exclusion_remove(&webview, &id)
+        .expect_err("the removal must be refused during a sync");
+    assert_eq!(error, sync_running_envelope(), "the §10 refusal envelope");
+    assert_eq!(
+        invoke_exclusions_list(&webview)
+            .expect("the read must keep working during a sync")
+            .len(),
+        1,
+        "reads are never gated (SYS-005) and the row was not deleted"
+    );
+
+    drop(guard);
+    invoke_exclusion_remove(&webview, &id).expect("the removal must work once the sync has ended");
+    assert_eq!(
+        invoke_exclusions_list(&webview)
+            .expect("the read must keep working after the sync")
+            .len(),
+        0,
+        "the retried removal converged on the empty table"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn projects_reorder_is_refused_during_a_sync_and_recovers_after_it() {
+    // SYS-005 for the column drag: the refusal carries the envelope,
+    // the table is provably untouched (D-093's window), and the
+    // re-sent order after the run ends still lands.
+    let (temp, app) = reorder_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let first = seed_project(
+        &database,
+        repo_dir(temp.path(), "alpha").display().to_string(),
+        "/alpha",
+        "Alpha",
+        "ALP",
+        "red",
+    );
+    let second = seed_project(
+        &database,
+        repo_dir(temp.path(), "beta").display().to_string(),
+        "/beta",
+        "Beta",
+        "BET",
+        "green",
+    );
+    let webview = main_webview(&app);
+
+    let guard = held_sync_flag(&app);
+    let error = invoke_projects_reorder(&webview, &[second.as_str(), first.as_str()])
+        .expect_err("the reorder must be refused during a sync");
+    assert_eq!(error, sync_running_envelope(), "the §10 refusal envelope");
+    assert_eq!(
+        stored_order(&database),
+        [
+            (first.clone(), 1, "active".to_owned()),
+            (second.clone(), 2, "active".to_owned())
+        ],
+        "the table was not renumbered while the flag was up"
+    );
+
+    drop(guard);
+    invoke_projects_reorder(&webview, &[second.as_str(), first.as_str()])
+        .expect("the reorder must work once the sync has ended");
+    assert_eq!(
+        stored_order(&database),
+        [
+            (second.clone(), 1, "active".to_owned()),
+            (first.clone(), 2, "active".to_owned())
+        ],
+        "the re-sent drag landed after the run ended"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn project_add_manual_is_refused_during_a_sync_before_the_sec003_gate() {
+    // The add flow's gate ordering: the mode gate runs FIRST, so
+    // during a sync even a validly-picked repository path is refused
+    // with `E_SYNC_RUNNING` (it is the flag, not the input, that
+    // answers), and a path from nowhere meets the same mode answer —
+    // SEC-003's invariant holds either way (a foreign folder still
+    // never reaches the `.git` check, the database, or the probes).
+    // After the run ends, the same picked path adds normally.
+    let (temp, app) = add_manual_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let repo = repo_dir(temp.path(), "during-sync-repo");
+    let picked = pick_folder(&app, &repo);
+    let webview = main_webview(&app);
+
+    let guard = held_sync_flag(&app);
+    let error = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect_err("the add must be refused during a sync");
+    assert_eq!(error, sync_running_envelope(), "the §10 refusal envelope");
+    let error =
+        invoke_project_add_manual(&webview, "/nowhere/never-picked", serde_json::json!(null))
+            .expect_err("a foreign path must also meet the mode answer first");
+    assert_eq!(
+        error,
+        sync_running_envelope(),
+        "the mode gate precedes SEC-003 — the refusal is input-independent"
+    );
+    assert!(
+        stored_projects(&database).is_empty(),
+        "no project row was written while the flag was up"
+    );
+
+    drop(guard);
+    let added = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect("the add must work once the sync has ended");
+    assert_eq!(
+        added.outcome, "added",
+        "the retried add after the run ended succeeded"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
 }

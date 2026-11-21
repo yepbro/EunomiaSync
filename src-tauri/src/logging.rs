@@ -764,18 +764,19 @@ pub(crate) fn dialog_pick_folder_failed(error: &AppError) {
 /// The `project_add_manual` command failed (T-074, §10's every-error
 /// rule): the payload is the error's own §7.10 vocabulary, in the
 /// `dialog_pick_folder_failed` shape — the §10 answers the flow can
-/// reach (the `E_VALIDATION` SEC-003 rejection of a path from nowhere,
-/// `E_NOT_A_REPO` for a folder outside any repository,
-/// `E_PROJECT_UNAVAILABLE` for a refused probe, the `E_VALIDATION`
-/// envelope of a §6.9 field, and the store fallbacks). `error` level:
-/// the log line is the failure's durable half. The typed outcomes that
-/// are NOT failures — the repo-root offer, the duplicate message, the
-/// archive-restore offer — are success-shaped responses and
-/// deliberately log nothing (nothing happened; the journal records
-/// events, and a refusal wrote none), and a *successful* add is the
-/// journal's own `project.added` entry, written inside the operation's
-/// transaction (D-051) — never duplicated into the file log (the
-/// info+user+ok unmirrored shape).
+/// reach (the `E_SYNC_RUNNING` SYS-005 refusal while a sync holds
+/// the global flag (T-105), the `E_VALIDATION` SEC-003 rejection of
+/// a path from nowhere, `E_NOT_A_REPO` for a folder outside any
+/// repository, `E_PROJECT_UNAVAILABLE` for a refused probe, the
+/// `E_VALIDATION` envelope of a §6.9 field, and the store fallbacks).
+/// `error` level: the log line is the failure's durable half. The
+/// typed outcomes that are NOT failures — the repo-root offer, the
+/// duplicate message, the archive-restore offer — are success-shaped
+/// responses and deliberately log nothing (nothing happened; the
+/// journal records events, and a refusal wrote none), and a
+/// *successful* add is the journal's own `project.added` entry,
+/// written inside the operation's transaction (D-051) — never
+/// duplicated into the file log (the info+user+ok unmirrored shape).
 pub(crate) fn project_add_failed(error: &AppError) {
     tracing::error!(
         target: "eunomia::projects",
@@ -811,9 +812,10 @@ pub(crate) fn exclusions_list_failed(error: &AppError) {
 
 /// The `exclusion_remove` command failed (T-078, §10's every-error
 /// rule): the `project_add_failed` shape — the reachable §10 answers
-/// are the typed `E_VALIDATION` refusal of an id no row matches (a
-/// stale screen's row), the shared base classifier's SQL classes
-/// (`ProjectsError::Sql` through the list/delete reads,
+/// are the `E_SYNC_RUNNING` SYS-005 refusal while a sync holds the
+/// global flag (T-105), the typed `E_VALIDATION` refusal of an id no
+/// row matches (a stale screen's row), the shared base classifier's
+/// SQL classes (`ProjectsError::Sql` through the list/delete reads,
 /// `StorageError::Sql` through the journal insert — busy exhaustion,
 /// a corrupt database, a constraint abort), and the store fallback of
 /// a corrupt exclusion cell (`ProjectsCorrupt`). A successful removal
@@ -834,18 +836,19 @@ pub(crate) fn exclusion_remove_failed(error: &AppError) {
 
 /// The `projects_reorder` command failed (T-080, §10's every-error
 /// rule): the `exclusion_remove_failed` shape — the reachable §10
-/// answers are the typed `E_VALIDATION` refusal of a list that does
-/// not name the active set exactly once each (a stale screen's order),
-/// the shared base classifier's SQL classes (`ProjectsError::Sql`
-/// through the ordered read and the renumbering, `StorageError::Sql`
-/// through the journal insert — busy exhaustion, a corrupt database, a
-/// constraint abort), the store fallback of a corrupt projects cell
-/// (`ProjectsCorrupt`), and the honest no-database fallback. A
-/// successful reorder is the journal's own `project.changed` entry,
-/// written inside the operation's transaction (D-051) — never
-/// duplicated into the file log (the info+user+ok unmirrored shape);
-/// the verified no-op (a re-sent unchanged order) writes nothing and
-/// logs nothing.
+/// answers are the `E_SYNC_RUNNING` SYS-005 refusal while a sync
+/// holds the global flag (T-105), the typed `E_VALIDATION` refusal of
+/// a list that does not name the active set exactly once each (a
+/// stale screen's order), the shared base classifier's SQL classes
+/// (`ProjectsError::Sql` through the ordered read and the
+/// renumbering, `StorageError::Sql` through the journal insert — busy
+/// exhaustion, a corrupt database, a constraint abort), the store
+/// fallback of a corrupt projects cell (`ProjectsCorrupt`), and the
+/// honest no-database fallback. A successful reorder is the journal's
+/// own `project.changed` entry, written inside the operation's
+/// transaction (D-051) — never duplicated into the file log (the
+/// info+user+ok unmirrored shape); the verified no-op (a re-sent
+/// unchanged order) writes nothing and logs nothing.
 pub(crate) fn projects_reorder_failed(error: &AppError) {
     tracing::error!(
         target: "eunomia::projects",

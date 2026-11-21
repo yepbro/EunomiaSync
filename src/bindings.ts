@@ -119,7 +119,10 @@ export const commands = {
 	 *  state behind, so a retry after a refresh is always safe (the
 	 *  make-operations-idempotent rule: the store's `delete_exclusion`
 	 *  owns the same rule one layer down — an absent row deletes
-	 *  nothing).
+	 *  nothing). While a sync holds the global `sync_running` flag, the
+	 *  removal is refused up front with the typed `E_SYNC_RUNNING`
+	 *  envelope instead (SYS-005, [`reject_during_sync`]) — nothing is
+	 *  written, and the screen's retry after the run ends converges.
 	 * 
 	 *  One transaction (D-037/D-051, §6.9 "the whole operation runs in
 	 *  one transaction"): the by-id lookup through the repository's
@@ -207,12 +210,16 @@ export const commands = {
 	 *  fixed name; §7.1 PRJ-001; scenario S1).
 	 * 
 	 *  `path` is the folder the UI's `dialog_pick_folder` answer named,
-	 *  and the command's first act is the SEC-003 gate on it —
-	 *  [`session_paths::validate_ui_path`], the T-073/D-100 boundary: a
-	 *  path that neither canonicalizes onto a registered project nor onto
-	 *  a folder picked in this session is rejected with `E_VALIDATION`
-	 *  before anything else runs (a foreign folder never reaches the
-	 *  `.git` check, the database, or the disk probes).
+	 *  and the command's first act is the SYS-005 sync gate on it —
+	 *  while a sync holds `sync_running`, the answer is the typed
+	 *  `E_SYNC_RUNNING` refusal before anything else runs (see
+	 *  [`reject_during_sync`]); with the flag down, the SEC-003 gate —
+	 *  [`session_paths::validate_ui_path`], the T-073/D-100 boundary —
+	 *  is the first per-input act: a path that neither canonicalizes
+	 *  onto a registered project nor onto a folder picked in this
+	 *  session is rejected with `E_VALIDATION` before anything else
+	 *  runs (a foreign folder never reaches the `.git` check, the
+	 *  database, or the disk probes).
 	 * 
 	 *  The spec flow, in order (S1: "pick a folder, `.git` check,
 	 *  duplicate check, create the entry with default settings and a
@@ -252,9 +259,12 @@ export const commands = {
 	 *     and the `project.added` journal entry (LOG-001…004,
 	 *     info/user/ok, entity project) **inside the same transaction** —
 	 *     a rolled-back add leaves no entry claiming it happened. The
-	 *     `E_SYNC_RUNNING` guard of SYS-005 does not apply: that rule
-	 *     lists the project-*editing* commands, and no sync writer exists
-	 *     yet; the guard joins with the sync-run task.
+	 *     SYS-005 sync gate runs before the whole flow (the command's
+	 *     first act above): during a sync the add answers
+	 *     `E_SYNC_RUNNING` and nothing is written; the spec's own
+	 *     project-*editing* list (`project_update`,
+	 *     `project_remove`, `project_relink`, `backup_restore`) joins
+	 *     the same gate as those commands land.
 	 *  5. **Write-access warning** (§6.9, T-063/D-094): after the commit,
 	 *     [`eunomia_fs::write_access::check_write_access`] over the
 	 *     root's future target file, on the blocking pool (never inside
@@ -352,7 +362,11 @@ export const commands = {
 	 *  passing validation (one connection serializes the read and the
 	 *  write, D-037) but is mapped through the same refusal if it ever
 	 *  fires anyway — convergence, never a masked conflict (the D-103
-	 *  duplicate-race rule).
+	 *  duplicate-race rule). While a sync holds the global `sync_running`
+	 *  flag, the drag is refused before any of this with the typed
+	 *  `E_SYNC_RUNNING` envelope (SYS-005, [`reject_during_sync`]) — the
+	 *  table is untouched, and the UI's re-send after the run ends
+	 *  converges on the then-current order.
 	 * 
 	 *  Failures reach the log with their §10 code
 	 *  ([`logging::projects_reorder_failed`]); a successful reorder is the
