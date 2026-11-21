@@ -9388,3 +9388,152 @@ ProjectAvailabilityEvent` with `const NAME =
   inside `emit`, so every no-event assertion is a `try_recv` after
   the call returned — no timeouts (the one bounded wait observes a
   pass enter its in-flight state).
+
+### D-113 — The UI-011 AppError alert: honest message_key fallback, code-keyed §10 action groups, visible OS facts, and the copyable envelope — 2026-11-21
+
+Problem: T-143 turns UI-011/NFR-018 (an error message answers what
+happened, where, why, and what to do, with technical details collapsed
+behind a copy button) into the reusable frontend component over the
+T-013 `AppError` wire form (§7.10: `code`, `message_key`, `params`,
+`details`). Open questions: the fallback when `message_key` is not in
+the catalog (vue-i18n renders the literal key string, warned only —
+D-110's P2-1 finding); what "where" renders given that param shapes
+beyond path/project are not yet stable across producers; which OS facts
+stay visible (BKP-005 vs the bindings' "os_message is envelope
+material"); how the §10 user actions group; and how copying works
+without a clipboard plugin dependency.
+
+Solution (T-143): `src/components/AppErrorAlert.vue` — a pure
+presentational component (`error: AppErrorWire` + optional `contextKey`
+in, no IPC), plus `src/components/app-error-actions.ts` (the §10
+grouping) and the `errors.*` namespace in `src/locales/en.json`.
+
+- **Fallback policy.** The title resolves `te(message_key)` first:
+  present → `t(message_key, params)` (params interpolated per UI-020,
+  NFR-006); absent → `errors.fallbackTitle` ("Something went wrong").
+  The raw key never reaches the UI. The code, where row, action row and
+  envelope do not depend on the key and keep rendering — drift degrades
+  to a generic title, not a broken alert. The optional `contextKey`
+  follows the same `te()` discipline (unknown key → no context line).
+- **"Where" and the message templates.** A labeled row for exactly the
+  `path`/`project` params (§10's "where" facts), composed per what is
+  present (`{project} — {path}` / `{path}` / `{project}`); absent both
+  → no row. Message templates interpolate the params their producer has
+  pinned — the D-113-first-cut made every message placeholder-free
+  because `E_VALIDATION`'s param shapes are not stable across producers
+  (`field`/`key`/`id` + `value`/`reason` variants); the round-1 review
+  (P2-1) corrected that to the honest split: producer-STABLE keys
+  interpolate (`errors.db_too_new` → schema versions,
+  `errors.db_corrupt` → the quick_check `detail`,
+  `errors.update_migration_failed` → covered by its action, all pinned
+  by the db suite), while the still-unstable families (`E_VALIDATION`)
+  stay placeholder-free until their producer task pins the shape — the
+  component always passes `params` to `t()`, so a message growing
+  placeholders needs no component change, and every param is always in
+  the copyable envelope.
+- **"Why" — BKP-005 stays visible (D-034's pointer honored).** The why
+  row always shows the §10 code; `details.os_code` and `details.os_kind`
+  join it when present (`E_WRITE_FAILED — OS error 13
+(PermissionDenied)`; kind alone when there is no raw code — BKP-005's
+  "OS code **or** error type"). `os_message` stays envelope-only, per
+  the bindings' documented contract ("raw diagnostic material … never
+  interpolated into the localized message"). The `os_kind` tags stay
+  machine spellings (round-1 P3-8 declined as out of scope: humanizing
+  them is a catalog task of its own when a producer family makes it
+  matter).
+- **"What to do" — groups keyed by `code`, not `message_key`, plus one
+  sanctioned family-key override.** §10's action column is per-code and
+  the `ErrorCode` union is closed, so the map in `app-error-actions.ts`
+  is `satisfies Record<ErrorCode, string>`: a new code without a group
+  is a compile error, and message-family keys ride their code's group
+  for free (keying by the open `message_key` string would need a
+  per-family lookup rule that can miss one). Twenty codes → sixteen
+  code groups, merged only where §10's actions genuinely coincide:
+  `fixTarget` (the three E_TARGET_* rows), `restoreFromBackup`
+  (WRITE_FAILED + VERIFY_FAILED) and `retry` (DB_LOCKED's "retry" +
+  UPDATE_FAILED's "retry later" — split from SYNC_RUNNING's `wait` by
+  the round-1 review P3-1: waiting presumes a running operation the
+  other two do not have); each remaining code keeps its §10-specific
+  action — merging further would blur instructions the spec spells out.
+  The one override (`ERROR_ACTION_OVERRIDES`, consulted on an exact
+  own-property `message_key` match before the code map — round-2 P3-1:
+  `in` would walk Object.prototype and turn a "toString" key into a
+  bogus catalog key) is `errors.update_migration_failed` →
+  `installPreviousVersion`: the family key `DbInitError::app_error`
+  already emits for UPD-004, whose remedy ("install the previous
+  version, pointing at the `db-backups/pre-migration-*` copy") is
+  knowingly not §10's row for `E_UPDATE_FAILED`; the producing code
+  documents that "the UI shows the UPD-004 instruction, not the §10
+  row's prose". The override's action interpolates `{backup_path}`.
+  Group texts live at `errors.actions.<group>`.
+- **The envelope.** Native `<details>/<summary>` (the a11y disclosure
+  pattern for free) holding the full §7.10 wire form as 2-space JSON in
+  a fixed field order (`code`, `message_key`, `params`, `details`) and
+  one Copy button. Copying uses `navigator.clipboard.writeText` with
+  the `execCommand` textarea fallback for contexts without the async
+  clipboard API — no clipboard-manager plugin (a new dependency is an
+  owner decision). The feedback is a three-state machine
+  (`idle`/`copied`/`failed`): the button label flips to "Copied" or
+  "Copy failed" and reverts after 2.5 s; every failure path — writeText
+  rejecting, execCommand returning false, execCommand throwing
+  (round-2 P2-2: the throw is caught, so it lands in `failed` instead
+  of escaping the click handler as an unhandled rejection) — reaches
+  the failed state. The legacy path's textarea is removed in a
+  `finally` and the pre-copy focus restored (round-1 P3-3).
+- **Accessibility.** `role="alert"` wraps the message cluster only
+  (context, title, where/why/action rows) — mounting the alert
+  announces the error, while the collapsed disclosure, the Copy button
+  and the copy-feedback live region are siblings outside it (round-1
+  P3-2: a live region nested in another re-announces unpredictably).
+  The feedback is announced by a visually hidden `role="status"`
+  region and is never color-only (the label changes). Real `<button>`
+  (keyboard + focus visible via `:focus-visible`, ≥24 px target); the
+  error state is carried by icon + text, not color alone; dark scheme
+  follows the OS.
+- **The `E_VALIDATION` family question (round-1 P3-5, resolved by
+  record).** vue-i18n cannot make `errors.validation` both a string and
+  the parent of `errors.validation.<field>` family members. The default
+  key stays the string leaf (T-013's contract, pinned both sides);
+  family members are NOT added under it — when the first family member
+  lands, the default leaf moves to `errors.validation.default` in the
+  same coordinated change (D-034 already frames message-key renames
+  that way, pinned by tests on both sides). Until then a family key
+  honestly hits the title fallback while riding its code's action.
+- **Catalog pins.** `AppErrorAlert.spec.ts` mirrors the twenty default
+  `errors.<snake_case>` keys from `errors.rs`'s registry test and
+  asserts each resolves in `en.json`, pins all twenty code→group
+  mappings and the override, and asserts an action message for every
+  group — the frontend half of the T-013 key contract; the Rust-side
+  bindings pin is the other half. The component is not wired into a
+  screen yet (callers catch the rejected `ipc.commands.*` promise and
+  render it — the screens' tasks): the same tested-today/consumed-later
+  shape as the registry itself. `src/ipc/index.ts` re-exports
+  `AppErrorWire`/`ErrorCode` so UI code never imports `bindings.ts`
+  (D-003).
+
+Review: two rounds — reports in `.opencode/reviews/t143-round*.md`
+(owner-local). Round 1 (deepseek-v4.1-flash, changes requested):
+1×P1, 3×P2, 8×P3. Applied: P1-1 — the one non-default key the Rust
+side already emits (`errors.update_migration_failed`, UPD-004) got its
+catalog message + the family-key action override (the grouped "wait"
+advice was knowingly wrong for a rolled-back migration); P2-1 —
+producer-stable messages now interpolate their params (db_too_new,
+db_corrupt) with title tests; P2-2 — the legacy-copy test pins the
+copied payload (textarea value, `'copy'` argument, removal), plus a
+writeText-rejects→legacy-succeeds case; P2-3 — a table-driven pin of
+all twenty code→group mappings with exact-text assertions for the
+merged groups; P3-1 — `wait` split from `retry`, `fixCauseAndRetry`
+no longer points at the collapsed details; P3-2 — `role="alert"`
+narrowed to the message cluster; P3-3 — try/finally + focus restore in
+the legacy path; P3-4 — the three-state copy feedback with a failed
+test; P3-6/P3-7 — per-test mounts, redundant assertion dropped.
+Declined: P3-8 (humanizing `os_kind` tags — out of scope). Round 2
+(hy4-flash-free, changes requested): 2×P2, 2×P3, all applied. P2-1 —
+this entry's body updated to the applied design (the five stale
+pre-fix passages); P2-2 — a throwing `execCommand` now lands in the
+`failed` state instead of an unhandled rejection, with a test; P3-1 —
+the override lookup is an own-property check (`hasOwnProperty.call`;
+lib is ES2020, no `Object.hasOwn`), with a prototype-named-key test;
+P3-2 — containment assertions (disclosure/copy/status outside the
+alert), the failed-state revert test, and the payload assertion in the
+writeText-rejects case.

@@ -9,5 +9,70 @@
       "vue": "Vue logo"
     },
     "trackedProjects": "no projects tracked yet | {count} project tracked | {count} projects tracked"
+  },
+  "errors": {
+    "fallbackTitle": "Something went wrong",
+    "sync_running": "A sync is already running",
+    "not_a_repo": "The selected folder is not a Git repository",
+    "project_unavailable": "The project folder cannot be reached",
+    "no_write_access": "There is no write access to the project folder or the target file",
+    "target_is_dir": "The target path is a directory",
+    "target_broken_link": "The target path is a dangling symlink",
+    "target_outside_root": "The target path resolves outside the project root",
+    "markers_invalid": "The managed-block markers are missing, repeated, or out of order",
+    "not_utf8": "The target file is not valid UTF-8",
+    "backup_failed": "A backup could not be created or verified",
+    "disk_full": "There is no space left on the volume",
+    "file_locked": "The target file is locked by another process",
+    "write_failed": "Writing the target file failed",
+    "verify_failed": "The written file failed its verification check",
+    "content_reserved": "The text contains a reserved marker line",
+    "validation": "A field or value failed validation",
+    "db_locked": "The database is busy",
+    "db_corrupt": "The database is damaged ({detail})",
+    "db_too_new": "The database uses schema {database_schema_version}, but this app supports only {app_schema_version}",
+    "update_failed": "The update check or installation failed",
+    "update_migration_failed": "A database migration failed and was rolled back; the app did not change the database",
+    "where": {
+      "label": "Where",
+      "path": "{path}",
+      "project": "{project}",
+      "projectPath": "{project} — {path}"
+    },
+    "why": {
+      "label": "Why",
+      "code": "{code}",
+      "osCode": "{code} — OS error {osCode}",
+      "osCodeKind": "{code} — OS error {osCode} ({osKind})",
+      "kind": "{code} — {osKind}"
+    },
+    "actions": {
+      "label": "What to do",
+      "wait": "Wait until the running operation finishes, then try again.",
+      "retry": "Try again in a moment.",
+      "pickRepoRoot": "Pick the repository root — the folder that contains the .git directory.",
+      "relocate": "Locate the moved folder, or archive the project.",
+      "fixAccess": "Change the write permissions on the folder or file, then try again.",
+      "fixTarget": "Fix the target path so it is a regular file inside the project root.",
+      "pasteMarkerBlock": "Paste a fresh marker block into the file (Copy marker block).",
+      "reencode": "Re-encode the file as UTF-8, then run the sync again.",
+      "fixCauseAndRetry": "Fix the cause described in the error and try again.",
+      "freeSpace": "Free up space on the volume, then try again.",
+      "closeAndRetry": "Close the program that holds the file, then try again.",
+      "restoreFromBackup": "Run the sync again; if the file stays damaged, restore it from the backup in the data directory.",
+      "removeMarkerLine": "Remove the reserved marker line from the text.",
+      "fixField": "Fix the invalid field, then save again.",
+      "dbRecovery": "Pick a database copy on the recovery screen, or start with an empty database.",
+      "updateApp": "Update the app to a newer version.",
+      "installPreviousVersion": "Install the previous app version, or update to a fixed release. The pre-migration copy of the database is at {backup_path}."
+    },
+    "details": {
+      "summary": "Technical details",
+      "copy": "Copy",
+      "copied": "Copied",
+      "copiedAnnouncement": "Error details copied to the clipboard.",
+      "copyFailed": "Copy failed",
+      "copyFailedAnnouncement": "Copying the error details failed."
+    }
   }
 }

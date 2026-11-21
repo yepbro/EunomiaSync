@@ -46,3 +46,6 @@ export const ipc = { backend, commands } as const
 
 export { IPC_MOCK_ENV } from './mode'
 export type { IpcBackendKind }
+// Wire types UI code may need (the AppError alert renders one; D-003:
+// components reach the contract through this facade, never bindings).
+export type { AppErrorWire, ErrorCode } from './contract'
