@@ -7,8 +7,9 @@
 //!
 //! Each rule is transcribed next to the schema CHECK (§6.2) that
 //! stores the same verdict, so a value that passes here never fails
-//! the database — with the one recorded exception of a name whose
-//! first stored character is `NUL` (the `NUL` section below):
+//! the database — including the names, whose `NUL` rejection below
+//! closes the one exception D-076 once had to record (a NUL-first
+//! name SQLite measures as empty):
 //!
 //! | Field            | §6.9 rule                                                      | schema CHECK (§6.2)                     | this module returns |
 //! | ---------------- | -------------------------------------------------------------- | --------------------------------------- | ------------------- |
@@ -38,7 +39,7 @@
 //!   for a NEW main variant, not a rule stored names follow;
 //! - the backup-limit row is a settings field, not a library field.
 //!
-//! # The names: trim, then count — then one line
+//! # The names: trim, then count — then one character scan
 //!
 //! The three name rows state bare length ranges, but their schema
 //! CHECKs measure `length(trim(…))`, so the validator works on the
@@ -62,14 +63,23 @@
 //! characters, the same std-tables boundary D-075 recorded for
 //! labels.
 //!
+//! The same scan reports a `NUL` (`U+0000`) with its code-point
+//! index — the name-wide NUL rejection, D-076's open item closed by
+//! D-126 (the `NUL` section below):
+//! the length bounds fire first, then ONE positional scan reports the
+//! first offending character, whichever rule it breaks — a name with
+//! a line break at 1 and a NUL at 3 says the line break, one with the
+//! two swapped says the NUL.
+//!
 //! The variant-name row says only "1–100 characters" — the one name
 //! row without "one line". D-076 reads the omission as editorial (the
 //! row's Limits column already carries the uniqueness and Main notes)
 //! and extends the same one-line rule to it: a variant name is the
 //! same kind of thing as the other two, a list label (the LIB-002
 //! variant list), and the rule is what keeps it one. That extension
-//! is the module's one deliberate divergence STRICTER than the bare
-//! row; everything else is verbatim.
+//! and the name-wide NUL rejection (the `NUL` section below) are the
+//! module's deliberate divergences STRICTER than the bare rows;
+//! everything else is verbatim.
 //!
 //! # The variant text: validation versus normalization
 //!
@@ -139,29 +149,42 @@
 //!
 //! # `NUL`
 //!
-//! The row's `NUL` rejection belongs to the variant text alone — that
-//! is where §6.9 and DB-016 put it. The three name fields carry no
-//! NUL rule (the rows reserve no control-character rule for names;
-//! that concern is the variant-text row's, as D-075 already ruled for
-//! the project fields), so a name containing `\0` validates here.
-//! Known consequence, recorded in D-076 as an open item: SQLite's
-//! `length()` counts code points only UP TO the first `U+0000`, so a
-//! name whose FIRST character is NUL passes this validator while the
-//! store's own CHECK measures it as length 0 — the insert then fails
-//! the CHECK with a raw database error instead of a field error. The
-//! same latent gap sits in T-049's project fields. The heading name
-//! has the sharper edge of it: it is the one name written into the
-//! target file verbatim (`## <title>`), so a NUL there would put a
-//! NUL byte into `AGENTS.md` — git then treats the file as binary.
-//! Closing the gap belongs to a validators-wide task, not to this
-//! module.
+//! §6.9's `NUL` rejection names the variant text only, and
+//! [`validate_variant_text`] fires it there. The three NAME fields
+//! reject a `NUL` (`U+0000`) as well — the open item D-076 left to a
+//! validators-wide task, closed here (T-252):
+//!
+//! - SQLite's `length()` counts code points only UP TO the first
+//!   `U+0000` (D-076, verified against SQLite directly), and every
+//!   name CHECK leans on that arithmetic — a name whose FIRST
+//!   character is NUL used to pass the length check here while the
+//!   store's own `length(trim(…))` CHECK measured it as 0, so the
+//!   insert failed with a raw database error instead of a field
+//!   error. The instruction and variant names never enter the file
+//!   (ALG-022) but share this stored edge.
+//! - the heading name is the one name that reaches the target file
+//!   verbatim (`## <title>` via the body's heading block), so a NUL
+//!   there would put a NUL byte into `AGENTS.md`/`CLAUDE.md` — git's
+//!   binary heuristic (it reads a file's leading bytes, where the
+//!   managed heading sits) then treats the file as binary. That, not
+//!   the SQLite arithmetic, is the reason the variant-text row bans
+//!   NUL, and it holds for the heading name a fortiori.
+//!
+//! The rejection rides the name scan (see above): the first of a
+//! line break or a NUL is reported with its code-point index, in the
+//! same shape as [`LibraryFieldError::VariantTextNul`]. T-049's
+//! project NAME carries the same rule in
+//! [`crate::project_validators`]; the project LABEL needs none of
+//! its own — D-075's control-character rejection already refuses
+//! `U+0000` — and the closed-list fields (color, file name) cannot
+//! match a NUL to a literal at all.
 //!
 //! # Errors
 //!
 //! Every failure is a typed [`LibraryFieldError`] variant naming the
 //! field and the broken rule — never a string (the D-062/D-071/D-072/
 //! D-075 precedent of typed errors at core boundaries). The
-//! command layer maps the length and line-break failures to
+//! command layer maps the length, line-break and NUL failures to
 //! `E_VALIDATION` (§8) and [`LibraryFieldError::ReservedContent`] to
 //! `E_CONTENT_RESERVED` (§7.10's registry, D-034) in a later task —
 //! the mapping is deliberately absent here, exactly as
@@ -191,6 +214,10 @@
 //! assert_eq!(
 //!     validate_instruction_title(&"a".repeat(201)).unwrap_err(),
 //!     LibraryFieldError::InstructionTitleTooLong { length: 201 }
+//! );
+//! assert_eq!(
+//!     validate_heading_title("a\0b").unwrap_err(),
+//!     LibraryFieldError::HeadingTitleNul { index: 1 } // NUL (D-126)
 //! );
 //! assert_eq!(
 //!     validate_variant_text("x\n<!-- EUNOMIASYNC:BEGIN -->").unwrap_err(),
@@ -223,7 +250,7 @@ const VARIANT_TEXT_LIMIT: usize = 262_144;
 /// is wrong with it.
 ///
 /// One variant per field and failure — the command layer maps the
-/// length and line-break failures to `E_VALIDATION` (§8) and
+/// length, line-break and NUL failures to `E_VALIDATION` (§8) and
 /// [`ReservedContent`](Self::ReservedContent) to `E_CONTENT_RESERVED`
 /// (§7.10, D-034) with the field-scoped message; the variants carry
 /// the measured length (or the offending index and character, or the
@@ -266,6 +293,17 @@ pub enum LibraryFieldError {
         /// The offending character.
         character: char,
     },
+    /// The instruction name contains `NUL` (`U+0000`) at `index`. No
+    /// §6.9 row bans it in a name; the D-126 validators-wide ruling
+    /// does (D-076's open item; module docs) — a NUL breaks the
+    /// SQLite `length()` arithmetic every name CHECK leans on.
+    #[error("instruction name contains NUL at index {index}")]
+    InstructionTitleNul {
+        /// The code-point index in the TRIMMED value the validator
+        /// measured (NUL is not whitespace, so the trim never
+        /// removes one).
+        index: usize,
+    },
     /// The variant name is empty after trimming (§6.9: 1–100).
     #[error("variant name is empty after trimming")]
     VariantNameEmpty,
@@ -287,6 +325,17 @@ pub enum LibraryFieldError {
         /// The offending character.
         character: char,
     },
+    /// The variant name contains `NUL` (`U+0000`) at `index` — the
+    /// D-126 validators-wide ruling (D-076's open item; module
+    /// docs), the same rejection the variant-name row's TEXT sibling
+    /// has always had.
+    #[error("variant name contains NUL at index {index}")]
+    VariantNameNul {
+        /// The code-point index in the TRIMMED value the validator
+        /// measured (NUL is not whitespace, so the trim never
+        /// removes one).
+        index: usize,
+    },
     /// The heading name is empty — the empty string, or nothing but
     /// whitespace, after trimming (§6.9: 1–200).
     #[error("heading name is empty after trimming")]
@@ -306,6 +355,18 @@ pub enum LibraryFieldError {
         index: usize,
         /// The offending character.
         character: char,
+    },
+    /// The heading name contains `NUL` (`U+0000`) at `index` — the
+    /// D-126 validators-wide ruling (D-076's open item; module
+    /// docs). The heading name is the one name written into the
+    /// target file verbatim (`## <title>`), where a NUL byte would
+    /// make git's binary heuristic treat the file as binary.
+    #[error("heading name contains NUL at index {index}")]
+    HeadingTitleNul {
+        /// The code-point index in the TRIMMED value the validator
+        /// measured (NUL is not whitespace, so the trim never
+        /// removes one).
+        index: usize,
     },
     /// The variant text is longer than 262,144 characters (DB-006).
     #[error("variant text is {length} characters; the limit is 262144")]
@@ -347,7 +408,7 @@ fn marker_literal(marker: &MarkerLine) -> &'static str {
 }
 
 /// The shared name-field verdict: why a trimmed name failed its
-/// range-or-one-line rule, before the field's own error says which
+/// range-or-character rule, before the field's own error says which
 /// field it was (the three name fields share one shape; see the
 /// module docs).
 enum NameProblem {
@@ -357,13 +418,20 @@ enum NameProblem {
     TooLong(usize),
     /// A line break at the code-point index.
     LineBreak { index: usize, character: char },
+    /// A `NUL` (`U+0000`) at the code-point index (the D-126
+    /// validators-wide ruling, closing D-076's open item).
+    Nul { index: usize },
 }
 
 /// The shared body of the three §6.9 name validators (module docs):
 /// the input must already be TRIMMED — the caller measures and
 /// returns that value — and the checks fire in a fixed order so the
-/// message is deterministic: the length bounds first, then the
-/// one-line scan for the first `\n` or `\r`.
+/// message is deterministic: the length bounds first, then one
+/// positional scan that reports the FIRST offending character — a
+/// line break (`\n` or `\r`, §6.9's one-line rule) or a `NUL`
+/// (`U+0000`, the name-wide NUL rejection — D-126, closing D-076's
+/// open item) — with its code-point
+/// index.
 fn name_problem(trimmed: &str, limit: usize) -> Option<NameProblem> {
     let length = trimmed.chars().count();
     if length == 0 {
@@ -371,11 +439,15 @@ fn name_problem(trimmed: &str, limit: usize) -> Option<NameProblem> {
     } else if length > limit {
         Some(NameProblem::TooLong(length))
     } else {
-        trimmed
-            .chars()
-            .enumerate()
-            .find(|&(_, character)| character == '\n' || character == '\r')
-            .map(|(index, character)| NameProblem::LineBreak { index, character })
+        trimmed.chars().enumerate().find_map(|(index, character)| {
+            if character == '\n' || character == '\r' {
+                Some(NameProblem::LineBreak { index, character })
+            } else if character == '\0' {
+                Some(NameProblem::Nul { index })
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -393,7 +465,10 @@ fn name_problem(trimmed: &str, limit: usize) -> Option<NameProblem> {
 /// an inner line break (`\n`, `\r\n`'s `\r`, or a lone `\r`) with
 /// [`InstructionTitleLineBreak`](Self::InstructionTitleLineBreak) —
 /// edge breaks are trimmed away before the check, so "\nName\n"
-/// stores as "Name".
+/// stores as "Name"; and a `NUL` (`U+0000`) anywhere with
+/// [`InstructionTitleNul`](Self::InstructionTitleNul) — the
+/// name-wide NUL rejection (D-126, closing D-076's open item;
+/// module docs).
 ///
 /// The row's "unique among visible instructions, case-insensitive"
 /// clause is a cross-row store query, not a field rule (module docs).
@@ -407,6 +482,7 @@ fn name_problem(trimmed: &str, limit: usize) -> Option<NameProblem> {
 /// assert_eq!(validate_instruction_title(&"a".repeat(200)).unwrap(), "a".repeat(200));
 /// assert!(validate_instruction_title(&"a".repeat(201)).is_err());
 /// assert!(validate_instruction_title("a\nb").is_err()); // one line
+/// assert!(validate_instruction_title("a\0b").is_err()); // NUL (D-126)
 /// ```
 pub fn validate_instruction_title(title: &str) -> Result<String, LibraryFieldError> {
     let trimmed = title.trim();
@@ -419,6 +495,7 @@ pub fn validate_instruction_title(title: &str) -> Result<String, LibraryFieldErr
         Some(NameProblem::LineBreak { index, character }) => {
             Err(LibraryFieldError::InstructionTitleLineBreak { index, character })
         }
+        Some(NameProblem::Nul { index }) => Err(LibraryFieldError::InstructionTitleNul { index }),
     }
 }
 
@@ -430,7 +507,10 @@ pub fn validate_instruction_title(title: &str) -> Result<String, LibraryFieldErr
 /// row does not repeat "one line", but a variant name is a list label
 /// like the other two names, so the D-076 ruling extends the same
 /// one-line rule here — an inner `\n` or `\r` fails with
-/// [`LibraryFieldError::VariantNameLineBreak`]. The row's
+/// [`LibraryFieldError::VariantNameLineBreak`] — and the name-wide
+/// NUL rejection (D-126, closing D-076's open item) applies too: a
+/// `U+0000` anywhere fails
+/// with [`LibraryFieldError::VariantNameNul`]. The row's
 /// "unique within the instruction, case-insensitive" clause and the
 /// `Main` default are the store's and the UI's business (module
 /// docs).
@@ -444,6 +524,7 @@ pub fn validate_instruction_title(title: &str) -> Result<String, LibraryFieldErr
 /// assert_eq!(validate_variant_name(&"a".repeat(100)).unwrap(), "a".repeat(100));
 /// assert!(validate_variant_name(&"a".repeat(101)).is_err());
 /// assert!(validate_variant_name("a\nb").is_err()); // one line (D-076)
+/// assert!(validate_variant_name("a\0b").is_err()); // NUL (D-126)
 /// ```
 pub fn validate_variant_name(name: &str) -> Result<String, LibraryFieldError> {
     let trimmed = name.trim();
@@ -454,6 +535,7 @@ pub fn validate_variant_name(name: &str) -> Result<String, LibraryFieldError> {
         Some(NameProblem::LineBreak { index, character }) => {
             Err(LibraryFieldError::VariantNameLineBreak { index, character })
         }
+        Some(NameProblem::Nul { index }) => Err(LibraryFieldError::VariantNameNul { index }),
     }
 }
 
@@ -462,10 +544,16 @@ pub fn validate_variant_name(name: &str) -> Result<String, LibraryFieldError> {
 ///
 /// The same trim-then-count-and-one-line contract as
 /// [`validate_instruction_title`] — the two fields share the
-/// `library_items.title` column and its CHECK. The row's "Level 2–6"
-/// needs no validator: the closed
-/// [`HeadingLevel`](crate::library::HeadingLevel) type already makes
-/// every other level unrepresentable (D-042; module docs).
+/// `library_items.title` column and its CHECK — plus the name-wide
+/// NUL rejection (D-126, closing D-076's open item): a `U+0000`
+/// anywhere fails with
+/// [`LibraryFieldError::HeadingTitleNul`]. This is the sharpest of
+/// the three names: a heading title is written into the target file
+/// verbatim (`## <title>`), so a NUL here would put a NUL byte into
+/// `AGENTS.md`/`CLAUDE.md` — git then treats the file as binary
+/// (module docs). The row's "Level 2–6" needs no validator: the
+/// closed [`HeadingLevel`](crate::library::HeadingLevel) type already
+/// makes every other level unrepresentable (D-042; module docs).
 ///
 /// # Examples
 ///
@@ -476,6 +564,7 @@ pub fn validate_variant_name(name: &str) -> Result<String, LibraryFieldError> {
 /// assert_eq!(validate_heading_title(&"a".repeat(200)).unwrap(), "a".repeat(200));
 /// assert!(validate_heading_title(&"a".repeat(201)).is_err());
 /// assert!(validate_heading_title("a\rb").is_err()); // one line
+/// assert!(validate_heading_title("a\0b").is_err()); // NUL (D-126)
 /// ```
 pub fn validate_heading_title(title: &str) -> Result<String, LibraryFieldError> {
     let trimmed = title.trim();
@@ -488,6 +577,7 @@ pub fn validate_heading_title(title: &str) -> Result<String, LibraryFieldError> 
         Some(NameProblem::LineBreak { index, character }) => {
             Err(LibraryFieldError::HeadingTitleLineBreak { index, character })
         }
+        Some(NameProblem::Nul { index }) => Err(LibraryFieldError::HeadingTitleNul { index }),
     }
 }
 
@@ -679,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn instruction_name_precedence_is_length_then_line_break() {
+    fn instruction_name_precedence_is_length_then_first_offending_character() {
         // A name can break several rules at once; the checks fire in
         // a fixed order so the message is deterministic.
         // 201 characters AND a trailing break: the trim eats the
@@ -692,6 +782,26 @@ mod tests {
         assert_eq!(
             validate_instruction_title(" \n ").unwrap_err(),
             LibraryFieldError::InstructionTitleEmpty
+        );
+        // Too long beats the character scan, NUL included.
+        let mut long = "a".repeat(201);
+        long.push('\0');
+        assert_eq!(
+            validate_instruction_title(&long).unwrap_err(),
+            LibraryFieldError::InstructionTitleTooLong { length: 202 }
+        );
+        // …and between a line break and a NUL, the FIRST one in the
+        // string wins — one positional scan (module docs).
+        assert_eq!(
+            validate_instruction_title("a\nb\0c").unwrap_err(),
+            LibraryFieldError::InstructionTitleLineBreak {
+                index: 1,
+                character: '\n'
+            }
+        );
+        assert_eq!(
+            validate_instruction_title("a\0b\nc").unwrap_err(),
+            LibraryFieldError::InstructionTitleNul { index: 1 }
         );
     }
 
@@ -711,13 +821,41 @@ mod tests {
     }
 
     #[test]
-    fn instruction_name_carries_no_nul_rule() {
-        // §6.9 puts the NUL rejection in the variant-text row only;
-        // the name rows reserve no control-character rule (D-075's
-        // posture for project names). Pinned with the D-076 open
-        // item: a NUL-first name would measure 0 to SQLite's own
-        // length().
-        assert_eq!(validate_instruction_title("a\0b").unwrap(), "a\0b");
+    fn instruction_name_nul_is_rejected_at_any_position() {
+        // The D-076 open item, closed for every name field: a NUL in
+        // a stored name breaks the SQLite length() arithmetic the
+        // CHECK leans on (a NUL-first name measures 0), so the only
+        // NUL, one in the middle, and one at the end all fail with
+        // the code-point index.
+        assert_eq!(
+            validate_instruction_title("\0").unwrap_err(),
+            LibraryFieldError::InstructionTitleNul { index: 0 }
+        );
+        assert_eq!(
+            validate_instruction_title("a\0b").unwrap_err(),
+            LibraryFieldError::InstructionTitleNul { index: 1 }
+        );
+        assert_eq!(
+            validate_instruction_title("a\0").unwrap_err(),
+            LibraryFieldError::InstructionTitleNul { index: 1 }
+        );
+        // The index counts CODE POINTS: after a two-byte "é" the NUL
+        // sits at index 1.
+        assert_eq!(
+            validate_instruction_title("é\0x").unwrap_err(),
+            LibraryFieldError::InstructionTitleNul { index: 1 }
+        );
+        // Only the FIRST NUL is reported.
+        assert_eq!(
+            validate_instruction_title("a\0b\0c").unwrap_err(),
+            LibraryFieldError::InstructionTitleNul { index: 1 }
+        );
+        // NUL is not whitespace: the trim never hides it — a padded
+        // NUL-only name trims to the bare NUL and still fails.
+        assert_eq!(
+            validate_instruction_title(" \0 ").unwrap_err(),
+            LibraryFieldError::InstructionTitleNul { index: 0 }
+        );
     }
 
     #[test]
@@ -735,6 +873,10 @@ mod tests {
         assert_eq!(
             validate_instruction_title("a\nb").unwrap_err().to_string(),
             "instruction name contains the line break '\\n' at index 1"
+        );
+        assert_eq!(
+            validate_instruction_title("a\0b").unwrap_err().to_string(),
+            "instruction name contains NUL at index 1"
         );
     }
 
@@ -813,6 +955,41 @@ mod tests {
     }
 
     #[test]
+    fn variant_name_nul_is_rejected_at_any_position() {
+        // The name-wide NUL rejection (D-076's open item, closed by
+        // D-126; module docs): the variant NAME now refuses what its
+        // text sibling always has.
+        assert_eq!(
+            validate_variant_name("\0").unwrap_err(),
+            LibraryFieldError::VariantNameNul { index: 0 }
+        );
+        assert_eq!(
+            validate_variant_name("a\0b").unwrap_err(),
+            LibraryFieldError::VariantNameNul { index: 1 }
+        );
+        assert_eq!(
+            validate_variant_name("a\0").unwrap_err(),
+            LibraryFieldError::VariantNameNul { index: 1 }
+        );
+        // The index counts code points, only the FIRST NUL is
+        // reported, and the trim never hides one.
+        assert_eq!(
+            validate_variant_name("é\0x\0").unwrap_err(),
+            LibraryFieldError::VariantNameNul { index: 1 }
+        );
+        assert_eq!(
+            validate_variant_name(" \0 ").unwrap_err(),
+            LibraryFieldError::VariantNameNul { index: 0 }
+        );
+        // First offending character wins against a line break: the
+        // NUL at 1 precedes the \n at 3.
+        assert_eq!(
+            validate_variant_name("a\0b\nc").unwrap_err(),
+            LibraryFieldError::VariantNameNul { index: 1 }
+        );
+    }
+
+    #[test]
     fn variant_name_errors_say_what_is_wrong() {
         assert_eq!(
             validate_variant_name("  ").unwrap_err().to_string(),
@@ -827,6 +1004,10 @@ mod tests {
         assert_eq!(
             validate_variant_name("a\rb").unwrap_err().to_string(),
             "variant name contains the line break '\\r' at index 1"
+        );
+        assert_eq!(
+            validate_variant_name("a\0b").unwrap_err().to_string(),
+            "variant name contains NUL at index 1"
         );
     }
 
@@ -889,6 +1070,39 @@ mod tests {
     }
 
     #[test]
+    fn heading_name_nul_is_rejected_at_any_position() {
+        // The sharpest of the three names (module docs): a heading
+        // title reaches the target file verbatim (`## <title>`), so a
+        // NUL here would put a NUL byte into AGENTS.md and git would
+        // treat the file as binary — the D-076 consequence.
+        assert_eq!(
+            validate_heading_title("\0").unwrap_err(),
+            LibraryFieldError::HeadingTitleNul { index: 0 }
+        );
+        assert_eq!(
+            validate_heading_title("a\0b").unwrap_err(),
+            LibraryFieldError::HeadingTitleNul { index: 1 }
+        );
+        assert_eq!(
+            validate_heading_title("a\0").unwrap_err(),
+            LibraryFieldError::HeadingTitleNul { index: 1 }
+        );
+        assert_eq!(
+            validate_heading_title("é\0x\0").unwrap_err(),
+            LibraryFieldError::HeadingTitleNul { index: 1 }
+        );
+        assert_eq!(
+            validate_heading_title(" \0 ").unwrap_err(),
+            LibraryFieldError::HeadingTitleNul { index: 0 }
+        );
+        // First offending character wins against a line break.
+        assert_eq!(
+            validate_heading_title("a\0b\nc").unwrap_err(),
+            LibraryFieldError::HeadingTitleNul { index: 1 }
+        );
+    }
+
+    #[test]
     fn heading_name_errors_say_what_is_wrong() {
         assert_eq!(
             validate_heading_title(" ").unwrap_err().to_string(),
@@ -903,6 +1117,10 @@ mod tests {
         assert_eq!(
             validate_heading_title("a\nb").unwrap_err().to_string(),
             "heading name contains the line break '\\n' at index 1"
+        );
+        assert_eq!(
+            validate_heading_title("a\0b").unwrap_err().to_string(),
+            "heading name contains NUL at index 1"
         );
     }
 
@@ -1226,40 +1444,88 @@ mod tests {
     }
     #[test]
     fn every_failure_is_typed_never_a_string() {
-        // The E_VALIDATION / E_CONTENT_RESERVED mapping (§8, §7.10)
-        // matches on variants; every failure mode of every field has
-        // one.
-        let failures = [
-            validate_instruction_title("").map(|_| ()),
-            validate_instruction_title(&"a".repeat(201)).map(|_| ()),
-            validate_instruction_title("a\nb").map(|_| ()),
-            validate_variant_name("").map(|_| ()),
-            validate_variant_name(&"a".repeat(101)).map(|_| ()),
-            validate_variant_name("a\nb").map(|_| ()),
-            validate_heading_title("").map(|_| ()),
-            validate_heading_title(&"a".repeat(201)).map(|_| ()),
-            validate_heading_title("a\rb").map(|_| ()),
-            validate_variant_text(&"x".repeat(262_145)).map(|_| ()),
-            validate_variant_text("a\0b").map(|_| ()),
-            validate_variant_text("x\n<!-- EUNOMIASYNC:BEGIN -->").map(|_| ()),
+        // The E_VALIDATION mapping (§8, §7.10) matches on variants;
+        // every failure mode of every field has one — and each is ITS
+        // field's own variant, so a cross-field mix-up (a variant-name
+        // failure returning an instruction-title error, say) fails
+        // here, not only in the per-field tests.
+        type Failure = (fn() -> Result<(), LibraryFieldError>, LibraryFieldError);
+        let failures: [Failure; 15] = [
+            (
+                || validate_instruction_title("").map(|_| ()),
+                LibraryFieldError::InstructionTitleEmpty,
+            ),
+            (
+                || validate_instruction_title(&"a".repeat(201)).map(|_| ()),
+                LibraryFieldError::InstructionTitleTooLong { length: 201 },
+            ),
+            (
+                || validate_instruction_title("a\nb").map(|_| ()),
+                LibraryFieldError::InstructionTitleLineBreak {
+                    index: 1,
+                    character: '\n',
+                },
+            ),
+            (
+                || validate_instruction_title("a\0b").map(|_| ()),
+                LibraryFieldError::InstructionTitleNul { index: 1 },
+            ),
+            (
+                || validate_variant_name("").map(|_| ()),
+                LibraryFieldError::VariantNameEmpty,
+            ),
+            (
+                || validate_variant_name(&"a".repeat(101)).map(|_| ()),
+                LibraryFieldError::VariantNameTooLong { length: 101 },
+            ),
+            (
+                || validate_variant_name("a\nb").map(|_| ()),
+                LibraryFieldError::VariantNameLineBreak {
+                    index: 1,
+                    character: '\n',
+                },
+            ),
+            (
+                || validate_variant_name("a\0b").map(|_| ()),
+                LibraryFieldError::VariantNameNul { index: 1 },
+            ),
+            (
+                || validate_heading_title("").map(|_| ()),
+                LibraryFieldError::HeadingTitleEmpty,
+            ),
+            (
+                || validate_heading_title(&"a".repeat(201)).map(|_| ()),
+                LibraryFieldError::HeadingTitleTooLong { length: 201 },
+            ),
+            (
+                || validate_heading_title("a\rb").map(|_| ()),
+                LibraryFieldError::HeadingTitleLineBreak {
+                    index: 1,
+                    character: '\r',
+                },
+            ),
+            (
+                || validate_heading_title("a\0b").map(|_| ()),
+                LibraryFieldError::HeadingTitleNul { index: 1 },
+            ),
+            (
+                || validate_variant_text(&"x".repeat(262_145)).map(|_| ()),
+                LibraryFieldError::VariantTextTooLong { length: 262_145 },
+            ),
+            (
+                || validate_variant_text("a\0b").map(|_| ()),
+                LibraryFieldError::VariantTextNul { index: 1 },
+            ),
+            (
+                || validate_variant_text("x\n<!-- EUNOMIASYNC:BEGIN -->").map(|_| ()),
+                LibraryFieldError::ReservedContent {
+                    line: 2,
+                    marker: MarkerLine::Begin,
+                },
+            ),
         ];
-        for failure in failures {
-            let error = failure.unwrap_err();
-            assert!(matches!(
-                error,
-                LibraryFieldError::InstructionTitleEmpty
-                    | LibraryFieldError::InstructionTitleTooLong { .. }
-                    | LibraryFieldError::InstructionTitleLineBreak { .. }
-                    | LibraryFieldError::VariantNameEmpty
-                    | LibraryFieldError::VariantNameTooLong { .. }
-                    | LibraryFieldError::VariantNameLineBreak { .. }
-                    | LibraryFieldError::HeadingTitleEmpty
-                    | LibraryFieldError::HeadingTitleTooLong { .. }
-                    | LibraryFieldError::HeadingTitleLineBreak { .. }
-                    | LibraryFieldError::VariantTextTooLong { .. }
-                    | LibraryFieldError::VariantTextNul { .. }
-                    | LibraryFieldError::ReservedContent { .. }
-            ));
+        for (produce, expected) in failures {
+            assert_eq!(produce().unwrap_err(), expected);
         }
     }
 }

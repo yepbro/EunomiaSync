@@ -10928,3 +10928,77 @@ all findings adjudicated and taken:
   "Check for updates" buttons are disambiguated.
 - P3-4 taken by making the "(changed)" suffix visible cell text (a
   non-color cue), not only an accessible-name suffix.
+
+### D-126 — NUL rejected in every user-facing name field: the D-076 validators-wide promise, kept positionally — 2026-11-21
+
+Problem: D-076 left an open item — the three §6.9 library name rows
+and T-049's project name carry no NUL rule, so a name containing
+`U+0000` validates while SQLite's `length()` (verified against SQLite
+directly in D-076) counts code points only up to the first NUL: a
+NUL-FIRST name slips past the validator's length check and the store's
+own `length(trim(…))` CHECK then measures it as 0, failing the insert
+with a raw database error instead of a field error. The sharper
+consequence D-076's round-1 review added: the heading title is the one
+name written into the target file verbatim (`## <title>` via the
+body's heading block), so a NUL there puts a NUL byte into
+`AGENTS.md`/`CLAUDE.md` — git then treats the file as binary (its
+heuristic reads a blob's leading bytes, and the managed heading area
+sits in them). T-252
+(the 2026-11-21 DECISIONS audit, item 7) closes the promised
+validators-wide gap.
+
+Solution — the audit's actual list, not the card's summary one:
+
+- **New rejections**, each a typed per-field error in the house form
+  `"<field> contains NUL at index {index}"` (the `VariantTextNul`
+  shape): `InstructionTitleNul`, `VariantNameNul`, `HeadingTitleNul`
+  (`library_validators`) and `NameNul` (`project_validators`,
+  `validate_name`). The project name is in scope because D-076 itself
+  names "T-049's project fields" as carrying the same latent gap.
+- **Already covered, pinned only**: the project LABEL — `U+0000` is a
+  control character, so D-075's `LabelControlCharacter` rejection
+  already refuses it wherever it sits (a NUL-only label fails the
+  earlier visible check as `LabelEmpty`); the closed-list fields
+  (color, file name) cannot match a NUL to a literal at all — both
+  get boundary pins, no new rule.
+- **Ordering, the one ruling this entry adds**: inside the three
+  library names the NUL rides the EXISTING character scan — after the
+  length bounds, one positional pass reports the FIRST offending
+  character, whichever rule it breaks (`\n`/`\r` = §6.9's one-line
+  rule, `\0` = this ruling): a name with a break at 1 and a NUL at 3
+  says the break, the swapped one says the NUL. That is how the scan
+  already worked for line breaks and how D-075's label control scan
+  works; a rule-ordered pair of scans would report a later defect
+  while an earlier one sits unreported. The project name (no
+  one-line rule) keeps its own order: empty, too long, then the NUL
+  scan. Length always wins over every character verdict.
+
+§6.9 bans NUL in the variant TEXT only — grep-verified; nothing in the
+spec's name rows reserves a control-character rule. These rejections
+are therefore D-076-motivated EXTENSIONS stricter than the bare rows
+(the same posture as D-076's variant-name one-line ruling), not
+transcriptions; the spec should grow a matching one-line note in its
+§6.9 name rows (reported to the orchestrator — the docs task owns
+spec.md). Falsifiability: with the NUL arms mutated out, the new
+per-field boundary tests and the extended precedence test fail; the
+pre-existing variant-text and label NUL tests stay green (they pin
+rules that predate T-252).
+
+Deliberately NOT extended — the two text fields that are not names:
+the project DESCRIPTION still carries no NUL rule (open question for a
+follow-up card: a NUL there is inert for the target file but hits the
+same stored-length arithmetic), and the variant text was already
+covered. The extra-file names are fixed literals (`<STEM>.local.md`,
+`<STEM>.project.md`), not user input — nothing to validate. No
+migration or backfill is needed because no write path could ever have
+stored a NUL (round-1 review's correction of this entry's first
+draft): the project name's only writer derives it from the repository
+FOLDER name (`derived_name` in the add-project command) — an OS path
+component cannot carry `U+0000`, and a non-UTF-8 byte becomes U+FFFD
+before `validate_name` sees it — and the library name fields have no
+production write path at all (the command-layer wiring is a later
+task, D-076/D-034). The schema itself does NOT forbid a NUL — a
+mid-string NUL passes every name CHECK, because SQLite counts only up
+to it — so the library editor, the SEC-009 import and any future
+store-level writer MUST route names through these validators: this
+gate, not the CHECKs, is what keeps the columns clean.

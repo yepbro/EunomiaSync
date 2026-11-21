@@ -41,9 +41,14 @@
 //! validator measured. A name made entirely of non-U+0020 whitespace
 //! (a tab, an NBSP) is rejected here as empty — stricter than the
 //! bare CHECK, and the point of the rule: a name is not stored as
-//! nothing-but-whitespace. (The row reserves no
-//! control-character rule for names — that concern belongs to the
-//! variant-text row, which rejects `NUL` and reserved markers.)
+//! nothing-but-whitespace. (The row reserves no other
+//! control-character rule for names, but `NUL` is rejected anywhere
+//! it sits — the D-126 validators-wide ruling on D-076's open item,
+//! the same one the library name fields carry: SQLite's `length()`
+//! counts only up to the first `U+0000`, so a NUL-first name would
+//! pass the length check while the store's own CHECK measures it as
+//! 0. The label needs no NUL rule of its own: D-075's
+//! control-character rejection already refuses `U+0000`.)
 //!
 //! # The label: what "visible" means
 //!
@@ -124,8 +129,9 @@
 //! the consumed prefix has none: after the trim the first character
 //! is never whitespace, but it can be a control, and the rest of
 //! the prefix can be controls or inner spaces — all invisible
-//! (names reserve no control rule, D-075, and trim removes only the
-//! edges). So `"\u{7}"` and `"\u{7} \u{8}"` are legal names whose
+//! (names reserve no control rule beyond `NUL` — D-075/D-076's
+//! posture, extended by D-126 — and trim removes only the edges).
+//! So `"\u{7}"` and `"\u{7} \u{8}"` are legal names whose
 //! derived defaults render nothing and are rejected by
 //! [`validate_label`] as `LabelEmpty`, while `"\u{7}abc"` derives
 //! `"\u{7}ABC"` and fails the control check instead. The derivation
@@ -227,6 +233,19 @@ pub enum ProjectFieldError {
         /// The trimmed length that exceeded the limit.
         length: usize,
     },
+    /// The name contains `NUL` (`U+0000`) at `index`. Not a §6.9
+    /// clause — the D-126 validators-wide ruling on D-076's open
+    /// item (the library name fields carry it too): SQLite's
+    /// `length()` counts only up to the first `U+0000`, so a
+    /// NUL-first name would slip past the length checks while the
+    /// store's own `length(trim(name))` CHECK measures it as 0.
+    #[error("project name contains NUL at index {index}")]
+    NameNul {
+        /// The code-point index in the TRIMMED value the validator
+        /// measured (NUL is not whitespace, so the trim never
+        /// removes one).
+        index: usize,
+    },
     /// The label renders nothing: it is empty, or nothing but
     /// whitespace (DB-042: "An empty label is not allowed").
     #[error("project label has no visible characters")]
@@ -287,6 +306,10 @@ const fn is_visible(character: char) -> bool {
 /// Rust strips — see the module docs). Inner spaces stay; only the
 /// edges go. A name that is empty after trimming — the empty string
 /// or pure whitespace — fails with [`ProjectFieldError::NameEmpty`].
+/// A `NUL` (`U+0000`) anywhere fails with
+/// [`ProjectFieldError::NameNul`] — the name-wide NUL rejection
+/// (D-076's open item, closed by D-126; module docs); NUL is not
+/// whitespace, so the trim never hides one.
 ///
 /// # Examples
 ///
@@ -297,6 +320,7 @@ const fn is_visible(character: char) -> bool {
 /// assert_eq!(validate_name("A").unwrap(), "A");
 /// assert_eq!(validate_name(&"a".repeat(100)).unwrap(), "a".repeat(100));
 /// assert!(validate_name(&"a".repeat(101)).is_err());
+/// assert!(validate_name("a\0b").is_err()); // NUL (D-126)
 /// ```
 pub fn validate_name(name: &str) -> Result<String, ProjectFieldError> {
     let trimmed = name.trim();
@@ -305,6 +329,8 @@ pub fn validate_name(name: &str) -> Result<String, ProjectFieldError> {
         Err(ProjectFieldError::NameEmpty)
     } else if length > 100 {
         Err(ProjectFieldError::NameTooLong { length })
+    } else if let Some(index) = trimmed.chars().position(|character| character == '\0') {
+        Err(ProjectFieldError::NameNul { index })
     } else {
         Ok(trimmed.to_owned())
     }
@@ -537,6 +563,48 @@ mod tests {
     }
 
     #[test]
+    fn name_nul_is_rejected_at_any_position() {
+        // The D-126 validators-wide ruling on D-076's open item
+        // (module docs): SQLite's
+        // length() counts only up to the first U+0000, so a NUL-first
+        // name would pass the length checks while the store's own
+        // CHECK measures it as 0 — a raw database error instead of a
+        // field error. Only NUL, middle, and end all fail with the
+        // code-point index.
+        assert_eq!(
+            validate_name("\0").unwrap_err(),
+            ProjectFieldError::NameNul { index: 0 }
+        );
+        assert_eq!(
+            validate_name("a\0b").unwrap_err(),
+            ProjectFieldError::NameNul { index: 1 }
+        );
+        assert_eq!(
+            validate_name("a\0").unwrap_err(),
+            ProjectFieldError::NameNul { index: 1 }
+        );
+        // The index counts CODE POINTS: after a two-byte "é" the NUL
+        // sits at index 1, and only the FIRST NUL is reported.
+        assert_eq!(
+            validate_name("é\0x\0").unwrap_err(),
+            ProjectFieldError::NameNul { index: 1 }
+        );
+        // NUL is not whitespace: the trim never hides it.
+        assert_eq!(
+            validate_name(" \0 ").unwrap_err(),
+            ProjectFieldError::NameNul { index: 0 }
+        );
+        // Too long beats the NUL scan — the fixed order keeps the
+        // message deterministic.
+        let mut long = "a".repeat(101);
+        long.push('\0');
+        assert_eq!(
+            validate_name(&long).unwrap_err(),
+            ProjectFieldError::NameTooLong { length: 102 }
+        );
+    }
+
+    #[test]
     fn name_errors_say_what_is_wrong() {
         assert_eq!(
             validate_name("   ").unwrap_err().to_string(),
@@ -545,6 +613,10 @@ mod tests {
         assert_eq!(
             validate_name(&"a".repeat(101)).unwrap_err().to_string(),
             "project name is 101 characters after trimming; the limit is 100"
+        );
+        assert_eq!(
+            validate_name("a\0b").unwrap_err().to_string(),
+            "project name contains NUL at index 1"
         );
     }
 
@@ -660,6 +732,27 @@ mod tests {
                 character: '\n'
             }
         );
+    }
+
+    #[test]
+    fn label_nul_is_rejected_as_a_control_character() {
+        // The label needs no NUL rule of its own: `U+0000` is a
+        // control character, so D-075's rejection already refuses it
+        // wherever it sits — the audit's confirmation, pinned here.
+        // With a visible character present the control scan fires —
+        // at the start here; the END-position NUL pin already lives
+        // in the control test above ("AB\u{0}").
+        assert_eq!(
+            validate_label("\0A").unwrap_err(),
+            ProjectFieldError::LabelControlCharacter {
+                index: 0,
+                character: '\0'
+            }
+        );
+        // …and a NUL-only label renders nothing, so the visible-count
+        // check fires first with the truer message (the documented
+        // precedence: length, visible, control).
+        assert_eq!(validate_label("\0"), Err(ProjectFieldError::LabelEmpty));
     }
 
     #[test]
@@ -851,10 +944,11 @@ mod tests {
 
     #[test]
     fn default_label_counterexamples_controls_in_the_name() {
-        // Names reserve NO control-character rule (D-075), and trim
-        // removes whitespace, not controls — so these names are
-        // valid, and each derived default is rejected by the label's
-        // own rules. The derivation stays literal: filtering would
+        // Names reserve NO control-character rule beyond `NUL`
+        // (D-075, extended by D-126), and trim removes whitespace,
+        // not controls — so these names are valid, and each derived
+        // default is rejected by the label's own rules. The
+        // derivation stays literal: filtering would
         // invent a rule DB-042 does not state. The settings modal
         // shows the field error and the user edits the label before
         // the save; pinned here as the contract's recorded edge.
@@ -1001,7 +1095,8 @@ mod tests {
     #[test]
     fn color_rejects_everything_else_with_the_value_kept() {
         for unknown in [
-            "purple", "Red", "RED", "", "red ", " red", "teal\n", "crimson", "grey", "rose",
+            "purple", "Red", "RED", "", "red ", " red", "teal\n", "teal\0", "crimson", "grey",
+            "rose",
         ] {
             assert_eq!(
                 validate_color(unknown).unwrap_err(),
@@ -1036,6 +1131,7 @@ mod tests {
             "GEMINI.md",
             "AGENTS",
             "AGENTS.md ",
+            "AGENTS\0.md",
             "docs/AGENTS.md",
             "",
         ] {
@@ -1074,30 +1170,57 @@ mod tests {
     #[test]
     fn every_failure_is_typed_never_a_string() {
         // The E_VALIDATION mapping (§8) matches on variants; each
-        // field's every failure mode has one.
-        let failures = [
-            validate_name("").map(|_| ()),
-            validate_name(&"a".repeat(101)).map(|_| ()),
-            validate_label("").map(|_| ()),
-            validate_label("ABCDEFG").map(|_| ()),
-            validate_label("A\u{7}B").map(|_| ()),
-            validate_description(&"x".repeat(1001)).map(|_| ()),
-            validate_color("purple").map(|_| ()),
-            validate_file_name("GEMINI.md").map(|_| ()),
+        // field's every failure mode has one — and each is ITS
+        // field's own variant, so a cross-field mix-up fails here,
+        // not only in the per-field tests.
+        type Failure = (fn() -> Result<(), ProjectFieldError>, ProjectFieldError);
+        let failures: [Failure; 9] = [
+            (
+                || validate_name("").map(|_| ()),
+                ProjectFieldError::NameEmpty,
+            ),
+            (
+                || validate_name(&"a".repeat(101)).map(|_| ()),
+                ProjectFieldError::NameTooLong { length: 101 },
+            ),
+            (
+                || validate_name("a\0b").map(|_| ()),
+                ProjectFieldError::NameNul { index: 1 },
+            ),
+            (
+                || validate_label("").map(|_| ()),
+                ProjectFieldError::LabelEmpty,
+            ),
+            (
+                || validate_label("ABCDEFG").map(|_| ()),
+                ProjectFieldError::LabelTooLong { length: 7 },
+            ),
+            (
+                || validate_label("A\u{7}B").map(|_| ()),
+                ProjectFieldError::LabelControlCharacter {
+                    index: 1,
+                    character: '\u{7}',
+                },
+            ),
+            (
+                || validate_description(&"x".repeat(1001)).map(|_| ()),
+                ProjectFieldError::DescriptionTooLong { length: 1001 },
+            ),
+            (
+                || validate_color("purple").map(|_| ()),
+                ProjectFieldError::UnknownColor {
+                    value: "purple".to_owned(),
+                },
+            ),
+            (
+                || validate_file_name("GEMINI.md").map(|_| ()),
+                ProjectFieldError::UnknownFileName {
+                    value: "GEMINI.md".to_owned(),
+                },
+            ),
         ];
-        for failure in failures {
-            let error = failure.unwrap_err();
-            assert!(matches!(
-                error,
-                ProjectFieldError::NameEmpty
-                    | ProjectFieldError::NameTooLong { .. }
-                    | ProjectFieldError::LabelEmpty
-                    | ProjectFieldError::LabelTooLong { .. }
-                    | ProjectFieldError::LabelControlCharacter { .. }
-                    | ProjectFieldError::DescriptionTooLong { .. }
-                    | ProjectFieldError::UnknownColor { .. }
-                    | ProjectFieldError::UnknownFileName { .. }
-            ));
+        for (produce, expected) in failures {
+            assert_eq!(produce().unwrap_err(), expected);
         }
     }
 }
