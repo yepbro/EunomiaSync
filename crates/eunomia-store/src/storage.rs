@@ -686,8 +686,11 @@ fn sweep_stale_temporaries(
 /// for file writes (an antivirus scanner briefly holding a freshly
 /// created file): a sharing violation or access denied is retried up to
 /// three more times after 100 ms, 300 ms and 900 ms pauses, then the
-/// last error is returned.
-fn retry_transient_hold<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+/// last error is returned. Shared with `backup_retention`, whose copy
+/// removals ride the same §9.5 backoff.
+pub(crate) fn retry_transient_hold<T>(
+    mut op: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
     const PAUSES_MS: [u64; 3] = [100, 300, 900];
     let mut attempt = 0;
     loop {

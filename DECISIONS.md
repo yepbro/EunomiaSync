@@ -10461,3 +10461,175 @@ follow-up. The DB-022 payload reading is made explicit: the spec's
 "list of dirty projects" arrives as the first event's full list (the
 clean baseline makes every dirty project a first change) and as diffs
 afterwards — D-112's event shape, now stated rather than implied.
+
+### D-122 — Backup retention as a store service: the ok-only window per "project—file" pair, delete-first marking, and best-effort FS failures reported not raised — 2026-11-21
+
+Problem: T-114 lands BKP-003/BKP-006 — after a run finishes, at
+most N=backup.retention copies are kept per "project and file" pair,
+the oldest extras deleted (§6.4: file deleted → record `pruned`).
+Open questions: where the service lives and how `backup.retention`
+reaches it; what "only if the new copies are checked" (BKP-006)
+means against a DDL with no `unchecked` status; which N are "the
+newest" and whether anything protects the latest copy at keep 0;
+and what a filesystem failure mid-prune does to the record (mark
+anyway, or not), given the marks must share one transaction while
+file deletions cannot roll back.
+
+Solution: `eunomia_store::backup_retention` — a bookkeeping service
+over the existing v1 `backup_records` table (no schema change, the
+`library_versions` shape), one entry point `apply(conn, data_dir,
+keep)`.
+
+- _The limit is a parameter (the LogLimits/D-102 precedent)._ §6.5's
+  1–200 range has one owner — the settings repository (D-039); the
+  command layer reads `backup.retention` and passes the value. A
+  zero or negative `keep` (a caller bug, not a user setting) is
+  clamped to 1 inside `apply`: the newest copy of a pair is never
+  deleted — ALG-072's unconditional-latest guard, so a buggy zero
+  cannot wipe a project's whole backup history. The spec names no
+  "latest is protected" rule for backups; the clamp is this entry's
+  ruling, adopted from the revisions precedent.
+- _BKP-006 = the ok-only set._ §9.4 phase 2 inserts a record only
+  after the BKP-010 size+SHA-256 check, so `ok` IS the "checked"
+  marking and the other three statuses are history of gone copies.
+  The retention window is exactly `status='ok'`: terminal rows
+  (`pruned`, `missing`, `discarded`) consume no keep slot and are
+  never rewritten. The run-level half of BKP-006 — retention runs
+  only after the run's new copies were all checked — is the
+  pipeline's calling contract (phase 4 is unreachable past an
+  `E_BACKUP_FAILED` abort); the record-level half is the ok filter.
+- _"Newest" by `created_at DESC, id DESC`._ DB-002 TEXT makes the
+  lexicographic order chronological; UUIDv7 TEXT ids (D-031) break
+  same-millisecond ties by true creation order. One window-function
+  query (ROW_NUMBER per `(project_id, source_path)` partition)
+  selects the prunable rows.
+- _Delete-first, mark-after._ §6.4 ties `pruned` to the physical
+  deletion, and the order is the self-healing one: a crash or
+  rollback between removal and mark leaves an `ok` record without a
+  file, which the next run converges (removal NotFound = success,
+  D-091's `remove_copy` ruling) and marks `pruned`. The mirror order
+  would leave a `pruned` record over a live file — a lying status
+  the restore screen must never see.
+- _FS failure = report, not error; record stays `ok`._ A removal
+  that fails after the §9.5 transient-hold retries (`retry_transient_
+hold`, now pub(crate) in `storage`) skips its record, lands in
+  `RetentionOutcome::failures` with the record id, the stored cell
+  and a typed reason, and the walk continues — the daily-copy
+  prune's best-effort posture: phase 4 must not fail a successful
+  sync over one held file, and the next run retries the skip
+  (idempotent convergence). The marks ride the caller's connection
+  (D-037/D-051): a DB failure mid-mark returns `StorageError::Sql`,
+  the caller's rollback undoes every mark, and the already-removed
+  files stay removed — converged by the next run exactly like the
+  crash window above.
+- _The deletion guard._ `backup_path` is D-091's relative layout
+  string (`backups/<project_id>__<slug>/<file>.<UTC>.<hash8>.bak`),
+  joined under the caller's `data_dir`. A destructive call does not
+  trust the cell: it must be relative, rooted at `backups/`, free of
+  `..` components and `.bak`-named (mid-path `.` is normalized away
+  by `Path::components` and needs no rule), else the record is
+  reported with `PathRejected` and never deleted — the daily-copy
+  retention's strict-name discipline applied to deletion. The path
+  convention (relative, not absolute) is this entry's contract for
+  the future record-writer task; the UNIQUE column stores the
+  data-dir-relative spelling so a relocated data directory keeps its
+  records valid.
+- _No store→fs edge._ `eunomia-fs`'s `remove_copy` is private and
+  single-line; `storage.rs` already deletes database-backup files
+  with `std::fs` best-effort (`prune_daily_backups`), so the copy
+  removal uses the same posture in-store — D-017's edge economy:
+  the first task that truly needs the other crate's types adds the
+  edge, and one `remove_file` is not it.
+
+Tests: 3 unit tests in the module (the guard's accept shape; the
+rejection vocabulary incl. the std-normalization note on `.`; the
+failure `Display` facts) and 11 integration tests in
+`tests/backup_retention.rs` on a real `open_db`+`run_migrations`
+database with real files, the layout paths built through the real
+core builders (`backup_relative_path` — the 19-char BKP-001 stamp,
+the cleaned slug): the BKP-003 criterion as a process (five syncs,
+each followed by the phase-4 retention at N=3 → after every run
+exactly the newest `min(n,3)` alive; after the fifth the three
+newest, files and `ok` records, the two oldest deleted and
+`pruned`), keep 1, the 0/negative clamp over both a fresh and an
+already-pruned state, the same-millisecond id tie-break (real
+`new_id` UUIDv7s, D-031), per-pair isolation (two projects; two
+files in one project), terminal statuses (`pruned`, `missing`,
+`discarded`) invisible and untouched, the vanished copy converging
+(one real removal + one NotFound in one pass) plus the second full
+no-op run, the refused removal (a directory squatting on the name:
+skipped, reported, others pruned, next run converging after the
+obstacle goes), hostile cells (`../` escape with a live file
+outside the tree, absolute path) reported and never deleted, the
+trigger-injected mark failure rolling every status back while the
+removed files stay removed (then converging), and the empty-table /
+within-limit no-ops.
+
+Round-1 review (deepseek-v4.1-flash) — REQUEST CHANGES, no P0/P1,
+four P2, eight P3; all processed:
+
+- P2-1 taken (the round's substance): the docs claimed the tests
+  pin the guard's accepted shape against the real builder output
+  while the fixtures hand-spelled the layout (and the stamp was 18
+  chars, not BKP-001's 19). The fixtures now build every layout
+  path through `eunomia_core::backup_name::backup_relative_path`
+  (the store→core edge D-105 already wired), with distinct hex
+  digests per copy so the builders' `hash8` component differs too;
+  the claims are now true.
+- P2-2 taken: "the next run converges" was stated unconditionally —
+  it holds only while the record still sits past the window. The
+  module docs now state the residual (a limit raised before the
+  next run leaves an `ok` record over a missing file, §10's
+  restore/`missing` detection being the designated closer — no v1
+  producer of `missing` exists yet).
+- P2-3 taken: `mark_pruned` gained the structural `AND status =
+'ok'` guard and counts only changed rows, making the
+  "terminal rows are never rewritten" promise structural instead
+  of snapshot-dependent (defensive today under the single-writer
+  executor, D-037; §10's `missing` detection and BKP-005's sweep
+  are future second writers).
+- P2-4 taken: `PathRejected::Escape`'s `.` half is unreachable
+  (`Path::components` normalizes mid-path `.` away; a leading `.`
+  is `NotUnderBackupsRoot`) — the docs and the arm's comment now
+  say so instead of implying a live rule.
+- P3 taken (1, 2, 3, 4, 5, 7): the `discarded` status is now
+  seeded and pinned untouched in the terminal-status test; the
+  `created_at DESC, id DESC` tie-break is exercised (two real
+  UUIDv7 ids sharing one stamp — the later-generated id keeps the
+  slot); the vanished-copy fixture now writes copy 1's file so one
+  pass exercises a real removal AND a NotFound convergence (its
+  comment matches again); the criterion test applies retention
+  after EACH of the five syncs (the card's process, not one batch
+  apply); the guard's docs name the symlink boundary (the guard
+  judges the stored cell, not the filesystem — a symlink inside a
+  writable data directory is outside the machine-written-cell
+  threat model); and the `source_path`-verbatim pair-key contract
+  is stated in the module docs for the future record writer.
+- P3-6 declined (index over `(status, project_id, source_path,
+created_at)`): a schema/migration change outside this task's
+  boundary — §6.4 keeps the history as status, the volumes are
+  §12.2-bounded, and the module docs now name the index as the
+  schema task for the day the full-window scan stops being cheap.
+  The doc half of the finding (noting the intentional row growth)
+  was taken.
+- P3-8 declined (Unix errno meanings in `retry_transient_hold`'s
+  Windows-only os-code matches): the helper is pre-existing
+  D-038 machinery shared with the migration/daily-copy paths;
+  changing its retry semantics belongs to its owner-task, and the
+  worst case here is a 1.3 s pause before an already-failing
+  removal is reported.
+
+Round-2 review (hy4-flash-free) — APPROVE, no P0/P1/P2; two P3
+(low confidence, both flagged non-blocking by the reviewer):
+
+- P3-1 taken: the module docs described `apply` in the present
+  tense as "called by the sync pipeline" while no production caller
+  exists yet (the caller is the parallel src-tauri pipeline task) —
+  the docs now say the service is FOR the pipeline to call and name
+  the boundary.
+- P3-2 declined (clamping `keep` to §6.5's upper bound 200 inside
+  the service): the range has exactly one owner — the settings
+  repository (D-039) — and D-102's parameter posture exists
+  precisely so the service does not duplicate it; a hardcoded 200
+  here would silently diverge the day the spec range changes, and
+  an over-200 value only keeps more copies (harmless direction).
