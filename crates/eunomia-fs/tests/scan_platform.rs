@@ -146,7 +146,9 @@ mod linux {
                 .expect("a repository path has a file name")
                 .to_string_lossy()
                 == nfc;
-            let class = classify_repository(path, &registry).class();
+            let class = classify_repository(path, &registry)
+                .expect("the walker's UTF-8 gate keeps every repository keyable")
+                .class();
             assert_eq!(
                 class,
                 if is_nfc {
@@ -345,7 +347,8 @@ mod macos_nfd_names {
             canonical_path_key(&root.join(nfc)).expect("the NFC spelling must resolve and key");
         let registry = ScanRegistry::new(std::slice::from_ref(&registry_key), &[], &[]);
         let walked = &log.repositories[0];
-        let classified = classify_repository(walked, &registry);
+        let classified = classify_repository(walked, &registry)
+            .expect("the walker's UTF-8 gate keeps the repository keyable");
         assert_eq!(classified.class(), ScanClass::Known);
     }
 }

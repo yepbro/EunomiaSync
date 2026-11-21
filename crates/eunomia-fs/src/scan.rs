@@ -5,10 +5,14 @@
 //! `.git` directory), plain directories, and skips — a folder whose name
 //! is excluded from the scan ([`SkipReason::Excluded`]), a folder whose
 //! `.git` is not a directory ([`SkipReason::SubmoduleOrWorktree`], the
-//! submodule or linked-worktree form), and a folder the OS refused to
-//! inspect ([`SkipReason::Access`], carrying the OS error code, PRJ-007).
-//! The consumer drives the walk through one callback and learns from the
-//! returned [`ScanOutcome`] whether it ran to completion or was cancelled.
+//! submodule or linked-worktree form), a folder the OS refused to
+//! inspect ([`SkipReason::Access`], carrying the OS error code,
+//! PRJ-007), and a folder whose PATH is not valid UTF-8
+//! ([`SkipReason::NotUtf8`] — the walk's half of the D-086 addendum:
+//! such a path can never become a registered identity, so it is a
+//! skip, never a keyed find). The consumer drives the walk through
+//! one callback and learns from the returned [`ScanOutcome`] whether
+//! it ran to completion or was cancelled.
 //!
 //! # What this module is, and is not
 //!
@@ -94,6 +98,26 @@
 //! never surfaces as a function-level failure: every access problem is
 //! data on an event, never a `Result`.
 //!
+//! # The UTF-8 identity gate (the D-086 addendum)
+//!
+//! A folder whose path text is not valid UTF-8 — its own name, or any
+//! ancestor's, carries bytes no TEXT identity can hold on a
+//! byte-preserving filesystem — is skipped with
+//! [`SkipReason::NotUtf8`] and NOT descended into: every descendant's
+//! path inherits the invalid bytes, so the whole subtree is
+//! unregistrable and walking it could only produce more skips. The
+//! gate runs on the WHOLE path at every depth, the scan root
+//! included: unlike the excluded-name filter (a policy the user chose
+//! and the root is exempt from), this is the TEXT boundary of the
+//! registered identity itself — a non-UTF-8 root could never key,
+//! store, or be added (the add seam refuses it typed, the same
+//! addendum). The command layer reaches this arm only for roots it
+//! did not canonicalize through the identity seam; the skip exists so
+//! the walk stays honest about every tree it can see. The event's
+//! path carries the real bytes (`PathBuf`), and the reason's Display
+//! names the encoding fact; the lossy spelling the log and dialog
+//! would show is the consumer's rendering, never a key.
+//!
 //! # Cancellation (ALG-053, SYS-003)
 //!
 //! The [`CancelToken`] is checked before anything else happens for every
@@ -140,7 +164,9 @@
 //! the root bypassing the name filters, an unreadable folder and an
 //! unreadable root (skipped loudly under root, OS code carried), a
 //! searchable-but-unlistable folder's two events, an unreadable FILE
-//! producing no event at all (nothing reads contents), the Display and
+//! producing no event at all (nothing reads contents), the non-UTF-8
+//! repository skipped with its own reason and its subtree not walked
+//! (Linux-only fixture, the D-086 addendum), the Display and
 //! `os_code()` contract, and cancellation — pre-flipped (no events) and
 //! mid-walk (the flip lands on the first yielded entry; strictly fewer
 //! than all events arrive). Parallel delivery means every assertion is
@@ -295,7 +321,7 @@ impl ScanEvent {
 
 /// Why a scan skipped an entry (PRJ-002's skip-reason vocabulary).
 ///
-/// The three variants are the walker's whole skip vocabulary; the
+/// The four variants are the walker's whole skip vocabulary; the
 /// remaining PRJ-002 reasons ("archived or in exclusions") are the
 /// classification task's, computed against the database, not facts of
 /// the folder tree. `Access` carries the OS failure as its source so
@@ -314,6 +340,17 @@ pub enum SkipReason {
     /// repository; the user can add it by hand. The walk did not
     /// descend into the folder.
     SubmoduleOrWorktree,
+    /// The folder's path is not valid UTF-8 (the D-086 addendum, owner
+    /// ruling 2026-11-20 variant 2): on a byte-preserving filesystem
+    /// the folder's own name — or an ancestor's — carries bytes no
+    /// TEXT identity can hold, so the path could never be keyed or
+    /// stored losslessly; the identity seam refuses such paths at the
+    /// add/scan boundary instead of keying them lossily (the
+    /// pre-addendum U+FFFD behavior is deleted). The walk did not
+    /// descend into the folder: every descendant's path inherits the
+    /// invalid bytes. No OS call failed — a fact about the text, like
+    /// `Excluded`, not an access refusal.
+    NotUtf8,
     /// The OS refused to inspect the folder: access denied on the
     /// folder or an ancestor, the drive dropped, a listing failed
     /// mid-walk (PRJ-007). The traversal continued elsewhere. The
@@ -339,11 +376,11 @@ impl SkipReason {
     /// The raw OS error code behind this skip, when an OS call failed
     /// (`raw_os_error` of the carried [`io::Error`]): PRJ-007's "with
     /// the OS code", consumed by the UI detail and the §10 log line.
-    /// `None` for the skips that are facts about the name, not OS
-    /// failures.
+    /// `None` for the skips that are facts about the name or text, not
+    /// OS failures.
     pub fn os_code(&self) -> Option<i32> {
         match self {
-            SkipReason::Excluded | SkipReason::SubmoduleOrWorktree => None,
+            SkipReason::Excluded | SkipReason::SubmoduleOrWorktree | SkipReason::NotUtf8 => None,
             SkipReason::Access { source } => source.raw_os_error(),
         }
     }
@@ -355,6 +392,7 @@ impl fmt::Display for SkipReason {
             SkipReason::Excluded => write!(f, "folder name is excluded from the scan"),
             // ALG-052's own reason words, verbatim.
             SkipReason::SubmoduleOrWorktree => write!(f, "submodule or worktree"),
+            SkipReason::NotUtf8 => write!(f, "path is not valid UTF-8"),
             SkipReason::Access { source } => write!(f, "folder cannot be read: {source}"),
         }
     }
@@ -364,7 +402,7 @@ impl std::error::Error for SkipReason {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             SkipReason::Access { source } => Some(source),
-            SkipReason::Excluded | SkipReason::SubmoduleOrWorktree => None,
+            SkipReason::Excluded | SkipReason::SubmoduleOrWorktree | SkipReason::NotUtf8 => None,
         }
     }
 }
@@ -533,6 +571,22 @@ fn visit_entry(
 
         Ok(entry) => {
             let path = entry.path();
+            // The UTF-8 identity gate (the D-086 addendum), BEFORE the
+            // name filters: a path whose text is not valid UTF-8 can
+            // never become a registered identity — the key builder and
+            // the canonicalizing add seam refuse it typed — so the walk
+            // reports it as a skip and does not descend (every
+            // descendant inherits the invalid bytes). Applied at every
+            // depth INCLUDING the root: unlike the excluded-name policy
+            // below, this is the TEXT boundary of the identity itself,
+            // not a user choice the root could be exempt from.
+            if path.to_str().is_none() {
+                on_event(&ScanEvent::Skipped {
+                    path: path.to_path_buf(),
+                    reason: SkipReason::NotUtf8,
+                });
+                return WalkState::Skip;
+            }
             // ALG-051: excluded names and system folders are skipped
             // and not descended — and not probed either, so exclusion
             // wins over repository detection (see the module docs).
@@ -647,6 +701,7 @@ mod tests {
         Directory(String),
         SkippedExcluded(String),
         SkippedSubmoduleOrWorktree(String),
+        SkippedNotUtf8(String),
         SkippedAccess(String),
     }
 
@@ -657,6 +712,7 @@ mod tests {
                 | Recorded::Directory(path)
                 | Recorded::SkippedExcluded(path)
                 | Recorded::SkippedSubmoduleOrWorktree(path)
+                | Recorded::SkippedNotUtf8(path)
                 | Recorded::SkippedAccess(path) => path.contains(needle),
             }
         }
@@ -688,6 +744,7 @@ mod tests {
                     SkipReason::SubmoduleOrWorktree => {
                         Recorded::SkippedSubmoduleOrWorktree(path_string(path))
                     }
+                    SkipReason::NotUtf8 => Recorded::SkippedNotUtf8(path_string(path)),
                     SkipReason::Access { .. } => Recorded::SkippedAccess(path_string(path)),
                 },
             };
@@ -795,6 +852,99 @@ mod tests {
         assert!(
             !events.iter().any(|event| event.path_contains("nested")),
             "a skipped submodule/worktree folder must not be descended into; got: {events:?}"
+        );
+    }
+
+    /// Linux-only, like the sweep test's non-UTF-8 fixture (the
+    /// `temp_files` platform posture): only Linux filesystems accept
+    /// an invalid-byte name — APFS and NTFS reject it with EILSEQ — so
+    /// the D-086-addendum walk gate is testable only here.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_scan_root_yields_one_skip_and_completes() {
+        // The gate's ROOT arm, the one claim of the module docs no
+        // other fixture reaches: a root whose own path is not valid
+        // UTF-8 is skipped like any other entry (the identity
+        // boundary is not a name policy the root could be exempt
+        // from), the walk cannot descend, and it ends Completed with
+        // exactly one event — data, not a walker failure.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let root = dir.path().join(OsStr::from_bytes(b"scan\xff"));
+        fs::create_dir_all(root.join(".git"))
+            .expect("the non-UTF-8 scan-root fixture must be creatable");
+
+        let (outcome, events) = record_all(&root, 6, &[]);
+
+        assert_eq!(outcome, ScanOutcome::Completed);
+        assert_eq!(
+            events,
+            vec![Recorded::SkippedNotUtf8(
+                root.to_string_lossy().into_owned()
+            )],
+            "a non-UTF-8 root yields exactly one NotUtf8 skip: {events:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_repository_is_skipped_and_its_subtree_is_not_walked() {
+        // The walk's half of the D-086 addendum: a repository whose
+        // path text is not valid UTF-8 (its own name here, an
+        // ancestor's name in the second fixture) is NEVER a found
+        // repository — it is a skip with the NotUtf8 reason, the
+        // subtree under the invalid component is not walked, and the
+        // valid siblings are found untouched.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let non_utf8 = dir.path().join(OsStr::from_bytes(b"repo\xff"));
+        fs::create_dir_all(non_utf8.join(".git"))
+            .expect("the non-UTF-8 repository fixture must be creatable");
+        // A VALID-named repository under a non-UTF-8-named ancestor:
+        // its whole path carries the ancestor's invalid bytes, so the
+        // ancestor is skipped and the walk never reaches the child.
+        let nested_parent = dir.path().join(OsStr::from_bytes(b"dir\xfe"));
+        let nested = nested_parent.join("inner");
+        fs::create_dir_all(nested.join(".git"))
+            .expect("the non-UTF-8 ancestor fixture must be creatable");
+        let sibling = repo_with_git_dir(dir.path(), "sibling");
+
+        let (outcome, events) = record_all(dir.path(), 6, &[]);
+
+        assert_eq!(outcome, ScanOutcome::Completed);
+        assert!(
+            events.contains(&Recorded::SkippedNotUtf8(
+                non_utf8.to_string_lossy().into_owned()
+            )),
+            "the non-UTF-8-named repository must be skipped with the NotUtf8 \
+             reason; got: {events:?}"
+        );
+        assert!(
+            events.contains(&Recorded::SkippedNotUtf8(
+                nested_parent.to_string_lossy().into_owned()
+            )),
+            "the non-UTF-8-named ANCESTOR must be skipped too — every path \
+             below it is unregistrable; got: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| event.is_repository_of(&non_utf8)),
+            "a non-UTF-8 repository must never be REPORTED as one — no lossy \
+             find, no later lossy classification; got: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| event.path_contains("inner")),
+            "the walk must not descend into a non-UTF-8 path; got: {events:?}"
+        );
+        assert!(
+            events.contains(&Recorded::Repository(
+                sibling.to_string_lossy().into_owned()
+            )),
+            "the valid sibling repository is still found — valid paths are \
+             untouched by the gate; got: {events:?}"
         );
     }
 
@@ -1291,6 +1441,14 @@ mod tests {
         let submodule = SkipReason::SubmoduleOrWorktree;
         assert_eq!(submodule.to_string(), "submodule or worktree");
         assert_eq!(submodule.os_code(), None, "a name skip has no OS code");
+
+        let not_utf8 = SkipReason::NotUtf8;
+        assert_eq!(not_utf8.to_string(), "path is not valid UTF-8");
+        assert_eq!(not_utf8.os_code(), None, "a text-fact skip has no OS code");
+        assert!(
+            std::error::Error::source(&not_utf8).is_none(),
+            "a text-fact skip has no error source"
+        );
 
         let access = SkipReason::Access {
             source: io::Error::from_raw_os_error(13),

@@ -224,7 +224,10 @@ export const commands = {
 	 *     (nearest root wins, D-06). A folder outside any repository is
 	 *     §10's `E_NOT_A_REPO`; a probe the OS refused is
 	 *     `E_PROJECT_UNAVAILABLE` with the OS facts ("could not check" is
-	 *     not "not a repo", D-090).
+	 *     not "not a repo", D-090); a root whose canonical form is not
+	 *     valid UTF-8 is the D-086-addendum encoding rejection (keys and
+	 *     stored paths are lossless), the same envelope the dialog and
+	 *     session gates answer.
 	 *  2. **The root offer** (PRJ-003): when the picked folder is a
 	 *     subfolder and `accept_repo_root` is not `Some(true)`, the answer
 	 *     is the `"repo_root_offered"` arm — the app *offers* the root,

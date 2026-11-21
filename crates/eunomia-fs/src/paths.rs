@@ -35,9 +35,9 @@
 //! output is the STORED path, verbatim — NFC and folding apply to the
 //! key only, never to the stored path (owner ruling, 2026-11-19).
 //! [`path_key`] builds the identity key
-//! of an already-canonicalized path — pure and total: separators
-//! become `/`, interior and trailing separator runs collapse, and the
-//! per-OS Unicode rule applies. On Windows and macOS the key is
+//! of an already-canonicalized path — pure over the path TEXT:
+//! separators become `/`, interior and trailing separator runs
+//! collapse, and the per-OS Unicode rule applies. On Windows and macOS the key is
 //! NFC-normalized and case-folded with SIMPLE folding — the 1:1
 //! mappings (statuses C and S) of Unicode CaseFolding.txt, the
 //! filesystem-faithful rule: ligatures have no simple fold and stay
@@ -63,19 +63,33 @@
 //! never collides with a sibling `a/b`.
 //!
 //! Unix paths are bytes; the key is TEXT (a SQLite TEXT column,
-//! §6.2). Non-UTF-8 path bytes reach the key as U+FFFD replacement
-//! characters (`Path::to_string_lossy`) — the same lossy form the
-//! app's logs and dialogs show for such paths. The known cost,
-//! documented here and in DECISIONS.md D-086: on a byte-preserving
-//! filesystem, two names differing only in invalid-byte sequences
-//! collapse to one key (the second add hits the UNIQUE column) —
-//! whether to reject non-UTF-8 paths at the add/scan seam instead is
-//! a format-contract decision that stays with the owner. And the
-//! rule set above is a FORMAT CONTRACT otherwise too: keys are
+//! §6.2) and the stored path is TEXT too — and a TEXT identity over
+//! byte paths has exactly two honest shapes: lossy (U+FFFD, the
+//! pre-addendum D-086 rule) or refusal. The owner ruling of
+//! 2026-11-20 (escalation variant 2, recorded as the D-086 addendum)
+//! chose REFUSAL: [`canonicalize`] and [`path_key`] answer a typed
+//! error for a path whose text is not valid UTF-8, so keys and
+//! stored paths are always lossless. The lossy form survives only in
+//! DIAGNOSTICS — the error and skip path fields the log and dialog
+//! show — never in the database. Because the refusal changes the key
+//! format's domain, the format contract below now reads: NFC and
+//! simple folding over VALID UTF-8 only; the change landed before
+//! the first release, so no stored key migration is needed (the
+//! pre-release dev rows keyed lossily are insignificant and are
+//! simply re-added). The scan meets the same boundary one level
+//! down: a non-UTF-8 repository path is a SKIP with its own reason
+//! ([`crate::scan::SkipReason::NotUtf8`]), never a keyed find.
+//!
+//! And the rule set above is a FORMAT CONTRACT otherwise too: keys are
 //! stored in SQLite and compared across app versions, so changing
 //! the fold flavor, the normalization, or the separator shape later
 //! would silently split or merge project identities (the
-//! DECISIONS.md D-082 posture for snapshot hashes).
+//! DECISIONS.md D-082 posture for snapshot hashes). One follow-up
+//! obligation is recorded rather than done here: docs/spec.md's
+//! skip-reason vocabulary (PRJ-002's parenthetical, ALG-051/052) does
+//! not yet list the new reason — spec edits ship as their own
+//! `docs:` commits after the ruling (the D-086 precedent), to land
+//! before the `scan_start` UI consumes the vocabulary.
 //!
 //! # Testing plan
 //!
@@ -96,8 +110,9 @@
 //! prefix and the DB-031 symlink collapse), the NFC-vs-NFD collapse,
 //! the simple-fold fidelity battery (ﬁ/ſ/ß/ẞ/İ/KELVIN SIGN),
 //! separator shapes including the Unix backslash and the verbatim-UNC
-//! key spelling, and the DB-031 one-folder-one-key symlink acceptance
-//! test. The repository-root lookup is tested through the public
+//! key spelling, the DB-031 one-folder-one-key symlink acceptance
+//! test, and the non-UTF-8 refusal of both canonicalization and the
+//! key builder over a real Linux fixture (the D-086 addendum). The repository-root lookup is tested through the public
 //! function against real fixtures: the picked folder being the root
 //! itself, a subfolder two levels deep, the nearest `.git` winning over
 //! an outer nested repository, the `.git`-file worktree form and a
@@ -369,14 +384,30 @@ pub enum PathKeyRule {
 /// HERE, by keying only canonicalized paths: a symlink resolves to
 /// its target before any key is built.
 ///
+/// # The UTF-8 gate (the D-086 addendum)
+///
+/// The canonical output is stored in a TEXT column and keyed into
+/// TEXT, so the function REFUSES a canonical form whose text is not
+/// valid UTF-8 ([`CanonicalizeError::NotUtf8`]) — keys and stored
+/// paths are always lossless (owner ruling 2026-11-20, escalation
+/// variant 2; the pre-addendum U+FFFD lossy keying is deleted). The
+/// check runs on the OUTPUT, not the input: a non-UTF-8 input that
+/// RESOLVES to a UTF-8 target (a UTF-8-named symlink pointing at a
+/// non-UTF-8-named folder, the other way round) is accepted, because
+/// the stored identity is the target's spelling — and the reverse is
+/// refused. The refusal carries the canonical form's LOSSY text for
+/// the log and dialog only.
+///
 /// # Errors
 ///
 /// [`CanonicalizeError`] when the OS cannot resolve the path — it
 /// does not exist (a moved, deleted or unmounted folder; D-09's
 /// situation), access is denied, a link loop cannot be followed, or
-/// a component is not a directory. The typed error carries the input
-/// path text and the OS error with its raw code, for the §10 log
-/// line.
+/// a component is not a directory ([`CanonicalizeError::Io`]) — or
+/// when the resolved form is not valid UTF-8
+/// ([`CanonicalizeError::NotUtf8`]). The typed error carries the
+/// input path text and the OS error with its raw code, for the §10
+/// log line.
 ///
 /// # Examples
 ///
@@ -390,10 +421,21 @@ pub enum PathKeyRule {
 /// assert!(error.os_code().is_some());
 /// ```
 pub fn canonicalize(path: &Path) -> Result<std::path::PathBuf, CanonicalizeError> {
-    dunce::canonicalize(path).map_err(|source| CanonicalizeError {
+    let canonical = dunce::canonicalize(path).map_err(|source| CanonicalizeError::Io {
         path: path.to_string_lossy().into_owned(),
         source,
-    })
+    })?;
+    // The D-086 addendum gate: the canonical form becomes the stored
+    // TEXT path and the key's input, so a form whose text is not
+    // valid UTF-8 is refused, not keyable lossily. The lossy string
+    // built here rides only in the error's diagnostic field.
+    if canonical.to_str().is_some() {
+        Ok(canonical)
+    } else {
+        Err(CanonicalizeError::NotUtf8 {
+            path: canonical.to_string_lossy().into_owned(),
+        })
+    }
 }
 
 /// The identity key of a project path (DB-030, DB-031): canonicalizes
@@ -404,7 +446,12 @@ pub fn canonicalize(path: &Path) -> Result<std::path::PathBuf, CanonicalizeError
 ///
 /// # Errors
 ///
-/// [`CanonicalizeError`], as in [`canonicalize`].
+/// [`CanonicalizeError`], as in [`canonicalize`] — including its
+/// [`CanonicalizeError::NotUtf8`] refusal of a canonical form whose
+/// text is not valid UTF-8 (the D-086 addendum). The key builder's
+/// own [`PathKeyError`] cannot fire through this composition —
+/// `canonicalize` already gated the same text — and is folded into
+/// the same variant rather than assumed away.
 ///
 /// # Examples
 ///
@@ -420,12 +467,15 @@ pub fn canonicalize(path: &Path) -> Result<std::path::PathBuf, CanonicalizeError
 /// // The key is the key of the canonical form, ends at the folder,
 /// // and carries no trailing separator (the leading spelling is
 /// // platform-shaped: a drive letter on Windows, a `/` elsewhere):
-/// assert_eq!(key, path_key(&canonical));
+/// assert_eq!(key, path_key(&canonical).unwrap());
 /// assert!(key.ends_with("repo"));
 /// assert!(!key.ends_with('/'));
 /// ```
 pub fn canonical_path_key(path: &Path) -> Result<String, CanonicalizeError> {
-    canonicalize(path).map(|canonical| path_key(&canonical))
+    let canonical = canonicalize(path)?;
+    path_key(&canonical).map_err(|source| CanonicalizeError::NotUtf8 {
+        path: source.into_path(),
+    })
 }
 
 /// The identity key of an ALREADY-CANONICALIZED path (DB-030): the
@@ -433,18 +483,24 @@ pub fn canonical_path_key(path: &Path) -> Result<String, CanonicalizeError> {
 /// separators, interior and trailing separator runs collapsed, and on
 /// Windows/macOS NFC plus simple case folding.
 ///
-/// Total: any input produces a key, never a panic. But DB-030/DB-031's
-/// identity promises hold only for canonical input: a non-canonical
-/// path gets the key of its TEXT (e.g. `/repo` and a symlink spelled
-/// `/alias` key differently until canonicalized), which is why
-/// [`canonical_path_key`] is the entry point flows should call. The
-/// repository scan (ALG-053) keys the paths it walked; that holds
-/// given the scan is rooted at a stored canonical path and keeps
-/// D-07's no-follow rule — the scan task owns both preconditions.
+/// Total: any input produces a key or a typed refusal, never a panic.
+/// But DB-030/DB-031's identity promises hold only for canonical
+/// input: a non-canonical path gets the key of its TEXT (e.g. `/repo`
+/// and a symlink spelled `/alias` key differently until
+/// canonicalized), which is why [`canonical_path_key`] is the entry
+/// point flows should call. The repository scan (ALG-053) keys the
+/// paths it walked; that holds given the scan is rooted at a stored
+/// canonical path and keeps D-07's no-follow rule — the scan task
+/// owns both preconditions.
 ///
-/// Unix paths are bytes and the key is TEXT: non-UTF-8 path bytes
-/// reach the key as U+FFFD replacement characters (the same lossy
-/// form logs and dialogs show).
+/// Unix paths are bytes and the key is TEXT, so the key is built over
+/// the path TEXT only: a path whose text is not valid UTF-8 is
+/// REFUSED with [`PathKeyError`] — the D-086 addendum (owner ruling
+/// 2026-11-20, variant 2) deleted the pre-addendum U+FFFD lossy
+/// keying, making keys and stored paths always lossless. The walk
+/// refuses such paths before they reach classification
+/// ([`crate::scan::SkipReason::NotUtf8`]); the error's path field is
+/// the lossy spelling, for the log and dialog only.
 ///
 /// # Examples
 ///
@@ -454,13 +510,18 @@ pub fn canonical_path_key(path: &Path) -> Result<String, CanonicalizeError> {
 ///
 /// // The running platform's rule; on Linux the case is kept, on
 /// // Windows and macOS it folds. The shape holds everywhere:
-/// let key = path_key(Path::new("/Repo/MyProject"));
+/// let key = path_key(Path::new("/Repo/MyProject")).unwrap();
 /// assert!(key.starts_with('/'));
 /// assert!(!key.ends_with('/'));
 /// ```
 #[must_use = "the key is the value; building it and dropping it wastes the allocation"]
-pub fn path_key(canonical: &Path) -> String {
-    path_key_with_rule(&canonical.to_string_lossy(), platform_rule())
+pub fn path_key(canonical: &Path) -> Result<String, PathKeyError> {
+    match canonical.to_str() {
+        Some(text) => Ok(path_key_with_rule(text, platform_rule())),
+        None => Err(PathKeyError {
+            path: canonical.to_string_lossy().into_owned(),
+        }),
+    }
 }
 
 /// [`path_key`] with the Unicode rule fed explicitly: the pure,
@@ -563,70 +624,151 @@ fn simple_fold(text: &str) -> String {
         .collect()
 }
 
-/// Why [`canonicalize`] said no: the OS refused to resolve the path.
-/// One failure mode (the resolution call itself), so a struct — the
-/// input path text and the OS error are the two facts the §10 log
-/// line needs, exposed through [`CanonicalizeError::path`] and
-/// [`CanonicalizeError::os_code`] the way
-/// [`ProjectUnavailableError`] exposes its verdicts. Hand-rolled
-/// impls, not `thiserror`: the crate's §5.2 dependency list has no
-/// `thiserror` (the DECISIONS.md D-017 store precedent).
+/// Why [`canonicalize`] said no: the OS refused to resolve the path,
+/// or the resolved form's text is not valid UTF-8 (the D-086
+/// addendum). Hand-rolled impls, not `thiserror`: the crate's §5.2
+/// dependency list has no `thiserror` (the DECISIONS.md D-017 store
+/// precedent).
+///
+/// The two facts the §10 log line needs — the path text and, when an
+/// OS call failed, the raw error code — are exposed through
+/// [`CanonicalizeError::path`], [`CanonicalizeError::io_error`] and
+/// [`CanonicalizeError::os_code`] the way [`ProjectUnavailableError`]
+/// exposes its verdicts. The `NotUtf8` refusal is a fact about the
+/// TEXT, not an OS failure (the D-090 negative-lookup/refusal split):
+/// its `io_error()`/`os_code()` answer `None`, and its `path` field
+/// is the LOSSY spelling of the canonical form — the form the log
+/// and dialog show, never the database.
 #[derive(Debug)]
-pub struct CanonicalizeError {
-    /// The path text this failure is about — the log line's subject.
-    path: String,
-    /// The OS refusal, carrying the raw error code.
-    source: io::Error,
+pub enum CanonicalizeError {
+    /// The OS refused to resolve the path: it does not exist (moved,
+    /// deleted, unmounted — D-09's situation), access is denied, a
+    /// link loop cannot be followed, a component is not a directory.
+    /// The input path text (lossy form, the same text the log line
+    /// shows) and the OS failure with its raw code ride along.
+    Io {
+        /// The path text canonicalization was asked for — the log
+        /// line's subject.
+        path: String,
+        /// The OS refusal, carrying the raw error code.
+        source: io::Error,
+    },
+    /// The canonical form's text is not valid UTF-8: the stored TEXT
+    /// path and the key would be lossy, so the identity seam refuses
+    /// the path outright (the D-086 addendum, owner ruling
+    /// 2026-11-20). The path is the canonical form's LOSSY spelling —
+    /// a diagnostic, never a key or a stored value.
+    NotUtf8 {
+        /// The canonical form's lossy text (the form logs and dialogs
+        /// show for such paths).
+        path: String,
+    },
 }
 
 impl CanonicalizeError {
-    /// The path text canonicalization was asked for (lossy form of
-    /// the input, the same text the log line shows).
+    /// The path text this failure is about (lossy form, the same text
+    /// the log line shows): the canonicalization input for `Io`, the
+    /// canonical form's lossy spelling for `NotUtf8`.
     #[must_use]
     pub fn path(&self) -> &str {
-        &self.path
+        match self {
+            CanonicalizeError::Io { path, .. } | CanonicalizeError::NotUtf8 { path } => path,
+        }
     }
 
-    /// The OS failure behind the refusal; its `raw_os_error` and
+    /// The OS failure behind the refusal, when an OS call produced
+    /// it; `None` for the UTF-8 refusal, which is a fact about the
+    /// text rather than an OS failure. Its `raw_os_error` and
     /// `ErrorKind` are §10's first-class log facts.
     #[must_use]
-    pub fn io_error(&self) -> &io::Error {
-        &self.source
-    }
-
-    /// Consumes the error into the OS failure behind it — for typed
-    /// errors that classify the refusal by `ErrorKind`/code and then
-    /// re-raise the io error as their own variant (the
-    /// [`TargetPathError`] resolution verdicts; [`NotARepoError`]
-    /// carries the [`CanonicalizeError`] whole instead).
-    #[must_use]
-    pub fn into_io_error(self) -> io::Error {
-        self.source
+    pub fn io_error(&self) -> Option<&io::Error> {
+        match self {
+            CanonicalizeError::Io { source, .. } => Some(source),
+            CanonicalizeError::NotUtf8 { .. } => None,
+        }
     }
 
     /// The raw OS error code (`std::io::Error::raw_os_error`) —
     /// §10 names it a first-class fact of every error log line.
+    /// `None` where no OS call failed.
     #[must_use]
     pub fn os_code(&self) -> Option<i32> {
-        self.source.raw_os_error()
+        self.io_error().and_then(io::Error::raw_os_error)
     }
 }
 
 impl fmt::Display for CanonicalizeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "cannot canonicalize project path {}: {}",
-            self.path, self.source
-        )
+        match self {
+            CanonicalizeError::Io { path, source } => {
+                write!(f, "cannot canonicalize project path {}: {}", path, source)
+            }
+            CanonicalizeError::NotUtf8 { path } => {
+                write!(
+                    f,
+                    "cannot canonicalize project path {}: the path text is not valid UTF-8",
+                    path
+                )
+            }
+        }
     }
 }
 
 impl std::error::Error for CanonicalizeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
+        match self {
+            CanonicalizeError::Io { source, .. } => {
+                Some(source as &(dyn std::error::Error + 'static))
+            }
+            CanonicalizeError::NotUtf8 { .. } => None,
+        }
     }
 }
+
+/// Why [`path_key`] said no: the path's text is not valid UTF-8, and
+/// the D-086 addendum (owner ruling 2026-11-20, variant 2) made the
+/// key builder refuse such text instead of keying it lossily — keys
+/// are always lossless. A fact about the text, not an OS failure (the
+/// D-090 split): no `io::Error` to carry, `os_code()` has no meaning
+/// here. The `path` field is the LOSSY spelling — the form the log
+/// and dialog show, never the database. Hand-rolled impls, not
+/// `thiserror`: the crate's §5.2 dependency list has none (the
+/// DECISIONS.md D-017 store precedent).
+#[derive(Debug)]
+pub struct PathKeyError {
+    /// The path's lossy text (the form logs and dialogs show for such
+    /// paths).
+    path: String,
+}
+
+impl PathKeyError {
+    /// The path's lossy text this failure is about — the log line's
+    /// subject, never a key or a stored value.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Consumes the error into the lossy path text — for callers that
+    /// re-wrap the refusal into their own envelope (the composition
+    /// in [`canonical_path_key`]).
+    #[must_use]
+    pub fn into_path(self) -> String {
+        self.path
+    }
+}
+
+impl fmt::Display for PathKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "cannot build the path key of {}: the path text is not valid UTF-8",
+            self.path
+        )
+    }
+}
+
+impl std::error::Error for PathKeyError {}
 
 // ---- PRJ-003 / D-08: the Git repository root lookup ----------------
 
@@ -766,10 +908,13 @@ pub fn find_git_root(path: &Path) -> Result<std::path::PathBuf, NotARepoError> {
 pub enum NotARepoError {
     /// The input path could not be canonicalized: the folder does not
     /// exist (moved, deleted, unmounted — D-09's situation), access is
-    /// denied on the way to it, a link loop cannot be followed. The
-    /// typed canonicalization failure, carried whole.
+    /// denied on the way to it, a link loop cannot be followed — or
+    /// the canonical form's text is not valid UTF-8, which the
+    /// identity seam refuses outright (the D-086 addendum). The typed
+    /// canonicalization failure, carried whole.
     Canonicalize {
-        /// The canonicalization refusal (input path text + OS error).
+        /// The canonicalization refusal (input/canonical path text +
+        /// OS error, or the UTF-8 fact).
         source: CanonicalizeError,
     },
     /// A `.git` probe on a walked directory was refused by the OS:
@@ -813,11 +958,13 @@ impl NotARepoError {
 
     /// The I/O error behind this failure, when an OS call produced it;
     /// `None` for the negative lookup, which is a fact about the tree
-    /// rather than an OS failure.
+    /// rather than an OS failure, and for a UTF-8 refusal inside the
+    /// carried canonicalization failure (a fact about the text, the
+    /// D-086 addendum).
     #[must_use]
     pub fn io_error(&self) -> Option<&io::Error> {
         match self {
-            NotARepoError::Canonicalize { source } => Some(source.io_error()),
+            NotARepoError::Canonicalize { source } => source.io_error(),
             NotARepoError::NotReadable { source, .. } => Some(source),
             NotARepoError::NoGitEntry { .. } => None,
         }
@@ -871,9 +1018,9 @@ impl std::error::Error for NotARepoError {
 /// D-088's coordination rule to T-066) as `AGENTS.md`. Both fields
 /// come from the same resolution, so the write path and the staging
 /// name can never drift apart. The name is lossy text
-/// (`to_string_lossy`, the module's established form — the same
-/// documented U+FFFD cost posture as the `path_key`), which is what
-/// the staging-name grammar (`&str`, D-088) consumes; the write path
+/// (`to_string_lossy`) — the D-092 write-path posture, a diagnostic
+/// and grammar surface only (the identity seam refuses non-UTF-8 text
+/// instead of keying it lossily, the D-086 addendum); the write path
 /// itself carries the real bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetPath {
@@ -931,11 +1078,12 @@ impl TargetPath {
 /// - The target is a symbolic link: the path is resolved and the
 ///   write goes to the real file — the common case `CLAUDE.md` points
 ///   to `AGENTS.md` (T-F6). The whole chain resolves in one OS call
-///   through the module's [`canonicalize`] (the D-086 primitive): the
-///   kernel follows links of any depth, and the answer is the absolute,
-///   verbatim-spelled canonical form the containment check and the
-///   write both want. A `read_link` composition would re-implement the
-///   walk with a depth bound for no gain.
+///   through the module's raw canonicalization
+///   (the private `canonicalize_raw`, the D-092 write-path form): the
+///   kernel follows links of any depth, and the answer is the
+///   absolute, verbatim-spelled canonical form the containment check
+///   and the write both want. A `read_link` composition would
+///   re-implement the walk with a depth bound for no gain.
 /// - The link does not end at a real file — a dangling link, or a
 ///   loop the OS refuses to follow (ELOOP):
 ///   [`TargetPathError::BrokenLink`], the `E_TARGET_BROKEN_LINK`
@@ -962,7 +1110,8 @@ impl TargetPath {
 /// # The containment check's platform posture
 ///
 /// Both sides of the check are canonical (the root by the caller's
-/// D-086 posture, the link's resolution by [`canonicalize`]), so their
+/// canonical-root posture, the link's resolution by
+/// the private `canonicalize_raw`), so their
 /// shared prefix carries the filesystem's own spelling and the
 /// byte-exact component comparison answers on every platform. When the
 /// byte-exact comparison fails, the comparison retries case-folded on
@@ -981,7 +1130,8 @@ impl TargetPath {
 /// # Contracts the caller holds
 ///
 /// `root` is the project root, spelled however the caller holds it —
-/// it is CANONICALIZED HERE (the D-086 posture enforced, not assumed:
+/// it is CANONICALIZED HERE (the canonical-root posture enforced, not
+/// assumed:
 /// both containment sides and every returned path live under the
 /// canonical form, so a root behind a symlinked ancestor — on macOS
 /// every temp fixture, `/var/…` = `/private/var/…` — cannot turn a
@@ -990,7 +1140,8 @@ impl TargetPath {
 /// (§5.7; SEC-006: names never come from free-form strings). The
 /// containment check nevertheless runs on the FINAL write path
 /// whatever produced it — PHYSICALLY, not lexically: every branch
-/// resolves its path through canonicalize (a regular file reached
+/// resolves its path through the raw canonicalization (a regular file
+/// reached
 /// through an intermediate link judges by its real location; an
 /// absent final component resolves its parent chain; a parent chain
 /// that does not exist has nothing to link through), and the check
@@ -1007,7 +1158,11 @@ impl TargetPath {
 /// identity; the resolved target is a WRITE path, not a stored
 /// identity — its canonical (verbatim-spelled) form is simply what the
 /// writer opens and renames over, and what keeps the containment
-/// comparison honest.
+/// comparison honest. That is also why the resolution here is the RAW
+/// form (the private `canonicalize_raw`) rather than the identity seam's
+/// [`canonicalize`]: the D-086 addendum's UTF-8 gate governs stored
+/// identities, while the write path carries the real bytes and only
+/// the staging NAME is lossy text (D-088/D-092).
 ///
 /// # Races are honest (TOCTOU)
 ///
@@ -1068,17 +1223,18 @@ impl TargetPath {
 pub fn resolve_target_path(root: &Path, file_name: &str) -> Result<TargetPath, TargetPathError> {
     // The containment comparison must be canonical on BOTH sides, and
     // the returned paths must live under one spelling: the root
-    // resolves through the module's canonicalize — the D-086 posture
-    // ENFORCED here rather than assumed of the caller. A root behind
+    // resolves through the module's raw canonicalization — the
+    // canonical posture ENFORCED here rather than assumed of the
+    // caller. A root behind
     // a symlinked ancestor (on macOS every temp fixture: `/var/…` is
     // the same folder as `/private/var/…`) must not turn a legitimate
     // target into a false OutsideRoot. A vanished or unresolvable root
     // is a refusal, not a verdict: the availability check (§9.4 step
     // 1) owns that situation in the pipeline, and this is the honest
     // answer if the tree moved mid-run.
-    let root = canonicalize(root).map_err(|error| TargetPathError::NotReadable {
-        path: error.path().to_owned(),
-        source: error.into_io_error(),
+    let root = canonicalize_raw(root).map_err(|source| TargetPathError::NotReadable {
+        path: root.to_string_lossy().into_owned(),
+        source,
     })?;
     let candidate = root.join(file_name);
     // Probe WITHOUT following a final symlink: the verdict "is the
@@ -1117,9 +1273,9 @@ pub fn resolve_target_path(root: &Path, file_name: &str) -> Result<TargetPath, T
                 // is the same path spelled by the join — one extra
                 // realpath is the price of not trusting the name.
                 // The atomic rename replaces it in place.
-                canonicalize(&candidate).map_err(|error| TargetPathError::NotReadable {
-                    path: error.path().to_owned(),
-                    source: error.into_io_error(),
+                canonicalize_raw(&candidate).map_err(|source| TargetPathError::NotReadable {
+                    path: candidate.to_string_lossy().into_owned(),
+                    source,
                 })?
             }
         }
@@ -1152,10 +1308,10 @@ pub fn resolve_target_path(root: &Path, file_name: &str) -> Result<TargetPath, T
 }
 
 /// Resolves the write path for an ABSENT final component (the
-/// creation case): the parent chain resolves through canonicalize so
-/// containment judges the real location an intermediate link would
-/// lead to, and the final component is carried verbatim — it is the
-/// name the write creates.
+/// creation case): the parent chain resolves through the raw
+/// canonicalization so containment judges the real location an
+/// intermediate link would lead to, and the final component is
+/// carried verbatim — it is the name the write creates.
 ///
 /// The root itself is already canonical, so a one-component name (the
 /// contract shape, §5.7) takes the lexical join with no extra syscall.
@@ -1176,7 +1332,7 @@ fn resolve_absent(root: &Path, candidate: &Path) -> Result<std::path::PathBuf, T
         // the real path.
         return Ok(candidate.to_path_buf());
     }
-    match canonicalize(parent) {
+    match canonicalize_raw(parent) {
         Ok(real_parent) => match candidate.file_name() {
             Some(final_component) => Ok(real_parent.join(final_component)),
             // No final component: nothing to rejoin (unreachable for
@@ -1184,8 +1340,7 @@ fn resolve_absent(root: &Path, candidate: &Path) -> Result<std::path::PathBuf, T
             // keeps the function total.
             None => Ok(candidate.to_path_buf()),
         },
-        Err(error) => {
-            let source = error.into_io_error();
+        Err(source) => {
             if source.kind() == io::ErrorKind::NotFound {
                 // The parent chain does not exist either: no link can
                 // hide there, the lexical join is the truth.
@@ -1200,17 +1355,33 @@ fn resolve_absent(root: &Path, candidate: &Path) -> Result<std::path::PathBuf, T
     }
 }
 
+/// The raw resolution the WRITE-path machinery runs (D-092): the same
+/// `dunce::canonicalize` the identity seam wraps, WITHOUT the UTF-8
+/// gate of [`canonicalize`] — the write path carries the real bytes
+/// by that decision's own contract, and only the staging NAME is
+/// lossy text (D-088). The identity seam's refusal (the D-086
+/// addendum) governs what may become a STORED project path; a
+/// resolved write target under an already-registered UTF-8 root is
+/// not a stored identity, so it keeps its byte-faithful resolution
+/// here. The io error is returned raw: every consumer classifies the
+/// refusal by `ErrorKind`/raw code (dangling vs loop vs plain
+/// refusal).
+fn canonicalize_raw(path: &Path) -> Result<std::path::PathBuf, io::Error> {
+    dunce::canonicalize(path)
+}
+
 /// Resolves a symlinked target through its whole chain to the real
-/// file (§9.4 step 2). The whole-chain resolution is the module's
-/// [`canonicalize`]; a chain that does not end at a real file is
-/// [`TargetPathError::BrokenLink`] (dangling, or a loop the OS refuses
-/// to follow), any other refusal is [`TargetPathError::NotReadable`],/// and a chain ending at a directory is [`TargetPathError::IsDir`] —
-/// the write cannot go into a folder.
+/// file (§9.4 step 2). The whole-chain resolution is the raw
+/// canonicalization above; a chain that does not end at a real file
+/// is [`TargetPathError::BrokenLink`] (dangling, or a loop the OS
+/// refuses to follow), any other refusal is
+/// [`TargetPathError::NotReadable`], and a chain ending at a
+/// directory is [`TargetPathError::IsDir`] — the write cannot go
+/// into a folder.
 fn resolve_link(candidate: &Path) -> Result<std::path::PathBuf, TargetPathError> {
-    let real = match canonicalize(candidate) {
+    let real = match canonicalize_raw(candidate) {
         Ok(real) => real,
-        Err(error) => {
-            let source = error.into_io_error();
+        Err(source) => {
             if source.kind() == io::ErrorKind::NotFound || is_filesystem_loop(source.raw_os_error())
             {
                 return Err(TargetPathError::BrokenLink {
@@ -2258,14 +2429,17 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn on_linux_the_platform_key_keeps_case() {
-        assert_eq!(path_key(Path::new("/Repo/MyProject")), "/Repo/MyProject");
+        assert_eq!(
+            path_key(Path::new("/Repo/MyProject")).expect("valid UTF-8 text keys"),
+            "/Repo/MyProject"
+        );
     }
 
     #[test]
     #[cfg(windows)]
     fn on_windows_the_platform_key_folds_and_slashes() {
         assert_eq!(
-            path_key(Path::new("C:\\Repo\\MyProject")),
+            path_key(Path::new("C:\\Repo\\MyProject")).expect("valid UTF-8 text keys"),
             "c:/repo/myproject"
         );
     }
@@ -2273,7 +2447,10 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn on_macos_the_platform_key_folds() {
-        assert_eq!(path_key(Path::new("/Repo/MyProject")), "/repo/myproject");
+        assert_eq!(
+            path_key(Path::new("/Repo/MyProject")).expect("valid UTF-8 text keys"),
+            "/repo/myproject"
+        );
     }
 
     // ---- DB-030/DB-031: the Windows-leg tests (CI matrix) -------------
@@ -2299,7 +2476,10 @@ mod tests {
         // The key shape of a stripped drive path: folded, `/`
         // separators, drive letter first:
         let key = canonical_path_key(&repo).expect("the fixture folder must canonicalize");
-        assert_eq!(key, path_key(&canonical));
+        assert_eq!(
+            key,
+            path_key(&canonical).expect("the canonical text is valid UTF-8")
+        );
         assert!(
             key.len() >= 3 && key.as_bytes()[1] == b':' && key.as_bytes()[2] == b'/',
             "the key of a stripped drive path is <letter>:/…: {key:?}"
@@ -2332,8 +2512,8 @@ mod tests {
         }
 
         assert_ne!(
-            path_key(&repo),
-            path_key(&alias),
+            path_key(&repo).expect("the real folder's text keys"),
+            path_key(&alias).expect("the alias text keys"),
             "precondition: the two TEXT spellings key differently — only \
              canonicalization collapses the alias (DB-031)"
         );
@@ -2344,22 +2524,124 @@ mod tests {
         );
     }
 
-    // ---- DB-030: TEXT keys over byte paths ----------------------------
+    // ---- DB-030: TEXT keys over byte paths (the D-086 addendum) -------
 
     #[cfg(unix)]
     #[test]
-    fn non_utf8_path_bytes_reach_the_key_as_replacement_characters() {
-        // Unix paths are bytes, the key is TEXT: the lossy conversion
-        // is part of the contract, pinned so a silent switch to panic
-        // or drop cannot slip in.
+    fn non_utf8_path_text_is_refused_by_the_key_builder() {
+        // Unix paths are bytes, the key is TEXT, and the D-086
+        // addendum (owner ruling 2026-11-20, variant 2) deleted the
+        // pre-addendum U+FFFD lossy keying: the key builder REFUSES
+        // text that is not valid UTF-8 with a typed error whose path
+        // field is the lossy spelling — a diagnostic, never a key.
+        // Pinned so a silent switch back to lossy (or to a panic)
+        // cannot slip in.
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
         let path = Path::new(OsStr::from_bytes(b"/tmp/\xff\xfe"));
-        let key = path_key(path);
+        let error = path_key(path).expect_err("non-UTF-8 path text must be refused");
+        assert_eq!(
+            error.path(),
+            "/tmp/\u{fffd}\u{fffd}",
+            "the refusal carries the LOSSY spelling for the log line"
+        );
         assert!(
-            key.contains('\u{fffd}'),
-            "invalid bytes surface as U+FFFD in the key: {key:?}"
+            error.to_string().contains("not valid UTF-8"),
+            "the Display text names the encoding fact: {error}"
+        );
+        assert!(
+            std::error::Error::source(&error).is_none(),
+            "the refusal is a fact about the text, not an OS failure"
+        );
+
+        // The mirror: valid UTF-8 text keys exactly as before — the
+        // refusal narrows the domain, it does not change the rule.
+        assert_eq!(
+            path_key(Path::new("/tmp/repo")).expect("valid UTF-8 text keys"),
+            "/tmp/repo"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn canonicalize_refuses_a_non_utf8_canonical_form() {
+        // The identity seam's half of the addendum, against a REAL
+        // Linux fixture (only Linux filesystems accept the
+        // invalid-byte name — the `temp_files` platform posture):
+        // a UTF-8-named symlink pointing at a non-UTF-8-named folder
+        // resolves to a canonical form whose text is not valid UTF-8,
+        // and that form is REFUSED — the stored TEXT path and the key
+        // stay lossless. The refusal is a text fact: no io error, no
+        // OS code, no source. Linux-only fixture, like the sweep
+        // test's (EILSEQ on APFS/NTFS).
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let raw = OsStr::from_bytes(b"repo\xff");
+        let non_utf8 = dir.path().join(raw);
+        fs::create_dir_all(non_utf8.join(".git"))
+            .expect("the non-UTF-8 repository fixture must be creatable");
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&non_utf8, &alias)
+            .expect("creating the fixture symlink must work");
+        let sibling = repo_with_git_entry(dir.path(), "sibling");
+
+        // The UTF-8 spelling resolves THROUGH the link to the
+        // non-UTF-8 target: the canonical FORM is what the gate
+        // judges, and it is refused with the target's lossy text.
+        let error = canonicalize(&alias)
+            .expect_err("a canonical form that is not valid UTF-8 must be refused");
+        assert!(
+            matches!(&error, CanonicalizeError::NotUtf8 { .. }),
+            "the refusal is the typed NotUtf8 variant, got: {error:?}"
+        );
+        assert!(
+            error.path().ends_with("repo\u{fffd}"),
+            "the refusal names the resolved target's lossy spelling: {}",
+            error.path()
+        );
+        assert!(error.io_error().is_none(), "no OS call failed");
+        assert_eq!(error.os_code(), None);
+        assert!(std::error::Error::source(&error).is_none());
+
+        // The raw non-UTF-8 spelling is refused the same way, and the
+        // composition (`canonical_path_key`) inherits the refusal —
+        // no lossy key is ever built:
+        assert!(matches!(
+            canonicalize(&non_utf8).expect_err("the raw spelling is refused too"),
+            CanonicalizeError::NotUtf8 { .. }
+        ));
+        assert!(matches!(
+            canonical_path_key(&alias).expect_err("the composition refuses lossless-ly"),
+            CanonicalizeError::NotUtf8 { .. }
+        ));
+        assert!(
+            path_key(&non_utf8).is_err(),
+            "the key builder refuses the non-UTF-8 text directly"
+        );
+
+        // The output-side gate's accepted direction: a non-UTF-8
+        // INPUT that resolves to a UTF-8 target canonicalizes fine —
+        // the stored identity is the target's spelling.
+        let raw_link = dir.path().join(OsStr::from_bytes(b"link\xff"));
+        std::os::unix::fs::symlink(&sibling, &raw_link)
+            .expect("creating the non-UTF-8-named symlink must work");
+        let resolved = canonicalize(&raw_link)
+            .expect("an input is judged by the canonical form it resolves to");
+        assert_eq!(
+            resolved,
+            canonicalize(&sibling).expect("the valid target must canonicalize"),
+            "the canonical form is the UTF-8 target — accepted, keys losslessly"
+        );
+
+        // Valid paths are untouched: the sibling canonicalizes and
+        // keys exactly as before the addendum.
+        let canonical = canonicalize(&sibling).expect("the valid folder must canonicalize");
+        assert_eq!(
+            canonical_path_key(&sibling).expect("the valid folder must key"),
+            path_key(&canonical).expect("the canonical text keys")
         );
     }
 
@@ -2380,8 +2662,8 @@ mod tests {
         }
 
         assert_ne!(
-            path_key(&repo),
-            path_key(&alias),
+            path_key(&repo).expect("the real folder's text keys"),
+            path_key(&alias).expect("the alias text keys"),
             "precondition: the two TEXT spellings key differently — only \
              canonicalization collapses the alias (DB-031)"
         );
@@ -2393,8 +2675,10 @@ mod tests {
         // The same equality through the two halves separately — the
         // resolution is canonicalize's, the keying is total on it:
         assert_eq!(
-            path_key(&canonicalize(&repo).expect("the real folder must canonicalize")),
-            path_key(&canonicalize(&alias).expect("the symlink resolves to the same folder")),
+            path_key(&canonicalize(&repo).expect("the real folder must canonicalize"))
+                .expect("the canonical text keys"),
+            path_key(&canonicalize(&alias).expect("the symlink resolves to the same folder"))
+                .expect("the canonical text keys"),
         );
     }
 

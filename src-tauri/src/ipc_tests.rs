@@ -3541,41 +3541,130 @@ fn a_foreign_path_is_rejected_before_the_repository_checks_run() {
     assert_eq!(stored_projects(&database).len(), 0);
     assert_eq!(journal_entries(&database).len(), 0);
 
-    // D-100's recorded non-UTF-8 seam, at the IPC level its note
-    // assigned to this command: a folder whose name is not valid
-    // UTF-8 IS picked (the allowlist holds the real bytes), but the
-    // lossy answer string names no real folder — the honest rejection
-    // names the encoding, never the allowlist. Linux-only: only Linux
-    // filesystems accept the invalid-byte name (the `temp_files`
-    // platform posture).
-    #[cfg(target_os = "linux")]
-    {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-        let raw = OsStr::from_bytes(b"repo\xff");
-        let non_utf8 = temp.path().join(raw);
-        std::fs::create_dir_all(non_utf8.join(".git"))
-            .expect("the non-UTF-8 repository fixture must be creatable");
-        // The pick goes through the real dialog seam: the bookkeeping
-        // canonicalizes and remembers the REAL bytes, and the answer
-        // is the lossy display string the UI would hold.
-        let lossy = pick_folder(&app, &non_utf8);
-        assert!(
-            lossy.contains('\u{FFFD}'),
-            "the fixture is lossy on the wire"
-        );
-        let error = invoke_project_add_manual(&webview, &lossy, serde_json::json!(null))
-            .expect_err("a lossy spelling names no real folder");
-        assert_eq!(error["code"], serde_json::json!("E_VALIDATION"), "{error}");
-        assert!(
-            error["params"]["reason"]
-                .as_str()
-                .is_some_and(|reason| reason.contains("UTF-8")),
-            "the rejection names the encoding, not the allowlist, got: {error}"
-        );
-    }
+    // The D-086-addendum non-UTF-8 seam moved UP a boundary: the pick
+    // itself is now refused (the dialog canonicalizes before
+    // remembering, and a non-UTF-8 canonical form is the typed
+    // encoding rejection), so the old flow — pick remembered with the
+    // real bytes, add rejected over the lossy answer — is gone. The
+    // whole seam, pick and add halves, is pinned by
+    // `a_non_utf8_folder_is_refused_at_the_dialog_and_add_boundaries`
+    // (Linux-only, same fixture family).
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+/// The D-086 addendum (owner ruling 2026-11-20, variant 2) at the
+/// dialog and add boundaries, over a REAL Linux non-UTF-8 fixture:
+/// the folder is picked through the real dialog seam and refused
+/// typed — the encoding envelope, not an availability error — nothing
+/// is remembered for it, the hand-sent lossy spelling gets the same
+/// honest answer at the add gate, the database is untouched, and a
+/// valid sibling still picks and adds. Linux-only: only Linux
+/// filesystems accept the invalid-byte name (the `temp_files`
+/// platform posture).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_non_utf8_folder_is_refused_at_the_dialog_and_add_boundaries() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let (temp, app) = add_manual_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let raw = OsStr::from_bytes(b"repo\xff");
+    let non_utf8 = temp.path().join(raw);
+    std::fs::create_dir_all(non_utf8.join(".git"))
+        .expect("the non-UTF-8 repository fixture must be creatable");
+    let sibling = repo_dir(temp.path(), "sibling-repo");
+
+    // The dialog boundary: the pick canonicalizes to a form whose
+    // text is not valid UTF-8, and the bookkeeping refuses it with
+    // the typed encoding envelope — E_VALIDATION naming the path
+    // field and the honest reason. Nothing is remembered (the
+    // allowlist does not grow), so no later command can name the
+    // folder through SEC-003 either.
+    let error = pick_folder_via_dialog(&app, Ok(Some(non_utf8.clone())))
+        .expect_err("a non-UTF-8 pick is refused at the dialog boundary");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"), "{error}");
+    assert_eq!(
+        error["params"]["field"],
+        serde_json::json!("path"),
+        "the refusal names the path field"
+    );
+    assert!(
+        error["params"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains('\u{FFFD}')),
+        "the echoed value is the lossy spelling — a diagnostic, never stored: {error}"
+    );
+    assert!(
+        error["params"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("UTF-8")),
+        "the refusal names the encoding, got: {error}"
+    );
+    assert_eq!(
+        session_len(&app),
+        0,
+        "nothing is remembered for a refused pick"
+    );
+
+    // The add-gate twin: the UI could only ever hold the LOSSY
+    // spelling, and sending it to `project_add_manual` answers the
+    // same honest encoding rejection (the D-100 answer, unchanged in
+    // shape) — never an add, never an availability error.
+    let lossy = non_utf8.to_string_lossy().into_owned();
+    assert!(
+        lossy.contains('\u{FFFD}'),
+        "the fixture is lossy on the wire"
+    );
+    let error = invoke_project_add_manual(&webview, &lossy, serde_json::json!(null))
+        .expect_err("a lossy spelling names no real folder");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"), "{error}");
+    assert!(
+        error["params"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("UTF-8")),
+        "the rejection names the encoding, not the allowlist, got: {error}"
+    );
+
+    // The TYPED arm of the same gate — valid UTF-8 on the wire, real
+    // bytes underneath: a UTF-8-named alias pointing at the
+    // non-UTF-8 folder RESOLVES to an unrepresentable canonical
+    // form, and the SEC-003 check answers the encoding rejection for
+    // it too (the input string contains no U+FFFD, so this is the
+    // typed branch, not the lossy-answer heuristic).
+    let alias = temp.path().join("utf8-alias");
+    std::os::unix::fs::symlink(&non_utf8, &alias)
+        .expect("creating the UTF-8-named alias must work");
+    let error = validate_ui_path_over(&app, &alias.display().to_string())
+        .expect_err("an alias onto an unrepresentable folder must be refused");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"), "{error}");
+    assert!(
+        error["params"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("UTF-8")),
+        "the typed refusal names the encoding, got: {error}"
+    );
     assert_eq!(stored_projects(&database).len(), 0);
     assert_eq!(journal_entries(&database).len(), 0);
+
+    // Valid paths are untouched: the sibling picks and adds exactly
+    // as before the addendum.
+    let picked = pick_folder(&app, &sibling);
+    let added = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect("a valid repository still adds")
+        .project
+        .expect("the added answer carries the project");
+    let canonical =
+        eunomia_fs::paths::canonicalize(&sibling).expect("the valid fixture must canonicalize");
+    assert_eq!(
+        added.path,
+        canonical.display().to_string(),
+        "the stored path is the lossless canonical form"
+    );
 
     // Windows teardown rule: the app's managed `Db` closes first.
     drop(app);
@@ -3927,9 +4016,10 @@ fn scan_classified_from(
             found
                 .lock()
                 .expect("the test collector cannot be poisoned")
-                .push(eunomia_fs::scan_classify::classify_repository(
-                    path, registry,
-                ));
+                .push(
+                    eunomia_fs::scan_classify::classify_repository(path, registry)
+                        .expect("the walker's UTF-8 gate keeps every repository keyable"),
+                );
         }
     });
     assert_eq!(outcome, eunomia_fs::scan::ScanOutcome::Completed);
@@ -3968,7 +4058,7 @@ fn removing_an_exclusion_makes_the_next_scan_classify_the_path_new() {
     repo_dir(temp.path(), "free-repo");
     let canonical = eunomia_fs::paths::canonicalize(&excluded_repo)
         .expect("the fixture repository must canonicalize");
-    let key = eunomia_fs::paths::path_key(&canonical);
+    let key = eunomia_fs::paths::path_key(&canonical).expect("the canonical text is valid UTF-8");
     let id = seed_exclusion(
         &database,
         canonical.display().to_string(),
@@ -4030,7 +4120,7 @@ fn removing_an_exclusion_of_an_archived_project_keeps_the_scan_verdict_archived(
     let repo = repo_dir(temp.path(), "archived-repo");
     let canonical =
         eunomia_fs::paths::canonicalize(&repo).expect("the fixture repository must canonicalize");
-    let key = eunomia_fs::paths::path_key(&canonical);
+    let key = eunomia_fs::paths::path_key(&canonical).expect("the canonical text is valid UTF-8");
     // The archived project row (§6.4): created and archived through
     // the repository — the archive flow's own composition, the seam
     // T-109's `project_archive` will own. `seed_project` takes a

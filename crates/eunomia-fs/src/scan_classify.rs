@@ -63,6 +63,22 @@
 //! doubled separator; NFC/NFD under the folding rules of Windows
 //! and macOS) are one repository with one class.
 //!
+//! # Classification never sees lossy text (the D-086 addendum)
+//!
+//! The key builder refuses a path whose text is not valid UTF-8
+//! ([`paths::PathKeyError`]) — the addendum deleted the
+//! pre-addendum U+FFFD lossy keying — and the WALK refuses the same
+//! paths one step earlier ([`crate::scan::SkipReason::NotUtf8`]: a
+//! non-UTF-8 path is a skip, never a found repository), so a
+//! walk-driven [`classify_entry`] cannot meet one AS A REPOSITORY
+//! EVENT (the skips still pass through, by reference, their bytes
+//! untouched): classification never sees lossy text, and no
+//! classified result can carry a
+//! lossy-known identity. The signatures answer
+//! [`paths::PathKeyError`] anyway — honestly typed for hand-built
+//! events that bypass the walker's gate, never `unwrap`ped — and a
+//! Linux-fixture test pins the pipeline consequence end to end.
+//!
 //! # Overlapping sets: a priority, not an error (PRJ-017, DB-015)
 //!
 //! ALG-053 does not say what to do when a key sits in two sets at
@@ -110,11 +126,15 @@
 //! checkboxes, "Add selected", the restore offer — so they must
 //! survive the scan callback. [`ClassifiedScanEvent`] is the
 //! BORROWED envelope of [`classify_entry`]: a 1:1 mapping of every
-//! [`ScanEvent`] where repositories gain their key and class and
+//! walk event where repositories gain their key and class and
 //! everything else passes through by reference (`&Path`, `&
 //! SkipReason`) — zero allocation for the folders-checked counter
 //! and the skip display, which is most events, and a shape ready to
-//! serialize into the progress event as-is.
+//! serialize into the progress event as-is. The mapping is total
+//! over the WALKER's output: the walk skips non-UTF-8 paths before
+//! emitting a Repository event (the pinned test below), so the
+//! `Result` the functions answer exists for events from other
+//! sources, not for walk-driven consumers.
 //!
 //! # Testing plan
 //!
@@ -138,7 +158,11 @@
 //! filesystem (a missing path classifies by its text key); a scan
 //! rooted at a SYMLINK against the canonical registry classifies
 //! `new` — the documented failure mode that makes the caller's
-//! canonical-root obligation real; duplicates inside a set are
+//! canonical-root obligation real; the D-086 addendum's pipeline
+//! pin — a real non-UTF-8 repository (Linux fixture) arrives as a
+//! `NotUtf8` skip and classifies NOTHING, even against a registry
+//! holding the lossy spelling's key, so no classified result can be
+//! lossy-known; duplicates inside a set are
 //! harmless; every [`SkipReason`] passes through with its OS code
 //! intact and its path readable through the envelope's `path()`;
 //! and a plain directory passes through unclassified.
@@ -314,10 +338,14 @@ impl ClassifiedRepository {
 /// One [`ScanEvent`], classified: the shape ready to serialize into
 /// the scan's progress event (SYS-003's `scan://progress`).
 ///
-/// The mapping from [`ScanEvent`] is 1:1 and total — every walk
-/// event becomes exactly one classified event, so the command layer
-/// writes ONE match over this type and cannot drop a fact:
-/// repositories carry their [`ClassifiedRepository`]; plain folders
+/// The mapping from [`ScanEvent`] is 1:1 and total over the WALKER's
+/// output — every walk event becomes exactly one classified event,
+/// so the command layer writes ONE match over this type and cannot
+/// drop a fact: the walker's `NotUtf8` skip means a repository event
+/// never carries non-UTF-8 text (the D-086 addendum, pinned by
+/// test), so [`classify_entry`]'s `Result` never fires for
+/// walk-driven consumers. Repositories carry their
+/// [`ClassifiedRepository`]; plain folders
 /// (the "folders checked" counter) and skips (the "Skipped" group
 /// with its reason) pass through BY REFERENCE — no allocation for
 /// the events that need no new facts, which is most of them. The
@@ -408,8 +436,18 @@ pub fn classify_key(path_key: &str, registry: &ScanRegistry) -> ScanClass {
 /// a canonicalized scan root — the CALLER's obligation, not the
 /// walker's guarantee (see the module docs: the walker accepts a
 /// symlinked root and reports its link-spelled paths). The class is
-/// [`classify_key`] on that key. Total: any path classifies; a path
-/// that does not exist classifies by its text key.
+/// [`classify_key`] on that key.
+///
+/// # Errors
+///
+/// [`paths::PathKeyError`] when the path's text is not valid UTF-8:
+/// the D-086 addendum made the key builder refuse such text (keys
+/// are always lossless), and this function answers the refusal
+/// instead of keying lossily. Unreachable for WALK-driven repository
+/// events — the walker skips non-UTF-8 paths with
+/// [`crate::scan::SkipReason::NotUtf8`] before emitting a repository
+/// event (pinned by test) — so the error serves hand-built inputs
+/// that bypass the walker's gate.
 ///
 /// # Examples
 ///
@@ -423,23 +461,32 @@ pub fn classify_key(path_key: &str, registry: &ScanRegistry) -> ScanClass {
 /// // The first scan of a folder: the registry is empty, everything
 /// // is new.
 /// let empty = ScanRegistry::default();
-/// assert_eq!(classify_repository(repo, &empty).class(), ScanClass::New);
+/// assert_eq!(
+///     classify_repository(repo, &empty).expect("valid UTF-8 text keys").class(),
+///     ScanClass::New
+/// );
 ///
 /// // After the user added it, the same path is known — the
 /// // acceptance criterion, one lookup wide:
-/// let key = path_key(repo);
+/// let key = path_key(repo).expect("valid UTF-8 text keys");
 /// let registry = ScanRegistry::new(&[key], &[], &[]);
-/// assert_eq!(classify_repository(repo, &registry).class(), ScanClass::Known);
+/// assert_eq!(
+///     classify_repository(repo, &registry).expect("valid UTF-8 text keys").class(),
+///     ScanClass::Known
+/// );
 /// ```
 #[must_use = "the classification allocates the key; dropping it wastes the work"]
-pub fn classify_repository(path: &Path, registry: &ScanRegistry) -> ClassifiedRepository {
-    let path_key = paths::path_key(path);
+pub fn classify_repository(
+    path: &Path,
+    registry: &ScanRegistry,
+) -> Result<ClassifiedRepository, paths::PathKeyError> {
+    let path_key = paths::path_key(path)?;
     let class = classify_key(&path_key, registry);
-    ClassifiedRepository {
+    Ok(ClassifiedRepository {
         path: path.to_path_buf(),
         path_key,
         class,
-    }
+    })
 }
 
 /// Classifies one walk event into the serializable
@@ -453,6 +500,15 @@ pub fn classify_repository(path: &Path, registry: &ScanRegistry) -> ClassifiedRe
 /// walk's and the command layer's, ALG-053's two other clauses).
 /// Total and allocation-free except for the one repository
 /// classification.
+///
+/// # Errors
+///
+/// [`paths::PathKeyError`] — exactly [`classify_repository`]'s
+/// refusal, for a repository event whose path text is not valid
+/// UTF-8. Unreachable for walk-driven events (the walker emits a
+/// `NotUtf8` skip instead of a repository event, pinned by test);
+/// the `Result` keeps the mapping honest for hand-built inputs
+/// without an `unwrap`.
 ///
 /// # Examples
 ///
@@ -469,7 +525,7 @@ pub fn classify_repository(path: &Path, registry: &ScanRegistry) -> ClassifiedRe
 ///
 /// // A skip passes through with its reason — the UI vocabulary is
 /// // the walker's own:
-/// match classify_entry(&event, &registry) {
+/// match classify_entry(&event, &registry).expect("a skip never fails to classify") {
 ///     ClassifiedScanEvent::Skipped { reason, .. } => {
 ///         assert_eq!(reason.to_string(), "submodule or worktree");
 ///     }
@@ -480,13 +536,13 @@ pub fn classify_repository(path: &Path, registry: &ScanRegistry) -> ClassifiedRe
 pub fn classify_entry<'a>(
     event: &'a ScanEvent,
     registry: &ScanRegistry,
-) -> ClassifiedScanEvent<'a> {
+) -> Result<ClassifiedScanEvent<'a>, paths::PathKeyError> {
     match event {
-        ScanEvent::Repository { path } => {
-            ClassifiedScanEvent::Repository(classify_repository(path, registry))
-        }
-        ScanEvent::Directory { path } => ClassifiedScanEvent::Directory { path },
-        ScanEvent::Skipped { path, reason } => ClassifiedScanEvent::Skipped { path, reason },
+        ScanEvent::Repository { path } => Ok(ClassifiedScanEvent::Repository(classify_repository(
+            path, registry,
+        )?)),
+        ScanEvent::Directory { path } => Ok(ClassifiedScanEvent::Directory { path }),
+        ScanEvent::Skipped { path, reason } => Ok(ClassifiedScanEvent::Skipped { path, reason }),
     }
 }
 
@@ -510,7 +566,10 @@ mod tests {
 
     /// Runs one scan of `root` classified against `registry` — the
     /// command layer's flow (T-076) in miniature: walk, classify
-    /// every repository event, keep the classified records.
+    /// every repository event, keep the classified records. The
+    /// walker's `NotUtf8` gate keeps every repository event keyable,
+    /// so the classification's own refusal is unreachable here (its
+    /// `expect` says exactly that).
     fn scan_classified(root: &Path, registry: &ScanRegistry) -> Vec<ClassifiedRepository> {
         let options = ScanOptions {
             max_depth: NonZeroUsize::new(6).expect("6 is non-zero"),
@@ -523,7 +582,10 @@ mod tests {
                 found
                     .lock()
                     .expect("the test collector cannot be poisoned")
-                    .push(classify_repository(path, registry));
+                    .push(
+                        classify_repository(path, registry)
+                            .expect("the walker's UTF-8 gate keeps every repository event keyable"),
+                    );
             }
         });
         assert_eq!(outcome, crate::scan::ScanOutcome::Completed);
@@ -619,7 +681,7 @@ mod tests {
         // The registry holds the CANONICAL key — what the add flow
         // stores (D-086: canonicalize first, then key).
         let canonical = paths::canonicalize(&repo).expect("the fixture repository must resolve");
-        let canonical_key = paths::path_key(&canonical);
+        let canonical_key = paths::path_key(&canonical).expect("the canonical text is valid UTF-8");
         let registry = ScanRegistry::new(std::slice::from_ref(&canonical_key), &[], &[]);
 
         let found = scan_classified(&link, &registry);
@@ -634,8 +696,14 @@ mod tests {
             "the link-spelled path keys by its text and misses the canonical key — \
              this is why the caller must canonicalize the root; got: {found:?}"
         );
-        assert_eq!(found[0].path_key(), paths::path_key(&link));
-        assert_ne!(found[0].path_key(), paths::path_key(&canonical));
+        assert_eq!(
+            found[0].path_key(),
+            paths::path_key(&link).expect("the link spelling is valid UTF-8 text")
+        );
+        assert_ne!(
+            found[0].path_key(),
+            paths::path_key(&canonical).expect("the canonical text is valid UTF-8")
+        );
     }
 
     #[test]
@@ -657,7 +725,7 @@ mod tests {
         // fail for the right reason — a degenerate key would be
         // caught here, not laundered through the same call.
         let path = Path::new("/srv/repos/eunomia");
-        let key = paths::path_key(path);
+        let key = paths::path_key(path).expect("valid UTF-8 text keys");
         assert!(
             key.contains("repos/eunomia"),
             "the key carries the name; got: {key}"
@@ -680,7 +748,7 @@ mod tests {
                 ScanClass::Excluded,
             ),
         ] {
-            let classified = classify_repository(path, &registry);
+            let classified = classify_repository(path, &registry).expect("valid UTF-8 text keys");
             assert_eq!(classified.class(), expected);
             assert_eq!(
                 classified.path_key(),
@@ -739,7 +807,9 @@ mod tests {
         let registry = ScanRegistry::default();
         assert_eq!(classify_key("/never/seen", &registry), ScanClass::New);
         assert_eq!(
-            classify_repository(Path::new("/never/seen"), &registry).class(),
+            classify_repository(Path::new("/never/seen"), &registry)
+                .expect("valid UTF-8 text keys")
+                .class(),
             ScanClass::New
         );
     }
@@ -753,10 +823,14 @@ mod tests {
         // classifier adds no spelling sensitivity of its own.
         let clean = Path::new("/srv/repos/eunomia");
         let messy = Path::new("/srv//repos/eunomia/");
-        let registry = ScanRegistry::new(&[paths::path_key(clean)], &[], &[]);
+        let registry = ScanRegistry::new(
+            &[paths::path_key(clean).expect("valid UTF-8 text keys")],
+            &[],
+            &[],
+        );
 
-        let by_clean = classify_repository(clean, &registry);
-        let by_messy = classify_repository(messy, &registry);
+        let by_clean = classify_repository(clean, &registry).expect("valid UTF-8 text keys");
+        let by_messy = classify_repository(messy, &registry).expect("valid UTF-8 text keys");
 
         assert_eq!(by_clean.class(), ScanClass::Known);
         assert_eq!(by_messy.class(), ScanClass::Known);
@@ -795,12 +869,108 @@ mod tests {
         // classifier would fail NotFound here). The classifier never
         // opens anything — ALG-054's posture, one layer up.
         let missing = Path::new("/definitely/not/here/repo");
-        let key = paths::path_key(missing);
+        let key = paths::path_key(missing).expect("valid UTF-8 text keys");
         let registry = ScanRegistry::new(&[key], &[], &[]);
 
         assert_eq!(
-            classify_repository(missing, &registry).class(),
+            classify_repository(missing, &registry)
+                .expect("valid UTF-8 text keys")
+                .class(),
             ScanClass::Known
+        );
+    }
+
+    /// Linux-only, like the walk's own non-UTF-8 fixture (the
+    /// `temp_files` platform posture): only Linux filesystems accept
+    /// an invalid-byte name.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_repository_classifies_nothing_even_against_a_lossy_key() {
+        // The D-086 addendum's pipeline pin (the card's acceptance
+        // criterion, scan → classify): a real repository whose path
+        // text is not valid UTF-8 is NEVER classified — the walk
+        // reports it as a `NotUtf8` skip, so no `Repository` event
+        // exists to key — even when the registry holds the LOSSY
+        // spelling's key (a pre-addendum dev row): a classified
+        // result can never be lossy-known. The valid sibling
+        // classifies as before.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let non_utf8 = dir.path().join(OsStr::from_bytes(b"repo\xff"));
+        std::fs::create_dir_all(non_utf8.join(".git"))
+            .expect("the non-UTF-8 repository fixture must be creatable");
+        let sibling = repo_with_git_dir(dir.path(), "sibling");
+
+        // The registry holds what a pre-addendum lossy row would have
+        // held: the key of the LOSSY spelling (valid UTF-8 text).
+        let lossy = non_utf8.to_string_lossy().into_owned();
+        let lossy_key = paths::path_key(Path::new(&lossy)).expect("the lossy spelling is text");
+        let registry = ScanRegistry::new(std::slice::from_ref(&lossy_key), &[], &[]);
+
+        let options = ScanOptions {
+            max_depth: NonZeroUsize::new(6).expect("6 is non-zero"),
+            exclude_names: Vec::new(),
+        };
+        let cancel = CancelToken::new();
+        let seen = std::sync::Mutex::new((Vec::new(), 0_usize));
+        let outcome = scan_repositories(dir.path(), &options, &cancel, |event| {
+            // The walker callback is `Fn` (parallel delivery), so the
+            // collectors ride a mutex — the `record_all` idiom.
+            match classify_entry(event, &registry)
+                .expect("the walker's UTF-8 gate keeps classification keyable")
+            {
+                ClassifiedScanEvent::Repository(classified) => seen
+                    .lock()
+                    .expect("the test collector cannot be poisoned")
+                    .0
+                    .push(classified),
+                ClassifiedScanEvent::Skipped { reason, .. } => {
+                    if matches!(reason, SkipReason::NotUtf8) {
+                        seen.lock()
+                            .expect("the test collector cannot be poisoned")
+                            .1 += 1;
+                    }
+                }
+                ClassifiedScanEvent::Directory { .. } => {}
+            }
+        });
+
+        assert_eq!(outcome, crate::scan::ScanOutcome::Completed);
+        let (classified_repositories, not_utf8_skips) = seen
+            .into_inner()
+            .expect("the test collector cannot be poisoned");
+        assert_eq!(
+            not_utf8_skips, 1,
+            "the non-UTF-8 repository arrives as exactly one NotUtf8 skip"
+        );
+        assert_eq!(
+            classified_repositories.len(),
+            1,
+            "only the valid sibling is classified; got: {classified_repositories:?}"
+        );
+        assert_eq!(classified_repositories[0].path(), sibling);
+        assert_eq!(classified_repositories[0].class(), ScanClass::New);
+        assert!(
+            classified_repositories
+                .iter()
+                .all(|classified| classified.path_key() != lossy_key),
+            "no classified identity is the lossy key — lossy-known is unreachable"
+        );
+
+        // The refusal is typed, not silent, for inputs that bypass
+        // the walker's gate (the honest Err arm a hand-built event
+        // gets):
+        let hand_built = ScanEvent::Repository {
+            path: non_utf8.clone(),
+        };
+        let error = classify_entry(&hand_built, &registry)
+            .expect_err("a hand-built non-UTF-8 repository event must be refused");
+        assert!(
+            error.path().contains('\u{fffd}'),
+            "the refusal carries the lossy spelling for the log: {}",
+            error.path()
         );
     }
 
@@ -810,9 +980,10 @@ mod tests {
         // unchanged — reason by reference, OS code intact
         // (PRJ-007), path exact.
         let registry = ScanRegistry::default();
-        let cases: [(&str, SkipReason, Option<i32>); 3] = [
+        let cases: [(&str, SkipReason, Option<i32>); 4] = [
             ("/scan/node_modules", SkipReason::Excluded, None),
             ("/scan/worktree", SkipReason::SubmoduleOrWorktree, None),
+            ("/scan/weird", SkipReason::NotUtf8, None),
             (
                 "/scan/locked",
                 SkipReason::Access {
@@ -829,7 +1000,8 @@ mod tests {
                 path: PathBuf::from(path),
                 reason,
             };
-            let classified = classify_entry(&event, &registry);
+            let classified =
+                classify_entry(&event, &registry).expect("a skip never fails to classify");
             let ClassifiedScanEvent::Skipped {
                 path: passed_path,
                 reason: passed_reason,
@@ -855,14 +1027,15 @@ mod tests {
         // The envelope's 1:1 mapping: a repository event gains its
         // key and class (the key equal to the registered one), a
         // plain folder passes through untouched.
-        let key = paths::path_key(Path::new("/srv/repos/eunomia"));
-        let registry = ScanRegistry::new(&[key], &[], &[]);
+        let key = paths::path_key(Path::new("/srv/repos/eunomia")).expect("text keys");
+        let registry = ScanRegistry::new(std::slice::from_ref(&key), &[], &[]);
 
         let repository_event = ScanEvent::Repository {
             path: PathBuf::from("/srv/repos/eunomia"),
         };
         let ClassifiedScanEvent::Repository(classified) =
             classify_entry(&repository_event, &registry)
+                .expect("a repository event with text keys classifies")
         else {
             panic!("a repository event must classify as a repository");
         };
@@ -873,6 +1046,7 @@ mod tests {
             path: PathBuf::from("/srv/plain"),
         };
         let ClassifiedScanEvent::Directory { path } = classify_entry(&directory_event, &registry)
+            .expect("a directory event never fails to classify")
         else {
             panic!("a plain folder must pass through as a directory");
         };
@@ -881,11 +1055,15 @@ mod tests {
         // The envelope's own path() mirrors ScanEvent::path for all
         // three variants.
         assert_eq!(
-            classify_entry(&repository_event, &registry).path(),
+            classify_entry(&repository_event, &registry)
+                .expect("a repository event with text keys classifies")
+                .path(),
             Path::new("/srv/repos/eunomia")
         );
         assert_eq!(
-            classify_entry(&directory_event, &registry).path(),
+            classify_entry(&directory_event, &registry)
+                .expect("a directory event never fails to classify")
+                .path(),
             Path::new("/srv/plain")
         );
     }

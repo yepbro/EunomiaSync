@@ -91,12 +91,17 @@ impl SessionPaths {
     /// identity rule — DB-030's per-OS folding — governs both halves
     /// of SEC-003 (this one and the repository's `find_by_path_key`);
     /// both sides are canonical forms, so the key is deterministic
-    /// and pure to compute.
+    /// and pure to compute. The key builder refuses non-UTF-8 text
+    /// (the D-086 addendum): remembered picks are canonical UTF-8 by
+    /// the picker's own gate, and a probe that cannot key simply
+    /// matches nothing.
     pub(crate) fn contains(&self, canonical: &Path) -> bool {
-        let key = eunomia_fs::paths::path_key(canonical);
+        let Some(key) = eunomia_fs::paths::path_key(canonical).ok() else {
+            return false;
+        };
         self.locked()
             .iter()
-            .any(|picked| eunomia_fs::paths::path_key(picked) == key)
+            .any(|picked| eunomia_fs::paths::path_key(picked).is_ok_and(|keyed| keyed == key))
     }
 
     /// How many folders this session has picked — the observable size
@@ -132,7 +137,14 @@ impl SessionPaths {
 /// not failed as an OS error: the dialog only returns existing
 /// folders and the repository only stores canonical ones, so a
 /// non-canonicalizable path cannot be on either allowlist — the
-/// honest answer is "not allowlisted", whatever the OS reason.
+/// honest answer is "not allowlisted", whatever the OS reason. The
+/// one typed exception is the D-086 addendum: a path whose canonical
+/// form is not valid UTF-8 (or the picker's lossy answer spelling of
+/// one) gets the honest ENCODING rejection instead — "unrepresentable"
+/// is not "not allowlisted" for a folder the user may genuinely have
+/// picked (see [`rejected_unresolvable_ui_path`]); since the addendum
+/// the picker itself refuses such picks at the dialog boundary, and
+/// this gate is the second line of the same boundary.
 ///
 /// The session list is consulted **before** the database: the pick
 /// half of SEC-003 needs no database, so a session-picked folder
@@ -158,27 +170,34 @@ pub(crate) async fn validate_ui_path<R: Runtime>(
 ) -> Result<PathBuf, AppError> {
     // Canonicalize off the async workers (SYS-001): resolving a path
     // is a metadata syscall per component, and a dead mount must not
-    // stall an async worker. A path that cannot be canonicalized gets
-    // the rejection its TEXT deserves: a lossy U+FFFD spelling names
-    // no real folder (D-100's recorded non-UTF-8 cost — the honest
-    // reason names the encoding, not the allowlist, since the folder
-    // may genuinely have been picked; the round-1 review finding),
-    // every other unresolvable path was never picked and is not a
-    // registered project's canonical form.
+    // stall an async worker. The refusal is TYPED since the D-086
+    // addendum, and the honest answer depends on which half refused:
+    // a canonical form that is not valid UTF-8 gets the encoding
+    // rejection (the folder may genuinely have been picked — the
+    // picker's own boundary already refused it, this is the add-gate
+    // twin); a spelling that CONTAINS the replacement character is
+    // the picker's lossy ANSWER form, which names no real folder (the
+    // D-100 cost, still the honest encoding sentence, never the
+    // allowlist one); every other unresolvable path was never picked
+    // and is not a registered project's canonical form.
     let sent = PathBuf::from(path);
     let canonical =
         tauri::async_runtime::spawn_blocking(move || eunomia_fs::paths::canonicalize(&sent))
             .await
             .map_err(crate::db::join_failure_to_app_error)?
-            .map_err(|_| rejected_unresolvable_ui_path(path))?;
+            .map_err(|source| rejected_unresolvable_ui_path(path, &source))?;
     // The session half first (no database involved — see the module
     // docs for why that order matters in recovery mode).
     if managed_session(app)?.contains(&canonical) {
         return Ok(canonical);
     }
     // The registered-project half: the repository's own identity
-    // lookup, keyed the way the add flow will key it (DB-030).
-    let key = eunomia_fs::paths::path_key(&canonical);
+    // lookup, keyed the way the add flow will key it (DB-030). The
+    // key cannot refuse here — canonicalize's UTF-8 gate produced
+    // `canonical` — but the guarantee is enforced, not assumed (the
+    // shared encoding envelope answers if it ever does).
+    let key = eunomia_fs::paths::path_key(&canonical)
+        .map_err(|source| crate::commands::rejected_non_utf8_path(source.path()))?;
     let database = managed_db(app)?;
     let registered = database
         .run(move |transaction| {
@@ -243,27 +262,27 @@ fn rejected_ui_path(path: &str) -> AppError {
 
 /// The rejection for a path that cannot be resolved at all (the
 /// canonicalize-failure half of [`validate_ui_path`]): the recorded
-/// D-100 non-UTF-8 seam, resolved at its first consuming command
-/// (T-074, the round-1 review finding). The picker remembers the REAL
-/// canonical bytes of a pick but answers their lossy `display()` form,
-/// so a folder whose name is not valid UTF-8 comes back as a U+FFFD
-/// spelling that names no real folder — for a folder the user did
-/// just pick, the plain SEC-003 sentence would be false and
-/// unactionable. The honest reason names the encoding and the fix
-/// (rename); a path with no replacement character was never picked
-/// and keeps the SEC-003 reason. A folder legitimately NAMED with a
-/// U+FFFD scalar resolves fine (the bytes match), so this arm is
-/// reached only by the lossy spellings — the one case where the
-/// distinction between "not allowlisted" and "unrepresentable"
-/// matters.
-fn rejected_unresolvable_ui_path(path: &str) -> AppError {
-    if path.contains('\u{FFFD}') {
-        crate::commands::rejected_field(
-            "path",
-            path,
-            "the folder name is not valid UTF-8: the UI's lossy spelling names no real \
-             folder, so the project cannot be registered (rename the folder)",
-        )
+/// D-100 non-UTF-8 seam, carried into the D-086 addendum's typed
+/// world. Two shapes get the honest ENCODING rejection (the shared
+/// [`crate::commands::rejected_non_utf8_path`] envelope): the typed
+/// refusal — the path RESOLVES to a canonical form whose text is not
+/// valid UTF-8 — and the picker's lossy ANSWER spelling (a string
+/// containing U+FFFD), which names no real folder even for a folder
+/// the user did just pick, so the plain SEC-003 sentence would be
+/// false and unactionable. Everything else was never picked and is
+/// not a registered project's canonical form, and keeps the SEC-003
+/// reason. A folder legitimately NAMED with a U+FFFD scalar resolves
+/// fine (the bytes match), so the string arm is reached only by the
+/// lossy spellings — the one case where the distinction between "not
+/// allowlisted" and "unrepresentable" matters.
+fn rejected_unresolvable_ui_path(
+    path: &str,
+    source: &eunomia_fs::paths::CanonicalizeError,
+) -> AppError {
+    if matches!(source, eunomia_fs::paths::CanonicalizeError::NotUtf8 { .. })
+        || path.contains('\u{FFFD}')
+    {
+        crate::commands::rejected_non_utf8_path(path)
     } else {
         rejected_ui_path(path)
     }
@@ -313,5 +332,25 @@ mod tests {
         let session = SessionPaths::new();
         assert_eq!(session.len(), 0);
         assert!(!session.contains(Path::new("/home/user/alpha")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_that_cannot_key_matches_nothing() {
+        // The D-086 addendum's key refusal, one seam out: a probe
+        // path whose text is not valid UTF-8 cannot equal any
+        // remembered pick (the picker's gate keeps the list UTF-8),
+        // so membership honestly answers false instead of failing —
+        // the same "cannot key, cannot match" rule the identity seam
+        // applies.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let session = SessionPaths::new();
+        session.remember(PathBuf::from("/home/user/alpha"));
+        assert!(
+            !session.contains(Path::new(OsStr::from_bytes(b"/home/user/repo\xff"))),
+            "an unkeyable probe is not a member of anything"
+        );
     }
 }

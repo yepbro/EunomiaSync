@@ -22,9 +22,10 @@
 //! let repos = TempRepos::create(500, "eunomia-bench")?;
 //! // Owned lossy spellings first, borrowed afterwards: a ProjectRoot
 //! // borrows, so the strings it points at must outlive the loop
-//! // (`to_string_lossy`, never `to_str().unwrap_or_default()` — a
-//! // non-UTF-8 path degrades to U+FFFD, not to an empty project
-//! // path).
+//! // (`to_string_lossy`, never `to_str().unwrap_or_default()` — an
+//! // odd path degrades to U+FFFD in the DISPLAY, not to an empty
+//! // project path; the roots themselves are ASCII `repo-NNNN` and
+//! // key losslessly, inside the D-086 addendum's domain).
 //! let owned: Vec<(String, String)> = repos.roots().iter()
 //!     .map(|root| (root.path.to_string_lossy().into_owned(), root.path_key.clone()))
 //!     .collect();
@@ -49,6 +50,18 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 use crate::paths::{canonicalize, path_key};
+
+/// Maps the fixture's canonicalization refusal onto the plain
+/// [`io::Error`] the fixture's own signature returns: the OS kind for
+/// an OS refusal, `Other` for the NotUtf8 refusal (unreachable here —
+/// the labels are validated ASCII — but mapped honestly, never
+/// `unwrap`ped).
+fn fixture_canonicalize_error(error: crate::paths::CanonicalizeError) -> io::Error {
+    let kind = error
+        .io_error()
+        .map_or(io::ErrorKind::Other, io::Error::kind);
+    io::Error::new(kind, error.to_string())
+}
 
 /// One created repository root: its canonical path (DB-030, the
 /// spelling a registered project stores) and the matching identity
@@ -119,9 +132,10 @@ impl TempRepos {
         // The canonical spelling (on macOS the system temp directory
         // sits behind a `/var` → `/private/var` symlink): the roots
         // are canonical, so the group directory they are compared
-        // against and the scan walks must be too.
-        let group_dir = canonicalize(&group)
-            .map_err(|err| io::Error::new(err.io_error().kind(), err.to_string()))?;
+        // against and the scan walks must be too. The fixture's labels
+        // are validated ASCII components, so the identity seam's
+        // NotUtf8 refusal (the D-086 addendum) is unreachable here.
+        let group_dir = canonicalize(&group).map_err(fixture_canonicalize_error)?;
         let mut repos = Self {
             _base: base,
             group_dir,
@@ -130,12 +144,12 @@ impl TempRepos {
         for index in 0..count {
             let repo = repos.group_dir.join(format!("repo-{index:04}"));
             write_minimal_git(&repo)?;
-            let canonical = canonicalize(&repo)
-                .map_err(|err| io::Error::new(err.io_error().kind(), err.to_string()))?;
+            let canonical = canonicalize(&repo).map_err(fixture_canonicalize_error)?;
             // The key of the already-canonical form — the same value
             // `canonical_path_key` would return, without a second
             // canonicalization pass.
-            let path_key = path_key(&canonical);
+            let path_key =
+                path_key(&canonical).map_err(|error| io::Error::other(error.to_string()))?;
             repos.roots.push(RepoRoot {
                 path: canonical,
                 path_key,

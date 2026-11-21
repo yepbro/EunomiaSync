@@ -1568,7 +1568,10 @@ pub(crate) struct ExistingProject {
 ///    (nearest root wins, D-06). A folder outside any repository is
 ///    §10's `E_NOT_A_REPO`; a probe the OS refused is
 ///    `E_PROJECT_UNAVAILABLE` with the OS facts ("could not check" is
-///    not "not a repo", D-090).
+///    not "not a repo", D-090); a root whose canonical form is not
+///    valid UTF-8 is the D-086-addendum encoding rejection (keys and
+///    stored paths are lossless), the same envelope the dialog and
+///    session gates answer.
 /// 2. **The root offer** (PRJ-003): when the picked folder is a
 ///    subfolder and `accept_repo_root` is not `Some(true)`, the answer
 ///    is the `"repo_root_offered"` arm — the app *offers* the root,
@@ -1660,10 +1663,23 @@ async fn project_add_manual_impl<R: Runtime>(
         .map_err(|source| rejected_field("label", &label_default, &source.to_string()))?
         .to_owned();
 
+    // The D-086 addendum seam: find_git_root's canonicalization
+    // already refused a non-UTF-8 root, so the stored path TEXT and
+    // the key are the same lossless conversion of that canonical
+    // form — these two arms keep the guarantee typed instead of
+    // assumed (the honest-refusal shape the fs seam itself answers;
+    // unreachable except through a tree that changes between the walk
+    // and here).
+    let root_key = eunomia_fs::paths::path_key(&root)
+        .map_err(|source| rejected_non_utf8_path(source.path()))?;
+    let path_text = root
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| rejected_non_utf8_path(&root.to_string_lossy()))?;
+
     // The transaction half: everything the operation writes happens in
     // one `Db::run` (D-037). The moved values are what `NewProject`
     // borrows; the probe keeps its own copies outside.
-    let root_key = eunomia_fs::paths::path_key(&root);
     let probe_root = root.clone();
     let outcome = database
         .run(move |transaction| {
@@ -1714,10 +1730,10 @@ async fn project_add_manual_impl<R: Runtime>(
             let color =
                 eunomia_core::color_pick::pick_color(&occupied, &ProjectId::new(tie_break_id));
             // The stored path is the verbatim canonicalize output
-            // (DB-030); the lossy form is the TEXT-column boundary the
-            // key and the log share (D-086) — a non-UTF-8 byte reaches
-            // the row the same way it reached the key.
-            let path_text = root.to_string_lossy().into_owned();
+            // (DB-030) — and, by the D-086 addendum, always valid
+            // UTF-8: the gate above refused anything else, so the
+            // TEXT-column boundary between the row and the key is
+            // lossless.
             let new = eunomia_store::projects::NewProject {
                 path: &path_text,
                 path_key: &root_key,
@@ -1821,6 +1837,30 @@ enum AddOutcome {
     Refused(ProjectAddResult),
 }
 
+/// The D-086-addendum encoding rejection (owner ruling 2026-11-20,
+/// escalation variant 2): a path whose text is not valid UTF-8 can
+/// never become a registered identity — keys and stored paths are
+/// always lossless — so every boundary that meets one refuses it with
+/// THIS one envelope: `E_VALIDATION` naming the path field, a lossy
+/// rendering of the offending path echoed back (the only printable
+/// form — at the session gate literally the caller's own input, at
+/// the other seams the lossy spelling of the refused path; a
+/// diagnostic, never stored, and paths may ride `params`, SEC-008),
+/// and the honest reason naming the encoding and the fix.
+/// `pub(crate)`
+/// for the session gate's and the picker's reuse (the
+/// [`rejected_field`] shape); no new §10 code — the registry has none
+/// for this fact, and `E_VALIDATION`'s field/message family is
+/// exactly the settings-shape seam.
+pub(crate) fn rejected_non_utf8_path(path: &str) -> AppError {
+    rejected_field(
+        "path",
+        path,
+        "the folder path contains a name that is not valid UTF-8: the project cannot be \
+         registered (rename the folder)",
+    )
+}
+
 /// Maps the root-lookup failure onto §10 (the PRJ-003 half of the
 /// flow): the negative lookup (`NoGitEntry` — every ancestor probed,
 /// no `.git` anywhere) is `E_NOT_A_REPO`, §10's row for "a folder
@@ -1828,12 +1868,19 @@ enum AddOutcome {
 /// canonicalization is `E_PROJECT_UNAVAILABLE` — "could not check" is
 /// not "checked and absent" (the D-090 split; §10 keeps the two
 /// apart, and the user actions differ: retry or fix access vs. pick
-/// the repository root). The walked path travels in `params`
-/// (SEC-008: paths may) and the OS refusal, when there is one, in
-/// `details` (§10's first-class log fact).
+/// the repository root). The one exception inside the refusal bucket
+/// is the D-086 addendum's UTF-8 fact: a canonical form that is not
+/// valid UTF-8 is not an availability problem at all (nothing moved,
+/// nothing is unreadable) — it is the same encoding rejection the
+/// boundaries answer, so it gets the same typed envelope. The walked
+/// path travels in `params` (SEC-008: paths may) and the OS refusal,
+/// when there is one, in `details` (§10's first-class log fact).
 fn repo_lookup_failed(source: &NotARepoError) -> AppError {
     let code = match source {
         NotARepoError::NoGitEntry { .. } => ErrorCode::NotARepo,
+        NotARepoError::Canonicalize {
+            source: eunomia_fs::paths::CanonicalizeError::NotUtf8 { .. },
+        } => return rejected_non_utf8_path(source.path()),
         NotARepoError::Canonicalize { .. } | NotARepoError::NotReadable { .. } => {
             ErrorCode::ProjectUnavailable
         }
@@ -2745,8 +2792,12 @@ pub(crate) async fn dialog_pick_folder<R: Runtime>(
 /// remembered and answered, so the allowlist only ever holds canonical
 /// forms (SEC-003 compares canonical to canonical); a pick whose
 /// folder vanished in that window is
-/// [`picked_folder_vanished`]'s typed answer, and nothing is
-/// remembered for it.
+/// [`picked_folder_vanished`]'s typed answer, and a pick whose
+/// canonical form is not valid UTF-8 is the D-086-addendum encoding
+/// rejection ([`rejected_non_utf8_path`]) — the dialog boundary the
+/// owner's ruling places the refusal at, so no unrepresentable folder
+/// ever reaches the allowlist or the wire answer. Nothing is
+/// remembered for either refusal.
 pub(crate) async fn dialog_pick_folder_with<R, F>(
     app: AppHandle<R>,
     pick: F,
@@ -2762,7 +2813,22 @@ where
             None => Ok(None),
             Some(raw) => eunomia_fs::paths::canonicalize(&raw)
                 .map(Some)
-                .map_err(|source| picked_folder_vanished(&raw, &source)),
+                .map_err(|source| {
+                    // The pick bookkeeping's two refusals (the D-086
+                    // addendum keeps them apart): a folder that cannot be
+                    // RESOLVED is the vanish race's E_PROJECT_UNAVAILABLE;
+                    // a folder whose canonical form is not valid UTF-8 is
+                    // the encoding rejection — the dialog boundary the
+                    // owner's ruling places it at. Neither is remembered.
+                    match &source {
+                        eunomia_fs::paths::CanonicalizeError::NotUtf8 { .. } => {
+                            rejected_non_utf8_path(&raw.to_string_lossy())
+                        }
+                        eunomia_fs::paths::CanonicalizeError::Io { source, .. } => {
+                            picked_folder_vanished(&raw, source)
+                        }
+                    }
+                }),
         }
     })
     .await
@@ -2835,24 +2901,25 @@ pub(crate) fn dialog_error_to_app_error(error_text: &str) -> AppError {
     app_error
 }
 
-/// The §10 mapping for a pick whose folder cannot be canonicalized:
-/// the dialog only returns existing folders, so this is the race
+/// The §10 mapping for a pick whose folder cannot be RESOLVED by the
+/// OS: the dialog only returns existing folders, so this is the race
 /// where the folder moved, was deleted or lost read access between
 /// the pick and the bookkeeping — §10's `E_PROJECT_UNAVAILABLE` row
 /// ("The project folder moved, was deleted, or cannot be read") is
 /// exactly the fact. The picked path travels in `params` (SEC-008:
 /// paths may) and the OS refusal in `details`
 /// ([`AppError::with_os_error`], §10's first-class log fact). Nothing
-/// is remembered for a vanished pick.
-fn picked_folder_vanished(
-    picked: &Path,
-    source: &eunomia_fs::paths::CanonicalizeError,
-) -> AppError {
+/// is remembered for a vanished pick. Takes the io failure directly
+/// (the caller has already destructured the `Io` variant apart from
+/// the OTHER refusal the bookkeeping can meet — a canonical form that
+/// is not valid UTF-8, which is [`rejected_non_utf8_path`]'s encoding
+/// envelope instead, the D-086 addendum boundary).
+fn picked_folder_vanished(picked: &Path, source: &std::io::Error) -> AppError {
     let mut app_error = AppError::new(ErrorCode::ProjectUnavailable);
     app_error
         .params
         .insert("path".to_owned(), picked.display().to_string());
-    app_error.with_os_error(source.io_error())
+    app_error.with_os_error(source)
 }
 
 #[cfg(test)]
@@ -2891,15 +2958,21 @@ mod tests {
     #[test]
     fn a_vanished_pick_maps_to_project_unavailable_with_the_os_facts() {
         // Arrange: a real canonicalization failure over a path that
-        // does not exist — the only shape the pick bookkeeping can
-        // fail with (the dialog returns existing folders; this is the
-        // vanish race).
+        // does not exist — the only io shape the pick bookkeeping
+        // fails with (the dialog returns existing folders; this is
+        // the vanish race). The NotUtf8 refusal is deliberately NOT
+        // this function's input: the caller routes it to the shared
+        // encoding envelope (the D-086 addendum), pinned by its own
+        // unit test.
         let vanished = Path::new("/definitely/not/here/eunomia-t073");
         let source = eunomia_fs::paths::canonicalize(vanished)
             .expect_err("a missing path must fail canonicalization");
+        let io = source
+            .io_error()
+            .expect("an OS refusal carries its io error");
 
         // Act
-        let app_error = picked_folder_vanished(vanished, &source);
+        let app_error = picked_folder_vanished(vanished, io);
 
         // Assert: §10's E_PROJECT_UNAVAILABLE row, the picked path in
         // params (SEC-008: paths may), and the OS refusal in details.
@@ -3496,6 +3569,51 @@ mod tests {
             let details = app_error.details.expect("the OS refusal travels");
             assert!(details.os_code.is_some(), "the raw OS code is present");
         }
+    }
+
+    #[test]
+    fn a_non_utf8_root_lookup_failure_is_the_encoding_validation_envelope() {
+        // The D-086 addendum inside the root-lookup mapping: a
+        // canonicalize refusal that IS the UTF-8 fact is not an
+        // availability error — nothing moved and nothing is
+        // unreadable, the folder's name is simply unrepresentable as
+        // a lossless identity — so it answers the shared encoding
+        // envelope (E_VALIDATION naming the path field and the honest
+        // reason), the same typed refusal the dialog and session
+        // gates give. The lossy spelling rides only in the echoed
+        // value, a diagnostic.
+        let source = NotARepoError::Canonicalize {
+            source: eunomia_fs::paths::CanonicalizeError::NotUtf8 {
+                path: "/tmp/repo\u{fffd}".to_owned(),
+            },
+        };
+
+        // Act
+        let app_error = repo_lookup_failed(&source);
+
+        // Assert: the encoding envelope, field/value/reason, no OS
+        // details (a text fact, the D-090 split).
+        assert_eq!(app_error.code, ErrorCode::Validation);
+        assert_eq!(app_error.message_key, "errors.validation");
+        assert_eq!(
+            app_error.params.get("field").map(String::as_str),
+            Some("path")
+        );
+        assert_eq!(
+            app_error.params.get("value").map(String::as_str),
+            Some("/tmp/repo\u{fffd}")
+        );
+        assert!(
+            app_error
+                .params
+                .get("reason")
+                .is_some_and(|reason| reason.contains("UTF-8")),
+            "the reason names the encoding: {app_error:?}"
+        );
+        assert!(
+            app_error.details.is_none(),
+            "a text fact carries no OS details"
+        );
     }
 
     #[test]

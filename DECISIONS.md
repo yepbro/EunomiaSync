@@ -10205,3 +10205,126 @@ keeps the unmirrored shape.
   whole `recent`/`list` read (the D-039/D-051 unknown-member policy,
   version skew surfaced by design); the accepted mitigation is the
   updater's no-rollback story (UPD-004), not a reader-side guess.
+
+### D-120 — The D-086 addendum: non-UTF-8 paths refused at the add/scan boundaries; the lossy U+FFFD key deleted — 2026-11-21
+
+Problem: D-086 left the non-UTF-8 corner as a lossy key (Unix path
+bytes → U+FFFD via `to_string_lossy`) and explicitly deferred "reject
+at the add/scan seam instead?" to the owner as a format-contract
+decision. The escalation landed on 2026-11-20: variant 2 — reject
+non-UTF-8 paths with a typed error at the input boundaries, so keys
+and stored paths are always LOSSLESS; NFC + simple-fold apply to
+valid UTF-8 only. The recorded cost of the lossy rule (two
+byte-different names collapsing onto one UNIQUE key; a scan
+classifying such a folder `known` against a lossy dev row) is what
+the ruling removes.
+
+Solution (T-243):
+
+- _The identity seam refuses, typed._ `eunomia_fs::paths::canonicalize`
+  now returns `CanonicalizeError::NotUtf8` (the struct became the enum
+  `{Io, NotUtf8}`) when the CANONICAL FORM's text is not valid UTF-8 —
+  the output is what becomes the stored TEXT path and the key's input,
+  so the gate judges the output (a non-UTF-8 input resolving to a
+  UTF-8 target — a UTF-8-named link to a non-UTF-8-named folder, the
+  other way round — is ACCEPTED; the stored identity is the target's
+  spelling). `path_key` returns the new `PathKeyError` (lossy path
+  text for the log line only) instead of keying lossily;
+  `canonical_path_key` folds the (compositionally unreachable) key
+  refusal into the same `NotUtf8` variant — enforced, not assumed.
+  The refusal is a TEXT fact (the D-090 split): no io error, no OS
+  code, no `source()`.
+- _The write-path machinery keeps D-092 byte-faithful._ D-092's
+  contract is that the sync WRITE path carries the real bytes and
+  only the staging NAME is lossy text (D-088) — a different surface
+  from the identity seam. `resolve_target_path` and its helpers
+  therefore moved to a private `canonicalize_raw` (dunce, io error
+  raw, no UTF-8 gate); behavior and tests unchanged. The D-086
+  addendum governs STORED identities, not resolved write targets.
+- _The walk skips, classification never sees lossy._
+  `SkipReason::NotUtf8` ("path is not valid UTF-8", `os_code()`
+  None) is the walk's fourth reason: a path whose text is not valid
+  UTF-8 — its own name or an ancestor's — is a skip, NOT a found
+  repository, and the walk does not descend (every descendant's path
+  inherits the invalid bytes). The gate runs before the name filters
+  and at every depth INCLUDING the root: unlike the excluded-name
+  policy, this is the TEXT boundary of the identity itself.
+  `classify_repository`/`classify_entry` now answer `Result` with
+  `PathKeyError` — unreachable for walk-driven events (the gate
+  guarantees it, pinned end to end), honestly typed for hand-built
+  inputs; no classified result can be lossy-known.
+- _The app boundaries share one envelope._ `rejected_non_utf8_path`
+  in `commands.rs` (the `rejected_field` shape): `E_VALIDATION`,
+  field `path`, the sent spelling echoed (lossy — the only printable
+  form, the caller's own input, SEC-008), reason "the folder name is
+  not valid UTF-8: the project cannot be registered (rename the
+  folder)". No new §10 code — the registry has none for this fact
+  and the owner's card names the E_VALIDATION form. Consumers: the
+  DIALOG boundary (`dialog_pick_folder_with` refuses the pick itself
+  — nothing remembered, so no unrepresentable folder ever reaches
+  the allowlist or the wire answer; an OS refusal stays
+  `E_PROJECT_UNAVAILABLE`/`picked_folder_vanished`), the SEC-003
+  gate (`validate_ui_path`: the typed `NotUtf8` branch, plus the
+  D-100 lossy-answer-string heuristic kept for the wire spelling
+  that contains U+FFFD), and `project_add_manual`
+  (`repo_lookup_failed` maps `Canonicalize::NotUtf8` to the encoding
+  envelope — an availability error would misname the fact — and the
+  key/stored-text arms translate the fs refusal into the same
+  envelope; the stored `projects.path` and `path_key` are now
+  lossless by construction).
+- _Format contract, no migration._ The key format's domain narrows
+  to valid UTF-8 (D-086's format-stability warning named a change a
+  DECISIONS event — this is it). The change landed BEFORE the first
+  release: already-created dev rows with lossy keys are insignificant
+  (delete and re-add), no stored-key migration ships.
+
+Tests: fs — the lossy-key pin replaced by the refusal pins
+(`non_utf8_path_text_is_refused_by_the_key_builder`:
+`PathKeyError` contract, lossy diagnostic field, valid text keys as
+before; `canonicalize_refuses_a_non_utf8_canonical_form`: a REAL
+Linux fixture — UTF-8-named link to a `\xff`-named folder — refused
+typed, raw spelling refused, composition refused, non-UTF-8 INPUT
+resolving to a UTF-8 target accepted, valid sibling untouched);
+`scan` — `a_non_utf8_repository_is_skipped_and_its_subtree_is_not_walked`
+(own-name and ancestor-name fixtures, no Repository event, no
+descent, sibling found) and the reason-text/os-code contract;
+`scan_classify` — the pipeline pin
+`a_non_utf8_repository_classifies_nothing_even_against_a_lossy_key`
+(scan → classify over a registry holding the LOSSY spelling's key:
+exactly one NotUtf8 skip, only the valid sibling classified, no
+lossy-known identity; plus the honest typed Err for a hand-built
+event). App — the IPC seam moved UP a boundary:
+`a_non_utf8_folder_is_refused_at_the_dialog_and_add_boundaries`
+(the pick through the real dialog seam is refused with the encoding
+envelope, the allowlist does not grow, the hand-sent lossy spelling
+gets the same answer at the add gate, the database stays empty, the
+valid sibling picks and adds with its lossless canonical stored
+path); the commands unit `a_non_utf8_root_lookup_failure_is_the_
+encoding_validation_envelope`. The full existing `path_key` battery
+stays green after the lossy branch's deletion; Linux-only fixtures
+follow the `temp_files` EILSEQ posture (APFS/NTFS reject invalid-byte
+names). `temp_repos` (fixture tooling) and `tests/scan_platform.rs`
+were adjusted only for the new signatures — ASCII fixture paths,
+unchanged behavior.
+
+Round-1 review (deepseek-v4.1-flash; 0×P0, 0×P1, 2×P2, 5×P3,
+APPROVE): all applied. P2-1 — docs/spec.md's skip-reason vocabulary
+(PRJ-002's "Skipped" parenthetical, ALG-051/052) does not yet list
+`not_utf8`; per the D-086 precedent spec edits ship as their own
+`docs:` commits after the ruling, so this entry records the
+deferral: the spec extension must land before the `scan_start` UI
+consumes the reason vocabulary (a note to the same effect lives in
+`paths.rs`'s module docs). P2-2 — the broken intra-doc link fixed
+(`crate::scan::SkipReason::NotUtf8`) and the three new private-item
+links turned into plain code spans. P3 — the typed SEC-003 arm now
+pinned (a UTF-8-named alias onto the `repo\xff` fixture, real bytes
+at the add gate); the reason wording now says "the folder path
+contains a name…" (the gate judges the whole path); the dead `None`
+arm removed (`picked_folder_vanished` takes the destructured
+`&io::Error`); the unkeyable-probe and non-UTF-8-ROOT arms pinned by
+unit tests; the over-broad classify sentence narrowed to "as a
+repository event". Round 2 (hy4-flash-free; 0×P0/P1/P2, 1×P3-low,
+APPROVE): the envelope's doc no longer claims the echoed value is
+literally the caller's input at every seam — it is the lossy
+rendering of the offending path (literally the input at the session
+gate, the lossy spelling of the refused path at the others).
