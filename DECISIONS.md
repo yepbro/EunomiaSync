@@ -11002,3 +11002,102 @@ mid-string NUL passes every name CHECK, because SQLite counts only up
 to it — so the library editor, the SEC-009 import and any future
 store-level writer MUST route names through these validators: this
 gate, not the CHECKs, is what keeps the columns clean.
+
+### D-128 — `projects_list` serves the dirty flag from the T-101 service cache: one truth, the clean baseline inherited, and DB-014 decided by the row — 2026-11-21
+
+Problem: D-121's round-1 review routed a finding to this seam —
+`commands.rs`'s `dirty_verdict` still answered the constant `false`
+after the dirty service landed, so the wire's per-project `dirty`
+(the initial state the UI must bootstrap its dots from; a one-shot
+startup diff cannot bootstrap a late subscriber) and the
+`state://dirty` event were two sources of truth that could only drift.
+
+Solution: the command reads the service's managed
+`DirtyState` cache (read-only; the recalculation mechanics untouched).
+
+- _One truth, precisely._ New `DirtyState::last_verdict(&str)` is the
+  read side of the exact map the service diffs its next
+  `state://dirty` event against, so every verdict the wire serves is
+  one the service truthfully recorded. The event itself is
+  at-least-once and may carry a superseded change the cache no longer
+  holds (D-121's overlap contract), so a consumer reconciling the two
+  treats the read as the truth — the event updates, the read corrects;
+  the docs say exactly that, not a stronger "agree by construction"
+  (the round-1 review catch). The verdicts are read on the async
+  runtime after the read transaction and AFTER the `spawn_blocking`
+  availability probes (the round-1 ordering fix: a verdict snapshot
+  taken before the probes could arrive seconds later, carrying dirt
+  older than an event the webview had already applied; after the
+  probes the race shrinks to the IPC boundary). The lookup itself is
+  one short mutex guard + `HashMap::get` — no lock near an `await`,
+  no lock held across the blocking pool. The lookups are per row, not
+  one atomic snapshot: a concurrent recording between two rows can
+  mix pre- and post-pass verdicts in one response — every value still
+  a verdict the cache truthfully held, and cheaper than a map clone
+  per read.
+- _The clean baseline is inherited, not redefined._ Before the
+  service's first pass the cache is empty and every verdict reads
+  clean — D-121's own absent ≡ clean diff rule, now the command's
+  startup semantics too. A missing state entirely (a theoretical
+  broken setup: `setup` manages it before anything that could fail,
+  recovery mode included) is the same answer via the command's
+  `try_state` fallback: the honest degraded read is the clean
+  baseline, not a failed command over a display flag — the opposite
+  trade-off from `managed_db`'s honest `NoDatabase` error, because
+  the list itself is still truthfully readable and the flag merely
+  unobserved.
+- _DB-014 stays row-decidable._ The archived arm is checked before
+  the cache, so a stale `true` entry (archived after the last pass,
+  before the next one prunes it — pinned by a test) can never leak a
+  dot onto an archived column.
+- _The `E_SYNC_RUNNING` gate (T-105) does not apply_: it covers the
+  project-_changing_ commands; `projects_list` is a read, safe during
+  a sync, answering the verdicts the running pass will refresh.
+
+Testing: five mock-runtime tests in `dirty_recalc_tests.rs` driving
+the real command over the harness (the cache seeded only through
+production `recalc_and_emit` passes, never private helpers): both
+verdicts reflected per project (synced-clean + never-synced dirty in
+one cache), the empty-cache clean baseline, the archived half over a
+stale cache entry (with the row's `state: "archived"` and its absence
+from the active read pinned, so the dirty claim is about the archived
+row), repeated-call stability (whole-vector equality over a dirty
+verdict — not vacuous), and the missing-state fallback. All verified
+falsifiable by mutation: the old constant fails the reflection test
+and the stability test's dirty anchor, an inverted baseline fails the
+empty-cache test, a cache-reading archived arm fails the stale-entry
+test — every owning test red under its mutation. `src/bindings.ts`
+regenerated (`export_bindings_are_up_to_date`, D-034): the doc mirror
+now states the cache-backed boundary instead of the "pipeline has not
+landed" one. D-121's routed finding is closed by this entry.
+
+Round-1 review addendum (D-128, same task; report
+`.opencode/reviews/t254-round1.md`): findings fixed here — the
+"agree by construction" overstatement (docs in `commands.rs`,
+`dirty_recalc.rs`, and this entry now state the reconciling-read
+contract; the module doc's "the next pass corrects" sentence in
+`dirty_recalc.rs` gained its missing condition — the correction fires
+only when the world moved again), and the verdict-read-before-probes
+ordering (moved after the probes). Findings routed elsewhere: the
+recovery restore/recreate path still reopens a `Db` with no commit
+hook and no service spawn, so after a recovery the dots can never
+light this session — already D-121's routed follow-up, now with the
+read side named (follow-up card: the recovery-commands task must
+re-arm the service, not only the hook); no code change in this task's
+frozen-zone-bound scope.
+
+Round-2 review addendum (D-128, same task; report
+`.opencode/reviews/t254-round2.md`, hy4-flash-free): findings fixed
+here — the round-1 condition reached the module doc's diff-contract
+paragraph but not two siblings, now fixed: `record`'s own doc
+(`record` in `dirty_recalc.rs`) carries the same only-if-the-world-
+moved condition, and `last_verdict`'s doc states the reconciling-read
+contract instead of the refuted "cannot drift apart". This addendum
+also narrows the round-1 claim above: the sentence that gained the
+condition is the module doc's (in `dirty_recalc.rs`); D-121's own
+DECISIONS addendum keeps its historical 2026-11-21 wording (history
+is not silently rewritten — the sharpening lives here and in the
+code docs). The round-2 question (the read can transiently lag a
+just-emitted event by the emit→record window — the divergence is
+bidirectional) is now stated in `dirty_verdict`'s docs; the future
+consuming task reads that contract off `bindings.ts`.

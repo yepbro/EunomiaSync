@@ -53,7 +53,15 @@
 //! changed projects, in `sort_order`, and is not emitted at all when
 //! the diff is empty: repeated passes over an unchanged database are
 //! silent, which is what makes firing one after every committed
-//! transaction safe.
+//! transaction safe. `projects_list` reads the same cache
+//! ([`DirtyState::last_verdict`], T-254 closing D-121's follow-up):
+//! every verdict the wire serves is one the service truthfully
+//! recorded, the command inherits the clean baseline (before the
+//! first pass every verdict reads clean), and it is the reconciling
+//! read for the at-least-once event above — the event may carry a
+//! superseded change the cache no longer holds, and the next pass
+//! re-emits one only if the world moved again, so the read, not the
+//! silence, settles a stale dot.
 //!
 //! **Delivery is at-least-once, with a stale-record guard.** The new
 //! verdicts are recorded only *after* the event was emitted
@@ -64,9 +72,14 @@
 //! pass's recording after a newer one's, so the cache only moves
 //! forward in pass order — but an older pass's event may still carry
 //! a change a newer pass already superseded: a duplicate or spurious
-//! entry a listener that sets state keyed by project id survives, and
-//! the next pass corrects (the round-1 review finding that sharpened
-//! the earlier "duplicates are benign" claim into this precise one).
+//! entry a listener that sets state keyed by project id survives,
+//! and the next pass corrects it only if the world moved again (an
+//! unchanged world diffs empty against the newer recording and the
+//! pass stays silent — `projects_list`'s read, above, is what
+//! settles a stale dot; the round-1 review finding that sharpened
+//! the earlier "duplicates are benign" claim into this precise one,
+//! with the correction's condition made explicit by T-254's
+//! round-1).
 //!
 //! **A panic in the service kills the consumer task** (the sole
 //! channel receiver), and every later trigger permit silently fills a
@@ -302,8 +315,12 @@ impl DirtyState {
     /// world, whatever it held before. The stale-record guard: a
     /// ticket older than [`DiffCache::applied`] records nothing (a
     /// newer pass already moved the cache; the older pass's event was
-    /// still emitted — at-least-once — and the next pass corrects any
-    /// spurious change it carried). Pruning emits nothing: an
+    /// still emitted — at-least-once — and a later pass corrects any
+    /// spurious change it carried only if the world moved again; an
+    /// unchanged world diffs empty against the newer recording and
+    /// stays silent, so `projects_list`'s read is what settles it —
+    /// the module docs' overlap contract, sharpened by T-254's
+    /// reviews). Pruning emits nothing: an
     /// archived project has no column to mark anymore (archiving
     /// re-renders the matrix), and a stale entry would resurface as a
     /// phantom change if the project is restored later.
@@ -321,6 +338,27 @@ impl DirtyState {
         for (id, dirty) in verdicts {
             last.verdicts.insert(id.clone(), *dirty);
         }
+    }
+
+    /// The last recorded verdict of one project (DB-021) — the read
+    /// side of the cache `projects_list` serves (T-254, D-121's
+    /// follow-up): the same map the service diffs its next
+    /// `state://dirty` event against, so every verdict the wire
+    /// serves is one the service truthfully recorded. The event
+    /// itself is at-least-once and may carry a superseded change
+    /// this cache no longer holds (the module docs' overlap
+    /// contract), so a consumer reconciling the two treats the read
+    /// as the truth. An id this session has not
+    /// observed — before the service's first pass — reads as the
+    /// baseline **clean**: the diff rule's own absent ≡ clean
+    /// reading ([`Self::diff_against_last`]), not a separate default
+    /// the two halves could disagree on.
+    pub(crate) fn last_verdict(&self, project_id: &str) -> bool {
+        let last = self
+            .last
+            .lock()
+            .expect("the dirty cache is locked only inside this short synchronous section");
+        last.verdicts.get(project_id).copied().unwrap_or(false)
     }
 
     /// Drops one permit onto the bus; a full bus swallows it (the

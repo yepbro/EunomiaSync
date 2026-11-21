@@ -77,6 +77,7 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::data_dirs;
 use crate::db::{self, Db};
+use crate::dirty_recalc::DirtyState;
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use crate::logging;
 use crate::markdown;
@@ -1241,8 +1242,8 @@ pub(crate) struct ProjectColumnEntry {
     /// half of D-09's marking; `None` when the folder is available.
     pub(crate) unavailable_reason: Option<String>,
     /// DB-021's unsynced-changes flag at this read (MAIN-028's dot
-    /// icon); see [`dirty_verdict`] for the boundary this command
-    /// serves it under.
+    /// icon); see [`dirty_verdict`] for the cache-backed boundary
+    /// this command serves it under (D-121, closed by T-254).
     pub(crate) dirty: bool,
     /// The last successful sync's time (LOG-007/OUT-020), DB-002 UTC
     /// shape; `None` until the first sync writes it.
@@ -1273,11 +1274,22 @@ pub(crate) struct ProjectColumnEntry {
 /// re-checks before writing, and "Locate…"/"Archive" stay available
 /// actions on the entry's id).
 ///
-/// `dirty` is served under the honest boundary [`dirty_verdict`]
-/// documents: DB-014's archived half is the one part of DB-021 the
-/// §6.2 row decides alone, and the live flag's owner is DB-022's
-/// background hash pipeline (`state://dirty`, MAIN-028), which has
-/// not landed — the DTO field is that pipeline's arrival point.
+/// `dirty` is the dirty service's last known verdict per project
+/// (MAIN-028's dot icon), read from the managed [`DirtyState`]
+/// cache through [`dirty_verdict`] — the same session state the
+/// `state://dirty` diff is taken against (D-121, closed by T-254),
+/// so every served verdict is one the service truthfully recorded.
+/// The event is at-least-once and may carry a superseded change, so
+/// a consumer reconciling the two treats this read as the truth.
+/// The verdicts are read after the blocking availability probes, so
+/// a slow folder cannot make this response arrive carrying dirt
+/// older than an event the webview already applied. Before the
+/// service's first pass the cache is empty and every verdict reads
+/// clean — the service's own baseline; DB-014's archived half stays
+/// row-decidable. The read is not gated by `E_SYNC_RUNNING`
+/// (the T-105 gate covers project-*changing* commands; a read
+/// during a sync is safe and answers the verdicts the running pass
+/// will refresh).
 ///
 /// Failures reach the log with their §10 code
 /// ([`logging::projects_list_failed`], the D-096 follow-up this edge
@@ -1319,63 +1331,95 @@ async fn projects_list_impl<R: Runtime>(
     // folders: they run on the blocking pool, after the transaction —
     // a dead drive delays only this response, never the one database
     // lock, and the entries describe exactly what the read committed.
-    let entries = tauri::async_runtime::spawn_blocking(move || {
-        rows.into_iter()
-            .map(|project| {
-                // The verdict reads the row before the struct build
-                // moves its fields.
-                let dirty = dirty_verdict(&project);
-                let (available, unavailable_reason) = availability_of(Path::new(&project.path));
-                ProjectColumnEntry {
-                    id: project.id,
-                    name: project.name,
-                    label: project.label,
-                    color: project.color,
-                    state: project.state.as_str().to_owned(),
-                    available,
-                    unavailable_reason,
-                    dirty,
-                    last_synced_at: project.last_synced_at,
-                }
-            })
-            .collect::<Vec<_>>()
-    })
-    .await
-    .map_err(db::join_failure_to_app_error)?;
+    let probed: Vec<(eunomia_store::projects::Project, bool, Option<String>)> =
+        tauri::async_runtime::spawn_blocking(move || {
+            rows.into_iter()
+                .map(|project| {
+                    let (available, unavailable_reason) = availability_of(Path::new(&project.path));
+                    (project, available, unavailable_reason)
+                })
+                .collect()
+        })
+        .await
+        .map_err(db::join_failure_to_app_error)?;
+    // The dirty verdicts are read from the session cache AFTER the
+    // probes (the round-1 review's ordering fix): probes over dead
+    // folders can stall for seconds, and a verdict snapshot taken
+    // before them would let this response arrive carrying dirt older
+    // than a `state://dirty` event the webview already applied —
+    // reading after shrinks the race to the IPC boundary. The dirty
+    // service is managed by `setup` before anything that could fail
+    // (recovery mode included, D-112's shape), so a missing state is
+    // an uninitialized-app bug; the honest degraded answer is the
+    // clean baseline, not a failed read over a display flag —
+    // [`dirty_verdict`]'s absent ≡ clean, one truth with the
+    // service's diff rule.
+    let dirty_cache = app.try_state::<DirtyState>();
+    let entries = probed
+        .into_iter()
+        .map(|(project, available, unavailable_reason)| {
+            // The verdict reads the row before the struct build moves
+            // its fields.
+            let dirty = dirty_verdict(dirty_cache.as_deref(), &project);
+            ProjectColumnEntry {
+                id: project.id,
+                name: project.name,
+                label: project.label,
+                color: project.color,
+                state: project.state.as_str().to_owned(),
+                available,
+                unavailable_reason,
+                dirty,
+                last_synced_at: project.last_synced_at,
+            }
+        })
+        .collect::<Vec<_>>();
     Ok(entries)
 }
 
-/// The `dirty` verdict `projects_list` serves today (DB-021 with
-/// DB-014, MAIN-028) — an honest boundary, not a computation:
+/// DB-021's verdict as `projects_list` serves it (MAIN-028; D-121's
+/// routed follow-up, closed by T-254): the row-decidable DB-014 half
+/// plus the live flag read from the session cache the
+/// `state://dirty` service maintains.
 ///
-/// DB-021's rule compares the stored `last_synced_hash` with the
-/// **current** build hash, and DB-022 assigns the current hashes to
-/// the background recalculation pipeline that emits `state://dirty`
-/// (MAIN-028's live source for the column's dot icon) — a task that
-/// has not landed, and whose inputs (the library and assignment
-/// repositories, the ALG-001 snapshot the build hashes) do not exist
-/// in the store yet. The §6.2 row alone decides exactly one half of
-/// the rule: DB-014's archived project is never counted as dirty.
+/// An archived project is never counted as dirty (DB-014 — the
+/// rule's only half the §6.2 row decides alone, decided here
+/// whatever a stale cache entry might still say). An active
+/// project's verdict is the [`DirtyState`] cache's last recorded
+/// value — the same map the service diffs its next `state://dirty`
+/// event against, so a read is always consistent with the cache the
+/// service last recorded. The event itself is at-least-once and may
+/// carry a superseded change the cache no longer holds (the
+/// service's overlap contract), so a consumer reconciling the two
+/// treats this read as the truth — the event updates, the read
+/// corrects. The divergence is transient in both directions: the
+/// event may lead the cache by the service's emit→record window, and
+/// the read lags it exactly that long — the next read settles either
+/// way. A project the cache has not observed yet reads as the
+/// baseline **clean** (D-121's diff rule: absent ≡ clean), and so
+/// does a missing state entirely — `setup` manages it before
+/// anything that could fail (recovery mode included), so its absence
+/// is an uninitialized-app bug, and the honest degraded answer is
+/// the clean baseline, not a failed read over a display flag.
 ///
-/// For active projects, no database this app can produce holds
-/// unsynced changes today: nothing that writes assignments, library
-/// content or sync hashes exists yet (`last_synced_hash` starts NULL
-/// with no writer, and no assignment can exist), so DB-021's
-/// exception sentence shields every reachable row and the honest
-/// verdict is `false`. The boundary is temporal, not structural — the
-/// DB-022 pipeline task (or the first assignments command) takes the
-/// fact over by feeding [`eunomia_core::dirty::is_dirty`] the real
-/// build facts here; a silent constant past that point would be a
-/// lie this seam exists to prevent.
-fn dirty_verdict(project: &eunomia_store::projects::Project) -> bool {
+/// The lookups are per row, not one atomic snapshot (the round-1
+/// review's note): a concurrent pass recording between two rows can
+/// mix pre- and post-pass verdicts in one response — every value
+/// still a verdict the cache truthfully held, and cheaper than a
+/// map clone per read; the next read (or event) settles it.
+fn dirty_verdict(cache: Option<&DirtyState>, project: &eunomia_store::projects::Project) -> bool {
     match project.state {
         // DB-014: an archived project takes part in no sync and is
-        // never counted as dirty — the rule's only row-decidable half.
+        // never counted as dirty — the rule's only row-decidable
+        // half, checked before the cache so a stale entry (archived
+        // after the last pass, before the next one prunes it) cannot
+        // leak a dot onto an archived column.
         ProjectState::Archived => false,
-        // Active: the DB-022 boundary above — false for every row any
-        // current writer can produce, and the documented seam the
-        // hash-pipeline task replaces.
-        ProjectState::Active => false,
+        // Active: the service's last known verdict, clean baseline
+        // for the not-yet-observed.
+        ProjectState::Active => cache
+            .map(|cache| cache.last_verdict(&project.id))
+            .unwrap_or(false),
     }
 }
 

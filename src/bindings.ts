@@ -304,11 +304,22 @@ export const commands = {
 	 *  re-checks before writing, and "Locate…"/"Archive" stay available
 	 *  actions on the entry's id).
 	 * 
-	 *  `dirty` is served under the honest boundary [`dirty_verdict`]
-	 *  documents: DB-014's archived half is the one part of DB-021 the
-	 *  §6.2 row decides alone, and the live flag's owner is DB-022's
-	 *  background hash pipeline (`state://dirty`, MAIN-028), which has
-	 *  not landed — the DTO field is that pipeline's arrival point.
+	 *  `dirty` is the dirty service's last known verdict per project
+	 *  (MAIN-028's dot icon), read from the managed [`DirtyState`]
+	 *  cache through [`dirty_verdict`] — the same session state the
+	 *  `state://dirty` diff is taken against (D-121, closed by T-254),
+	 *  so every served verdict is one the service truthfully recorded.
+	 *  The event is at-least-once and may carry a superseded change, so
+	 *  a consumer reconciling the two treats this read as the truth.
+	 *  The verdicts are read after the blocking availability probes, so
+	 *  a slow folder cannot make this response arrive carrying dirt
+	 *  older than an event the webview already applied. Before the
+	 *  service's first pass the cache is empty and every verdict reads
+	 *  clean — the service's own baseline; DB-014's archived half stays
+	 *  row-decidable. The read is not gated by `E_SYNC_RUNNING`
+	 *  (the T-105 gate covers project-*changing* commands; a read
+	 *  during a sync is safe and answers the verdicts the running pass
+	 *  will refresh).
 	 * 
 	 *  Failures reach the log with their §10 code
 	 *  ([`logging::projects_list_failed`], the D-096 follow-up this edge
@@ -1604,8 +1615,8 @@ export type ProjectColumnEntry_Deserialize = {
 	unavailable_reason?: string | null,
 	/**
 	 *  DB-021's unsynced-changes flag at this read (MAIN-028's dot
-	 *  icon); see [`dirty_verdict`] for the boundary this command
-	 *  serves it under.
+	 *  icon); see [`dirty_verdict`] for the cache-backed boundary
+	 *  this command serves it under (D-121, closed by T-254).
 	 */
 	dirty: boolean,
 	/**
@@ -1661,8 +1672,8 @@ export type ProjectColumnEntry_Serialize = {
 	unavailable_reason: string | null,
 	/**
 	 *  DB-021's unsynced-changes flag at this read (MAIN-028's dot
-	 *  icon); see [`dirty_verdict`] for the boundary this command
-	 *  serves it under.
+	 *  icon); see [`dirty_verdict`] for the cache-backed boundary
+	 *  this command serves it under (D-121, closed by T-254).
 	 */
 	dirty: boolean,
 	/**

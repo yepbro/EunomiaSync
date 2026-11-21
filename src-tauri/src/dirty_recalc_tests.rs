@@ -16,6 +16,12 @@
 //! * the **executor seam** `Db::set_commit_hook` on a real database —
 //!   the row-change discrimination: a write commits and fires, a
 //!   read-only transaction and a zero-row write stay silent.
+//! * the **read side** — `commands::projects_list`'s `dirty` served
+//!   from the same cache (T-254, closing D-121's routed follow-up):
+//!   the command is driven over the mock app against a cache seeded
+//!   by real passes, pinning the clean baseline before the first
+//!   pass, the archived half over a stale entry, call stability, and
+//!   the missing-state fallback.
 //!
 //! The mock app is the `availability_app` shape (mock runtime, real
 //! database in a temp root, events mounted through a specta builder);
@@ -444,6 +450,217 @@ fn editing_a_hidden_instruction_without_assignments_leaves_every_project_clean()
     assert!(
         events.try_recv().is_err(),
         "an edit outside every build must not mark any project dirty"
+    );
+}
+
+// ---- the read side: projects_list serves the cache (T-254) -----------
+
+/// Calls the real command over the mock app — the read the
+/// frontend's generated `commands.projectsList` mirrors.
+fn list_projects(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    include_archived: bool,
+) -> Vec<crate::commands::ProjectColumnEntry> {
+    tauri::async_runtime::block_on(crate::commands::projects_list(
+        app.handle().clone(),
+        Some(include_archived),
+    ))
+    .expect("projects_list must succeed over the mock app")
+}
+
+/// The `dirty` flag of one seeded project's entry.
+fn dirty_of(entries: &[crate::commands::ProjectColumnEntry], project_id: &str) -> bool {
+    entries
+        .iter()
+        .find(|entry| entry.id == project_id)
+        .unwrap_or_else(|| panic!("the seeded project {project_id} must be listed"))
+        .dirty
+}
+
+#[test]
+fn projects_list_serves_the_service_cache_verdicts() {
+    // The T-254 core: the command's `dirty` is the service's last
+    // known verdict, not a constant. The cache is seeded by ONE real
+    // pass over a world with both verdicts in it — a synced-clean
+    // project (DB-024 stored the matching hash) and a never-synced
+    // project with an assignment (DB-021's first clause) — and the
+    // list must reflect each project's own verdict.
+    let (temp, app, _triggers) = dirty_app();
+    let database = database_of(&app);
+    let clean_root = temp.path().join("clean");
+    let clean_target = clean_root.join("AGENTS.md");
+    let clean_id = seed_project(&database, clean_root.display().to_string(), "/clean");
+    let unsynced_root = temp.path().join("unsynced");
+    let unsynced_id = seed_project(&database, unsynced_root.display().to_string(), "/unsynced");
+    let (instruction_id, variant_id) = seed_instruction(&database, "Style", "Be brief.");
+    seed_assignment(
+        &database,
+        clean_id.clone(),
+        instruction_id.clone(),
+        variant_id.clone(),
+    );
+    seed_assignment(&database, unsynced_id.clone(), instruction_id, variant_id);
+    simulate_sync(
+        &database,
+        clean_id.clone(),
+        synced_hash_of(&clean_target.display().to_string(), "Be brief."),
+    );
+    let changes = tauri::async_runtime::block_on(recalc_and_emit(app.handle()))
+        .expect("the cache-seeding pass must succeed");
+    assert_eq!(
+        changes,
+        vec![ProjectDirtyChange {
+            project_id: unsynced_id.clone(),
+            dirty: true,
+        }],
+        "the pass found exactly the never-synced project dirty — the \
+         cache now holds both verdicts"
+    );
+
+    let entries = list_projects(&app, false);
+    assert!(
+        !dirty_of(&entries, &clean_id),
+        "the synced project serves its clean verdict"
+    );
+    assert!(
+        dirty_of(&entries, &unsynced_id),
+        "the never-synced project serves its dirty verdict"
+    );
+}
+
+#[test]
+fn projects_list_before_the_first_pass_answers_the_clean_baseline() {
+    // The startup semantics, now the command's too (one truth): an
+    // empty cache — no pass has run yet — reads every project clean,
+    // a would-be-dirty one included; the first pass's event corrects
+    // the dots afterwards (D-121's clean baseline).
+    let (temp, app, _triggers) = dirty_app();
+    let database = database_of(&app);
+    let root = temp.path().join("p1");
+    let project_id = seed_project(&database, root.display().to_string(), "/p1");
+    let (instruction_id, variant_id) = seed_instruction(&database, "Style", "Be brief.");
+    seed_assignment(&database, project_id.clone(), instruction_id, variant_id);
+
+    let entries = list_projects(&app, false);
+    assert!(
+        !dirty_of(&entries, &project_id),
+        "an unobserved project reads clean — the cache's absent ≡ \
+         clean baseline"
+    );
+}
+
+#[test]
+fn an_archived_project_is_never_dirty_even_with_a_stale_cache_entry() {
+    // DB-014's half, decided by the row whatever the cache holds:
+    // the project went dirty (a real pass recorded `true`), was then
+    // archived, and NO pass has pruned the cache yet — the archived
+    // screen's entry must still read clean.
+    let (temp, app, _triggers) = dirty_app();
+    let database = database_of(&app);
+    let root = temp.path().join("p1");
+    let project_id = seed_project(&database, root.display().to_string(), "/p1");
+    let (instruction_id, variant_id) = seed_instruction(&database, "Style", "Be brief.");
+    seed_assignment(&database, project_id.clone(), instruction_id, variant_id);
+    let changes = tauri::async_runtime::block_on(recalc_and_emit(app.handle()))
+        .expect("the dirtying pass must succeed");
+    assert_eq!(
+        changes,
+        vec![ProjectDirtyChange {
+            project_id: project_id.clone(),
+            dirty: true,
+        }],
+        "the cache holds the project's dirty verdict"
+    );
+
+    // Archive without another pass: the cache keeps the stale `true`
+    // for the id (the next pass would prune it — the guard is the
+    // row's state, not the cache's content).
+    let archived_id = project_id.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::projects::archive(tx, &archived_id)
+            .map(|_| ())
+            .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("archiving the project must work");
+
+    let active = list_projects(&app, false);
+    assert!(
+        active.iter().all(|entry| entry.id != project_id),
+        "the archived row left the default active read"
+    );
+    let archived = list_projects(&app, true);
+    let entry = archived
+        .iter()
+        .find(|entry| entry.id == project_id)
+        .expect("the archived read must list the archived row");
+    assert_eq!(
+        entry.state, "archived",
+        "the listed row is the archived one — the dirty claim below is \
+         about it"
+    );
+    assert!(
+        !entry.dirty,
+        "DB-014: an archived project is never counted as dirty, stale \
+         cache entry or not"
+    );
+}
+
+#[test]
+fn repeated_projects_list_calls_are_stable() {
+    // The read is pure against the cache: repeated calls over the
+    // same seeded state answer identically — nothing is consumed or
+    // reordered by a call.
+    let (temp, app, _triggers) = dirty_app();
+    let database = database_of(&app);
+    let root = temp.path().join("p1");
+    let project_id = seed_project(&database, root.display().to_string(), "/p1");
+    let (instruction_id, variant_id) = seed_instruction(&database, "Style", "Be brief.");
+    seed_assignment(&database, project_id.clone(), instruction_id, variant_id);
+    let _ = tauri::async_runtime::block_on(recalc_and_emit(app.handle()))
+        .expect("the cache-seeding pass must succeed");
+
+    let first = list_projects(&app, false);
+    let second = list_projects(&app, false);
+    assert_eq!(
+        first, second,
+        "two reads over the same cache must answer identically"
+    );
+    assert!(
+        dirty_of(&first, &project_id),
+        "the anchored verdict is dirty — the stability claim is about \
+         real values, not vacuous equality"
+    );
+}
+
+#[test]
+fn projects_list_without_the_managed_dirty_state_answers_the_clean_baseline() {
+    // The missing-state fallback (the theoretical broken setup:
+    // `setup` manages the state before anything that could fail, so
+    // its absence is an uninitialized-app bug): the read still
+    // succeeds — a display flag must not fail the whole column list
+    // — and every verdict reads the clean baseline, exactly like an
+    // empty cache (one truth: absent ≡ clean).
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database =
+        Db::open(temp.path()).expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    // No `DirtyState` managed — deliberately.
+    app.manage(database);
+    let database = database_of(&app);
+    let root = temp.path().join("p1");
+    let project_id = seed_project(&database, root.display().to_string(), "/p1");
+    let (instruction_id, variant_id) = seed_instruction(&database, "Style", "Be brief.");
+    seed_assignment(&database, project_id.clone(), instruction_id, variant_id);
+
+    let entries = list_projects(&app, false);
+    assert!(
+        !dirty_of(&entries, &project_id),
+        "no managed cache — the honest degraded verdict is the clean \
+         baseline, not a failed read"
     );
 }
 
