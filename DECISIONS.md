@@ -8983,6 +8983,36 @@ its P2 (the extra-hint shape must reject unknown fields like
 `extra_file_from_json`, not silently drop them) and P3 (integer
 `limit`/`offset`) were applied before the final amend.
 
+### D-111 — Platform-true facts in tests: OS error codes and canonical path expectations — 2026-11-21
+
+Problem: two Windows-only CI failures in a row (runs 44864444674,
+44865217431), both invisible on the Linux dev machine and both in
+test expectations, not production code. (1) The T-069 fault-injection
+test injected `io::Error::from_raw_os_error(28)` ungated: on Unix 28
+is ENOSPC (std maps it to `ErrorKind::StorageFull`), on Windows it is
+`ERROR_OUT_OF_PAPER` — so the production `StorageFull` classification
+was right to refuse `DiskFull` and the test failed. (2) Four T-074
+IPC tests built expected paths with `std::fs::canonicalize`, which
+prepends the `\\?\` verbatim prefix on Windows, while every command
+returns the DB-030 canonical form (dunce, no prefix); the first run's
+leg aborted at (1) before reaching them, masking (2) for one round.
+
+Solution — two rules for every test that states a platform fact:
+
+- A raw OS error is a platform statement. When a test injects or
+  asserts one, it must either gate by platform (`#[cfg(unix)]` /
+  `#[cfg(windows)]` with the platform's code — ENOSPC 28 vs
+  `ERROR_DISK_FULL` 112, both `StorageFull` in std) or use
+  `io::Error::new(ErrorKind::…)` when only the kind matters.
+- A canonical-path expectation is built with
+  `eunomia_fs::paths::canonicalize` (the DB-030 form the commands
+  return), never `std::fs::canonicalize` — the two diverge by the
+  verbatim prefix on Windows and are identical on Unix, which is
+  exactly why Linux runs cannot catch it.
+
+Service commits 799163f (T-069) and 430bf22 (T-074) carry the fixes;
+subagent briefs for tasks with IPC/fs tests quote these two rules.
+
 ### D-109 — The §12.2 data set generator: repository-driven fill in one transaction, determinism defined over a stabilized view, and the two-crate split (store fill / fs temp Git roots) — 2026-11-20
 
 Problem: T-136 needs the M and L benchmark databases of spec §12.2
