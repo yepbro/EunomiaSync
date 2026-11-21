@@ -20,3 +20,44 @@ test('the mock IPC backend answers app_info (T-141)', async ({ page }) => {
   await expect(version).toBeVisible()
   await expect(version).toHaveText(/^v\d+\.\d+\.\d+/)
 })
+
+// UI-021 (T-145): the theme follows the OS setting and switches LIVE —
+// a real browser, the real compiled CSS and the real matchMedia. The
+// attribute assertions tie the painted colors to the JS bridge (the CSS
+// fallback alone would also paint correctly with the bridge dead); the
+// unit suite owns the bridge logic, this closes the loop to pixels.
+test('the theme follows the OS color scheme and switches without a reload (T-145)', async ({
+  page,
+}) => {
+  const shell = page.locator('main')
+  const html = page.locator('html')
+  const backgroundOf = () => shell.evaluate((el) => getComputedStyle(el).backgroundColor)
+
+  await page.emulateMedia({ colorScheme: 'light' })
+  await page.goto('/')
+  await expect(shell).toBeVisible()
+  await expect(html).toHaveAttribute('data-theme', 'light')
+  await expect.poll(backgroundOf).toBe('rgb(255, 255, 255)') // --page (light)
+
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await expect(html).toHaveAttribute('data-theme', 'dark')
+  await expect.poll(backgroundOf).toBe('rgb(24, 24, 27)') // --page (dark)
+
+  await page.emulateMedia({ colorScheme: 'light' })
+  await expect(html).toHaveAttribute('data-theme', 'light')
+  await expect.poll(backgroundOf).toBe('rgb(255, 255, 255)')
+})
+
+// The pre-JS paint (T-145 round-1 P2-1): with every script blocked, a
+// dark OS still paints dark — the media-query fallback in theme.css,
+// no bridge involved. The html background (the :root canvas) is the
+// observable: no app has mounted, so there is no <main> to read.
+test('a dark OS paints dark before any JavaScript runs (CSS fallback)', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await page.route('**/*.js', (route) => route.abort())
+  await page.goto('/')
+  const background = await page.evaluate(
+    () => getComputedStyle(document.documentElement).backgroundColor,
+  )
+  expect(background).toBe('rgb(24, 24, 27)') // --page (dark)
+})

@@ -1,1 +1,84 @@
+/*
+ * Base styles (T-145, spec §11.5 "the UI uses standard Tailwind
+ * components"): Tailwind v4 CSS-first setup — no tailwind.config file.
+ *
+ *  - ./theme.css holds the light/dark palette (CSS custom properties)
+ *    and is the only place colors are defined.
+ *  - The `dark:` variant follows the <html data-theme> attribute (kept
+ *    in step with the OS by src/assets/theme.ts), not the raw media
+ *    query: one switch point for variables, utilities and any future
+ *    manual override.
+ *  - @theme inline maps each palette token to standard Tailwind color
+ *    utilities — bg-page, bg-surface, text-ink, text-ink-muted,
+ *    text-accent, text-danger, border-line … — `inline` keeps the
+ *    var() reference in the generated utility, so classes re-resolve
+ *    live when the attribute flips.
+ *  - @layer base carries the app-wide accessibility norms: a visible
+ *    theme-aware focus ring (UI-021) and the >=24px minimum for
+ *    interactive controls (NFR-022). Component styles may override the
+ *    ring color (AppErrorAlert's Copy button keeps its own), never
+ *    remove the outline.
+ */
 @import 'tailwindcss';
+@import './theme.css';
+
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+@theme inline {
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-accent: var(--accent);
+  --color-danger: var(--danger);
+  --color-focus-ring: var(--focus-ring);
+  --color-line: var(--line);
+}
+
+@layer base {
+  :root {
+    font-family:
+      system-ui,
+      -apple-system,
+      'Segoe UI',
+      Roboto,
+      'Helvetica Neue',
+      Arial,
+      sans-serif;
+    background-color: var(--page);
+    color: var(--ink);
+    accent-color: var(--accent);
+  }
+
+  /* The app shell fills the window. vh first, dvh as progressive
+     enhancement: dvh needs Safari 15.4 (macOS 12.3), and NFR-001 floors
+     support at macOS 12 — without the vh fallback the shell stops
+     filling the window on 12.0–12.2. */
+  main {
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+
+  a {
+    color: var(--accent);
+  }
+
+  /* UI-021: focus is always visible. */
+  :focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  /* NFR-022: interactive controls are at least 24x24 CSS px (1.5rem).
+     Inline links inside prose are exempt (WCAG 2.5.8 inline exception);
+     min-height is a no-op on non-replaced inline elements anyway. */
+  button,
+  [role='button'],
+  summary,
+  input,
+  select,
+  textarea {
+    min-height: 1.5rem;
+    min-width: 1.5rem;
+  }
+}

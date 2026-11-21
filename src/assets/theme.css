@@ -1,0 +1,74 @@
+/*
+ * EunomiaSync theme tokens (T-145, spec UI-021/NFR-019/NFR-022, §11.5/§12.4).
+ *
+ * The palette lives ONLY here: the root element carries the light set,
+ * [data-theme='dark'] — set on <html> by useOsTheme() (src/assets/theme.ts)
+ * from the OS prefers-color-scheme — carries the dark overrides, and a
+ * media-query fallback applies the same dark set before JS runs (first
+ * paint) and when JS never does. Every token must exist in ALL THREE
+ * blocks: a token missing from a dark block silently falls back to its
+ * light value. src/assets/theme.spec.ts parses this file's literal
+ * values and fails on a missing override, on the two dark sets
+ * drifting apart, or on any text pair below WCAG AA 4.5:1 (non-text
+ * boundaries: 3:1).
+ *
+ * Adding a color:
+ *   1. add the token to ALL THREE blocks (hex #rrggbb, 6 digits — the
+ *      contrast test parses these literals);
+ *   2. map it to Tailwind utilities in main.css (@theme inline) so
+ *      bg-, text- and border- classes exist for it;
+ *   3. add its contrast pairs to src/assets/theme.spec.ts.
+ *
+ * Pairs the contrast test pins (both themes): ink, ink-muted, accent and
+ * danger on page and surface >= 4.5:1; focus-ring and line (UI
+ * boundaries) >= 3:1. The AppErrorAlert surfaces (alert and envelope
+ * backgrounds from T-143's scoped styles) are cross-checked against the
+ * ink token of the matching theme.
+ */
+:root {
+  color-scheme: light;
+  /* page: app background; surface: raised panels and code blocks */
+  --page: #ffffff;
+  --surface: #f3f4f6;
+  /* ink: primary text; ink-muted: secondary text (7.5:1 on page) */
+  --ink: #111827;
+  --ink-muted: #4b5563;
+  /* accent: links and primary actions */
+  --accent: #4338ca;
+  --danger: #b91c1c;
+  --focus-ring: #4338ca;
+  --line: #6b7280;
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+  --page: #18181b;
+  --surface: #27272a;
+  --ink: #f4f4f5;
+  --ink-muted: #a1a1aa;
+  --accent: #818cf8;
+  --danger: #f87171;
+  --focus-ring: #818cf8;
+  --line: #71717a;
+}
+
+/* The pre-JS paint and the no-JS world: until useOsTheme() (or without
+   it) the OS setting itself drives the dark tokens — the first frame on
+   a dark OS is dark, no white flash. The attribute above stays the
+   authority once JS runs: [data-theme='light'] turns this block off,
+   [data-theme='dark'] re-asserts the same values, so a future manual
+   override keeps working. Keep the values IDENTICAL to the
+   [data-theme='dark'] block — theme.spec.ts pins the two sets equal. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --page: #18181b;
+    --surface: #27272a;
+    --ink: #f4f4f5;
+    --ink-muted: #a1a1aa;
+    --accent: #818cf8;
+    --danger: #f87171;
+    --focus-ring: #818cf8;
+    --line: #71717a;
+  }
+}

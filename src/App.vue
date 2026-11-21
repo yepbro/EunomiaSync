@@ -8,11 +8,17 @@
 // UI-020): `t('app.title')` etc., with the pluralized project count as
 // the working pipe-plural example (`app.trackedProjects`). The
 // `eunomia/no-raw-ui-text` lint rule keeps raw copy out of templates.
+// The UI-021 theme bridge: the shell wires the OS light/dark setting to
+// <html data-theme> on boot and keeps it in step with live OS changes —
+// the palette lives in src/assets/theme.css (T-145).
 import { onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useOsTheme } from './assets/theme'
 import { ipc } from './ipc'
 
 const { t, n } = useI18n()
+
+useOsTheme()
 
 // The About-window facts (§7.10 `app_info`); the version line proves the
 // IPC chain end to end — facade → backend → typed wire DTO.
@@ -39,107 +45,26 @@ onMounted(async () => {
 </script>
 
 <template>
-  <main class="container">
-    <h1>{{ t('app.title') }}</h1>
-    <p v-if="version" class="version">{{ t('app.versionLine', { version }) }}</p>
-    <p v-if="projectCount !== null" class="projects">
+  <main class="flex flex-col items-center justify-center bg-page px-6 py-12 text-center text-ink">
+    <h1 class="text-3xl font-semibold tracking-tight">{{ t('app.title') }}</h1>
+    <p v-if="version" class="version mt-2 text-ink-muted">
+      {{ t('app.versionLine', { version }) }}
+    </p>
+    <p v-if="projectCount !== null" class="projects text-ink-muted">
       {{ t('app.trackedProjects', { count: n(projectCount) }, projectCount) }}
     </p>
 
-    <div class="row">
+    <div class="mt-6 flex items-center justify-center gap-6">
       <a href="https://vite.dev" target="_blank">
-        <img src="/vite.svg" class="logo vite" :alt="t('app.logoAlt.vite')" />
+        <img src="/vite.svg" class="size-24 p-3" :alt="t('app.logoAlt.vite')" />
       </a>
       <a href="https://tauri.app" target="_blank">
-        <img src="/tauri.svg" class="logo tauri" :alt="t('app.logoAlt.tauri')" />
+        <img src="/tauri.svg" class="size-24 p-3" :alt="t('app.logoAlt.tauri')" />
       </a>
       <a href="https://vuejs.org/" target="_blank">
-        <img src="./assets/vue.svg" class="logo vue" :alt="t('app.logoAlt.vue')" />
+        <img src="./assets/vue.svg" class="size-24 p-3" :alt="t('app.logoAlt.vue')" />
       </a>
     </div>
-    <p>{{ t('app.tagline') }}</p>
+    <p class="mt-6 max-w-prose text-ink-muted">{{ t('app.tagline') }}</p>
   </main>
 </template>
-
-<style scoped>
-.version,
-.projects {
-  margin: 0 0 0.5em;
-  opacity: 0.6;
-}
-
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.vue:hover {
-  filter: drop-shadow(0 0 2em #249b73);
-}
-</style>
-<style>
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-}
-</style>

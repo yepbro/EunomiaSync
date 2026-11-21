@@ -9904,3 +9904,139 @@ renumber, bulk journal, no-op). Recorded for the orchestrator: the
 brief's `src/**` freeze was overridden by its own green-checks
 requirement; both edits are additive hunks in IPC infrastructure, not
 the columns UI the parallel task owns.
+
+### D-117 — OS-following light/dark theming: palette as CSS tokens in theme.css, a single `<html data-theme>` switch driven by useOsTheme(matchMedia), and a dependency-free WCAG contrast test — 2026-11-21
+
+Problem: T-145 turns UI-021/NFR-019/NFR-022 (spec §11.5/§12.4) into the
+app-wide theming base: light and dark themes follow the OS setting and
+switch live without an app restart; text contrast ≥ WCAG AA 4.5:1 in
+both themes; focus always visible; interactive controls ≥ 24 px. The
+Tauri template's leftover styles in App.vue (unscoped `:root`
+font/color block, logo drop-shadows, link colors) had to go. Open
+questions: the switching mechanism (the card says "prefers-color-scheme
+on standard Tailwind components"; Tailwind v4.3.5 is already wired
+CSS-first via `@import 'tailwindcss'` + `@tailwindcss/vite`), where the
+palette lives, and how the "automatic contrast check" runs without new
+dependencies (package.json is frozen by the task scope).
+
+Solution (T-145):
+
+- **Palette.** `src/assets/theme.css` is the only place colors are
+  defined: eight semantic tokens (`page`, `surface`, `ink`, `ink-muted`,
+  `accent`, `danger`, `focus-ring`, `line`) in the `:root` light set and
+  overridden 1:1 in `[data-theme='dark']` — zinc/gray neutrals with
+  indigo accents and red-700/red-400 danger, every text pair ≥ 4.5:1
+  with margin (the tightest checked text pair is accent on the dark
+  surface at 4.99:1; ink on page is 16–18:1; the tightest non-text pair
+  is line on the dark surface at 3.08:1). Both dark sets also declare
+  `color-scheme` so native scrollbars/form controls follow, and
+  index.html carries `<meta name="color-scheme" content="light dark">`.
+- **Mechanism.** A single switch point: `useOsTheme()`
+  (`src/assets/theme.ts`) applies the OS preference to
+  `<html data-theme="light|dark">` at setup time and re-applies it on
+  every matchMedia `(prefers-color-scheme: dark)` `change` event — an OS
+  flip re-resolves the CSS variables live, no reload. A
+  `@media (prefers-color-scheme: dark) { :root:not([data-theme='light'])
+… }` fallback in theme.css carries the same dark values, so the FIRST
+  paint on a dark OS is already dark (before the JS bundle runs) and the
+  no-JS world themes too; the spec pins the fallback set equal to the
+  attribute set (two hand-maintained dark sets would drift). This is an
+  attribute-derived theme, not a bare CSS media-query swap, for three
+  reasons: it is the one switch the whole app can share (tokens,
+  Tailwind's `dark:` variant — re-keyed to the attribute via
+  `@custom-variant dark` in main.css — and a future manual settings
+  override), it is observable from JS so the no-restart criterion is
+  testable (the spec stubs matchMedia and flips `matches`), and
+  `light-dark()` was ruled out anyway (macOS 12 WKWebView, an NFR-001
+  target, predates it). Deviation from the card's letter ("theme by
+  prefers-color-scheme"): none in effect — the attribute is always
+  derived from prefers-color-scheme; recorded here because the card
+  reads like a media-query-only implementation. Known limit: the
+  AppErrorAlert (T-143, outside this task's edit scope) keys its own
+  dark block on the raw media query, not the attribute — identical
+  while the attribute tracks the OS; if a persisted manual override ever
+  lands, that component must move to the attribute first (follow-up for
+  its owner).
+- **Tailwind mapping.** main.css maps each token through
+  `@theme inline --color-*: var(--*)`, giving standard utilities
+  (`bg-page`, `text-ink`, `border-line`, …) that keep the `var()`
+  reference in the generated class, so they re-resolve when the
+  attribute flips; `@layer base` carries the app-wide norms: a global
+  `:focus-visible` 2 px `--focus-ring` outline (UI-021; component styles
+  may override the color, never remove it — AppErrorAlert's Copy button
+  keeps its own), `min-height/min-width: 1.5rem` for
+  button/[role='button']/summary/input/select/textarea (NFR-022's 24 px
+  both axes; inline prose links stay exempt per WCAG 2.5.8's inline
+  exception), a `100vh`+`100dvh` shell-min-height pair (dvh needs
+  Safari 15.4; NFR-001 floors at macOS 12), system font stack,
+  accent-colored links. App.vue now uses only these utilities — both
+  Tauri template style blocks are deleted.
+- **Contrast proof without dependencies.** `src/assets/theme.spec.ts`
+  computes WCAG relative luminance/contrast in-test, first pinning the
+  checker itself against reference pairs (21:1 black/white; #767676
+  passes and #777777 fails 4.5:1 on white — a checker that cannot
+  reproduce the boundary cannot be trusted), then parses the SHIPPED
+  theme.css (comments stripped, blocks brace-matched, `--token: #rrggbb`
+  literals collected — the stylesheet is the artifact the webview
+  renders, so hardcoded spec-side copies would prove nothing) and
+  asserts: every base text pair ≥ 4.5:1 and non-text boundaries
+  (focus-ring, line) ≥ 3:1 in both themes; every token appears in at
+  least one checked pair; the dark blocks override every token (no
+  silent light fallback, the two dark sets equal); the AppErrorAlert's
+  own surfaces (mirrored literals #fef2f2/#f3f4f6/#2c1a1a/#1f1f1f — the
+  component is outside this task's edit scope) hold 4.5:1 against the
+  matching theme's ink; main.css maps every token, imports theme.css
+  (and main.ts imports main.css — the palette's only route into the
+  app) and ships the focus and 24 px norms. The rendered loop is closed
+  by one Playwright case (e2e/smoke.spec.ts): emulateMedia flips the OS
+  color scheme light→dark→light and the shell's computed background
+  follows live, no reload — real browser, real compiled CSS, real
+  matchMedia. vitest's css handling stubs CSS imports (plain, `?raw`,
+  `?inline` all come back empty) and the task scope froze
+  vite.config/tsconfig, so the spec reads the two CSS files with
+  node:fs — the one `@ts-expect-error` in the diff (src tsconfig has no
+  node types; runtime is Node); once node types are added the directive
+  goes unused and typecheck fails until it is removed (the cue).
+- **Placement.** theme.ts lives under src/assets because T-145's
+  parallel-window file scope allows `src/assets/**` (three sibling
+  tasks own src-tauri, src/date, src/ipc/mock/events); moving it next to
+  future composables later is a no-op (one import site: App.vue).
+
+Review: two rounds — reports in `.opencode/reviews/t145-round*.md`
+(owner-local). Round 1 (deepseek-v4.1-flash, changes requested): no
+P0/P1; 2×P2, 7×P3 — all applied except one declined. P2-1 — the first
+paint on a dark OS was light (the palette's light `:root` set applies
+before the JS bundle runs; reviewer measured it in a built-app probe):
+the `@media (prefers-color-scheme: dark) { :root:not([data-theme='light'])
+}` fallback added, its token set pinned equal to the attribute block.
+P2-2 — the main.css→theme.css→main.ts chain was unasserted (deleting
+the `@import` kept all 43 tests green): structural pins added (imports
+asserted) plus a rendered Playwright case (emulateMedia light→dark→
+light, computed background follows live — the only test that would have
+caught P2-1). P3s applied: `min-width: 1.5rem` joined the 24 px norm
+(height-only before); a coverage test forces every token into at least
+one contrast pair; the `@ts-expect-error` comment now says typecheck
+fails until the directive is removed (not "self-deletes"); the alert
+mirror check documents its query==attribute assumption; the shell uses
+a `100vh`+`100dvh` base pair (min-h-dvh alone dropped on macOS
+12.0–12.2 WKWebView); D-117's margin numbers corrected (4.99:1 accent/
+dark-surface is the real binding pair). Declined: P3-5's "drop
+@custom-variant dark, it has no consumer" — the variant is the
+single-switch seam D-117 designs for the first theme-aware screen;
+instead its pin carries an honest no-consumer-yet note. P3-4's
+media-query-keyed AppErrorAlert is a follow-up for that component's
+owner (recorded above), not editable in this window.
+Round 2 (hy4-flash-free, no changes requested): no P0/P1/P2; 3×P3,
+all applied. P3-1 — the AppErrorAlert mirror's `surfaces` data was
+dead (the it.each rows duplicated it): the rows are now driven from the
+single mirror table. P3-2 — the rendered e2e could not tell the JS
+bridge from the CSS fallback (a dead bridge left it green): the live
+case now asserts `html[data-theme]` at every step, and a second case
+blocks all scripts on a dark OS and asserts the `:root` canvas is still
+dark — the pre-JS fallback proven at the rendered level (the P2-1
+regression guard). P3-3 — the fallback block's `color-scheme: dark`
+joined the asserted declarations (native scrollbars/controls on the
+dark first paint). The reviewer also re-verified the three-block
+cascade under all four OS/attribute combinations, the D-117 contrast
+numbers, and the alert's opacity-dimmed text (6.34:1 light / 7.98:1
+dark — clear AA).
