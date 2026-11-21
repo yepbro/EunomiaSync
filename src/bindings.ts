@@ -125,17 +125,21 @@ export const commands = {
 	 *  one transaction"): the by-id lookup through the repository's
 	 *  ordered list (the store's public face has no by-id read, D-093;
 	 *  the list is exactly the screen's own data, screen-sized), the
-	 *  physical `DELETE`, and the LOG-001…004 journal entry — a
-	 *  `project.changed` record at info/user/ok whose `Details::File`
-	 *  carries the removed path. The frozen `Action` vocabulary (D-051)
-	 *  has no exclusion-specific member and no `EntityType` names an
-	 *  exclusion, so the path — SEC-008 permits paths, and it is exactly
-	 *  the fact the screen shows — identifies the removed row; a future
-	 *  store-side task may grow an `exclusion.removed` member and take
-	 *  the entry over. A failure between the writes rolls both back: the
-	 *  journal never claims a removal that did not commit (the D-051
-	 *  in-transaction rule, pinned here in the settings rollback test's
-	 *  shape).
+	 *  physical `DELETE`, and the journal entry — an `exclusion.removed`
+	 *  record at info/user/ok whose entity columns name the removed row
+	 *  (`EntityType::Exclusion` + its id) and whose `Details::File`
+	 *  carries the removed path (SEC-008 permits paths, and it is exactly
+	 *  the fact the screen shows). The member is the D-106 tracked
+	 *  follow-up, landed by D-119: until it, this command journaled
+	 *  `project.changed` with no entity — the frozen vocabulary's only
+	 *  defensible shape — and those legacy rows keep reading unchanged
+	 *  (both spellings are members of the same closed vocabulary; the
+	 *  store's compatibility test pins the old shape beside the new).
+	 *  `project_id` stays unset either way (no project row is involved;
+	 *  `manual` exclusions have none). A failure between the writes rolls
+	 *  both back: the journal never claims a removal that did not commit
+	 *  (the D-051 in-transaction rule, pinned here in the settings
+	 *  rollback test's shape).
 	 * 
 	 *  Failures reach the log with their §10 code
 	 *  ([`logging::exclusion_remove_failed`]); a successful removal is

@@ -401,7 +401,7 @@ export const mockCommands: IpcCommands = {
    * `activity_list` (§7.10/§7.7): the boundary validates exactly like the
    * real command (`validated_activity_query`): limit 1..=500 (default 50),
    * offset ≥ 0, DB-002-shaped date bounds, a non-inverted range, actions
-   * within the closed 21-member vocabulary, result within {ok, error,
+   * within the closed 22-member vocabulary, result within {ok, error,
    * skipped} — every rejection is `E_VALIDATION` naming field/value/reason.
    * Then: every filter combines with AND; LOG-005 keeps diagnostics out
    * unless `include_diagnostic` explicitly opts in; newest first (`ts`
@@ -555,11 +555,11 @@ export const mockCommands: IpcCommands = {
    * refusal naming the field, with nothing deleted and nothing journaled;
    * a hit removes the row (the next `exclusions_list` no longer serves
    * it) and journals the removal in one operation. The journal entry
-   * mirrors the real command exactly (D-106): `project.changed` at
-   * info/user/ok whose `details` carries the removed path as
-   * `{"path":"…"}` — the frozen `Action` vocabulary has no
-   * `exclusion.removed` member yet; a future store-side task may grow it
-   * and take the entry over.
+   * mirrors the real command exactly (the D-106 follow-up member,
+   * D-119): `exclusion.removed` at info/user/ok whose entity columns
+   * name the removed row (`exclusion` + its id) and whose `details`
+   * carry the removed path as `{"path":"…"}`; no `project_id` (no
+   * project row is involved).
    */
   async exclusionRemove(id) {
     const state = mockState()
@@ -572,7 +572,11 @@ export const mockCommands: IpcCommands = {
       })
     }
     const [removed] = state.exclusions.splice(index, 1)
-    journal('project.changed', { details: JSON.stringify({ path: removed?.path }) })
+    journal('exclusion.removed', {
+      entityType: 'exclusion',
+      entityId: id,
+      details: JSON.stringify({ path: removed?.path }),
+    })
     return null
   },
 

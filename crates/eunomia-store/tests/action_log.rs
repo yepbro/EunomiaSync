@@ -12,6 +12,10 @@
 //!   transaction survives — both halves of the journal's
 //!   transactional semantics;
 //! * `user` and `diagnostic` entries round-trip separately (LOG-005);
+//! * the T-245 exclusion-removal shape round-trips with its entity
+//!   and path, and rows the T-078 era wrote (`project.changed`, no
+//!   entity — D-106's frozen-vocabulary fit) still read unchanged
+//!   beside it;
 //! * a tampered cell — a non-JSON `details`, an unknown action —
 //!   fails the read explicitly (the D-039 corrupt-cells policy);
 //! * the SEC-008 contract at the database boundary: the `details`
@@ -328,6 +332,118 @@ fn user_and_diagnostic_entries_round_trip_separately() {
     // newest first, so the diagnostic entry (written second) leads.
     assert_eq!(records[0].visibility, Visibility::Diagnostic);
     assert_eq!(records[1].visibility, Visibility::User);
+    teardown(conn, dir);
+}
+
+#[test]
+fn an_exclusion_removal_entry_round_trips_with_its_entity_and_path() {
+    let (conn, dir) = journal_db("exclusion-roundtrip");
+
+    // The T-245 producer shape (`exclusion_remove`, D-106 follow-up):
+    // the removal's own verb, the removed row's id in the entity
+    // columns, the removed path as the File detail — and no project
+    // (no project row is involved; `manual` exclusions have none).
+    let mut entry = LogEntry::new(
+        Action::ExclusionRemoved,
+        Level::Info,
+        Visibility::User,
+        Outcome::Ok,
+    );
+    entry.entity = Some(Entity {
+        kind: EntityType::Exclusion,
+        id: "0193a2bb-3333-7444-9c6d-1a2b3c4d5e6f",
+    });
+    entry.details = Some(Details::File {
+        path: PathBuf::from("/repos/removed"),
+    });
+    insert(&conn, &entry).expect("insert should succeed");
+
+    let records = read_recent(&conn, 10);
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.action, Action::ExclusionRemoved);
+    assert_eq!(record.action.as_str(), "exclusion.removed");
+    assert_eq!(record.level, Level::Info);
+    assert_eq!(record.visibility, Visibility::User);
+    assert_eq!(record.result, Outcome::Ok);
+    assert_eq!(
+        record.entity,
+        Some((
+            EntityType::Exclusion,
+            "0193a2bb-3333-7444-9c6d-1a2b3c4d5e6f".to_owned()
+        )),
+        "the entity columns name the removed exclusion row"
+    );
+    assert_eq!(record.project_id, None);
+    assert_eq!(record.sync_run_id, None);
+    assert_eq!(
+        record.details,
+        Some(serde_json::json!({ "path": "/repos/removed" })),
+        "the File detail carries the removed path"
+    );
+    teardown(conn, dir);
+}
+
+#[test]
+fn legacy_t078_project_changed_exclusion_rows_still_read() {
+    let (conn, dir) = journal_db("legacy-t078");
+
+    // Rows the T-078 version wrote (the D-106 journal shape, before
+    // the `exclusion.removed` member existed): `project.changed` at
+    // info/user/ok, no entity, no project_id, the removed path as the
+    // File detail. Written here by hand — the exact stored shape of
+    // that era, not what any current producer writes — so the read's
+    // backward compatibility is pinned against the real legacy row,
+    // and a writer change alone could not keep this test green. The
+    // far-past timestamp keeps the positional asserts deterministic
+    // regardless of the machine clock (`recent` orders newest first).
+    conn.execute(
+        "INSERT INTO action_log
+             (ts, level, visibility, action, entity_type, entity_id,
+              project_id, sync_run_id, result, details)
+         VALUES
+             ('2000-01-01T00:00:00.000Z', 'info', 'user', 'project.changed',
+              NULL, NULL, NULL, NULL, 'ok', '{\"path\":\"/repos/legacy\"}')",
+        [],
+    )
+    .expect("writing the legacy row should succeed");
+    // The current producer's row beside it: same fact, new shape.
+    let mut entry = LogEntry::new(
+        Action::ExclusionRemoved,
+        Level::Info,
+        Visibility::User,
+        Outcome::Ok,
+    );
+    entry.entity = Some(Entity {
+        kind: EntityType::Exclusion,
+        id: "0193a2bb-3333-7444-9c6d-1a2b3c4d5e6f",
+    });
+    entry.details = Some(Details::File {
+        path: PathBuf::from("/repos/legacy"),
+    });
+    insert(&conn, &entry).expect("insert should succeed");
+
+    // Both rows read back: the legacy one as the `project.changed`
+    // it was written as, the new one as `exclusion.removed`.
+    let records = read_recent(&conn, 10);
+    assert_eq!(records.len(), 2, "both eras' rows coexist and parse");
+    assert_eq!(records[0].action, Action::ExclusionRemoved);
+    assert_eq!(
+        records[0].entity.as_ref().map(|(kind, _)| *kind),
+        Some(EntityType::Exclusion)
+    );
+    let legacy = &records[1];
+    assert_eq!(legacy.action, Action::ProjectChanged);
+    assert_eq!(legacy.level, Level::Info);
+    assert_eq!(legacy.visibility, Visibility::User);
+    assert_eq!(legacy.result, Outcome::Ok);
+    assert_eq!(legacy.entity, None, "the legacy row never had an entity");
+    assert_eq!(legacy.project_id, None);
+    assert_eq!(
+        legacy.details,
+        Some(serde_json::json!({ "path": "/repos/legacy" })),
+        "the legacy File detail still parses"
+    );
     teardown(conn, dir);
 }
 

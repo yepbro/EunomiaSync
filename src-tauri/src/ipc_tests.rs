@@ -4266,10 +4266,12 @@ fn exclusion_remove_deletes_the_row_and_journals_the_path_in_one_transaction() {
     // §6.4's physical delete through the real command: the row is
     // gone, the list reflects it, and exactly one journal entry
     // records the removal inside the same transaction —
-    // `project.changed` at info/user/ok whose File detail carries the
-    // removed path (the frozen-vocabulary fit the command docs
-    // record), with no entity or project id (no EntityType names an
-    // exclusion).
+    // `exclusion.removed` at info/user/ok (the D-106 follow-up
+    // member, D-119) whose entity names the removed exclusion row
+    // and whose File detail carries its path, with no project id (no
+    // project row is involved). Rows the T-078 era wrote as
+    // `project.changed` keep reading — the store's compatibility
+    // test pins that half.
     let (temp, app) = exclusions_app();
     let database = app.state::<crate::db::Db>().inner().clone();
     let webview = main_webview(&app);
@@ -4307,11 +4309,18 @@ fn exclusion_remove_deletes_the_row_and_journals_the_path_in_one_transaction() {
     // The journal: exactly one entry, the removal's own event.
     let journal = journal_entries(&database);
     assert_eq!(journal.len(), 1, "one removal, one entry");
-    assert_eq!(journal[0].action.as_str(), "project.changed");
+    assert_eq!(journal[0].action.as_str(), "exclusion.removed");
     assert_eq!(journal[0].level.as_str(), "info");
     assert_eq!(journal[0].visibility.as_str(), "user");
     assert_eq!(journal[0].result.as_str(), "ok");
-    assert_eq!(journal[0].entity, None, "no EntityType names an exclusion");
+    assert_eq!(
+        journal[0].entity,
+        Some((
+            eunomia_store::action_log::EntityType::Exclusion,
+            removed.clone()
+        )),
+        "the entity columns name the removed exclusion row"
+    );
     assert_eq!(journal[0].project_id, None, "no project row is involved");
     assert_eq!(
         journal[0].details,

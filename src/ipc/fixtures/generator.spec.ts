@@ -194,6 +194,18 @@ describe('generateFixtures: domain rules', () => {
 })
 
 describe('generateActivityEntries: closed vocabularies', () => {
+  it('ACTION_MEMBERS mirrors the store vocabulary exactly once over (D-108/D-119)', () => {
+    // The D-108 strict-coverage mirror: the mock's `activity_list`
+    // filter validates against this list, so a member lost here
+    // would make the mock reject a filter value the real boundary
+    // accepts. The length literal (22, `Action::ALL` today) catches
+    // an accidental deletion; the dedup check catches a copy-paste
+    // double. No cross-language oracle exists (bindings.ts carries no
+    // enum), so the two literals are the pin.
+    expect(ACTION_MEMBERS).toHaveLength(22)
+    expect(new Set(ACTION_MEMBERS).size).toBe(ACTION_MEMBERS.length)
+  })
+
   it('writes only real action_log members and their enums', () => {
     const bundle = generateFixtures(PROFILE)
     const entries = generateActivityEntries(bundle.projects, PROFILE)

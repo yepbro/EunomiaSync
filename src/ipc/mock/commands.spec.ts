@@ -598,16 +598,18 @@ describe('exclusionsList / exclusionRemove (the D-10 screen, T-078/D-106)', () =
     expect(after[0]?.id).toBe(before[1]?.id)
   })
 
-  it('exclusionRemove journals project.changed carrying the removed path (D-106)', async () => {
+  it('exclusionRemove journals exclusion.removed naming the removed row (D-119)', async () => {
     const victim = (await commands.exclusionsList())[0]
     expect(victim).toBeDefined()
     await commands.exclusionRemove(victim?.id ?? '')
-    const page = await commands.activityList({ actions: ['project.changed'], limit: 500 })
+    const page = await commands.activityList({ actions: ['exclusion.removed'], limit: 500 })
     const entry = page.entries.find((e) => e.details === JSON.stringify({ path: victim?.path }))
-    expect(entry, 'one project.changed entry naming the removed path').toBeDefined()
+    expect(entry, 'one exclusion.removed entry naming the removed path').toBeDefined()
     expect(entry?.visibility).toBe('user')
     expect(entry?.result).toBe('ok')
-    expect(entry?.entity_type).toBeNull()
+    expect(entry?.entity_type).toBe('exclusion')
+    expect(entry?.entity_id).toBe(victim?.id)
+    expect(entry?.project_id).toBeNull()
   })
 
   it('exclusionRemove rejects an already-removed id with the typed envelope, changing nothing', async () => {

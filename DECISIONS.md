@@ -10087,3 +10087,121 @@ structural, as for every sibling edge.
   (one `inspect_err` on the single `_impl` every failure flows
   through) and the facade pin holds the line shape. Adding a pin for
   this one command alone would be the inconsistency.
+
+### D-119 — The `exclusion.removed` journal member: the D-106 follow-up landed, the vocabulary's first beyond-LOG-001…004 members, and the legacy `project.changed` rows kept readable — 2026-11-21
+
+Problem: T-245 closes D-106's tracked follow-up. The frozen D-051
+vocabulary forced `exclusion_remove` to journal `project.changed`
+with no entity — a row the future Activity window would render as a
+project change attributable to no project (D-106's known cost,
+recorded as "take the entry over BEFORE the Activity UI ships").
+Growing the vocabulary raised three questions: (1) the member's form
+and where it sits in an enum whose every member maps to a
+LOG-001…004 category (the requirement does not name exclusion
+operations); (2) whether the entry gains an `EntityType` of its own
+or reuses a project shape; (3) where the removed path travels now
+that the entity columns can carry the row's identity, and what
+happens to rows already written in the T-078 shape.
+
+Solution: two new members, one producer switch, and a compatibility
+pin — the vocabulary's first consciously-beyond-requirement
+extension.
+
+- _The member: `Action::ExclusionRemoved` → `"exclusion.removed"`,
+  placed after `ErrorReported` in a marked beyond-LOG-001…004
+  group._ The `object.verb` lowercase shape is unchanged
+  (`action_strings_are_dotted_and_unique` still pins it); the
+  placement is honest history — every LOG-001…004 category keeps its
+  documented members in their documented order, and the extension
+  gets its own labeled section instead of hiding inside the
+  requirement's list. The mapping oracle test grew a
+  `beyond_requirement` list after the requirement's categories, so
+  the enum's documented order stays the flattened category order and
+  a future member added anywhere but the end fails the placement
+  assert. `Action::ALL` is 22; the `exclusion.removed` spelling is
+  pinned by a unit test that also rejects the near misses
+  (`exclusion.added`, `exclusion.remove`, `exclusions.removed`) —
+  the extension added exactly one member, not an open-ended family.
+- _`EntityType::Exclusion` → `"exclusion"`, placed after `Project`._
+  D-106's follow-up text called for the member "with its
+  `EntityType`", and the placement follows the domain:
+  `project_exclusions` is the projects-domain sibling table. The old
+  D-106 reasoning — "the exclusion id must not ride a `project`
+  entity column" — is exactly what the new member fixes: the id now
+  rides an `exclusion` entity column, the honest kind for the row
+  it names. `EntityType::ALL` is 9; the singular spelling is pinned
+  (`exclusions` and friends rejected).
+- _The path stays in `Details::File`; the entity carries the row id;
+  `project_id` stays NULL._ The neighbors decide the payload:
+  `BackupCreated` carries its path in `Details::File` (LOG-001…004's
+  own "the project and path" convention, SEC-008 permits paths), and
+  the T-078 entry already used exactly that detail — so the switch
+  changes the verb and adds the entity, and rewrites nothing else.
+  No `project_id`: no project row is involved, and `manual`
+  exclusions have none (D-106's rule, unchanged). The shape stays
+  info/user/ok — the D-051 unmirrored tracing shape, so
+  `logging::action_logged` needed no change.
+- _Compatibility: the legacy rows keep reading, proven against the
+  real stored shape._ `project.changed` remains a member (its only
+  current producer, `projects_reorder`, is untouched; the future
+  update family will use the same member), so T-078-era rows parse
+  exactly as written; the store integration test hand-INSERTs the
+  exact legacy row (SQL literal, not a current producer's output)
+  beside a new-shape row and reads both back — the read's backward
+  compatibility is pinned against the historical bytes, immune to a
+  producer-side drift. No migration was written, and D-106's
+  "replaceable" premise no longer holds as stated: §6.4's delete is
+  physical, so a legacy journal row is now the only remaining record
+  of that removal — dropping it loses history, and migrating cannot
+  recover the removed row's id (the T-078 entry never carried one).
+  The follow-up therefore closes in two halves: the READ half is
+  done (pinned above), while the RENDER half stays open for the
+  Activity-UI task — until it maps the legacy shape at display time
+  (`project.changed`, entity NULL, a `{"path":…}` detail ⇒ the
+  "exclusion removed" label), those rows still render as a project
+  change attributable to no object (D-106's known cost, bounded to
+  pre-release data: the app is 0.1.0 and no shipped version holds
+  T-078-era rows).
+- _The command and its mirrors._ `exclusion_remove` writes the new
+  member inside its one `Db::run` transaction (unchanged shape: the
+  by-id list read, the typed refusal, the DELETE, the insert —
+  D-106's composition), its doc comment now records the D-119 form
+  and the legacy-read guarantee; the T-078 IPC test asserts the new
+  verb, the `(exclusion, id)` entity, and the path detail. The
+  frontend mock mirror follows the D-108 strict-coverage rule:
+  `ACTION_MEMBERS` grows to 22 (the `activity_list` filter accepts
+  the new member immediately), `exclusionRemove` journals the new
+  shape with the entity columns, and the mock spec pins action,
+  entity pair, and `project_id` NULL. `bindings.ts` regenerates
+  mechanically (the command's doc comment is mirrored into it by the
+  exporter; zero type or signature change — D-118's precedent).
+
+Tests: store — the two new integration tests above plus the
+`the_exclusion_members_round_trip_and_reject_near_misses` unit test
+and the updated vocabulary oracles (`enums_round_trip_the_schema_
+check_literals`, `the_action_vocabulary_covers_log_001_to_004_
+member_by_member`); app — the T-078 journal asserts repointed (one
+test, `exclusion_remove_deletes_the_row_and_journals_the_path_in_
+one_transaction`); frontend — the mock journal test repointed
+(`exclusionRemove journals exclusion.removed naming the removed row
+(D-119)`). No other journal surface moved: the tracing mirror's
+decision table is level/visibility/result-based and the new entry
+keeps the unmirrored shape.
+
+- _Round-1 review (deepseek-v4.1-flash: 0×P0/P1, 2×P2, 5×P3; verdict
+  APPROVE)._ Applied: the compatibility bullet rewritten (the
+  replaceability premise and the render half — P2-1; the producer
+  wording — P3-4); the legacy test's timestamp moved to a far-past
+  literal (clock-independent ordering, P3-1); the CHECK-literal
+  oracle doc now says which columns the §6.2 DDL actually constrains
+  (P3-2); `ACTION_MEMBERS` gained a length-and-uniqueness pin in its
+  spec (P3-3). Declined with reason (P2-2): the stale
+  "member-by-member onto LOG-001…004" sentence in ARCHITECTURE.md is
+  real, but ARCHITECTURE.md is outside this task's frozen file
+  scope — recorded here for the orchestrator (the D-118 deviation
+  precedent). Recorded (P3-5): the one-way read policy is now
+  reachable in production for the first time — an older build
+  opening a database that holds an `exclusion.removed` row fails the
+  whole `recent`/`list` read (the D-039/D-051 unknown-member policy,
+  version skew surfaced by design); the accepted mitigation is the
+  updater's no-rollback story (UPD-004), not a reader-side guess.

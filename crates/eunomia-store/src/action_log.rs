@@ -1,12 +1,14 @@
 //! Action-log repository (spec §7.7 LOG-001…005, §6.2).
 //!
 //! The `action_log` table is the journal of everything the user and the
-//! app did: projects, settings, instructions, variants, assignments,
-//! headings, sync runs, backups, errors (LOG-001…004). Every entry
-//! carries the time, the level, the visibility (LOG-005: `user` entries
-//! feed the "Activity" window, `diagnostic` entries live only in the
-//! file log and diagnostics), the action, the object it happened to,
-//! the result, and — for file writes — the project and path.
+//! app did: projects, path exclusions (§6.4), settings, instructions,
+//! variants, assignments, headings, sync runs, backups, errors
+//! (LOG-001…004, plus the recorded beyond-requirement members — see
+//! [`Action`]). Every entry carries the time, the level, the
+//! visibility (LOG-005: `user` entries feed the "Activity" window,
+//! `diagnostic` entries live only in the file log and diagnostics),
+//! the action, the object it happened to, the result, and — for file
+//! writes — the project and path.
 //!
 //! # Transactional semantics
 //!
@@ -211,6 +213,10 @@ impl Outcome {
 pub enum EntityType {
     /// A `projects` row.
     Project,
+    /// A `project_exclusions` row (§6.4's path exclusion — the
+    /// projects-domain sibling table, so the member sits next to
+    /// [`EntityType::Project`]).
+    Exclusion,
     /// A `library_items` row of kind `instruction`.
     Instruction,
     /// A `library_items` row of kind `heading`.
@@ -229,8 +235,9 @@ pub enum EntityType {
 
 impl EntityType {
     /// Every member.
-    pub const ALL: [EntityType; 8] = [
+    pub const ALL: [EntityType; 9] = [
         EntityType::Project,
+        EntityType::Exclusion,
         EntityType::Instruction,
         EntityType::Heading,
         EntityType::Variant,
@@ -244,6 +251,7 @@ impl EntityType {
     pub const fn as_str(&self) -> &'static str {
         match self {
             EntityType::Project => "project",
+            EntityType::Exclusion => "exclusion",
             EntityType::Instruction => "instruction",
             EntityType::Heading => "heading",
             EntityType::Variant => "variant",
@@ -258,6 +266,7 @@ impl EntityType {
     fn from_member(member: &str) -> Result<Self, ActionLogError> {
         match member {
             "project" => Ok(EntityType::Project),
+            "exclusion" => Ok(EntityType::Exclusion),
             "instruction" => Ok(EntityType::Instruction),
             "heading" => Ok(EntityType::Heading),
             "variant" => Ok(EntityType::Variant),
@@ -276,8 +285,10 @@ impl EntityType {
 /// The closed action vocabulary of LOG-001…004 — what the journal
 /// records. The variant list below is the requirement's own list,
 /// member by member (see the module docs and DECISIONS.md for the
-/// mapping table); future features extend it consciously, like every
-/// other closed vocabulary in this crate.
+/// mapping table), followed by the beyond-requirement members the
+/// app's own decisions added (each marked in place); future features
+/// extend it consciously, like every other closed vocabulary in this
+/// crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
     // LOG-001…004: "adding, changing, archiving, and restoring
@@ -344,11 +355,22 @@ pub enum Action {
     /// faults, e.g. a DB-017 invariant violation).
     /// An error or fault was reported.
     ErrorReported,
+    // Beyond LOG-001…004: journal members the app's own decisions
+    // added to the requirement's list, as consciously as the members
+    // above. §6.4's one physical-delete entity outside the library —
+    // the path exclusion — gets its own verb (the D-106 tracked
+    // follow-up, landed by T-245): before it, `exclusion_remove`
+    // journaled `project.changed` with no entity, a row attributable
+    // to no object.
+    /// A path exclusion was removed (§6.4 "Path exclusion", the
+    /// physical delete; the row id travels in the entity columns as
+    /// [`EntityType::Exclusion`], the path in [`Details::File`]).
+    ExclusionRemoved,
 }
 
 impl Action {
     /// Every member, in the order the module docs group them.
-    pub const ALL: [Action; 21] = [
+    pub const ALL: [Action; 22] = [
         Action::ProjectAdded,
         Action::ProjectChanged,
         Action::ProjectArchived,
@@ -370,6 +392,7 @@ impl Action {
         Action::SyncProjectResult,
         Action::BackupCreated,
         Action::ErrorReported,
+        Action::ExclusionRemoved,
     ];
 
     /// The stored action string — `object.verb`, lowercase, the shape
@@ -397,6 +420,7 @@ impl Action {
             Action::SyncProjectResult => "sync.project_result",
             Action::BackupCreated => "backup.created",
             Action::ErrorReported => "error.reported",
+            Action::ExclusionRemoved => "exclusion.removed",
         }
     }
 
@@ -435,6 +459,7 @@ impl Action {
             "sync.project_result" => Ok(Action::SyncProjectResult),
             "backup.created" => Ok(Action::BackupCreated),
             "error.reported" => Ok(Action::ErrorReported),
+            "exclusion.removed" => Ok(Action::ExclusionRemoved),
             _ => Err(ActionLogError::Member {
                 column: "action",
                 found: member.to_owned(),
@@ -1339,9 +1364,14 @@ fn invalid(source: ActionLogError) -> StorageError {
 mod tests {
     use super::*;
 
-    /// The §6.2 CHECK literals, hardcoded from the spec — an oracle
-    /// independent of the production enums (a mutated literal or a
-    /// narrowed vocabulary fails these tests).
+    /// The stored vocabulary literals, hardcoded from the spec — an
+    /// oracle independent of the production enums (a mutated literal
+    /// or a narrowed vocabulary fails these tests). `level`,
+    /// `visibility` and `result` are §6.2 CHECK literals; `action`
+    /// and `entity_type` live over free-TEXT columns the schema
+    /// leaves open (§6.2), closed instead by the app-level D-051
+    /// vocabulary (extended by D-119) — pinned here the same way so
+    /// the two kinds of literal share one oracle.
     #[test]
     fn enums_round_trip_the_schema_check_literals() {
         let levels = ["info", "warn", "error"];
@@ -1364,6 +1394,7 @@ mod tests {
 
         let entity_types = [
             "project",
+            "exclusion",
             "instruction",
             "heading",
             "variant",
@@ -1388,7 +1419,11 @@ mod tests {
     /// its own action with `result = error` (the fail-then-log
     /// semantics), and a DB-017 invariant violation is an
     /// [`Action::ErrorReported`] — recorded here so the mapping stays
-    /// total and conscious.
+    /// total and conscious. The vocabulary also carries members
+    /// **beyond** the requirement's list, each added by a recorded
+    /// decision (the D-106 follow-up member, T-245); they are listed
+    /// after the requirement's categories so the enum's documented
+    /// order stays the flattened category order.
     #[test]
     fn the_action_vocabulary_covers_log_001_to_004_member_by_member() {
         let categories: [(&str, &[Action]); 13] = [
@@ -1437,10 +1472,19 @@ mod tests {
         for (_, members) in remaining_categories {
             covered.extend_from_slice(members);
         }
+        // Beyond the requirement's list: members added by recorded
+        // decisions, still exactly one category each.
+        let beyond_requirement: [(&str, &[Action]); 1] = [(
+            "removing path exclusions (§6.4; the D-106 follow-up, T-245)",
+            &[Action::ExclusionRemoved],
+        )];
+        for (_, members) in beyond_requirement {
+            covered.extend_from_slice(members);
+        }
         assert_eq!(
             covered.len(),
             Action::ALL.len(),
-            "every Action member must map to exactly one LOG-001…004 category"
+            "every Action member must map to exactly one category"
         );
         for member in Action::ALL {
             let occurrences = covered.iter().filter(|&&a| a == member).count();
@@ -1484,6 +1528,51 @@ mod tests {
                     || b == b'_'),
                 "{string} must be lowercase"
             );
+        }
+    }
+
+    /// The T-245 members round-trip their stored strings in both
+    /// directions, and the vocabulary grew by exactly one member
+    /// each: near-miss spellings — the other exclusion verb, a
+    /// plural entity, a lone object — are still rejected, so the
+    /// extension did not open the closed vocabularies.
+    #[test]
+    fn the_exclusion_members_round_trip_and_reject_near_misses() {
+        // as_str → from_member → as_str is the identity for both.
+        assert_eq!(
+            Action::from_member(Action::ExclusionRemoved.as_str())
+                .expect("the stored spelling must parse"),
+            Action::ExclusionRemoved
+        );
+        assert_eq!(
+            Action::ExclusionRemoved.as_str(),
+            "exclusion.removed",
+            "the D-106 follow-up's own spelling"
+        );
+        assert_eq!(
+            EntityType::from_member(EntityType::Exclusion.as_str())
+                .expect("the stored spelling must parse"),
+            EntityType::Exclusion
+        );
+        assert_eq!(EntityType::Exclusion.as_str(), "exclusion");
+        // Near misses stay outside the vocabulary.
+        for rejected in ["exclusion.added", "exclusion.remove", "exclusions.removed"] {
+            match Action::from_member(rejected) {
+                Err(ActionLogError::Member { column, found }) => {
+                    assert_eq!(column, "action");
+                    assert_eq!(found, rejected);
+                }
+                other => panic!("{rejected:?} must be rejected, got {other:?}"),
+            }
+        }
+        for rejected in ["exclusions", "exclusion_row", "project_exclusion"] {
+            match EntityType::from_member(rejected) {
+                Err(ActionLogError::Member { column, found }) => {
+                    assert_eq!(column, "entity_type");
+                    assert_eq!(found, rejected);
+                }
+                other => panic!("{rejected:?} must be rejected, got {other:?}"),
+            }
         }
     }
 
