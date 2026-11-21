@@ -76,6 +76,15 @@ pub(crate) mod sync_running;
 // startup/sync triggers wired below.
 pub(crate) mod dirty_recalc;
 
+// The sync pipeline's phase 0 (spec §9.4 phase 0, §5.4 SYS-004/
+// SYS-005, ALG-001; T-112): the flag-guarded start — one read
+// transaction snapshots the library, the build assembles every active
+// project's managed content and DB-020 hash from that snapshot alone,
+// and one write transaction records the `running` run with its
+// `not_started` per-project rows. Phases 1–4 (T-113+) pick up the
+// prepared run; the flag lease travels in the outcome (RAII, D-123).
+pub(crate) mod sync_phase0;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -518,6 +527,9 @@ mod ipc_tests;
 
 #[cfg(test)]
 mod dirty_recalc_tests;
+
+#[cfg(test)]
+mod sync_phase0_tests;
 
 #[cfg(test)]
 mod tests {

@@ -14,4 +14,5 @@ pub mod library_versions;
 pub mod projects;
 pub mod settings;
 pub mod storage;
+pub mod sync_runs;
 pub mod values;

@@ -11263,3 +11263,159 @@ no-stderr analysis an `eprintln!` there would abort the process; the
 same crate already `eprintln!`s on the pre-existing daily-rotation
 path, so this adds no new class of exposure, recorded here so the
 Windows smoke run knows to look.
+
+### D-130 — T-112: sync phase 0 as two transactions around a pure build — the flag-guarded start, the `running`/`not_started` record, and the SYS-005 criterion pinned at the composition level — 2026-11-21
+
+Problem: T-112 turns §9.4 phase 0 into code: take `sync_running`
+(T-105), record a `running` `sync_runs` row, snapshot the library
+(T-100) and build every active project's content. Six points were
+open: how the phase's steps compose (flag, read, build, write — how
+many transactions, in what order); what the per-project rows carry at
+phase 0 vs what phases 1–4 fill in; how the content build reuses the
+D-121 mechanics when `dirty_recalc.rs` is a frozen zone; whether
+phase 0 writes any final status; how the card's criterion (a mid-run
+library edit stays out of the run AND leaves the project dirty) is
+pinned without racing; and how a new src-tauri module registers when
+`lib.rs` is held by the parallel T-102.
+
+Solution: `eunomia_store::sync_runs` (new store repositories) +
+`src-tauri/src/sync_phase0.rs` (the phase), composed as four steps.
+
+- _Two transactions around a pure build._ Step 1:
+  `commands::begin_sync` — the T-105 seam, typed `E_SYNC_RUNNING`
+  refusal — and, the moment the flag is taken, the capture of the
+  run's start timestamp: `sync_runs.started_at` names the run's
+  START, not the later insert (§9.4 phase 0 step 2's "record the
+  start time"; the round-1 review's P2-1 — the first spelling
+  stamped at insert time and would have drifted by the whole build).
+  Step
+  2: ONE `Db::run` read transaction reads the T-100 snapshot (the
+  SYS-005 shape the D-123 serialization argument names). Step 3: the
+  content build on `spawn_blocking` AFTER the transaction (SYS-001,
+  the D-096 ordering) — a pure function over the snapshot value, so
+  an edit committing anywhere after step 2 structurally cannot enter
+  the content. Step 4: ONE `Db::run` write transaction records the
+  run (`sync_runs::create_running`). Every error path is total: the
+  RAII `SyncGuard` travels inside the returned `Phase0Outcome`
+  (guard, run row, per-project content in `sort_order`); an error
+  before the outcome unwinds through the guard's drop — flag free,
+  read wrote nothing, failed write rolled back.
+- _Phase 0 records the fingerprint, not the verdict._ The run row:
+  fresh UUIDv7 id, DB-002 `started_at`, `running`, `projects_total`,
+  counters at their §6.2 zeros, `finished_at`/`error_code`/`details`
+  NULL. Each `sync_run_projects` row: `not_started`, the built
+  `target_path` (§9.4 phase-1-step-2 spelling,
+  pre-symlink-resolution), and the DB-020 `build_hash` of the built
+  content — the fingerprint phases 1–4 and the DB-024 writer read
+  instead of rebuilding. Phase 0 deliberately writes NO final run
+  status: §9.4's verdicts are phase 4's (T-113+), and a `running`
+  row left by a dead process is the crash-recovery rule's
+  `interrupted`, not phase 0's business — pinned by the whole-entry
+  test (the row reads `running` after the outcome drops). The
+  crash-window corollary (round-1 review, recorded): a process death
+  BEFORE the record leaves no run row at all — the recovery rule has
+  nothing to act on, which is the honest reading of "the run never
+  started"; the row's existence is the run's existence, recorded
+  once its content is built. Status transitions got no store writer
+  yet for the same reason; the reads future phases need (`get`,
+  `list_projects` — the latter in `sort_order` via the projects
+  join) landed with the insert.
+- _The D-121 mechanics, mirrored under the frozen-zone rule (AGENTS
+  §3.10)._ `managed_text` (D-064/D-065's markerless seam) and the
+  chunked mini-snapshots of 25 (the set-L budget) are duplicated into
+  `sync_phase0.rs`, pinned independently against the same oracles
+  (`build_content`'s real output for A/C, the body for B; a new
+  26-project chunk-boundary crossing-wires test — a scope leak
+  mutation was verified red against it). Consolidating the two
+  spellings behind one shared builder is a follow-up card for the
+  first task allowed to edit `dirty_recalc.rs`.
+- _The criterion, pinned deterministically at the composition level._
+  The steps are separately callable (`read_snapshot`,
+  `build_projects`, `record_run`), so the test interleaves
+  deterministically: synced-clean project (stored hash = DB-020 of
+  `Original.`), snapshot read, EDIT of the assigned variant commits,
+  build + record, then both halves — built content and recorded row
+  still fingerprint `Original.`, and the live `recalc_and_emit`
+  (D-121's service) reports the project dirty. Run twice: the writer
+  is the app's own `Db` handle (the production serialization shape)
+  and a second `open_db` connection (the T-100 out-of-band pattern —
+  the guarantee holds against any writer).
+- _The lib.rs boundary judgment._ The brief authorizes the two new
+  src-tauri files but forbids `lib.rs` (held by T-102 in its own
+  worktree); a Rust module file is dead code without its declaration,
+  so the registration is the minimal mechanical cross the "allowed"
+  list implies: exactly two declaration blocks
+  (`pub(crate) mod sync_phase0;` plus the test-module declaration),
+  nothing else in that file touched. The merge-ordering consequence
+  is accepted deliberately: if T-102 lands first, the two blocks
+  apply cleanly; a textual collision at the same anchor is a 4-line
+  resolution the orchestrator performs.
+- _Error mapping stays local._ `SyncRunsError → AppError` lives in
+  `sync_phase0.rs` (`sync_runs_to_app_error`, the D-093/D-096
+  boundary in the `projects_store_to_app_error` shape) because
+  `commands.rs` is a frozen zone: SQLite through the shared base
+  classifier, corrupt cells class-only (SEC-008), the by-id outcome
+  the family fallback. The snapshot read reuses
+  `dirty_recalc::build_snapshot_to_app_error` as-is. The UTF-8
+  spelling of a built target path is total by construction (stored
+  path TEXT + static ASCII file name) and refuses class-only rather
+  than lossy (`TargetPathNotUtf8`).
+
+Tests: store — 3 unit (vocabulary literal round trips, corrupt-cell
+refusals, error Display) + 8 integration on a real migrated database(row shapes verbatim, UUIDv7/DB-002 id and timestamp, the
+joined-transaction rollback under an FK refusal, the duplicate-input
+floor, the empty run, `get` round trip, `sort_order` read order
+against reversed insert order, the D-039 tampered-cell arm planted via
+`ignore_check_constraints`); src-tauri — 12 (8 in
+`sync_phase0_tests.rs` + 4 inline in `sync_phase0.rs`): the criterion
+twice (app-handle writer, second-connection writer), the whole entry
+(flag held while the outcome lives, content/rows verbatim against
+independently spelled `build_hash` oracles, two schemes, the
+crossing-wires rail, the row stays `running` after the drop, the
+flag freed), the 26-project chunk boundary, the
+settings-coverage matrix (scheme C + `CLAUDE.md` + enabled extras,
+the round-1 fix), the empty project list
+(recorded run, no rows), the second-start typed refusal (envelope:
+`SyncRunning`, details `None`), and the failed start's flag release
+(recovery-mode `NoDatabase` through the flag-first order). Mutation
+check: the mini-snapshot scope leak (M1) failed the chunk-boundary
+test red, green after revert.
+
+Round-1 review addendum (D-130, same task; report
+`.opencode/reviews/t112-round1.md`, deepseek-v4.1-flash — no P0/P1):
+findings fixed here — P2-1 `started_at` now captured at the flag take
+and passed through `create_running` (the store API takes the
+caller's timestamp; the crash-window corollary recorded above);
+P2-2 the settings-coverage test (scheme A with both extras at Start
+pinning the §7.5 tie and the ALG-030 splice against the D-21
+sentence literals, scheme C with `CLAUDE.md` and differing extra
+positions pinning the target name and the hash's extras slots);
+P3-1 the refusal test now counts `sync_runs` rows; P3-2 the dead
+`SyncRunsError::NotFound` variant and its mapper arm deleted (`get`
+answers `Ok(None)`); P3-3/P3-4 the `Aborted` and retention doc
+wordings corrected (the cleanup orders by `started_at DESC, id
+DESC`); P3-5 the broken code span in this entry reflowed; P3-6 the
+module docs now state the `panic = "abort"` release caveat (the
+dev/test unwind drops the guard; the release abort kills the flag
+with the process). P3-7 (a cfg(test) interleave hook inside `run`)
+declined: the exported steps ARE `run`'s body, and a test-only seam
+in production code buys nothing the step-level drive does not
+already pin.
+
+Round-2 review addendum (D-130, same task; report
+`.opencode/reviews/t112-round2.md`, hy4-flash-free — no P0/P1/P2):
+findings fixed here — the stale src-tauri test count in this entry
+(12, with the file breakdown); the mapper's `Member` arm documented
+as the reads' forward seam (`create_running` cannot produce it
+today); the cancelled-caller asymmetry documented in the module docs
+(a dropped `run` future frees the guard but cannot stop an in-flight
+write — `db.rs`'s own non-cancellability contract; the orphaned
+`running` row is the startup `interrupted` recovery's case, and the
+cancellation policy belongs to the `sync_run` command, T-118).
+
+Follow-ups for the board (the orchestrator cards them): consolidate
+the `managed_text`/chunking mirrors when `dirty_recalc.rs` unfreezes;
+ARCHITECTURE.md grows the phase-0 module row (that file was outside
+this task's allowed list); the `sync_runs` status-transition writers
+arrive with their phase tasks (T-113+), and the `interrupted`
+recovery pass is the startup task's.
