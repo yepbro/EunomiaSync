@@ -706,9 +706,13 @@ fn the_startup_pass_reports_never_synced_projects_with_assignments_dirty() {
 #[test]
 fn a_write_burst_coalesces_into_one_debounced_pass() {
     // DB-022's window, both halves: the pass a committed write
-    // schedules waits the 150 ms debounce (the floor is guaranteed by
-    // the sleep, so asserting it is safe on any runner), and a burst
-    // of commits behind one window collapses into exactly one pass.
+    // schedules waits the debounce (the floor is guaranteed by the
+    // sleep, so asserting it is safe on any runner), and a burst of
+    // commits behind one window collapses into exactly one pass. The
+    // window is widened past the production 150 ms so the coalescing
+    // half is deterministic on a loaded runner (CI 44947235666: the
+    // three `block_on` writes straddled a 150 ms window there).
+    const BURST_WINDOW: std::time::Duration = std::time::Duration::from_millis(1200);
     let (temp, app, triggers) = dirty_app();
     let database = database_of(&app);
     let root = temp.path().join("p1");
@@ -717,10 +721,10 @@ fn a_write_burst_coalesces_into_one_debounced_pass() {
     // The service settles after its startup pass and any residual
     // permit drains; the baseline count is taken after two extra
     // windows of quiet.
-    dirty_recalc::spawn_service(app.handle().clone(), triggers);
+    dirty_recalc::spawn_service_with_window(app.handle().clone(), triggers, BURST_WINDOW);
     let _events = listen_dirty(&app);
     wait_for_passes(&app, 1);
-    std::thread::sleep(dirty_recalc::DEBOUNCE * 3);
+    std::thread::sleep(BURST_WINDOW * 3);
     let settled = app.state::<DirtyState>().pass_count();
 
     // Three committed writes in quick succession — one permit's worth
@@ -747,13 +751,13 @@ fn a_write_burst_coalesces_into_one_debounced_pass() {
     }
     wait_for_passes(&app, settled + 1);
     assert!(
-        burst_start.elapsed() >= dirty_recalc::DEBOUNCE,
+        burst_start.elapsed() >= BURST_WINDOW,
         "the pass must wait the debounce window, not fire on the commit"
     );
     // No second pass follows: the burst's permits collapsed, and two
     // more windows of quiet prove it (a lower-bound style wait — the
     // channel holds no permit once the drain in the service loop ran).
-    std::thread::sleep(dirty_recalc::DEBOUNCE * 3);
+    std::thread::sleep(BURST_WINDOW * 3);
     assert_eq!(
         app.state::<DirtyState>().pass_count(),
         settled + 1,

@@ -717,7 +717,21 @@ pub(crate) async fn recalc_and_emit<R: Runtime>(
 /// either way, which is the coalescing guarantee.
 pub(crate) fn spawn_service<R: Runtime>(
     app: AppHandle<R>,
+    triggers: tauri::async_runtime::Receiver<Trigger>,
+) {
+    spawn_service_with_window(app, triggers, DEBOUNCE);
+}
+
+/// The service loop with an explicit debounce window: production
+/// takes [`DEBOUNCE`] above; tests that count passes across a burst
+/// of real commits widen it (CI 44947235666: on a loaded runner three
+/// `block_on` writes can straddle a 150 ms window, splitting the
+/// burst — the coalescing proof needs the window to dominate the
+/// commit cadence, not the wall clock to be kind).
+pub(crate) fn spawn_service_with_window<R: Runtime>(
+    app: AppHandle<R>,
     mut triggers: tauri::async_runtime::Receiver<Trigger>,
+    window: Duration,
 ) {
     app.state::<DirtyState>().trigger(Trigger::Immediate);
     tauri::async_runtime::spawn(async move {
@@ -726,7 +740,7 @@ pub(crate) fn spawn_service<R: Runtime>(
                 // DB-022's window. Tokio's sleep is the house-approved
                 // timer (the retention task's D-054 precedent — the
                 // `time` feature src-tauri already declares).
-                tokio::time::sleep(DEBOUNCE).await;
+                tokio::time::sleep(window).await;
             }
             // Triggers that arrived during the sleep (or during an
             // earlier pass) collapse here: their recalculation IS this
@@ -932,10 +946,19 @@ mod tests {
     /// project's target path — the value a sync would store for that
     /// build (DB-024), spelled directly through the public core seam,
     /// never through the code under test.
+    /// The DB-020 target of the `id` fixture, built the way the pass
+    /// builds it (`root.join(file)`): on Windows the join spells `\`,
+    /// so a hardcoded `/repos/p1/AGENTS.md` literal diverges from the
+    /// recomputed hash (CI 44947235666 — the D-111 platform-truth
+    /// rule, path-spelling half).
+    fn fixture_target(id: &str, file: &str) -> std::path::PathBuf {
+        Path::new("/repos").join(id).join(file)
+    }
+
     fn synced_hash_of_plain_body() -> String {
         build_hash(
             Scheme::A,
-            Path::new("/repos/p1/AGENTS.md"),
+            &fixture_target("p1", "AGENTS.md"),
             off(),
             off(),
             "Be brief.",
@@ -1238,8 +1261,8 @@ mod tests {
         let p1_stored = {
             // Spelled directly through the public core seam: the
             // DB-024 value a sync of p1's Main-variant build stores.
-            let target = Path::new("/repos/p1/AGENTS.md");
-            build_hash(Scheme::A, target, off(), off(), "Main body.")
+            let target = fixture_target("p1", "AGENTS.md");
+            build_hash(Scheme::A, &target, off(), off(), "Main body.")
         };
         let verdicts = verdicts_of(
             vec![project("p1"), project("p2")],
@@ -1339,7 +1362,7 @@ mod tests {
     /// managed; extras on → the reading lines join it, spelled here
     /// through the real `extra_file_lines` + the §7.5 join, not
     /// through `managed_text`).
-    fn clean_pin(settings: ProjectWriteSettings, path: &str, body: &str) -> Vec<(String, bool)> {
+    fn clean_pin(settings: ProjectWriteSettings, path: &Path, body: &str) -> Vec<(String, bool)> {
         let managed = if settings.extra_local.enabled || settings.extra_project.enabled {
             let lines = extra_file_lines(
                 settings.base_name,
@@ -1360,7 +1383,7 @@ mod tests {
         };
         let stored = build_hash(
             settings.scheme,
-            Path::new(path),
+            path,
             settings.extra_local,
             settings.extra_project,
             &managed,
@@ -1405,14 +1428,14 @@ mod tests {
         b.scheme = Scheme::B;
         b.base_name = BaseName::ClaudeMd;
         assert_eq!(
-            clean_pin(b, "/repos/p1/CLAUDE.md", "Body."),
+            clean_pin(b, &fixture_target("p1", "CLAUDE.md"), "Body."),
             vec![verdict("p1", false)]
         );
         // Scheme C: `<root>/<STEM>.project.md`, no reading lines.
         let mut c = extras(false, ExtraFilePosition::End, false, ExtraFilePosition::End);
         c.scheme = Scheme::C;
         assert_eq!(
-            clean_pin(c, "/repos/p1/AGENTS.project.md", "Body."),
+            clean_pin(c, &fixture_target("p1", "AGENTS.project.md"), "Body."),
             vec![verdict("p1", false)]
         );
         // Scheme A with both reading lines on, `.project.md` at start
@@ -1426,7 +1449,7 @@ mod tests {
             ExtraFilePosition::Start,
         );
         assert_eq!(
-            clean_pin(a_full, "/repos/p1/AGENTS.md", "Body."),
+            clean_pin(a_full, &fixture_target("p1", "AGENTS.md"), "Body."),
             vec![verdict("p1", false)]
         );
     }
