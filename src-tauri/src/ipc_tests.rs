@@ -3097,7 +3097,10 @@ fn project_add_manual_registers_a_repository_root_with_all_fields_and_the_journa
     let first = result.project.expect("the added arm carries the project");
     assert_eq!(
         first.path,
-        repo.canonicalize().unwrap().display().to_string()
+        eunomia_fs::paths::canonicalize(&repo)
+            .unwrap()
+            .display()
+            .to_string()
     );
     assert_eq!(first.name, "eunomia-repo");
     assert_eq!(first.label, "EUNOMI", "DB-042: the first six upper-cased");
@@ -3250,7 +3253,13 @@ fn project_add_manual_offers_the_repository_root_for_a_picked_subfolder() {
     assert_eq!(offered.outcome, "repo_root_offered");
     assert_eq!(
         offered.offered_root.as_deref(),
-        Some(repo.canonicalize().unwrap().display().to_string().as_str())
+        Some(
+            eunomia_fs::paths::canonicalize(&repo)
+                .unwrap()
+                .display()
+                .to_string()
+                .as_str()
+        )
     );
     assert!(offered.project.is_none() && offered.existing.is_none());
     // The offer wrote nothing: no row, no journal entry.
@@ -3264,7 +3273,10 @@ fn project_add_manual_offers_the_repository_root_for_a_picked_subfolder() {
     assert_eq!(confirmed.outcome, "added");
     assert_eq!(
         confirmed.project.as_ref().expect("the added arm").path,
-        repo.canonicalize().unwrap().display().to_string()
+        eunomia_fs::paths::canonicalize(&repo)
+            .unwrap()
+            .display()
+            .to_string()
     );
     assert_eq!(confirmed.project.as_ref().unwrap().name, "monorepo");
 
@@ -3306,7 +3318,13 @@ fn the_root_offer_targets_the_nearest_repository() {
         .expect("the deep subfolder is a typed offer");
     assert_eq!(
         offered.offered_root.as_deref(),
-        Some(inner.canonicalize().unwrap().display().to_string().as_str()),
+        Some(
+            eunomia_fs::paths::canonicalize(&inner)
+                .unwrap()
+                .display()
+                .to_string()
+                .as_str()
+        ),
         "the nearest .git wins, not the outer repository's"
     );
 
@@ -3319,7 +3337,10 @@ fn the_root_offer_targets_the_nearest_repository() {
     assert_eq!(added.outcome, "added");
     assert_eq!(
         added.project.as_ref().expect("the added arm").path,
-        inner.canonicalize().unwrap().display().to_string()
+        eunomia_fs::paths::canonicalize(&inner)
+            .unwrap()
+            .display()
+            .to_string()
     );
     assert_eq!(stored_projects(&database).len(), 1);
 
@@ -3358,7 +3379,10 @@ fn project_add_manual_answers_the_duplicate_message_and_the_archive_offer() {
     assert_eq!(existing.state, "active");
     assert_eq!(
         existing.path,
-        repo.canonicalize().unwrap().display().to_string()
+        eunomia_fs::paths::canonicalize(&repo)
+            .unwrap()
+            .display()
+            .to_string()
     );
     assert!(duplicate.project.is_none() && duplicate.offered_root.is_none());
     assert_eq!(stored_projects(&database).len(), rows_after_add);
