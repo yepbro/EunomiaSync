@@ -293,12 +293,10 @@ export const commands = {
 	 *  background hash pipeline (`state://dirty`, MAIN-028), which has
 	 *  not landed — the DTO field is that pipeline's arrival point.
 	 * 
-	 *  No failure log edge yet: the logging facade grows per command task
-	 *  (`logging::activity_list_failed` is T-027's) and `logging.rs` is
-	 *  outside this task's file scope — the follow-up is whichever task
-	 *  adopts the Projects module's write commands into the facade. A
-	 *  successful read is never journaled (the `activity_list` rationale:
-	 *  reading is not an event).
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::projects_list_failed`], the D-096 follow-up this edge
+	 *  closed); a successful read is never journaled (the `activity_list`
+	 *  rationale: reading is not an event).
 	 */
 	projectsList: (includeArchived: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<ProjectColumnEntry_Serialize[]>("projects_list", { includeArchived }, options),
 	/**

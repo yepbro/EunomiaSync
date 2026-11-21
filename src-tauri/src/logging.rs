@@ -858,6 +858,29 @@ pub(crate) fn projects_reorder_failed(error: &AppError) {
     );
 }
 
+/// The `projects_list` command failed (T-244, §10's every-error rule,
+/// closing the gap D-096 recorded for T-072): the
+/// `projects_reorder_failed` shape — the reachable §10 answers are the
+/// honest `NoDatabase` fallback (recovery mode), the shared base
+/// classifier's SQL classes (`ProjectsError::Sql` through the ordered
+/// read — busy exhaustion, a corrupt database), the store fallback of
+/// a corrupt projects cell (`ProjectsCorrupt`), and the blocking-pool
+/// join failure of the availability probes (`OperationPanicked`/
+/// `OperationCancelled`/`OperationFailed`). `error` level per the
+/// facade contract; a successful read is never journaled and logs
+/// nothing (reading is not an event — the `activity_list` rationale).
+pub(crate) fn projects_list_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::projects",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "listing the projects failed"
+    );
+}
+
 /// The availability recheck failed (T-079, D-09/DB-032, §10's
 /// every-error rule): the payload is the error's own §7.10 vocabulary,
 /// in the `activity_list_failed` shape. Logged by the fire-and-forget
@@ -2335,6 +2358,60 @@ mod tests {
             log.contains("code=\"E_DB_LOCKED\"")
                 && log.contains("os_kind=Some(\"ProjectsCorrupt\")"),
             "the corrupt-cell line carries the fallback code and diagnostic, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_projects_list_failure_line_carries_the_code_and_payload() {
+        // The list command's §10 edge (T-244, the D-096 follow-up), in
+        // the reorder pin shape: the reachable classes are the honest
+        // no-database fallback of recovery mode (the `NoDatabase`
+        // diagnostic) and the store fallback of a corrupt projects
+        // cell surfaced by the widened read (the `ProjectsCorrupt`
+        // diagnostic) — both fixed by the T-072 IPC pins this test
+        // mirrors; the SQL classes and the blocking-pool join failure
+        // travel the same one-line shape. A successful read logs
+        // nothing; that half is structural (no tracing call exists on
+        // that path — the command returns before the edge).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut no_database = AppError::new(crate::errors::ErrorCode::DbLocked);
+        no_database.details = Some(crate::errors::ErrorDetails {
+            os_code: None,
+            os_kind: Some("NoDatabase".to_owned()),
+            os_message: Some("no database is running (recovery mode?)".to_owned()),
+        });
+        let mut corrupt = AppError::new(crate::errors::ErrorCode::DbLocked);
+        corrupt.details = Some(crate::errors::ErrorDetails {
+            os_code: None,
+            os_kind: Some("ProjectsCorrupt".to_owned()),
+            os_message: Some("a stored state cell is outside its vocabulary".to_owned()),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            projects_list_failed(&no_database);
+            projects_list_failed(&corrupt);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("listing the projects failed")
+                && log.contains("code=\"E_DB_LOCKED\"")
+                && log.contains("os_kind=Some(\"NoDatabase\")")
+                && log.contains("os_message=Some(\"no database is running (recovery mode?)\")")
+                && log.contains("os_code=None"),
+            "the recovery-mode line carries its code literal and the \
+             no-database diagnostic, got: {log}"
+        );
+        assert!(
+            log.contains("code=\"E_DB_LOCKED\"")
+                && log.contains("os_kind=Some(\"ProjectsCorrupt\")")
+                && log
+                    .contains("os_message=Some(\"a stored state cell is outside its vocabulary\")"),
+            "the corrupt-cell line carries the corrupt-cell diagnostic, got: {log}"
         );
         drop(temp);
     }

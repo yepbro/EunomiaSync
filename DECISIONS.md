@@ -10040,3 +10040,50 @@ dark first paint). The reviewer also re-verified the three-block
 cascade under all four OS/attribute combinations, the D-117 contrast
 numbers, and the alert's opacity-dimmed text (6.34:1 light / 7.98:1
 dark — clear AA).
+
+### D-118 — `logging::projects_list_failed`: the D-096 gap closed by its follow-up, and the forced `bindings.ts` doc-mirror — 2026-11-21
+
+Problem: T-072 (D-096) shipped `projects_list` with a documented
+scope exception — "no failure log edge yet" — deferring the §10
+every-error rule to the task that owns the facade file. T-244 is that
+follow-up, and it hit one question the brief did not anticipate: the
+command's doc comment (which the edge's arrival made stale) is
+mirrored verbatim into `src/bindings.ts` by tauri-specta on every
+`cargo test`, and the `export_bindings_are_up_to_date` contract
+(D-034, tightened T-013) keeps CI red until the regenerated file is
+committed — while the T-244 brief froze `src/bindings.ts` ("the
+command does not change — the signature is the same").
+
+Solution: the `projects_list_failed` facade edge in `logging.rs` in
+the exact `projects_reorder_failed` shape (error level, target
+`eunomia::projects`, payload = the error's own §7.10 vocabulary:
+code literal, params, `os_code`/`os_kind`/`os_message`), reached from
+`projects_list` through the standard wrapper/`_impl` split so one
+`.inspect_err` covers every failure branch (the `managed_db`
+no-database fallback, the ordered store read, the blocking-pool join
+failure); success logs nothing (reading is not an event — the
+`activity_list` rationale, D-051/LOG-005). The pin is the T-078/T-080
+real-subscriber facade test
+(`the_projects_list_failure_line_carries_the_code_and_payload`), its
+fixtures mirroring the two reachable classes the T-072 IPC tests
+pinned (`NoDatabase`, `ProjectsCorrupt`); the success half stays
+structural, as for every sibling edge.
+
+- _The `bindings.ts` freeze vs the binding-sync contract._ The
+  signature is indeed unchanged — only the stale "no failure log edge
+  yet" doc paragraph was rewritten, and the exporter mirrored that
+  paragraph into `bindings.ts` (4 insertions / 6 deletions, zero
+  type or mock impact). D-034's red-until-committed contract wins
+  over the brief's file freeze, the same way D-115's scope note
+  recorded its own forced frontend edits: committing the mechanical
+  mirror keeps CI green, and reverting it would re-open the gap the
+  contract exists to close. Recorded for the orchestrator as the one
+  deviation from the T-244 file scope.
+- _No wrapper-call pin, on purpose (the round-1 review's P3-2)._ No
+  command-level logging edge in this codebase has a textual
+  wiring pin (checked: `activity_list`, the settings pair,
+  `app_info`, `dialog_pick_folder`, `project_add_manual`, both
+  exclusions, `projects_reorder`); the wiring argument is structural
+  (one `inspect_err` on the single `_impl` every failure flows
+  through) and the facade pin holds the line shape. Adding a pin for
+  this one command alone would be the inconsistency.
