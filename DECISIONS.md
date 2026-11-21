@@ -10808,3 +10808,123 @@ change now: the chain is sound while the suites live in one binary.
 The round-2 reviewer artifact (`REVIEW-T-105-round2.md`, written
 into the worktree despite the read-only brief) was moved into the
 round-2 report file and deleted from the tree.
+
+### D-125 — Owner rulings on the html-pages prototype audit — 2026-11-21
+
+Problem: the audit of the `html-pages` prototype (manual main-window mock-up,
+43 commits) against `docs/spec.md` 1.1 found 41 gaps — 13 beyond the spec
+(A1–A13), 23 refinements (B1–B23), and 5 contradictions (C1–C5). Several
+items (A1, B1, B20, C1–C3) were open model or UX decisions that the spec
+could not resolve on its own. Source:
+`.opencode/audits/html-pages-vs-spec-2026-11-21.md` (read-only audit; the
+reverse gap D — the spec describing more than the mock-up — is normal for a
+sketch and was ruled out of scope).
+
+Solution: the owner ruled on 2026-11-21; all approved items were folded into
+`docs/spec.md` 1.2 as extensions of existing requirement IDs (no new ID
+prefixes introduced):
+
+- **A1 — approved (model change):** a matrix cell may carry per-project
+  custom text, bypassing the variant model. `project_instructions` now has
+  a nullable `variant_id` plus `custom_text` with an exactly-one-target
+  CHECK, and `instruction_id` a direct FK to `library_items` (the composite
+  FK is skipped when `variant_id` is NULL, so the direct FK restores the
+  referential guarantee; round-1 review P2-1) (§6.2); §6.9 gained the
+  custom-text validation row; MAIN-007/LIB-018 rewritten from the
+  fork-variant flow (a variant named after the project, command
+  `variant_fork_for_project` — removed) to a custom-text editor
+  (`assignment_set_custom`); cell behavior (select disabled and showing
+  "Custom", checkbox active, edit/delete icons, confirmed deletion, bulk
+  operations do not touch custom cells) in §7.3/§7.4/§11.2; the build uses
+  custom text as the cell's text (§9.2). Chosen readings recorded (round-1
+  review P1-2): deleting custom text (or clearing it via
+  `assignment_set_custom`) assigns the main variant back to the cell — the
+  prototype restored the previously selected variant from a UI-only cache,
+  which the schema does not keep; and the disabled select of a custom cell
+  shows "Custom", never a variant name.
+- **A2–A11, A13 — approved:** per-cell "changed" state (§11.2); select-all
+  checkbox + selection chip + contextual "Assign to projects…" (§7.4);
+  hidden-instructions counter on "Show hidden" and search overriding
+  collapse (§7.4); full toolbar composition (§11.1); "Unsynced changes"
+  dialog from the dirty counter with per-project target files and Run sync
+  (§7.4); scan-modal additions — active depth/exclusions line, Scan again,
+  Add selected gating, skipped-reason hints (§7.1); three extra
+  confirmations — restore archived project, delete excluded path, delete
+  custom text (§11.4); the update block living in About (§7.9); entry
+  points to Archived/Excluded from Settings (§7.2/§11.1); the settings
+  pencil in the column header (§7.1, PRJ-008 entry point). Chosen reading
+  for the "changed" marker recorded (round-1 review P1-1/P1-3): the marker
+  is a session UI hint against a baseline captured at window open and
+  recaptured after every sync run — not persisted state; the dirty flag
+  stays authoritative and hash-based (DB-021) and the two may disagree
+  (an identical-text variant switch marks a cell without dirtying the
+  project; a reordered library dirties the project without marking a cell).
+  The audit candidate's "dirty column = at least one changed cell" was
+  rejected as a redefinition of DB-021.
+- **A12 — declined:** the pickers keep the named `Main`; the `Main` naming
+  rule in §6.9 is unchanged (§6.9 gained only A1's custom-text row). The
+  prototype's pseudo-variant "Default" is a demo deviation.
+- **B1–B23 — approved:** cell = checkbox + inline select, Enter opens the
+  picker (MAIN-001/§11.2 rewrite); hide/restore via the row eye button with
+  the confirmation text and the dashed "hidden" chip; heading-row tools
+  (+/pencil/trash, level-6 limit) and the fixed heading-deletion
+  confirmation text (UI-010); the four drag-and-drop outcomes; tooltip
+  mechanics (reusable, clamped, keyboard-triggered, none for empty
+  instructions); shortcut scope under open dialogs; roving-focus mechanics;
+  editor structure (separate name fields, live validation, ARIA tabs);
+  variant-row actions and the "Variant N" default name; project-settings
+  details (live label preview, counters, scheme-conditional blocks, copy
+  feedback); archive type-to-confirm mechanics and Archived/Excluded row
+  content with focus retention; scan re-run; sync run presentation (outcome
+  badge, counter chips, E_* hints, per-project time updates); settings
+  without Save; Activity taxonomy; Help match counter; About details;
+  MAIN-028 rewritten to icon + visible short text with the short sync time
+  as text and the full name in tooltip/sr-only; sync-bar composition;
+  sr-only "(empty instruction)"; cell accessible names "instruction —
+  project: state" including "(changed)".
+- **C1 — approved:** dropping a section on a heading (or the library
+  header) auto-shifts the whole branch to target level + 1 (or 2) within
+  2–6; "Change level" / "Shift branch level ±1" remain for manual cases
+  (LIB-032, ALG-062 rewritten; consistent with ALG-060/061).
+- **C2 — approved (simplification):** the main variant cannot be deleted —
+  the button is disabled with "Make another variant main first" (LIB-024,
+  §6.4). §3.2 D-12 keeps its original wording with a change note pointing
+  here (history not silently rewritten).
+- **C3 — approved (simplification):** deleting a variant moves its
+  assignments to the main variant; the confirmation names the number of
+  affected projects; the per-project replacement dialog is gone (LIB-023,
+  DB-012, §6.4).
+- **C4 — declined:** duplicate project names stay allowed with a warning
+  (§6.9 is right); the prototype's blocking inline error is a demo
+  deviation.
+- **C5 — declined:** two buttons — "Add project" (system picker) and "Scan
+  folder" — per UI-012/S1/S2; the prototype's single button that jumps
+  straight into a simulated scan is a picker simulation.
+
+Spec version bumped 1.1 → 1.2; the header names this ruling. Affected spec
+IDs: MAIN-001, MAIN-006…009, MAIN-012…014, MAIN-024…028, MAIN-007/LIB-018,
+LIB-002/009…016, LIB-005…007, LIB-017…025, LIB-030…034, ALG-020, ALG-062,
+PRJ-002/005…006, PRJ-008…018, PRJ-021, DEF-001…004, UI-001…004, UI-010,
+UPD-001/002/005, HLP-001…004, LOG UI row, DB-012, DB-016, §2 Assignment,
+§6.2 DDL, §6.4, §6.9, §7.5 OUT-020, §7.10 commands, §8 S5, §9.2, §11.2,
+§11.3, §15.1 unit row, §16 M3, §3.2 D-12 (change note). UI-012 was checked
+and left unchanged (C5 declined).
+
+Round-1 review (deepseek-v4.1-flash, docs-only; report
+`.opencode/reviews/docs-spec-sync-round1.md`) — no P0, 3 P1, 8 P2, 6 P3;
+all findings adjudicated and taken:
+
+- P1-1/P1-3 taken as a rewording plus the recorded session-baseline
+  reading (A2 above); the dirty flag stays hash-based (DB-021).
+- P1-2 taken with the main-variant restore reading (A1 above).
+- P2-1…P2-8 all taken: a direct FK on `instruction_id` (§6.2); the §11.2
+  Main/Empty rows show the inline select; the "+" custom-text affordance
+  named in MAIN-001/§11.2; this entry's A12 wording and the omitted B4
+  fixed; DB-016 names custom text; "Unsynced changes" added to UI-002;
+  MAIN-024's dirty wording follows DB-021 instead of overstating it.
+- P3-1/P3-2/P3-3/P3-5/P3-6 taken: the Escape target is the cell's
+  checkbox; S5 is listed under M3 as well; the custom-text build path is
+  named in the §15.1 unit row; an OUT-020 row was added to §7.5; the two
+  "Check for updates" buttons are disambiguated.
+- P3-4 taken by making the "(changed)" suffix visible cell text (a
+  non-color cue), not only an accessible-name suffix.
