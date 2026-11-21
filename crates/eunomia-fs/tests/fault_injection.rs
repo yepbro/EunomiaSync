@@ -302,22 +302,30 @@ fn the_override_never_fabricates_a_shortage_from_a_failed_probe() {
 fn mid_write_enospc_is_injectable_as_disk_full() {
     let dir = TempDir::new().expect("a temporary directory must be creatable");
     let target = existing(dir.path(), "AGENTS.md", b"untouched");
-    // ENOSPC = 28: std maps it to ErrorKind::StorageFull, the
-    // mid-write verdict the module classifies by.
-    let _guard = fault_injection::arm_atomic_fault(AtomicFault::Fail(
-        AtomicStep::WriteSync,
-        io::Error::from_raw_os_error(28),
-    ));
+    // The OS no-space refusal std maps to ErrorKind::StorageFull — the
+    // mid-write verdict the module classifies by: ENOSPC (28) on Unix,
+    // ERROR_DISK_FULL (112) on Windows (CI 44864444674: a raw 28 on
+    // Windows is ERROR_OUT_OF_PAPER, which is correctly NOT DiskFull).
+    #[cfg(unix)]
+    let no_space = io::Error::from_raw_os_error(28);
+    #[cfg(windows)]
+    let no_space = io::Error::from_raw_os_error(112);
+    #[cfg(unix)]
+    let no_space_code = 28;
+    #[cfg(windows)]
+    let no_space_code = 112;
+    let _guard =
+        fault_injection::arm_atomic_fault(AtomicFault::Fail(AtomicStep::WriteSync, no_space));
 
     let err = write_target_file(&target, b"abc", plenty_free())
         .expect_err("a no-space refusal must fail the write");
 
     let AtomicWriteError::DiskFull(failed) = &err else {
-        panic!("ENOSPC must be classified DiskFull, got: {err:?}");
+        panic!("the no-space refusal must be classified DiskFull, got: {err:?}");
     };
     assert_eq!(failed.step, Some(WriteStep::WriteSync));
     assert_eq!(failed.free, None, "no probe number exists mid-write");
-    assert_eq!(err.os_code(), Some(28));
+    assert_eq!(err.os_code(), Some(no_space_code));
     assert!(failed.cleanup.is_none(), "the staging file was removed");
     assert_eq!(
         fs::read(&target).expect("the target must survive"),
