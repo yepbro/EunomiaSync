@@ -390,8 +390,8 @@ opened), and after a copy is written the newest 7 daily names are
 kept, oldest deleted — never the copy just written, so a
 clock-set-back directory cannot cost the day its copy; pruning is
 best-effort throughout and never turns a successful copy into a
-reported failure. `pre-migration-*` names are outside the cap and
-never deleted. A fresh first launch gets its copy of the empty
+reported failure. `pre-migration-*` names are outside this daily cap;
+their retention is the separate T-253 age rule below, not a count. A fresh first launch gets its copy of the empty
 database too ("at every startup" — a cheap, honest baseline). The
 publication mechanics are the pre-migration scheme's (D-038): `.tmp`
 staging, `hard_link` no-clobber publication, §9.5 retries, and a
@@ -483,8 +483,9 @@ the startup gates over the chosen copy (`E_DB_TOO_NEW`/`E_DB_CORRUPT`
 before anything is touched), **stage the copy** (`db/`eunomiasync.sqlite3.tmp`:
 a byte copy, never a hard link — a link would let later writes
 mutate the backup — `0600`before publication, fsynced, while the
-live file is still in place, so a full disk or a permission leaves`db/`exactly as it was), preserve the damaged database as`db-backups/pre-recovery-<UTC>.sqlite3`(renamed, never deleted —
-chmod`0600`before the rename, stale`-journal`/`-wal`/`-shm`siblings renamed alongside first — though a gate read over the
+live file is still in place, so a full disk or a permission leaves`db/`exactly as it was), preserve the damaged database as`db-backups/pre-recovery-<UTC>.sqlite3`(renamed, not discarded —
+though the T-253 age rule may retire it as an aged copy at a later
+open; chmod`0600`before the rename, stale`-journal`/`-wal`/`-shm`siblings renamed alongside first — though a gate read over the
 damaged file already lets SQLite's own crash recovery remove bogus
 siblings, the preserve catches what those reads leave — the main
 rename as the commit point), publish the staged copy by one rename
@@ -502,10 +503,22 @@ healthy-refusal;`ipc_tests.rs`drives the commands over mock IPC,
 including the §7.10 error envelope of a rejected invoke — the D-034
 pin. Honest boundaries (D-049): a crash between the two renames
 leaves the next startup to bootstrap fresh while the original sits
-under its`pre-recovery-`name;`pre-recovery-*` files are outside
-the daily cap and accumulate across recoveries until an owner
-decides their retention; and the frontend screen itself is the
+under its`pre-recovery-`name; and the frontend screen itself is the
 recovery-UI task's.
+
+The protective copies both schemes leave behind are governed by the
+T-253 age rule (owner ruling 2026-11-21, `src-tauri/src/retention.rs`):
+`pre-migration-*` and `pre-recovery-*` files older than 7 days — aged
+by the creation stamp in the file name, never by count or mtime — are
+deleted by a best-effort pass that runs once, at the end of a
+successful `Db::open` (`db.rs`) — which covers every startup, the
+moment a migration run has written its copies, and the reopen after a
+recovery. `preserve_damaged` is deliberately not a trigger: a
+restore's chosen copy must outlive a failed publish (D-129). The
+newest copy of each kind is protected even past the window, the
+`daily-*` scheme stays under ERR-001's own count rule beside them, and
+a copy deleted by the pass takes its `-journal`/`-wal`/`-shm` sidecar
+siblings with it.
 
 The `settings` table has a typed repository, `eunomia_store::settings`
 (spec §6.5, DECISIONS.md D-039): the thirteen §6.5 keys as a
@@ -614,7 +627,14 @@ The app writes one `tracing` file log per day — `tracing` +
 (spec §5.3; see DECISIONS.md for the dependency entry). The file lands
 in `<data dir>/logs/eunomiasync.<UTC-date>.log` on every OS (spec §5.5;
 the `app_log_dir()` default is deliberately not used — see the Data
-directory section). The maximum level comes from `config.toml`'s
+directory section). At most **five** dated files are kept (T-253, owner
+ruling 2026-11-21): the appender's `max_log_files` cap prunes the
+oldest beyond it when the appender is built and at every rotation. The
+ruling's per-file 10 MB half is honestly not enforced —
+tracing-appender 0.2.5 has no size-based rotation, and a custom
+size-rotating writer would break the §5.5-pinned file name (see the
+DECISIONS.md T-253 entry); the cap bounds the days of history instead.
+The maximum level comes from `config.toml`'s
 `log_level` (SYS-012), applied by initializing the subscriber _after_
 the config is loaded (SYS-011) — `app.state::<AppConfig>()` is the seam
 that hands the level over (D-029). The writer guard is kept alive as
@@ -654,8 +674,10 @@ subscriber install are not unit-testable (the date cannot be moved in a
 test; the global default is process-wide and the suite runs in
 parallel) — the dated file name, the per-level filtering and the
 SEC-008 payload are (driven through a real subscriber over `tempfile`
-roots, asserted by reading the real log file back); the rollover and
-the file location on each OS rest on the manual smoke run.
+roots, asserted by reading the real log file back); the rollover, the
+rotation-time half of the `max_log_files` pruning (the startup half,
+which runs when the appender is built, is tested) and the file
+location on each OS rest on the manual smoke run.
 
 ## Watcher
 

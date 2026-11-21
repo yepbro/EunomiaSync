@@ -2639,3 +2639,64 @@ fn a_second_startup_keeps_the_sec007_modes_and_repairs_drift() {
 
     drop(db);
 }
+
+// ---- Protective-copy retention wiring (T-253) ------------------------------
+
+/// The `%Y%m%dT%H%M%S%3fZ` stamp of an instant whole days before
+/// `now` — the protective-copy name shape as both creating schemes
+/// write it (D-038's `utc_stamp`, recovery's `preserve_damaged`), built
+/// from the real clock because the wiring under test (`Db::open`) calls
+/// the pass with `Timestamp::now()`: fixtures dated relative to "now"
+/// cannot rot with the calendar.
+fn protective_stamp_days_before(now: jiff::Timestamp, days: u64) -> String {
+    (now - std::time::Duration::from_secs(days * 86_400))
+        .strftime("%Y%m%dT%H%M%S%3fZ")
+        .to_string()
+}
+
+#[test]
+fn a_successful_open_runs_the_protective_copy_retention_pass() {
+    // The T-253 wiring pin: `Db::open` is the pass's startup trigger.
+    // A fresh bootstrap writes no pre-migration copies of its own (the
+    // D-038 fresh-run rule), so the directory's state after the open is
+    // the pass's verdict over the seeded history alone: the 12-day-old
+    // copy goes, the 10-day-old one survives as the newest of its kind
+    // (versions do not split the kind), and the daily scheme stays
+    // untouched beside them.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let backups = temp.path().join("db-backups");
+    let now = jiff::Timestamp::now();
+    let aged = backups.join(format!(
+        "pre-migration-v1-{}.sqlite3",
+        protective_stamp_days_before(now, 12)
+    ));
+    std::fs::write(&aged, b"fixture stand-in for an aged copy")
+        .expect("seeding the aged copy must work");
+    let newest = backups.join(format!(
+        "pre-migration-v3-{}.sqlite3",
+        protective_stamp_days_before(now, 10)
+    ));
+    std::fs::write(&newest, b"fixture stand-in for the newest copy")
+        .expect("seeding the newest copy must work");
+    let daily = backups.join(format!("daily-{}.sqlite3", now.strftime("%Y%m%d")));
+    std::fs::write(&daily, b"fixture stand-in for a daily copy")
+        .expect("seeding the daily copy must work");
+
+    let database = Db::open(temp.path()).expect("the open must succeed");
+
+    assert!(
+        !aged.exists(),
+        "the open's retention pass must retire the aged non-newest copy"
+    );
+    assert!(
+        newest.exists(),
+        "the newest copy of the kind is protected even past the window"
+    );
+    assert!(
+        daily.exists(),
+        "the ERR-001 daily scheme stays outside the protective-copy pass"
+    );
+    drop(database);
+}

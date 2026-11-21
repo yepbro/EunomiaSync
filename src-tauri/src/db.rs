@@ -351,6 +351,15 @@ impl Db {
                 classify_migration_failure(&connection, &db_path, source)
             },
         )?;
+        // The protective-copy retention pass (T-253, owner ruling
+        // 2026-11-21): every successful open doubles as the pass's
+        // startup run, and an upgrade run may just have written new
+        // pre-migration copies — the pass retires the aged ones of both
+        // protective kinds next to them, age by the name stamp, the
+        // newest of each kind protected. A point call by contract:
+        // `retention::cleanup_db_backups` is best-effort (it logs its
+        // own failures through the facade) and can never fail this open.
+        crate::retention::cleanup_db_backups(&backups_dir, Timestamp::now());
         Ok(Db {
             connection: Arc::new(Mutex::new(connection)),
             backups_dir,

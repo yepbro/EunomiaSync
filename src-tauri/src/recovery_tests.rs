@@ -999,3 +999,89 @@ fn set_mtime(path: &Path, instant: &str) {
         panic!("setting the mtime of {} must work: {error}", path.display())
     });
 }
+
+// ---- Protective-copy retention boundary (T-253) -----------------------------
+
+#[test]
+fn a_restore_never_deletes_the_aged_copy_it_restores_from() {
+    // The T-253 boundary pin (round-1 review P1-1): a restore's chosen
+    // copy must outlive the restore's own file mechanics. The screen
+    // lists pre-migration copies, and an aged non-newest one is exactly
+    // what a user may pick after the app sat unused past the 7-day
+    // window; if the preserve step's neighborhood were cleaned while
+    // the staged `.tmp` is still the only durable copy of those bytes,
+    // a failed publish would leave the retry with nothing to retry
+    // from (the next attempt sweeps the `.tmp` as debris). The retention
+    // pass therefore runs only at the reopen (`Db::open`), never inside
+    // `restore_files` — pinned here by restoring FROM an aged,
+    // non-newest pre-migration copy and asserting it still exists
+    // afterwards, alongside the aged pre-recovery neighbors that also
+    // survive until the reopen.
+    let (temp, root) = data_root();
+    let db_path = db_path_of(&root);
+    // Order matters: `write_valid_backup` uses the database path as its
+    // scratch space (and removes the scratch afterwards), so the valid
+    // copy is written before the damaged database takes the path.
+    let backups = backups_dir_of(&root);
+    let now = seam_now();
+    let stamp = |days_back: u64| {
+        (now - std::time::Duration::from_secs(days_back * 86_400))
+            .strftime("%Y%m%dT%H%M%S%3fZ")
+            .to_string()
+    };
+    // The restore source: an aged, NON-newest pre-migration copy (a
+    // newer one exists beside it), holding a real database — the gates
+    // in `validate_backup` open real connections over it.
+    let source = write_valid_backup(
+        &root,
+        &format!("pre-migration-v1-{}.sqlite3", stamp(10)),
+        "aged restore source",
+    );
+    write_damaged_database(&db_path);
+    let newer_migration = backups.join(format!("pre-migration-v2-{}.sqlite3", stamp(2)));
+    std::fs::write(&newer_migration, b"fixture stand-in for a newer copy")
+        .expect("seeding the newer pre-migration copy must work");
+    for days_back in [8, 9] {
+        std::fs::write(
+            backups.join(format!("pre-recovery-{}.sqlite3", stamp(days_back))),
+            b"fixture stand-in for an aged pre-recovery copy",
+        )
+        .expect("seeding an aged pre-recovery copy must work");
+    }
+
+    let preserved = recovery::restore_files(
+        &root,
+        &source.file_name().unwrap().to_string_lossy(),
+        now,
+        |_| {},
+    )
+    .expect("the restore must succeed")
+    .expect("the damaged database must be preserved");
+
+    assert!(
+        source.exists(),
+        "the chosen copy must still exist after the restore's file mechanics"
+    );
+    assert!(
+        preserved
+            .to
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("pre-recovery-")),
+        "the damaged database was preserved under its pre-recovery name"
+    );
+    assert!(
+        newer_migration.exists()
+            && backups
+                .join(format!("pre-recovery-{}.sqlite3", stamp(8)))
+                .exists()
+            && backups
+                .join(format!("pre-recovery-{}.sqlite3", stamp(9)))
+                .exists(),
+        "no retention runs inside the restore: aged neighbors wait for the reopen"
+    );
+    assert!(
+        db_path.exists(),
+        "the staged copy was published at the database path"
+    );
+    drop(temp);
+}

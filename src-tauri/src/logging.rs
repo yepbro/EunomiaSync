@@ -5,7 +5,11 @@
 //! subfolder — `logs/eunomiasync.<date>.log`, where `<date>` is the UTC
 //! `YYYY-MM-DD` stamp of the write — via `tracing` +
 //! `tracing-appender`'s `RollingFileAppender` (`Rotation::DAILY`, filename
-//! prefix `eunomiasync`, suffix `log`). The appender is pointed at
+//! prefix `eunomiasync`, suffix `log`, at most [`MAX_LOG_FILES`] dated
+//! files kept: the appender prunes the oldest beyond the cap when it is
+//! built and at every rotation — T-253's count half; the
+//! [`MAX_LOG_FILES`] docs record why the ruling's per-file 10 MB half
+//! is honestly not enforced. The appender is pointed at
 //! `<data dir>/logs/` explicitly: Tauri's `app_log_dir()` would move the
 //! logs to `~/Library/Logs/…` on macOS, away from the spec §5.5 layout —
 //! a `config_tests.rs` absence pin keeps that API out of the codebase so
@@ -88,14 +92,17 @@
 //! builds (file name and folder, per-level filtering, the SEC-008
 //! payload contract) is unit-tested below over `tempfile` roots by
 //! driving real events through the subscriber and reading the real log
-//! file back. Two facts are consciously outside what a unit test can
+//! file back. Three facts are consciously outside what a unit test can
 //! prove: the midnight rollover (a date change mid-run) is
 //! `tracing-appender`'s own `Rotation::DAILY` contract — the dated file
 //! name proves the rotation wiring, the crossing itself rests on the
-//! crate plus the manual smoke run — and the global-install path
-//! ([`tracing::subscriber::set_global_default`]) is process-global, so
-//! installing it inside the parallel test suite is not observable there;
-//! the `setup` wiring is pinned textually in `config_tests.rs` instead.
+//! crate plus the manual smoke run; the rotation-time half of the
+//! `max_log_files` pruning rides that same untestable clock (the
+//! startup half, which runs when the appender is built, is tested); and
+//! the global-install path ([`tracing::subscriber::set_global_default`])
+//! is process-global, so installing it inside the parallel test suite is
+//! not observable there; the `setup` wiring is pinned textually in
+//! `config_tests.rs` instead.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -114,6 +121,22 @@ const LOG_FILE_PREFIX: &str = "eunomiasync";
 
 /// The log file name extension (spec §5.5).
 const LOG_FILE_SUFFIX: &str = "log";
+
+/// The maximum number of dated log files kept (T-253, owner ruling
+/// 2026-11-21): the appender's own `max_log_files` cap — when the
+/// appender is built (every startup) and at every rotation it removes
+/// the oldest files beyond this many (verified in the vendored
+/// tracing-appender 0.2.5 sources: the builder method is
+/// `rolling/builder.rs:235`, the prune runs at `Inner::new` and in
+/// `refresh_writer`). Honest boundary, recorded in the DECISIONS.md
+/// T-253 entry: the ruling's ideal was 5 files × 10 MB, but
+/// tracing-appender 0.2.5 has no size-based rotation (`Rotation` is
+/// NEVER/MINUTELY/HOURLY/DAILY only — `rolling.rs:501-509`), and a
+/// custom size-rotating writer would break the §5.5-pinned
+/// `eunomiasync.<date>.log` name scheme D-032 recorded. The count half
+/// is enforced; the per-file size half is not — one chatty day can
+/// exceed 10 MB, and the cap bounds the *days* of history instead.
+const MAX_LOG_FILES: usize = 5;
 
 /// Why [`init`] could not build the file log: the path it could not
 /// create or open, plus the OS cause. Kept as data (like
@@ -184,6 +207,7 @@ fn build_file_subscriber(
         .rotation(Rotation::DAILY)
         .filename_prefix(LOG_FILE_PREFIX)
         .filename_suffix(LOG_FILE_SUFFIX)
+        .max_log_files(MAX_LOG_FILES)
         .build(logs_dir)
         .map_err(|source| LogInitError {
             path: logs_dir.to_path_buf(),
@@ -448,6 +472,43 @@ pub(crate) fn db_cleanup_failed(error: &AppError) {
     );
 }
 
+/// The protective-copy retention pass removed copies beyond the 7-day
+/// window (T-253, owner ruling 2026-11-21): `pre-migration-*` and
+/// `pre-recovery-*` files in `db-backups/`, aged by the creation stamp
+/// in their names, the newest of each kind protected even past the
+/// window. `info`: a routine housekeeping event in the `db_cleanup`
+/// shape — the counts are the audit fact. A pass that removed
+/// **nothing** gets no line: it is the idempotent common case (every
+/// open of a healthy directory), the same no-op policy as
+/// [`db_backup_daily`]'s. The payload is numeric only (SEC-008), and
+/// this file-log line is the pass's whole journal (LOG-001…004's
+/// vocabulary has no housekeeping member — the D-054 boundary).
+pub(crate) fn db_backup_retention(counts: &crate::retention::BackupRetentionCounts) {
+    tracing::info!(
+        target: "eunomia::db",
+        pre_migration = counts.pre_migration,
+        pre_recovery = counts.pre_recovery,
+        "protective-copy retention removed db-backups/ copies beyond the 7-day window"
+    );
+}
+
+/// One step of the protective-copy retention pass failed (T-253): the
+/// `db-backups/` directory could not be read, or one aged copy could
+/// not be removed. `warn`, not `error`, for the same reason as
+/// [`db_backup_daily_failed`] — the pass is housekeeping over copies
+/// that already exist, the open/preserve that triggered it has
+/// succeeded, and the next open retries on its own (idempotent pass).
+/// The path and the OS cause are the payload (SEC-008: paths are
+/// allowed; the io error carries no stored text).
+pub(crate) fn db_backup_retention_failed(path: &Path, error: &std::io::Error) {
+    tracing::warn!(
+        target: "eunomia::db",
+        path = %path.display(),
+        error = %error,
+        "protective-copy retention failed; continuing without it (retried at the next open)"
+    );
+}
+
 /// A database operation hit SQLite's busy/locked state, its
 /// `busy_timeout` expired, and the `Db::run` executor is replaying
 /// the whole operation in a fresh transaction (spec §10 `E_DB_LOCKED`
@@ -675,8 +736,10 @@ pub(crate) fn recovery_recreated(db_path: &Path) {
 
 /// A `db_restore_backup` completed: the chosen copy replaced the
 /// database and was reopened (§7.10). `info`, both paths — the source
-/// copy stays where it was (never consumed), and the line is the audit
-/// record of which copy became the database.
+/// copy stays where it was (the restore never consumes it; T-253's
+/// age-based retention may retire an aged copy later, at the reopen,
+/// like any other aged copy), and the line is the audit record of
+/// which copy became the database.
 pub(crate) fn recovery_restored(backup: &Path, db_path: &Path) {
     tracing::info!(
         target: "eunomia::db",
@@ -2505,6 +2568,137 @@ mod tests {
         assert!(
             log.contains("WARN") && log.contains("retention cleanup failed"),
             "the failure line must be a warn naming the failed cleanup, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn protective_copy_retention_lines_carry_counts_and_path_facts() {
+        // The T-253 facade pair, driven the way the pass calls them:
+        // the success line carries the per-kind counts, the failure
+        // line the path and OS cause (SEC-008: numbers and paths — a
+        // housekeeping pass has no content to begin with).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+
+        tracing::subscriber::with_default(subscriber, || {
+            db_backup_retention(&crate::retention::BackupRetentionCounts {
+                pre_migration: 2,
+                pre_recovery: 1,
+            });
+            let failing = root
+                .join("db-backups")
+                .join("pre-recovery-20261121T120000000Z.sqlite3");
+            db_backup_retention_failed(
+                &failing,
+                &std::io::Error::new(std::io::ErrorKind::PermissionDenied, "probe"),
+            );
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("pre_migration=2") && log.contains("pre_recovery=1"),
+            "the success line must carry the per-kind removal counts, got: {log}"
+        );
+        assert!(
+            log.contains("protective-copy retention removed"),
+            "the success line must say what happened, got: {log}"
+        );
+        assert!(
+            log.contains("db-backups") && log.contains("probe"),
+            "the failure line must carry the path and the OS cause, got: {log}"
+        );
+        assert!(
+            log.contains("WARN") && log.contains("protective-copy retention failed"),
+            "the failure line must be a warn naming the failed pass, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn building_the_appender_prunes_dated_logs_beyond_five_files() {
+        // The startup half of the max_log_files cap (T-253): the prune
+        // runs when the appender is built, so a directory holding seven
+        // dated files must come down to the cap before today's file is
+        // appended to. Which of the equally-old seeds survive is the
+        // appender's own tie-breaking (it orders by creation time with a
+        // filename-date fallback); the count and the live file are the
+        // deterministic facts, and the count is the criterion.
+        let (temp, root) = logs_dir();
+        for day in 1..=7 {
+            fs::write(
+                root.join(format!("eunomiasync.2020-01-0{day}.log")),
+                b"an old day's log",
+            )
+            .expect("seeding an old dated log must work");
+        }
+
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("rotation probe event");
+        });
+        drop(guard);
+
+        let files = dated_log_files(&root);
+        assert_eq!(
+            files.len(),
+            5,
+            "seven seeded files plus today's must leave exactly five dated files"
+        );
+        let live = files
+            .iter()
+            .find(|path| {
+                fs::read_to_string(path)
+                    .map(|content| content.contains("rotation probe event"))
+                    .unwrap_or(false)
+            })
+            .expect("the file the subscriber wrote to must be among the survivors");
+        // The live file is today's, and it is the one pruning can never
+        // remove: it is created after the prune, newest by construction.
+        assert!(
+            live.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("eunomiasync.")),
+            "the live file keeps the §5.5 name shape"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn building_the_appender_below_the_cap_deletes_nothing() {
+        // The non-eager half: with fewer files than the cap, building
+        // the appender must not remove any of them (a prune that fired
+        // below its threshold would eat history the cap exists to keep).
+        let (temp, root) = logs_dir();
+        let survivors = [
+            root.join("eunomiasync.2020-01-06.log"),
+            root.join("eunomiasync.2020-01-07.log"),
+        ];
+        for path in &survivors {
+            fs::write(path, b"an old day's log").expect("seeding an old dated log must work");
+        }
+
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("quiet probe event");
+        });
+        drop(guard);
+
+        for path in &survivors {
+            assert!(
+                path.is_file(),
+                "a below-cap seed must survive: {}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            dated_log_files(&root).len(),
+            3,
+            "two seeds plus today's live file"
         );
         drop(temp);
     }

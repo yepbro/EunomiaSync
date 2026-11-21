@@ -982,6 +982,13 @@ the file log (`max_log_files` unset): spec sets none for the tracing log
 until a task decides otherwise — a conscious omission, not an oversight.
 `cargo-deny` is green for the two new crates.
 
+Addendum (2026-11-21, T-253/D-129): the conscious omission above is
+decided now — the owner ruled a 5-file cap, and the builder carries
+`.max_log_files(5)` (daily rotation unchanged; tracing-appender 0.2.5
+has no size rotation, so the ruling's per-file 10 MB half is honestly
+unenforced). The decision, its boundaries and the tests live in D-129;
+this entry's rotation/name claims stand as recorded.
+
 ### D-034 — AppError: the §7.10 wire DTO with a 20-code registry, exported via `Builder::typ` — 2026-11-18
 
 Problem: T-013 turns §7.10's `AppError` (every command returns
@@ -1485,6 +1492,14 @@ copy written immediately before it (the state the rollback leaves
 the database at, UPD-004's pointer); the semantics recorded above
 are unchanged, only the error grew a field. A failed copy write
 keeps this entry's `StorageError::Backup` shape.
+
+Addendum (2026-11-21, T-253/D-129): the app-layer retention this
+entry deferred has landed — `retention.rs` retires pre-migration
+copies older than 7 days at every successful `Db::open`, newest of
+the kind protected (which is exactly this entry's "never delete the
+copy UPD-004 points at" rule operationalized: the pointer is always
+the newest pre-migration copy). This crate is untouched: the store
+still never removes a final copy.
 
 ### D-039 — Settings repository: typed §6.5 keys, one JSON validation path, corrupt cells error instead of defaulting — 2026-11-18
 
@@ -2648,6 +2663,14 @@ linked — the screen picks from names, and the restore's own gates
 re-verify); and the recovery commands do not exist for the
 too-new/migration aborts — those keep the abort until their own
 screen tasks.
+
+Addendum (2026-11-21, T-253/D-129): the future owner decision above
+is made — pre-recovery copies retire by the 7-day age rule at every
+successful `Db::open`, newest of the kind protected, never inside
+`restore_files` itself (a restore's chosen copy must outlive a
+failed publish — D-129's round-1 P1-1). "Renamed, never discarded"
+for the damaged database stands for the preserve step; the preserved
+copy is later subject to the age rule like any other.
 
 ### D-050 — Busy-retry cycle in `Db::run`: three replays in fresh transactions, §9.5 pauses, the fallback re-examined — 2026-11-18
 
@@ -11101,3 +11124,142 @@ code docs). The round-2 question (the read can transiently lag a
 just-emitted event by the emit→record window — the divergence is
 bidirectional) is now stated in `dirty_verdict`'s docs; the future
 consuming task reads that contract off `bindings.ts`.
+
+### D-129 — T-253: protective DB copies retire by name-stamp age (7 days, newest of each kind protected); the file log caps at 5 daily files — constants, not config keys — 2026-11-21
+
+Problem: the two protective-copy schemes in `db-backups/` accumulated
+uncapped (D-046 recorded that the ERR-001 count-of-7 never touches
+them; D-049 left `pre-recovery-*` "until an owner decides"), and the
+file log rotated daily with no file-count bound at all. The owner
+ruled on 2026-11-21: copies older than **7 days** go, by age alone
+("независимо от количества; новые копии не удаляются никогда"); the
+file log gets "ротация 5 файлов × 10 МБ (≈50 МБ максимум)". The card
+left four decisions to this task: where the cleanup fires, the
+age source, the limits' form (constants vs `config.toml` §5.8), and
+how the log ruling maps onto `tracing-appender`.
+
+Solution, four decisions:
+
+- _Age source — the name stamp, never mtime._ Both schemes stamp the
+  creation instant into the file name (`pre-migration-v<N>-<UTC>` with
+  `<UTC>` = `%Y%m%dT%H%M%S%3fZ`, D-038's `utc_stamp`; `pre-recovery-<UTC>`
+  with the same shape plus `-N` same-millisecond variants, T-024). The
+  decisive fact: a pre-recovery copy is a **rename** of the damaged
+  database, so its mtime is the damaged file's last-write time and can
+  be arbitrarily older than the preserve moment — mtime-based age would
+  judge a copy made today as "over a week old" and, with two of them in
+  the directory, delete a fresh copy the day it was made, breaking the
+  ruling's "новые не удаляются никогда" outright. The stamp is the
+  creating scheme's own clock. Parsing (`retention.rs`): prefix →
+  version digits (pre-migration only) → stamp via
+  `Timestamp::strptime("%Y%m%dT%H%M%S%3fZ%z", stamp + "+0000")` — the
+  appended offset is required because jiff 1.0.1's `Timestamp::strptime`
+  refuses to produce a `Timestamp` without a parsed offset (verified
+  empirically: "offset required to parse timestamp"; the schemes'
+  trailing `Z` is a literal, not `%z`), and the stamp is UTC by
+  construction of both producers. A name any part of which does not
+  match — a hand-renamed copy, foreign files, `*.sqlite3.tmp` staging
+  debris, sidecar siblings — is **never deleted**: a file whose age
+  cannot be established has no age to judge (deleting it would be the
+  count-based guess the ruling replaces). The `-N` variant orders
+  within one stamp (`-2` written after `-1` after the plain name) —
+  pinned by a dedicated test.
+- _Semantics — strictly older than 7 days, per kind, newest
+  protected._ `kind` is the name prefix (pre-migration across all
+  versions is ONE kind — the ruling protects "one fresh copy of each
+  вид", and a recovery must not cost the newest migration safety net).
+  Delete iff `stamp < now − 7d` (a copy exactly at the edge stays; the
+  test pins the millisecond beside it) AND the copy is not the newest
+  of its kind (max stamp, variant breaking ties). This encodes both
+  ruling halves: a sole 10-day-old copy survives exactly until a new
+  one exists — the card's recorded edge — and `daily-*` copies stay
+  under ERR-001's own count rule. The pass
+  (`retention::cleanup_db_backups(backups_dir, now)`) is best-effort:
+  an unreadable directory or an unremovable file logs a `warn` through
+  the facade (`db_backup_retention_failed`) and the pass returns — it
+  can never fail the operation that triggered it; a pass that removed
+  something logs the per-kind counts at `info`
+  (`db_backup_retention`), a no-op logs nothing (the D-046/D-054
+  no-line policy).
+- _Trigger points — one call site: `Db::open` after the migration
+  run._ Every launch opens the database, so this is the startup pass
+  the `retention.rs` pattern asked for, and an upgrade run's fresh
+  pre-migration copies get their aged siblings retired immediately;
+  every recovery operation (recreate/restore) reopens through
+  `Db::open`, so the pass also fires right after a successful
+  recovery. The pre-recovery creation site
+  (`recovery::preserve_damaged`) is deliberately NOT a trigger — the
+  round-1 review's P1-1: inside `restore_files` the preserve runs
+  while the user's chosen copy is still the only durable source of the
+  bytes being restored (the staged `db/*.tmp` is debris-swept by the
+  next attempt, "debris, never data", D-049), so an age pass there
+  could delete an aged, non-newest chosen copy before the publish
+  commits and leave a failed publish unretryable. The chosen copy may
+  still be retired later by the reopen's own pass, which is the
+  "may itself be pruned by later retention" reading the frozen
+  `commands.rs` comment already documents (a forced deviation from its
+  neighboring "is left in place" phrasing that this entry records,
+  Rule 10 — the file belongs to a parallel task and was not edited).
+  The LOG-006 daily tick deliberately does NOT run this pass either:
+  a long-running app cannot create a protective copy without passing
+  through an open (pre-migration copies exist only inside `Db::open`,
+  pre-recovery only via the recovery commands that reopen), and wiring
+  `spawn_daily_cleanup` to the backups directory would need a `Db`
+  getter the frozen-`lib.rs` signature cannot carry. Honest
+  boundaries: a copy that crosses the 7-day line mid-run is retired at
+  the next open, not at the crossing moment; a launch whose open
+  FAILS (recovery mode) runs no pass — the aged copies wait for the
+  recovery operation's reopen or the next successful launch (exactly
+  the state in which the restore-keeps-its-source boundary above
+  matters). A rerun is a no-op over a cleaned directory, and a pass
+  interrupted mid-deletion converges on the rerun (both tested).
+- _Limits' form — constants; the log ruling mapped to what
+  tracing-appender has._ Spec §5.8 SYS-012 pins `config.toml`'s key
+  list as exactly `log_level` (unknown keys warn), and D-029's
+  bidirectional `KNOWN_KEYS` pin keeps the file at that list — so
+  retention limits as config keys would contradict the spec this task
+  may not edit. Constants it is: `PROTECTIVE_COPY_WINDOW = 7 days` in
+  `retention.rs`, `MAX_LOG_FILES = 5` in `logging.rs`. The log half:
+  the ruling's ideal was 5 × 10 MB, but tracing-appender 0.2.5 has no
+  size-based rotation — its `Rotation` is NEVER/MINUTELY/HOURLY/DAILY
+  only (verified in the vendored sources, `rolling.rs:501-509`) — and a
+  custom size-rotating writer would break the §5.5-pinned
+  `eunomiasync.<date>.log` name scheme D-032 recorded. The card's
+  sanctioned alternative is taken: `Rotation::DAILY` stays and the
+  builder gains `.max_log_files(5)` (the crate's own count cap; the
+  prune runs at appender creation — every startup, which is the
+  testable half — and at each rotation, rolling.rs:615/731). Honest
+  boundary: the per-file 10 MB half is not enforced; the cap bounds
+  days of history, and one chatty day can exceed 10 MB. If the owner
+  wants the size half, that is a new task (a custom writer or a
+  post-rotation size check) — follow-up material, not this one.
+
+Tests: the pass's behavior suite lives in `retention.rs` (aged/recent
+of both kinds, protected-newest past the window, the fresh-retires-
+aged edge, the strict 7-day boundary, empty directory, idempotent
+rerun and interrupted-pass convergence, sidecar sweep with a retired
+copy, same-stamp variant ordering, undatable/foreign names untouched,
+unreadable directory survived, a ~250-entry large directory reaching
+the exact verdict); the parser probed directly (both schemes,
+variants, all rejections including a non-numeric `-N`; instants
+compared against independently parsed literals — jiff's `Display`
+trims trailing fractional zeros); the wiring pinned at the call site
+(`db_tests.rs` — `Db::open` retires the aged non-newest copy while the
+daily scheme survives, stamps derived from the real clock because the
+open call uses it) and the boundary pinned at the non-call-site
+(`recovery_tests.rs` — a restore FROM an aged non-newest pre-migration
+copy leaves the source and the aged neighbors in place until the
+reopen, the round-1 P1-1 regression pin); the log cap in `logging.rs`
+(building the appender over seven seeded dated files leaves exactly
+five, the live file among them; below the cap nothing is deleted).
+Mutation checks ran red→green: flipping the boundary comparison and
+dropping the newest-protection each fail their test. Honest
+boundaries: the rotation-time half of the log prune rides the
+appender's own untestable clock, like D-032's midnight rollover; and
+enabling `max_log_files` makes tracing-appender's own
+`prune_old_logs` reachable, which reports a failed removal with an
+`eprintln!` (rolling.rs:705-716) — under the D-032 Windows-GUI
+no-stderr analysis an `eprintln!` there would abort the process; the
+same crate already `eprintln!`s on the pre-existing daily-rotation
+path, so this adds no new class of exposure, recorded here so the
+Windows smoke run knows to look.

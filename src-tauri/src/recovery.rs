@@ -41,7 +41,9 @@
 //!   source) cannot leave `db/` without a database — then the preserve
 //!   runs, then one rename publishes the staged copy (§9.5's staging
 //!   pattern, parent-directory fsync included). The chosen copy in
-//!   `db-backups/` is never opened for writing and never removed.
+//!   `db-backups/` is never opened for writing, and the restore itself
+//!   never removes it (T-253's age-based retention may retire an aged
+//!   copy later, at the reopen — never while the restore is in flight).
 //!
 //! The commands in `commands.rs` compose these operations with
 //! `Db::open` (which re-runs the full gate chain over the replaced
@@ -548,6 +550,13 @@ pub(crate) fn preserve_damaged(
     }
     secure_owner_only(db_path)?;
     rename(db_path, &target)?;
+    // No retention pass here, deliberately (T-253, D-126): a preserve
+    // inside `restore_files` runs while the user's chosen copy is still
+    // the only durable source of the bytes being restored — the staged
+    // `.tmp` is debris-swept by the next attempt, so deleting an aged
+    // chosen copy at this point would make a failed publish unrecover-
+    // able. The reopen every recovery operation performs (`Db::open`)
+    // runs the pass instead, once the restore has succeeded.
     Ok(Some(Preserved {
         from: db_path.to_path_buf(),
         to: target,
