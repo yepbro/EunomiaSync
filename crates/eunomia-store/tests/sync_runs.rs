@@ -1,5 +1,5 @@
 //! Behavior tests for the `sync_runs` repositories (spec §6.2 DDL,
-//! §9.4 phase 0 step 2; task T-112).
+//! §9.4 phase 0 step 2 and phase 1's transitions; tasks T-112/T-113).
 //!
 //! The tests run against a real database opened through `open_db` and
 //! migrated with `run_migrations` — the production configuration
@@ -20,6 +20,12 @@
 //! * the reads future phases consume: `get` round-trips the row
 //!   (and answers `None` for an unknown id), `list_projects` returns
 //!   the run's rows in the projects' `sort_order`;
+//! * phase 1's transitions (T-113): `mark_project_skipped` writes
+//!   the §10 code and message over an intact fingerprint,
+//!   `mark_project_unchanged` clears the error columns with the
+//!   status, `abort_run` finishes the run `aborted` without touching
+//!   the counters or the per-project rows — and an update that
+//!   matches no row is the typed refusal, never a silent success;
 //! * the corrupt-cell policy (D-039): a `status` cell tampered
 //!   outside the CHECK vocabulary surfaces as the typed `Member`
 //!   refusal at the read, never as a guess.
@@ -31,8 +37,8 @@ use eunomia_store::projects::{AddedVia, NewProject};
 use eunomia_store::settings::{BaseName, ExtraFile, Position, Scheme};
 use eunomia_store::storage::{open_db, run_migrations};
 use eunomia_store::sync_runs::{
-    NewSyncRunProject, SyncRunProjectStatus, SyncRunStatus, SyncRunsError, create_running, get,
-    list_projects,
+    NewSyncRunProject, SyncRunProjectStatus, SyncRunStatus, SyncRunsError, abort_run,
+    create_running, get, list_projects, mark_project_skipped, mark_project_unchanged,
 };
 use rusqlite::Connection;
 
@@ -350,6 +356,202 @@ fn list_projects_follows_the_sort_order_not_the_insert_order() {
         vec![first.as_str(), second.as_str()],
         "the rows must come back in sort_order"
     );
+}
+
+// ---- phase 1's transitions (T-113) -----------------------------------
+
+#[test]
+fn mark_project_skipped_writes_the_code_and_keeps_the_fingerprint() {
+    // §9.4 phase 1's per-project refusal: the row goes `skipped`
+    // carrying the §10 code and the message — and the `target_path`/
+    // `build_hash` phase 0 froze stay verbatim (the skip explains a
+    // build that already happened, it does not erase it).
+    let (conn, _guard) = runs_db("skip");
+    let project = seed_project(&conn, 1);
+    let run = create_running(&conn, STARTED_AT, &[run_project(&project, 1)])
+        .expect("creating the run should work");
+
+    mark_project_skipped(
+        &conn,
+        &run.id,
+        &project,
+        "E_PROJECT_UNAVAILABLE",
+        "folder is gone",
+    )
+    .expect("marking the skip should work");
+
+    let rows = list_projects(&conn, &run.id).expect("reading the rows should work");
+    assert_eq!(rows[0].status, SyncRunProjectStatus::Skipped);
+    assert_eq!(rows[0].error_code.as_deref(), Some("E_PROJECT_UNAVAILABLE"));
+    assert_eq!(rows[0].error_message.as_deref(), Some("folder is gone"));
+    assert_eq!(
+        rows[0].target_path.as_deref(),
+        Some("/repos/repo-1/AGENTS.md")
+    );
+    assert_eq!(rows[0].build_hash, Some("1".repeat(64)));
+}
+
+#[test]
+fn mark_project_unchanged_clears_the_error_columns_with_the_status() {
+    // §9.4 phase 1 step 5's verdict: `unchanged` — and a row that
+    // reaches this transition carries no refusal, so a stale error
+    // cell from an earlier spelling of the run must not survive into
+    // the summary. The stale cells are planted by direct SQL (free
+    // TEXT columns, no CHECK to bypass) because the writers' state
+    // scoping makes the old skip-then-unchanged sequence unreachable
+    // — exactly the reordering the scoping exists to refuse.
+    let (conn, _guard) = runs_db("unchanged");
+    let project = seed_project(&conn, 1);
+    let run = create_running(&conn, STARTED_AT, &[run_project(&project, 1)])
+        .expect("creating the run should work");
+    conn.execute(
+        "UPDATE sync_run_projects SET error_code = 'E_NOT_UTF8', error_message = 'stale refusal' \
+         WHERE sync_run_id = ?1 AND project_id = ?2",
+        rusqlite::params![run.id, project],
+    )
+    .expect("planting the stale error cells should work");
+
+    mark_project_unchanged(&conn, &run.id, &project).expect("marking the verdict should work");
+
+    let rows = list_projects(&conn, &run.id).expect("reading the rows should work");
+    assert_eq!(rows[0].status, SyncRunProjectStatus::Unchanged);
+    assert_eq!(rows[0].error_code, None);
+    assert_eq!(rows[0].error_message, None);
+}
+
+#[test]
+fn abort_run_finishes_the_run_without_touching_counters_or_rows() {
+    // §9.4's tail rules (phase 1's E_DISK_FULL here): the run row
+    // goes `aborted` with the caller's finish timestamp verbatim, the
+    // code and the details — and neither the per-status counters
+    // (phase 4's, §9.4 phase 4) nor any per-project row moves: the
+    // verdicts each phase wrote are exactly what the aborted run
+    // keeps.
+    let (conn, _guard) = runs_db("abort");
+    let project = seed_project(&conn, 1);
+    let run = create_running(&conn, STARTED_AT, &[run_project(&project, 1)])
+        .expect("creating the run should work");
+    mark_project_skipped(
+        &conn,
+        &run.id,
+        &project,
+        "E_PROJECT_UNAVAILABLE",
+        "folder is gone",
+    )
+    .expect("the pre-abort verdict should work");
+    const FINISHED_AT: &str = "2026-11-21T12:05:00.000Z";
+
+    abort_run(
+        &conn,
+        &run.id,
+        FINISHED_AT,
+        "E_DISK_FULL",
+        "free 119 bytes, required 120 bytes",
+    )
+    .expect("aborting the run should work");
+
+    let row = get(&conn, &run.id)
+        .expect("reading the run should work")
+        .expect("the run must persist");
+    assert_eq!(row.status, SyncRunStatus::Aborted);
+    assert_eq!(row.finished_at.as_deref(), Some(FINISHED_AT));
+    assert_eq!(row.error_code.as_deref(), Some("E_DISK_FULL"));
+    assert_eq!(
+        row.details.as_deref(),
+        Some("free 119 bytes, required 120 bytes")
+    );
+    // Phase 4's counters stay at their zeros (the ownership rule).
+    assert_eq!(row.projects_written, 0);
+    assert_eq!(row.projects_unchanged, 0);
+    assert_eq!(row.projects_skipped, 0);
+    assert_eq!(row.projects_failed, 0);
+    // The per-project verdicts survive the abort untouched.
+    let rows = list_projects(&conn, &run.id).expect("reading the rows should work");
+    assert_eq!(rows[0].status, SyncRunProjectStatus::Skipped);
+    assert_eq!(rows[0].error_code.as_deref(), Some("E_PROJECT_UNAVAILABLE"));
+}
+
+#[test]
+fn updates_addressing_no_row_or_a_settled_row_are_the_typed_refusal() {
+    // An UPDATE that matched nothing is a caller bug the store
+    // refuses to swallow as a silent success — both per-project
+    // writers and the run-level abort (the `create_running`
+    // duplicate-input posture) — and the state scoping extends that
+    // to a row a later spelling of the run already settled: driving a
+    // transition twice, or against a finished run, must never rewrite
+    // the run's audit record.
+    let (conn, _guard) = runs_db("miss");
+    let project = seed_project(&conn, 1);
+    let run = create_running(&conn, STARTED_AT, &[run_project(&project, 1)])
+        .expect("creating the run should work");
+
+    // Unknown ids.
+    for outcome in [
+        mark_project_skipped(&conn, &run.id, "no-such-project", "E_NOT_UTF8", "m"),
+        mark_project_unchanged(&conn, &run.id, "no-such-project"),
+        abort_run(&conn, "no-such-run", STARTED_AT, "E_DISK_FULL", "d"),
+    ] {
+        assert!(
+            matches!(outcome, Err(SyncRunsError::Sql(_))),
+            "a zero-row update must be the typed Sql refusal"
+        );
+    }
+
+    // A settled row: the skip landed once, and no later transition may
+    // move it again — the second skip and the unchanged both refuse.
+    mark_project_skipped(
+        &conn,
+        &run.id,
+        &project,
+        "E_PROJECT_UNAVAILABLE",
+        "folder is gone",
+    )
+    .expect("the first skip should work");
+    assert!(
+        matches!(
+            mark_project_skipped(&conn, &run.id, &project, "E_NOT_UTF8", "rewrite attempt"),
+            Err(SyncRunsError::Sql(_))
+        ),
+        "a second skip must refuse, not rewrite the code"
+    );
+    assert!(
+        matches!(
+            mark_project_unchanged(&conn, &run.id, &project),
+            Err(SyncRunsError::Sql(_))
+        ),
+        "unchanged over a settled row must refuse"
+    );
+    let rows = list_projects(&conn, &run.id).expect("reading the rows should work");
+    assert_eq!(rows[0].status, SyncRunProjectStatus::Skipped);
+    assert_eq!(rows[0].error_code.as_deref(), Some("E_PROJECT_UNAVAILABLE"));
+
+    // A finished run: the abort landed once, and a re-abort refuses
+    // instead of overwriting the finish stamp.
+    abort_run(&conn, &run.id, STARTED_AT, "E_DISK_FULL", "free 0 bytes")
+        .expect("the first abort should work");
+    assert!(
+        matches!(
+            abort_run(
+                &conn,
+                &run.id,
+                STARTED_AT,
+                "E_BACKUP_FAILED",
+                "rewrite attempt"
+            ),
+            Err(SyncRunsError::Sql(_))
+        ),
+        "a re-abort must refuse, not rewrite the verdict"
+    );
+    let row = get(&conn, &run.id)
+        .expect("reading the run should work")
+        .expect("the run must persist");
+    assert_eq!(row.error_code.as_deref(), Some("E_DISK_FULL"));
+
+    // The untouched run: an abort of a `running` run still works.
+    let other = create_running(&conn, STARTED_AT, &[run_project(&project, 1)])
+        .expect("the second run should create");
+    abort_run(&conn, &other.id, STARTED_AT, "E_DISK_FULL", "free 0 bytes")
+        .expect("aborting a running run should work");
 }
 
 #[test]

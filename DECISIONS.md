@@ -11419,3 +11419,213 @@ ARCHITECTURE.md grows the phase-0 module row (that file was outside
 this task's allowed list); the `sync_runs` status-transition writers
 arrive with their phase tasks (T-113+), and the `interrupted`
 recovery pass is the startup task's.
+
+### D-131 — T-113: sync phase 1 (preflight) over Phase0Outcome — the seven steps as one blocking-pool pass, the markerless write plan, and the E_DISK_FULL tail — 2026-11-21
+
+Problem: T-113 turns §9.4 phase 1 into code: for every active
+project, availability, resolved target path, write rights, the
+existing file (scheme B: UTF-8 and markers), the ALG-033 `unchanged`
+verdict, the D-25 confirmation list, the stale-tmp sweep — then the
+free-space rule that aborts the run with `E_DISK_FULL`. Eight points
+were open: how the phase composes over `Phase0Outcome` (how many
+transactions, where the blocking pool sits); where the per-project
+SCHEME comes from when `Phase0Outcome` does not carry it and
+`sync_phase0.rs` is a frozen zone; what "build the final bytes"
+(step 4) can mean when ALG-032 stamps the marker "once per run, at
+the start of the write phase" — after preflight; the §9.4 step-5 vs
+step-6 order when an empty build matches a marker-only file (D-24 vs
+D-25 both fire); which §10 row carries the D-090 "could not check"
+refusals (`resolve` NotReadable, `write_access` ProbeFailed, a
+refused file read) that are not verdicts; what the free-space check
+does about an empty copy list and a FAILED probe; which run-row
+status an `E_DISK_FULL` abort writes and what happens to the counters
+and per-project rows; and what the store's phase-1 writers look like
+(the transitions D-130 deferred to "the phase tasks that cause them").
+
+Solution: `src-tauri/src/sync_phase1.rs` (the phase) +
+`eunomia_store::sync_runs` additions (`mark_project_skipped`,
+`mark_project_unchanged`, `abort_run`) + `lib.rs` mod declarations
+(the D-130 boundary judgment, same anchor).
+
+- _Composition, phase-0-shaped._ ONE read transaction
+  (`sync.skip_identical` + each run project's scheme from the
+  projects table), the per-project seven-step preflight on
+  `spawn_blocking` AFTER it (SYS-001, the D-096 ordering), ONE write
+  transaction applying every `skipped`/`unchanged` verdict (`ready`
+  rows stay `not_started` — phase 3's), and — only on the space
+  shortage — a SECOND write transaction aborting the run. The
+  free-space source and the sweep clock are injected parameters (the
+  D-089/atomic.rs seam; production closes over
+  `free_bytes(&data_dir)` and `SystemTime::now()`).
+- _The scheme's second home._ `Phase0Outcome` carries content, hash
+  and target path but not the scheme; reading it from the projects
+  table in the phase's own transaction cannot observe an app-driven
+  change: the run holds `sync_running` and D-123's SYS-005 gate
+  rejects the project-mutation commands while it is up. Only an
+  out-of-band writer on the database file could race it — the same
+  residual T-100 window every post-snapshot read shares. The root
+  and file name for steps 1–2 decompose from the built target path
+  itself (`parent()` + `file_name()`): the stored root is canonical
+  and the name one of four static ASCII literals (phase 0's own
+  `target_path_text` argument).
+- _The markerless write plan (step 4)._ ALG-032's marker does not
+  exist yet at preflight, so the phase builds the markerless form of
+  the write instead: A/C take ALG-030's shape minus the marker line
+  (`managed` + one blank line, or the empty string) — exactly
+  `compare::contents_match`'s documented new-side contract; B takes
+  the ALG-031 splice minus the marker line, spelled by a private
+  `splice_without_marker` — a deliberate byte-exact mirror of
+  `assembly_b`'s private `build_block`/`dominant_terminator` (the
+  D-130 `managed_text` posture), pinned against the REAL `splice`'s
+  output over five file shapes × four managed shapes in the module's
+  unit tests. The plan rides the outcome as an explicit `WritePlan`
+  enum (the round-1 review's P2-1): `WholeFile { managed }` for A/C
+  (phase 3 rebuilds the whole file around the run marker — no
+  re-read, the write replaces everything), `Splice { managed,
+content, span }` for B (phase 3 splices between the markers of the
+  content phase 1 read — §9.4's reader is phase 1, and re-splicing
+  the MARKERLESS form instead would replace the block with the
+  marker-only body, corrupting the file). The variant is the scheme
+  for phase 3's purposes (A and C share the whole-file shape), so no
+  third home for the scheme column exists.
+- _Step 5 before step 6 — the idempotence edge._ §9.4 runs the steps
+  in order, so an ALG-033 match is `unchanged` even for an empty
+  build over a marker-only file (the file the next write would
+  produce byte for byte; D-24's own acceptance, not a D-25 wipe).
+  Step 6 fires only on the ready path: empty build over an existing
+  file with MORE THAN ZERO bytes — the raw size reading of D-25's
+  "the file is not [empty]", which with `skip_identical` off puts a
+  marker-only file on the confirmation list. Pinned by the D-25
+  integration test both ways (the setting on: unchanged, off the
+  list; off: on the list).
+- _Refusals file under the unavailability row._ The three "could not
+  check" shapes — `resolve_target_path`'s NotReadable,
+  `check_write_access`'s ProbeFailed, and a non-NotFound read
+  refusal — are not §9.4 verdicts (D-090) and not rights facts
+  (D-094); each skips with `E_PROJECT_UNAVAILABLE`, whose §10
+  situation list ("folder moved or deleted, drive disconnected, no
+  read rights") is the nearest honest row, with the OS code riding
+  in the message. The mapping table is unit-tested arm by arm with
+  synthetic errors; the read-refusal branch is unreachable through
+  mode bits (an unreadable file is read-only-flagged and skips at
+  step 3) and documented as the total-function posture.
+- _The regular-file gate (round-1 review's P2-4)._ Between steps 2
+  and 3 the phase refuses a target entry that is not a regular file
+  (a FIFO or device node — `resolve_target_path` accepts any
+  non-directory, non-link entry by design, and an open-for-read on an
+  empty FIFO BLOCKS, verified on the host, hanging the sequential
+  preflight and its flag for the process's life; the fs crate is a
+  frozen zone, so the gate lives in the app layer). No §10 code names
+  "wrong entry kind": the skip files under `E_PROJECT_UNAVAILABLE`
+  with the class-only message "the target entry is not a regular
+  file" (E_TARGET_IS_DIR's literal says folder — using it would lie),
+  pinned by a `mkfifo(1)`-fixture test.
+- _The free-space tail._ The copies are the ready projects' existing
+  files (phase 2's backup list); an EMPTY copy list skips the probe
+  entirely (zero required bytes cannot come up short, and a failed
+  probe must not abort a backupless run — pinned by a
+  panic-if-called probe). A definitive `NotEnoughSpace` aborts the
+  run (`aborted` + `E_DISK_FULL` + caller's `finished_at` + a
+  numbers-only details line), leaves every per-project row at its
+  phase-1 verdict, and answers the typed `E_DISK_FULL` envelope with
+  free/required in `details`. A FAILED probe proceeds — the
+  atomic.rs write-time posture (pinned by an injected
+  `ProbeFailed` test); phase 2's `E_BACKUP_FAILED` is the honest
+  reporter of a volume that cannot take the copies. The probe runs on
+  `spawn_blocking` like every other syscall of the phase (the
+  round-1 review's P2-5: production closes over a statvfs — SYS-001).
+  The counters stay untouched on abort (phase 4's, the D-130 ownership
+  rule): an aborted run's summary derives from the per-project rows.
+- _The store writers._ Two named per-project transitions (skip
+  carries code+message over an intact target_path/build_hash
+  fingerprint; unchanged clears both error columns) and the
+  run-level `abort_run`; every UPDATE is scoped to its source state
+  (`not_started`, `running` — the round-1 review's P2-2: a
+  transition driven twice, or against a settled row, matches zero
+  rows and hears the typed `Sql` refusal instead of silently
+  rewriting the run's audit record), and an UPDATE matching no row at
+  all surfaces the same way — never a silent success (the
+  `create_running` duplicate-input posture). `abort_run`'s doc names
+  phase 1's tail rule only: phase 2's `E_BACKUP_FAILED` abort shares
+  the row shape but adds the per-project `not_started` reset
+  (§9.4 phase 2 step 2) — that writer is the phase-2 task's.
+- _Sweep order._ Step 7 runs only for projects that reached it —
+  unchanged and ready; a project skipped at steps 1–4 has no sweep
+  (its steps stopped at the refusal), pinned by the sweep test's
+  skipped-folder assertion. Best-effort: a refused listing never
+  changes a verdict.
+
+Tests: store — 4 new integration (skip shape over the fingerprint,
+unchanged clears error columns, abort shape with counters/rows
+untouched, the zero-row AND wrong-state typed refusals); src-tauri —
+19 after round 1 (3 inline in `sync_phase1.rs`: the mirror pin
+against real `splice`, the refusal tables' every arm, the class-only
+invariant refusals; 16 in
+`sync_phase1_tests.rs` on the mock-app harness with REAL repo
+folders: criterion 1 twice (unavailable, read-only T-F5), criterion 2
+(shortage abort with the exact 100+20%=120 margin oracle and
+row/file assertions; the 119/120 boundary; the never-probing
+backupless run), step 2 (three refusals with their codes + the
+T-F6 symlink resolving and comparing through the real file),
+the regular-file gate (the `mkfifo` FIFO skips class-only instead
+of blocking the sequential pass — behind a 60 s watchdog so a gate
+regression fails THIS test, not the harness timeout),
+step 4 (E_NOT_UTF8, three marker shapes, SYS-009's deleted B target;
+the B splice form with the CRLF-dominant markerless oracle), step 5
+(A unchanged/different + the setting gate + the row transition),
+step 6 (the D-25 list, the creation case, the idempotence edge both
+ways), step 7 (stale deleted via std `set_modified` backdating,
+fresh/foreign/.git kept, skipped folder untouched), the A/C creation
+case with scheme C's `CLAUDE.project.md`, the sort_order order after
+a reorder, and the recovery-mode NoDatabase refusal. Mutation check:
+M1 (mirror terminator forced LF) failed the mirror pin and the B
+splice test; M2 (setting ignored) failed four unchanged tests; M3
+(tail disabled) failed the shortage test; M4 (D-25 without the size
+guard) failed the confirmation test — all green after revert.
+
+Follow-ups for the board (the orchestrator cards them):
+ARCHITECTURE.md grows the phase-1 module row (outside this task's
+allowed list, the D-130 precedent); the `interrupted` recovery pass
+and the sync-run command's `NeedsConfirmation` gate are T-118+;
+phase 3 consumes `ReadyProject` (the `WritePlan`, the B content and
+span) when the write phase lands; the sweep's per-file failures get
+their diagnostic line when the run's logging task lands.
+
+Round-1 review addendum (D-131, same task; report
+`.opencode/reviews/t113-round1.md`, deepseek-v4.1-flash — no P0/P1):
+findings fixed here — P2-1 the ready product now carries an explicit
+`WritePlan` (scheme-discriminated: `WholeFile { managed }` /
+`Splice { managed, content, span }`), so phase 3 implements the
+documented recipe without a third scheme home and without re-reading
+the B file (the docs' splice wording was also literally corrupting —
+splicing into the markerless form would drop the managed body);
+P2-2 the three store writers scope their UPDATEs to the source state
+(`not_started`/`running`) with wrong-state tests; P2-3 the
+`SyncRunProjectStatus` vocabulary doc updated (phase 1 decides
+`skipped` AND `unchanged`); P2-4 the regular-file gate (above) with
+the `mkfifo` test; P2-5 the free-space probe moved to
+`spawn_blocking`; P3-1 the failed-probe-proceeds test; P3-2 the
+sweep test's healthy project is now `unchanged`, pinning the
+step-7 call on that branch; P3-3 the sweep-comment now states the
+report is not carried anywhere (the next sweep re-attempts; the
+diagnostic line is the logging task's); P3-4 `abort_run`'s doc
+narrowed to phase 1 with the phase-2 reset noted as that task's;
+P3-5 the `Skipped` verdict carries structured
+`details: Option<ErrorDetails>` (`io_error()` → `from_io_error`) so
+T-118's log line has §10's OS facts — the store row keeps
+code+message (the schema has no details column); P3-6 these
+addenda are written from the actual reports.
+
+Round-2 review addendum (D-131, same task; report
+`.opencode/reviews/t113-round2.md`, hy4-flash-free — no P0/P1/P2):
+the reviewer verified the round-1 fixes and found no regression in
+the new paths (the regular-file gate's arm analysis, the blocking
+probe's bounds and ownership, the WritePlan construction, the
+state-scoped SQL, the B mirror's pin honesty, §9.4 order and §10
+codes). Findings fixed here — P3-1 this round-2 addendum itself (the
+pre-written stub replaced by this itemized text); P3-2 the Tests
+enumeration above now lists the FIFO-gate test (the count was right,
+the inventory summed one short); P3-3 the FIFO test gained a 60 s
+watchdog (a worker thread + bounded channel receive) so a gate
+regression fails the test loudly instead of hanging the suite to the
+CI timeout.

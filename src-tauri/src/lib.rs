@@ -85,6 +85,18 @@ pub(crate) mod dirty_recalc;
 // prepared run; the flag lease travels in the outcome (RAII, D-123).
 pub(crate) mod sync_phase0;
 
+// The sync pipeline's phase 1 — preflight (spec §9.4 phase 1, §10's
+// skip rows, D-09/D-24/D-25, OUT-008; T-113): the read-only
+// per-project gate over phase 0's built content — availability,
+// resolved target path, write rights, the existing file (scheme B:
+// UTF-8 and marker checks), the ALG-033 `unchanged` verdict, the
+// D-25 confirmation list, the stale-tmp sweep — and the closing
+// free-space rule that aborts the whole run with `E_DISK_FULL`
+// before anything is written. No target file is touched; the
+// verdicts land in `sync_run_projects` (T-118's command consumes
+// the outcome).
+pub(crate) mod sync_phase1;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -530,6 +542,9 @@ mod dirty_recalc_tests;
 
 #[cfg(test)]
 mod sync_phase0_tests;
+
+#[cfg(test)]
+mod sync_phase1_tests;
 
 #[cfg(test)]
 mod tests {

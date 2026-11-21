@@ -7,15 +7,18 @@
 //! row per active project carries that project's outcome through the
 //! pipeline (`not_started` at phase 0, then `written` / `unchanged` /
 //! `skipped` / `failed` as phases 1–4 decide). This module is the
-//! store's writer for the **phase-0 shape only** — the `running` run
-//! with its `not_started` rows — plus the reads the later phases and
-//! the history UI will consume. The status *transitions* (running →
-//! success/partial/aborted/failed/interrupted, per-project
-//! not_started → its outcome) belong to the phase tasks that cause
-//! them (T-113+), exactly the way `projects.rs` leaves
-//! `last_synced_at`/`last_synced_hash` to the sync tasks (OUT-020):
-//! a repository owns the shape of a row, the pipeline owns when the
-//! world is ready to claim it.
+//! store's writer for the phase-0 shape (`create_running`: the
+//! `running` run with its `not_started` rows) **and phase 1's
+//! transitions** (`mark_project_skipped`, `mark_project_unchanged`,
+//! `abort_run`: preflight's per-project verdicts and the
+//! `E_DISK_FULL` abort), plus the reads the later phases and the
+//! history UI will consume. The remaining transitions — the phase 3
+//! `written`/`failed` writers, phase 4's counters and
+//! success/partial/failed verdicts, the startup `interrupted`
+//! recovery — belong to the phase tasks that cause them, exactly the
+//! way `projects.rs` leaves `last_synced_at`/`last_synced_hash` to
+//! the sync tasks (OUT-020): a repository owns the shape of a row,
+//! the pipeline owns when the world is ready to claim it.
 //!
 //! # One transaction, joined — not owned
 //!
@@ -161,7 +164,8 @@ impl SyncRunStatus {
 /// Phase 0 writes exactly [`SyncRunProjectStatus::NotStarted`] for
 /// every row it creates — "this run knows the project, has built its
 /// content, and has not touched its file yet"; phase 1's preflight
-/// decides `skipped`, phases 3–4 decide `written`/`unchanged`/`failed`.
+/// decides `skipped` (steps 1–4) and `unchanged` (step 5), phases 3–4
+/// decide `written`/`failed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SyncRunProjectStatus {
     /// The file was written (phase 3).
@@ -539,6 +543,133 @@ pub fn create_running(
     // house precedent for broken invariants) instead of a silent
     // None.
     Ok(get(conn, &id)?.expect("the row just inserted must be readable"))
+}
+
+// ---- Phase 1's writers --------------------------------------------------------
+
+/// Phase 1's per-project skip (§9.4 phase 1 steps 1–4): one row goes
+/// `not_started → skipped`, carrying the §10 code of the refusal and a
+/// short, class-only message for the summary row (the row's
+/// `target_path`/`build_hash` fingerprint stays untouched — the skip
+/// explains a build that already happened, it does not erase it).
+///
+/// The UPDATE is scoped to the row's `not_started` source state: the
+/// transitions are a state machine's edges, and a caller driving one
+/// twice — or against a row a later phase already settled — matches
+/// zero rows and hears the typed refusal below instead of silently
+/// rewriting the run's audit record (the summary's source, OUT-009).
+///
+/// Joins the caller's transaction like every writer here (D-037/D-051);
+/// the phase's production shape applies every verdict of the run in ONE
+/// `Db::run` transaction.
+///
+/// # Errors
+///
+/// Returns [`SyncRunsError::Sql`] when the statement fails, and — by
+/// design — when it matches no row: an update that changed nothing
+/// means the caller addressed a run or project this run never recorded
+/// (or already deleted), or a row no longer in the expected
+/// `not_started` state — both caller bugs the store refuses to
+/// swallow as a silent success (the `create_running` duplicate-input
+/// posture). The rusqlite `QueryReturnedNoRows` error is the carrier;
+/// its `Display` names the miss.
+pub fn mark_project_skipped(
+    conn: &Connection,
+    run_id: &str,
+    project_id: &str,
+    error_code: &str,
+    error_message: &str,
+) -> Result<(), SyncRunsError> {
+    let changed = conn.execute(
+        "UPDATE sync_run_projects \
+         SET status = 'skipped', error_code = ?3, error_message = ?4 \
+         WHERE sync_run_id = ?1 AND project_id = ?2 AND status = 'not_started'",
+        rusqlite::params![run_id, project_id, error_code, error_message],
+    )?;
+    row_was_there(changed)
+}
+
+/// Phase 1 step 5's verdict (§9.4): one row goes
+/// `not_started → unchanged`, with both error columns cleared — a row
+/// that reaches this transition carries no refusal, and a stale error
+/// cell from an earlier spelling of the run must not survive into the
+/// summary.
+///
+/// Scoped to the `not_started` source state like
+/// [`mark_project_skipped`] — the same wrong-state refusal.
+///
+/// Joins the caller's transaction (D-037/D-051).
+///
+/// # Errors
+///
+/// Returns [`SyncRunsError::Sql`] when the statement fails or matched
+/// no row in the expected state (see [`mark_project_skipped`]'s doc
+/// for the ruling).
+pub fn mark_project_unchanged(
+    conn: &Connection,
+    run_id: &str,
+    project_id: &str,
+) -> Result<(), SyncRunsError> {
+    let changed = conn.execute(
+        "UPDATE sync_run_projects \
+         SET status = 'unchanged', error_code = NULL, error_message = NULL \
+         WHERE sync_run_id = ?1 AND project_id = ?2 AND status = 'not_started'",
+        rusqlite::params![run_id, project_id],
+    )?;
+    row_was_there(changed)
+}
+
+/// Phase 1's run-level abort (§9.4's tail rule: the `E_DISK_FULL`
+/// free-space shortage): the run row goes `running → aborted` with
+/// the caller's finish timestamp, the §10 code, and a short
+/// class-only details line. The per-status counters stay at whatever
+/// they were — they are phase 4's to fill (§9.4 phase 4; the module
+/// docs' ownership rule), and an aborted run's summary derives from
+/// the per-project rows, each of which keeps the verdict its own
+/// phase wrote (phase 1 does not reset rows: nothing was written, so
+/// no row claims otherwise). Phase 2's `E_BACKUP_FAILED` abort shares
+/// the `aborted` row shape but adds its own per-project reset
+/// ("`not_started` except `skipped`", §9.4 phase 2 step 2) — that
+/// writer belongs to the phase-2 task, not this function.
+///
+/// `finished_at` is the **caller's** timestamp (the
+/// [`create_running`]/`started_at` contract: the app layer captures the
+/// moment, the column names it) and must be the DB-002 UTC shape.
+/// Scoped to the `running` source state — re-aborting a finished run
+/// is the wrong-state refusal below, never a history rewrite.
+///
+/// Joins the caller's transaction (D-037/D-051).
+///
+/// # Errors
+///
+/// Returns [`SyncRunsError::Sql`] when the statement fails or matched
+/// no `running` row (the [`mark_project_skipped`] ruling).
+pub fn abort_run(
+    conn: &Connection,
+    run_id: &str,
+    finished_at: &str,
+    error_code: &str,
+    details: &str,
+) -> Result<(), SyncRunsError> {
+    let changed = conn.execute(
+        "UPDATE sync_runs \
+         SET status = 'aborted', finished_at = ?2, error_code = ?3, details = ?4 \
+         WHERE id = ?1 AND status = 'running'",
+        rusqlite::params![run_id, finished_at, error_code, details],
+    )?;
+    if changed == 0 {
+        return Err(SyncRunsError::Sql(rusqlite::Error::QueryReturnedNoRows));
+    }
+    Ok(())
+}
+
+/// The zero-rows-changed refusal shared by the per-project writers: an
+/// UPDATE that matched nothing is surfaced, not swallowed.
+fn row_was_there(changed: usize) -> Result<(), SyncRunsError> {
+    if changed == 0 {
+        return Err(SyncRunsError::Sql(rusqlite::Error::QueryReturnedNoRows));
+    }
+    Ok(())
 }
 
 // ---- Reads --------------------------------------------------------------------
