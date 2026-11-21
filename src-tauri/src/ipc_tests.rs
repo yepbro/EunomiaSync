@@ -119,6 +119,22 @@
 //! removal's one-transaction delete + journal (with the rollback
 //! proof in the settings test's trigger shape), the typed
 //! unknown-id refusal, and the registration pins.
+//!
+//! The `state://project-availability` tests (T-079, §7.10 events,
+//! D-09/DB-032, D-084) drive the availability service over the mock
+//! runtime with the event mounted the way `lib.rs`'s setup mounts it:
+//! the card's acceptance criterion end to end (a real `.git` fixture
+//! whose folder is moved away with `fs::rename` — the recheck marks
+//! the project unavailable and the typed event carries exactly that
+//! change; moving it back marks it available again), the diff-only
+//! contract (a first healthy probe and an unchanged recheck emit
+//! nothing — the baseline rule), DB-032's startup and window-focus
+//! triggers through their seams (`spawn_recheck` awaited by handle,
+//! `on_window_event` ruling on constructed window events), the
+//! future sync pipeline's direct entry, the in-flight coalescing
+//! slot (both a real pass parked mid-run on the gated database and
+//! the simpler externally-held slot), the empty active list, the
+//! honest no-database answer, and the registration pins.
 
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -4400,4 +4416,524 @@ fn the_exclusion_commands_are_registered_with_the_specta_builder() {
             "lib.rs must register the `{name}` command exactly once (§7.10, D-009)"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// `state://project-availability` (T-079, §7.10 events, D-09/DB-032, D-084)
+// ---------------------------------------------------------------------------
+
+/// A mock app in the healthy state the availability service serves
+/// (the `projects_app` shape) with the availability state managed and
+/// the event mounted — the registration `lib.rs`'s setup performs for
+/// `tauri::Wry`, pinned here for the mock runtime the emit/listen
+/// round trip needs (the specta builder is runtime-generic; the
+/// `EventRegistry` mount is what makes `emit` resolve the spec's wire
+/// name instead of panicking on a lookup).
+fn availability_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    app.manage(crate::availability::AvailabilityState::new());
+    tauri_specta::Builder::<tauri::test::MockRuntime>::new()
+        .events(tauri_specta::collect_events![
+            crate::availability::ProjectAvailabilityEvent
+        ])
+        .mount_events(&app);
+    (temp, app)
+}
+
+/// Subscribes the typed listener the frontend's generated
+/// `events.stateProjectAvailability` mirrors, returning the receiver
+/// every emitted payload lands on. Delivery to Rust listeners is
+/// synchronous inside `emit`, so once a recheck call has returned, the
+/// receiver already holds everything that pass emitted — the
+/// `try_recv`/timeout-free assertions below are deterministic.
+fn listen_availability(
+    app: &tauri::App<tauri::test::MockRuntime>,
+) -> std::sync::mpsc::Receiver<crate::availability::ProjectAvailabilityEvent> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    tauri_specta::Event::listen(app, move |event| {
+        let _ = sender.send(event.payload);
+    });
+    receiver
+}
+
+/// One expected diff entry, the typed payload's own shape — spelled
+/// out per test, never computed from the code under test.
+fn expected_change(
+    project_id: &str,
+    available: bool,
+    reason: Option<&str>,
+) -> crate::availability::ProjectAvailabilityChange {
+    crate::availability::ProjectAvailabilityChange {
+        project_id: project_id.to_owned(),
+        available,
+        unavailable_reason: reason.map(str::to_owned),
+    }
+}
+
+#[test]
+fn moving_a_project_folder_marks_it_unavailable_and_emits_the_change() {
+    // The card's acceptance criterion (D-09): a registered project
+    // with a real folder stays in the list when the folder moves —
+    // the recheck marks it unavailable, the event carries exactly
+    // that change, and moving the folder back marks it available
+    // again. Also pins the diff-only contract around it: the first
+    // healthy probe emits NOTHING (the baseline rule — a healthy
+    // startup has nothing to tell the UI) and an unchanged recheck is
+    // silent. This direct `recheck_and_emit` await is also the future
+    // sync pipeline's entry (§9.4/T-118 will call it as DB-032's
+    // before-sync checkpoint).
+    let (temp, app) = availability_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let folder = repo_dir(temp.path(), "alpha");
+    let project_id = seed_project(
+        &database,
+        folder.display().to_string(),
+        "/alpha",
+        "Alpha",
+        "ALP",
+        "red",
+    );
+    let events = listen_availability(&app);
+
+    // First probe: healthy — no change against the implicit baseline,
+    // nothing on the wire.
+    let first = tauri::async_runtime::block_on(crate::availability::recheck_and_emit(app.handle()))
+        .expect("the first recheck must succeed");
+    assert_eq!(first, Vec::new(), "a healthy first probe is no change");
+    assert!(
+        events.try_recv().is_err(),
+        "no event may be emitted for an empty diff"
+    );
+
+    // The folder moves away — the D-09 case.
+    let moved = temp.path().join("alpha-moved");
+    std::fs::rename(&folder, &moved).expect("moving the fixture folder must work");
+    let second =
+        tauri::async_runtime::block_on(crate::availability::recheck_and_emit(app.handle()))
+            .expect("the recheck after the move must succeed");
+    assert_eq!(
+        second,
+        vec![expected_change(&project_id, false, Some("missing"))],
+        "the moved folder marks the project unavailable"
+    );
+    assert_eq!(
+        events.try_recv().expect("the change must be emitted"),
+        crate::availability::ProjectAvailabilityEvent {
+            changes: vec![expected_change(&project_id, false, Some("missing"))],
+        },
+        "the event carries exactly the diff"
+    );
+
+    // Unchanged world: the repeat recheck is silent (idempotence —
+    // what makes rechecking on every focus safe).
+    let third = tauri::async_runtime::block_on(crate::availability::recheck_and_emit(app.handle()))
+        .expect("the unchanged recheck must succeed");
+    assert_eq!(third, Vec::new());
+    assert!(
+        events.try_recv().is_err(),
+        "an unchanged diff emits nothing"
+    );
+
+    // The folder returns: available again — the marking must clear,
+    // so the recovery direction is a change too.
+    std::fs::rename(&moved, &folder).expect("moving the fixture folder back must work");
+    let fourth =
+        tauri::async_runtime::block_on(crate::availability::recheck_and_emit(app.handle()))
+            .expect("the recheck after the restore must succeed");
+    assert_eq!(
+        fourth,
+        vec![expected_change(&project_id, true, None)],
+        "the returned folder marks the project available again"
+    );
+    assert_eq!(
+        events.try_recv().expect("the recovery must be emitted"),
+        crate::availability::ProjectAvailabilityEvent {
+            changes: vec![expected_change(&project_id, true, None)],
+        },
+        "the event carries the recovery"
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_missing_folder_on_the_first_probe_is_emitted_immediately() {
+    // The other half of the baseline rule: a project FIRST probed
+    // while its folder is already gone (a drive that was unplugged
+    // before the launch) is a change at startup — D-09's marking must
+    // not wait for a second pass.
+    let (temp, app) = availability_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    // Seeded without ever creating the folder — a `.git` fixture that
+    // does not exist.
+    let project_id = seed_project(
+        &database,
+        temp.path().join("gone").display().to_string(),
+        "/gone",
+        "Gone",
+        "GONE",
+        "blue",
+    );
+    let events = listen_availability(&app);
+
+    // The startup pass, awaited by its join handle for determinism
+    // (production drops the handle — the task runs on).
+    tauri::async_runtime::block_on(crate::availability::spawn_recheck(app.handle().clone()))
+        .expect("the startup pass must not fail");
+    assert_eq!(
+        events
+            .try_recv()
+            .expect("the first missing verdict is news"),
+        crate::availability::ProjectAvailabilityEvent {
+            changes: vec![expected_change(&project_id, false, Some("missing"))],
+        },
+        "a first probe finding the folder gone marks the project at startup"
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_focus_gain_triggers_the_recheck_and_other_window_events_do_not() {
+    // DB-032's window check point through the `on_window_event` seam:
+    // `Focused(true)` (which is also how a window's opening is
+    // delivered) runs the recheck; losing focus and unrelated events
+    // do not. The reaction is asserted on the seam's own outcome, and
+    // the spawned pass is awaited through the handle the `Recheck`
+    // arm carries — deterministic, no sleeps.
+    let (temp, app) = availability_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let folder = repo_dir(temp.path(), "beta");
+    let project_id = seed_project(
+        &database,
+        folder.display().to_string(),
+        "/beta",
+        "Beta",
+        "BET",
+        "green",
+    );
+    let events = listen_availability(&app);
+    // Baseline the cache, so the later move is the one observable
+    // change (the startup pass's job in production — done through the
+    // service entry here because this test pins the window seam, not
+    // the startup spawn).
+    tauri::async_runtime::block_on(crate::availability::recheck_and_emit(app.handle()))
+        .expect("the baseline recheck must succeed");
+    assert!(events.try_recv().is_err());
+
+    // The folder moves; a focus gain must pick it up.
+    std::fs::rename(&folder, temp.path().join("beta-moved"))
+        .expect("moving the fixture folder must work");
+    let reaction =
+        crate::availability::on_window_event(app.handle(), &tauri::WindowEvent::Focused(true));
+    match reaction {
+        crate::availability::WindowEventReaction::Recheck(pass) => {
+            tauri::async_runtime::block_on(pass).expect("the focus-triggered pass must not fail");
+        }
+        other => panic!("a focus gain must recheck, got {other:?}"),
+    }
+    assert_eq!(
+        events
+            .try_recv()
+            .expect("the focus recheck must emit the move"),
+        crate::availability::ProjectAvailabilityEvent {
+            changes: vec![expected_change(&project_id, false, Some("missing"))],
+        }
+    );
+
+    // The folder returns BEFORE the ignored events are driven: the
+    // cache still says `missing` while the world is available again,
+    // so any spurious recheck WOULD have a diff to emit — which is
+    // what makes the silence below meaningful (round-2 review P3-1:
+    // with the folder still moved, a recheck of an already-recorded
+    // `missing` verdict is silent by construction and proves nothing).
+    std::fs::rename(temp.path().join("beta-moved"), &folder)
+        .expect("moving the fixture folder back must work");
+    // Losing focus and an unrelated event are ignored — and emit
+    // nothing.
+    assert!(matches!(
+        crate::availability::on_window_event(app.handle(), &tauri::WindowEvent::Focused(false)),
+        crate::availability::WindowEventReaction::Ignored
+    ));
+    assert!(matches!(
+        crate::availability::on_window_event(
+            app.handle(),
+            &tauri::WindowEvent::Resized(Default::default())
+        ),
+        crate::availability::WindowEventReaction::Ignored
+    ));
+    assert!(
+        events.try_recv().is_err(),
+        "an ignored window event must not recheck — a diff is pending, so a spurious pass would emit"
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn an_in_flight_recheck_coalesces_a_second_spawn() {
+    // The focus-storm guard, end to end over the real service: a pass
+    // is held mid-run (parked on the one database connection, which
+    // `Db::run` serializes — the gate below holds it), and while that
+    // pass is genuinely in flight a second spawn must coalesce — no
+    // probes, no event. Releasing the gate lets the parked pass finish
+    // and emit. This is the round-1 review P1-1 regression test: the
+    // first cut released the slot before the pass started, which the
+    // in-flight observation below would have caught (`is_taken`
+    // staying false while the pass is parked).
+    let (temp, app) = availability_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    // The project's folder was never created: any real recheck has a
+    // diff to emit.
+    let project_id = seed_project(
+        &database,
+        temp.path().join("ghost").display().to_string(),
+        "/ghost",
+        "Ghost",
+        "GHO",
+        "amber",
+    );
+    let events = listen_availability(&app);
+    let slot = app
+        .state::<crate::availability::AvailabilityState>()
+        .inner()
+        .running
+        .clone();
+
+    // The gate: a `Db::run` operation that holds the connection and
+    // parks until the test releases it. It signals once it is inside
+    // the transaction, so "the gate is held" is deterministic.
+    let (release_gate_tx, release_gate_rx) = std::sync::mpsc::channel::<()>();
+    let (gate_held_tx, gate_held_rx) = std::sync::mpsc::channel::<()>();
+    let gate_database = database.clone();
+    let gate = tauri::async_runtime::spawn(async move {
+        gate_database
+            .run(move |_transaction| {
+                gate_held_tx.send(()).expect("the test waits for the gate");
+                release_gate_rx
+                    .recv()
+                    .expect("the test releases the gate before teardown");
+                Ok(())
+            })
+            .await
+    });
+    gate_held_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the gate must reach its transaction");
+
+    // The first pass: parks inside its own `Db::run` (the connection
+    // is taken), holding the in-flight slot across that await. The
+    // bounded wait observes the pass mid-run — the observable the
+    // broken slot could not provide.
+    let pass = crate::availability::spawn_recheck(app.handle().clone());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !slot.is_taken() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the spawned pass must take the in-flight slot (it is parked on the gated database)"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    // A second spawn while the first is in flight: coalesced — it
+    // returns without probing, and nothing is emitted yet (the parked
+    // pass has not even read the project list).
+    tauri::async_runtime::block_on(crate::availability::spawn_recheck(app.handle().clone()))
+        .expect("a coalesced spawn must not fail");
+    assert!(
+        events.try_recv().is_err(),
+        "a coalesced spawn must not probe or emit"
+    );
+
+    // Releasing the gate lets the parked pass run to completion: the
+    // diff is emitted, and the slot frees with the pass. The sender is
+    // kept alive until after the pass: a dropped sender would fail the
+    // gate's `recv` instead of releasing it.
+    release_gate_tx
+        .send(())
+        .expect("the gate receiver waits for this release");
+    // Two layers to unwrap: the join (the task ran) and the gated
+    // operation's own `Db::run` result (the transaction committed).
+    tauri::async_runtime::block_on(gate)
+        .expect("the gate task must join")
+        .expect("the gated operation must commit");
+    tauri::async_runtime::block_on(pass).expect("the parked pass must finish cleanly");
+    assert_eq!(
+        events
+            .try_recv()
+            .expect("the in-flight pass emits its diff"),
+        crate::availability::ProjectAvailabilityEvent {
+            changes: vec![expected_change(&project_id, false, Some("missing"))],
+        }
+    );
+    assert!(!slot.is_taken(), "the slot frees when the pass finishes");
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn an_externally_held_slot_coalesces_a_spawn_and_the_next_one_runs() {
+    // The slot held from outside (the documented `pub(crate)` seam) —
+    // the same skip behavior for a caller that cannot drive the
+    // database gate, plus the self-healing half: the moment the slot
+    // frees, the next spawn runs.
+    let (temp, app) = availability_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    // The project's folder was never created: any real recheck has a
+    // diff to emit.
+    let project_id = seed_project(
+        &database,
+        temp.path().join("ghost").display().to_string(),
+        "/ghost",
+        "Ghost",
+        "GHO",
+        "amber",
+    );
+    let events = listen_availability(&app);
+    let held = app
+        .state::<crate::availability::AvailabilityState>()
+        .inner()
+        .running
+        .clone()
+        .try_take()
+        .expect("the slot must be free before any recheck");
+
+    // The spawned pass finds the slot taken and returns silently.
+    tauri::async_runtime::block_on(crate::availability::spawn_recheck(app.handle().clone()))
+        .expect("a coalesced spawn must not fail");
+    assert!(
+        events.try_recv().is_err(),
+        "a coalesced spawn must not probe or emit"
+    );
+
+    // Freed, the next spawn does the work — the FULL payload, not just
+    // "some event" (round-2 review P3-4: the pending diff is exactly
+    // the one first-probe change).
+    drop(held);
+    tauri::async_runtime::block_on(crate::availability::spawn_recheck(app.handle().clone()))
+        .expect("the pass after the slot freed must not fail");
+    assert_eq!(
+        events
+            .try_recv()
+            .expect("the pass after the slot freed emits the pending diff"),
+        crate::availability::ProjectAvailabilityEvent {
+            changes: vec![expected_change(&project_id, false, Some("missing"))],
+        }
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "exactly one pass ran, so exactly one event"
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn an_empty_active_project_list_emits_nothing() {
+    // The empty-world answer: no active projects means no probes, no
+    // diff, no event — the recheck succeeds (an empty database is a
+    // healthy state, not an error).
+    let (temp, app) = availability_app();
+    let events = listen_availability(&app);
+
+    let changes =
+        tauri::async_runtime::block_on(crate::availability::recheck_and_emit(app.handle()))
+            .expect("the empty-list recheck must succeed");
+    assert_eq!(changes, Vec::new());
+    assert!(events.try_recv().is_err());
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_recheck_without_a_database_answers_the_honest_no_database_error() {
+    // Recovery mode (the T-024 state): no `Db` managed. The recheck
+    // answers the same honest `NoDatabase` fallback every database
+    // command does — not a panic, not a pretend-empty diff — and
+    // emits nothing; the fire-and-forget spawn takes the same error
+    // through its logging edge without failing its own task.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(crate::availability::AvailabilityState::new());
+    tauri_specta::Builder::<tauri::test::MockRuntime>::new()
+        .events(tauri_specta::collect_events![
+            crate::availability::ProjectAvailabilityEvent
+        ])
+        .mount_events(&app);
+    let events = listen_availability(&app);
+
+    let error = tauri::async_runtime::block_on(crate::availability::recheck_and_emit(app.handle()))
+        .expect_err("the no-database state must fail honestly");
+    assert_eq!(error.code.as_str(), "E_DB_LOCKED");
+    assert_eq!(error.message_key, "errors.db_locked");
+    assert_eq!(
+        error.details.map(|details| details.os_kind),
+        Some(Some("NoDatabase".to_owned())),
+        "the diagnostic names the missing state"
+    );
+    assert!(events.try_recv().is_err());
+
+    // The spawned trigger survives the same state (its failure goes
+    // to the log facade, not the task's own result).
+    tauri::async_runtime::block_on(crate::availability::spawn_recheck(app.handle().clone()))
+        .expect("the spawned pass must complete even without a database");
+    assert!(events.try_recv().is_err());
+
+    // Windows teardown rule: no `Db` is managed here; the temp root
+    // still closes last.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_project_availability_event_and_its_triggers_are_registered_with_the_specta_builder() {
+    // The §7.10 event plus DB-032's two wired check points, each
+    // registered exactly once (the D-034 wiring-pin rationale — the
+    // round-1 review P2-1 gap): without these pins, dropping the
+    // event registration or either trigger call site would leave
+    // `export_bindings_are_up_to_date` green (it silently rewrites the
+    // committed bindings without the event) and every seam test green
+    // (they drive the seams, not `lib.rs`'s call sites), while the
+    // startup and window check points silently disappear.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("availability::ProjectAvailabilityEvent")
+            .count(),
+        1,
+        "lib.rs must register the `state://project-availability` event exactly once (§7.10)"
+    );
+    assert_eq!(
+        lib.matches("availability::spawn_recheck").count(),
+        1,
+        "lib.rs must wire DB-032's startup check point exactly once"
+    );
+    assert_eq!(
+        lib.matches("availability::on_window_event").count(),
+        1,
+        "lib.rs must wire DB-032's window check point exactly once"
+    );
 }

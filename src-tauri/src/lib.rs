@@ -7,7 +7,7 @@
 
 use specta_typescript::Typescript;
 use tauri::Manager;
-use tauri_specta::{Builder, collect_commands};
+use tauri_specta::{Builder, collect_commands, collect_events};
 
 // The IPC error contract (spec §7.10, §10): AppError and the MVP
 // error-code registry, exported to the frontend through the specta
@@ -56,6 +56,12 @@ pub(crate) mod session_paths;
 // build path never calls it (its sole caller is the command).
 pub(crate) mod markdown;
 
+// The project-availability service (spec §7.10's
+// `state://project-availability` event; D-09/DB-032's three check
+// points; T-079): the D-084 re-probe of every active project, the
+// session diff cache, and the startup/focus triggers wired below.
+pub(crate) mod availability;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -100,6 +106,17 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::settings_get::<tauri::Wry>,
             commands::settings_set::<tauri::Wry>,
         ])
+        // The registered §7.10 events: `state://project-availability`
+        // (T-079, D-09/DB-032) — the first event the builder carries,
+        // emitted by `availability::recheck_and_emit` at DB-032's
+        // three check points. The wire name is the spec's literal
+        // `state://…` spelling (pinned by the manual `Event`
+        // implementation in `availability.rs`); the generated
+        // TypeScript accessor is its camelCase form
+        // (`stateProjectAvailability`). Every later event task
+        // (sync://progress, state://dirty, …) lists its own §7.10
+        // name here.
+        .events(collect_events![availability::ProjectAvailabilityEvent,])
         // `AppError` (§7.10: every command returns `Result<T, AppError>`)
         // is registered directly instead of through a command
         // signature: the type must stay reachable even when a command
@@ -176,6 +193,26 @@ pub fn run() {
     // no `opener:` permission and cannot open arbitrary URLs/paths.
     let tauri_builder = tauri_builder.plugin(tauri_plugin_opener::init());
 
+    // DB-032's window check point (D-09, T-079): every window event
+    // routes through the availability trigger — a focus gain
+    // (`Focused(true)`, which is also how "the window opened" is
+    // delivered) rechecks all active projects in a fire-and-forget
+    // task behind the in-flight slot; everything else is ignored.
+    // Routed through the `on_window_event` seam (not per-window
+    // listeners) so every window of the app qualifies, present and
+    // future, and the handler never blocks the event loop's thread
+    // (SYS-001 — the probes run on the spawned task's blocking pool).
+    let tauri_builder = tauri_builder.on_window_event(|window, event| {
+        if let availability::WindowEventReaction::Recheck(_pass) =
+            availability::on_window_event(window.app_handle(), event)
+        {
+            // The pass's join handle is deliberately dropped here:
+            // production never waits on a focus-triggered recheck —
+            // the task runs on (the handle detaches on drop, tokio's
+            // semantics); only the IPC tests await it.
+        }
+    });
+
     tauri_builder
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
@@ -217,6 +254,16 @@ pub fn run() {
             // mode (recovery included: no database is involved in
             // opening a picker).
             app.manage(session_paths::SessionPaths::new());
+
+            // The availability session cache (D-09/DB-032, T-079):
+            // the last D-084 verdicts per active project, plus the
+            // in-flight slot that coalesces overlapping rechecks.
+            // Managed here for the same reason as the allowlist —
+            // infallible, needed in every mode (window events start
+            // only after this hook, and in recovery mode the recheck
+            // answers the honest `NoDatabase` error over it instead
+            // of panicking on a missing lookup).
+            app.manage(availability::AvailabilityState::new());
 
             // Machine-level config (spec §5.8, SYS-011…013): read or
             // create `config.toml` from the data directory — before
@@ -366,6 +413,20 @@ pub fn run() {
             let retention_db = database.clone();
             app.manage(database);
             retention::spawn_daily_cleanup(retention_db);
+
+            // DB-032's startup check point (D-09, T-079): one
+            // availability recheck of every active project, spawned —
+            // not awaited — so four metadata probes per project over
+            // possibly dead drives cannot hold the launch (SYS-001;
+            // NFR-002's startup budget). Deliberately the LAST startup
+            // step: the event is mounted (the hook's first line), the
+            // database is managed (the recheck reads the project list
+            // through its executor), and the diff cache above exists.
+            // The pass emits `state://project-availability` only when
+            // some project is found unavailable (the baseline rule —
+            // `availability.rs` module docs); a failure is logged
+            // through the facade, never fatal to the launch.
+            availability::spawn_recheck(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

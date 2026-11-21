@@ -832,6 +832,46 @@ pub(crate) fn exclusion_remove_failed(error: &AppError) {
     );
 }
 
+/// The availability recheck failed (T-079, D-09/DB-032, §10's
+/// every-error rule): the payload is the error's own §7.10 vocabulary,
+/// in the `activity_list_failed` shape. Logged by the fire-and-forget
+/// triggers (`spawn_recheck`) — the startup pass and the focus pass
+/// have no caller to return to; the sync pipeline, when it adopts
+/// `recheck_and_emit`, branches on the returned error itself and this
+/// line is its durable half. The reachable answers are the honest
+/// `NoDatabase` fallback (recovery mode) and the classified store
+/// errors of the project-list read. `error` level per the facade
+/// contract; a *successful* check logs nothing — probing folders that
+/// mostly answer "fine" is not an event, and an unchanged diff emits
+/// nothing either (the diff contract in `availability.rs`).
+pub(crate) fn availability_check_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::availability",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "the project-availability recheck failed"
+    );
+}
+
+/// Emitting the `state://project-availability` event failed (T-079):
+/// the recheck itself succeeded — its diff was computed and is
+/// returned to the caller — but the UI update did not leave the
+/// process. `warn`, not `error`: the next check point re-detects the
+/// same diff (the cache is deliberately left stale on a failed emit —
+/// the at-least-once contract in `availability.rs`) and retries, so
+/// this line marks a missed update, not lost state. The tauri error
+/// itself is the whole payload — it carries no user paths.
+pub(crate) fn availability_emit_failed(error: &tauri::Error) {
+    tracing::warn!(
+        target: "eunomia::availability",
+        error = %error,
+        "emitting the project-availability event failed; the next check point retries"
+    );
+}
+
 /// A file operation on a project's library file — the SEC-008 core
 /// event. The upcoming variant, sync and backup tasks log through this
 /// helper: it takes the operation code, the file's path and the numeric

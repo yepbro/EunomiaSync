@@ -2,6 +2,7 @@
 
 import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 import type { InvokeOptions } from "@tauri-apps/api/core";
+import * as __TAURI_EVENT from "@tauri-apps/api/event";
 
 /** Commands */
 export const commands = {
@@ -348,6 +349,11 @@ export const commands = {
 	 *  line (the info+user+ok mirror policy, D-051).
 	 */
 	settingsSet: (changes: SettingChange[], options?: InvokeOptions) => __TAURI_INVOKE<SettingItem[]>("settings_set", { changes }, options),
+};
+
+/** Events */
+export const events = {
+	stateProjectAvailability: makeEvent<ProjectAvailabilityEvent_Serialize, ProjectAvailabilityEvent_Deserialize>("state://project-availability"),
 };
 
 /* Types */
@@ -1332,6 +1338,121 @@ export type ProjectAddResult_Serialize = {
 };
 
 /**
+ *  One entry of the `state://project-availability` diff (§7.10): the
+ *  project a change is about, addressed the way every project action
+ *  addresses it (its row id), plus the verdict that now holds. The
+ *  display name is deliberately absent — the UI already holds it
+ *  keyed by id from `projects_list`, and a copy here could only
+ *  drift.
+ */
+export type ProjectAvailabilityChange = ProjectAvailabilityChange_Serialize | ProjectAvailabilityChange_Deserialize;
+
+/**
+ *  One entry of the `state://project-availability` diff (§7.10): the
+ *  project a change is about, addressed the way every project action
+ *  addresses it (its row id), plus the verdict that now holds. The
+ *  display name is deliberately absent — the UI already holds it
+ *  keyed by id from `projects_list`, and a copy here could only
+ *  drift.
+ */
+export type ProjectAvailabilityChange_Deserialize = {
+	/**
+	 *  The project row id (UUIDv7 TEXT, DB-002) whose availability
+	 *  changed since the previous check.
+	 */
+	project_id: string,
+	/**  The verdict that now holds for the folder. */
+	available: boolean,
+	/**
+	 *  Why [`ProjectAvailabilityChange::available`] is `false`, in the
+	 *  D-084 reason spellings; `None` when the folder is (again)
+	 *  available.
+	 */
+	unavailable_reason?: string | null,
+};
+
+/**
+ *  One entry of the `state://project-availability` diff (§7.10): the
+ *  project a change is about, addressed the way every project action
+ *  addresses it (its row id), plus the verdict that now holds. The
+ *  display name is deliberately absent — the UI already holds it
+ *  keyed by id from `projects_list`, and a copy here could only
+ *  drift.
+ */
+export type ProjectAvailabilityChange_Serialize = {
+	/**
+	 *  The project row id (UUIDv7 TEXT, DB-002) whose availability
+	 *  changed since the previous check.
+	 */
+	project_id: string,
+	/**  The verdict that now holds for the folder. */
+	available: boolean,
+	/**
+	 *  Why [`ProjectAvailabilityChange::available`] is `false`, in the
+	 *  D-084 reason spellings; `None` when the folder is (again)
+	 *  available.
+	 */
+	unavailable_reason: string | null,
+};
+
+/**
+ *  The `state://project-availability` event payload (§7.10): only the
+ *  projects whose verdict changed since the previous check, in probe
+ *  order (`sort_order`). Never emitted with an empty `changes`.
+ * 
+ *  The event name is the spec's literal wire name (it is what the
+ *  frontend listens for), pinned by the manual
+ *  [`tauri_specta::Event`] implementation below — the crate's derive
+ *  macro would build the name from the struct's identifier and cannot
+ *  produce the `state://` prefix, and the `derive` cargo feature that
+ *  ships it is not enabled (the workspace pins
+ *  `tauri-specta = "=2.0.0-rc.29"` with `typescript` only).
+ */
+export type ProjectAvailabilityEvent = ProjectAvailabilityEvent_Serialize | ProjectAvailabilityEvent_Deserialize;
+
+/**
+ *  The `state://project-availability` event payload (§7.10): only the
+ *  projects whose verdict changed since the previous check, in probe
+ *  order (`sort_order`). Never emitted with an empty `changes`.
+ * 
+ *  The event name is the spec's literal wire name (it is what the
+ *  frontend listens for), pinned by the manual
+ *  [`tauri_specta::Event`] implementation below — the crate's derive
+ *  macro would build the name from the struct's identifier and cannot
+ *  produce the `state://` prefix, and the `derive` cargo feature that
+ *  ships it is not enabled (the workspace pins
+ *  `tauri-specta = "=2.0.0-rc.29"` with `typescript` only).
+ */
+export type ProjectAvailabilityEvent_Deserialize = {
+	/**
+	 *  The changed projects; empty diffs are not emitted (see the
+	 *  module docs' diff contract).
+	 */
+	changes: ProjectAvailabilityChange_Deserialize[],
+};
+
+/**
+ *  The `state://project-availability` event payload (§7.10): only the
+ *  projects whose verdict changed since the previous check, in probe
+ *  order (`sort_order`). Never emitted with an empty `changes`.
+ * 
+ *  The event name is the spec's literal wire name (it is what the
+ *  frontend listens for), pinned by the manual
+ *  [`tauri_specta::Event`] implementation below — the crate's derive
+ *  macro would build the name from the struct's identifier and cannot
+ *  produce the `state://` prefix, and the `derive` cargo feature that
+ *  ships it is not enabled (the workspace pins
+ *  `tauri-specta = "=2.0.0-rc.29"` with `typescript` only).
+ */
+export type ProjectAvailabilityEvent_Serialize = {
+	/**
+	 *  The changed projects; empty diffs are not emitted (see the
+	 *  module docs' diff contract).
+	 */
+	changes: ProjectAvailabilityChange_Serialize[],
+};
+
+/**
  *  One project column entry on the `projects_list` wire (§7.4 MAIN-028,
  *  §7.1): the facts the matrix column renders plus the identity the
  *  column's actions (archive, reorder, "Locate…") call back with, and
@@ -1496,3 +1617,29 @@ export type SettingItem = {
 	 */
 	value: string,
 };
+
+/* Tauri Specta runtime */
+type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;
+
+type EventEmitTo<T> = [T] extends [null] ? (target: __TAURI_EVENT.EventTarget | string) => Promise<void> : (target: __TAURI_EVENT.EventTarget | string, payload: T) => Promise<void>;
+
+function makeEvent<TListen, TEmit = TListen>(name: string, serialize?: (payload: TEmit) => unknown, deserialize?: (payload: any) => TListen) {
+    const mapEvent = (cb: __TAURI_EVENT.EventCallback<TListen>) => (event: __TAURI_EVENT.Event<any>) => cb({ ...event, payload: deserialize ? deserialize(event.payload) : event.payload });
+    const mapPayload = (payload: TEmit) => serialize ? serialize(payload) : payload;
+
+    const base = {
+        listen: (cb: __TAURI_EVENT.EventCallback<TListen>) => __TAURI_EVENT.listen(name, mapEvent(cb)),
+        once: (cb: __TAURI_EVENT.EventCallback<TListen>) => __TAURI_EVENT.once(name, mapEvent(cb)),
+        emit: ((payload: TEmit) => __TAURI_EVENT.emit(name, mapPayload(payload)) as unknown) as EventEmit<TEmit>,
+        emitTo: ((to: __TAURI_EVENT.EventTarget | string, payload: TEmit) => __TAURI_EVENT.emitTo(to, name, mapPayload(payload)) as unknown) as EventEmitTo<TEmit>
+    };
+
+    const fn = (target: import("@tauri-apps/api/webview").Webview | import("@tauri-apps/api/window").Window) => ({
+        listen: (cb: __TAURI_EVENT.EventCallback<TListen>) => target.listen(name, mapEvent(cb)),
+        once: (cb: __TAURI_EVENT.EventCallback<TListen>) => target.once(name, mapEvent(cb)),
+        emit: ((payload: TEmit) => target.emit(name, mapPayload(payload)) as unknown) as EventEmit<TEmit>,
+        emitTo: ((to: __TAURI_EVENT.EventTarget | string, payload: TEmit) => target.emitTo(to, name, mapPayload(payload)) as unknown) as EventEmitTo<TEmit>
+    });
+
+    return Object.assign(fn, base);
+}

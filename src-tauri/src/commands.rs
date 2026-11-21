@@ -76,7 +76,7 @@ use crate::recovery::{self, DbBackupInfo};
 use crate::session_paths;
 
 use eunomia_core::project::{Color, ProjectId};
-use eunomia_fs::paths::{NotARepoError, ProjectUnavailableError};
+use eunomia_fs::paths::NotARepoError;
 use eunomia_fs::write_access::WriteAccessError;
 use eunomia_store::action_log::{
     Action, ActionLogError, ActivityQuery, Details, Entity, EntityType, Level, LogEntry, Outcome,
@@ -1275,23 +1275,12 @@ fn dirty_verdict(project: &eunomia_store::projects::Project) -> bool {
 /// (D-09/MAIN-028 mark an unavailable project with "an icon and
 /// text" — the text needs the failure class). The spellings are the
 /// wire's own snake_case names of the probe's verdicts, not stored
-/// database cells.
+/// database cells — single-sourced in [`crate::availability::Verdict::probe`]
+/// (T-079) so the column this command serves and the
+/// `state://project-availability` event can never drift apart.
 fn availability_of(root: &Path) -> (bool, Option<String>) {
-    match eunomia_fs::paths::check_project_available(root) {
-        Ok(()) => (true, None),
-        Err(error) => (
-            false,
-            Some(
-                match error {
-                    ProjectUnavailableError::Missing { .. } => "missing",
-                    ProjectUnavailableError::NotADirectory => "not_a_directory",
-                    ProjectUnavailableError::NotReadable { .. } => "not_readable",
-                    ProjectUnavailableError::NoGitEntry => "no_git_entry",
-                }
-                .to_owned(),
-            ),
-        ),
-    }
+    let verdict = crate::availability::Verdict::probe(root);
+    (verdict.available, verdict.unavailable_reason)
 }
 
 /// Maps a store failure of the `projects_list` read onto the §7.10

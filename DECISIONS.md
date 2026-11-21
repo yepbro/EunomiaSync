@@ -9255,3 +9255,136 @@ comment counted as a usage) — comments are stripped before matching and
 the raw-scan intent plus its false-negative surface (aliased `t`,
 dynamic keys) documented in the spec; D-110's plural call form was a
 wrong shorthand (`t(key, n)`) — it now quotes the real expression.
+
+### D-112 — Project availability as a service: the session diff cache, the baseline rule, and the first specta event (a manual `Event` impl) — 2026-11-20
+
+Problem: T-079 turns D-09/DB-032's three check points (startup,
+window open/focus, before a sync) into the §7.10
+`state://project-availability` event with "the list of changes".
+Five points were open: (1) what the diff is taken against — nothing
+in the spec defines a baseline, and an honest first check of 500
+healthy projects is not 500 changes; (2) where the last known
+verdicts live — the database is meaningless across restarts (a
+folder's availability is a fact about the machine's current
+filesystem) and no `projects` column exists for it; (3) how the
+event reaches `src/bindings.ts` when tauri-specta's `Event` derive
+macro is compiled out (the workspace pins
+`tauri-specta = "=2.0.0-rc.29"` with the `typescript` feature only;
+`derive` is off) and the builder had NO events registered yet; (4)
+what a focus-storm does — `Focused(true)` can fire many times a
+second and every check probes four metadata syscalls per project
+over possibly dead drives; (5) what the future sync pipeline
+(§9.4/T-118) actually consumes from this task.
+
+Solution: `src-tauri/src/availability.rs` — a service module, not a
+command (the §5.1 layering: the commands layer owns commands, the
+service owns the check points), plus one wiring line each in
+`lib.rs`.
+
+- _The baseline rule._ The cache is session memory
+  (`AvailabilityState`, managed next to `SessionPaths` — infallible,
+  present in recovery mode too); a project never probed this session
+  counts as `(available, no reason)`. Consequences: a healthy first
+  check emits NOTHING (T-072's `projects_list` already probes fresh
+  on every read — an all-healthy startup has nothing to tell the
+  UI), a project first probed while its folder is gone IS a change
+  (D-09's marking must not wait for a second pass), and any later
+  contradiction of a recorded verdict is a change in both directions
+  (unavailable → available included: the marking must clear). The
+  event carries only the changed projects, in `sort_order` (probe
+  order), and is not emitted at all for an empty diff — repeated
+  checks with unchanged folders are silent, which is what makes
+  rechecking on every focus safe. The payload is minimal by design:
+  `project_id` + `available` + `unavailable_reason` per change — the
+  UI already holds names keyed by id from `projects_list`, and a
+  copy in the event could only drift.
+- _At-least-once delivery._ The probes are recorded only AFTER the
+  emit succeeded: a failed emit leaves the cache stale so the next
+  check point re-detects and re-emits the same diff (a lost UI
+  update would be permanent until the folder changed again; a
+  duplicate — possible when the guarded spawn overlaps the sync
+  pipeline's direct await — is a benign no-op for a listener that
+  sets state keyed by id). The emit failure itself is a `warn`
+  facade line (`availability_emit_failed`), not an error of the
+  check.
+- _The first specta event, by hand._ `impl tauri_specta::Event for
+ProjectAvailabilityEvent` with `const NAME =
+"state://project-availability"` — the spec's literal wire name
+  (tauri permits its characters: alphanumeric, `-`, `/`, `:`, `_`).
+  The derive macro would build the name from the struct's identifier
+  and cannot produce the `state://` prefix anyway. Registered in
+  `specta_builder().events(collect_events![…])`; `bindings.ts` now
+  carries `events.stateProjectAvailability` (the camelCase accessor
+  of the wire name) with the `makeEvent` runtime — the first events
+  export in the file (D-108's "no events today" note is thereby
+  superseded; the mock layer's typed event bus keys with the
+  generated payload types as it planned). The verdict spellings
+  (`missing`/`not_a_directory`/`not_readable`/`no_git_entry`) are
+  single-sourced in `Verdict::probe`, and `commands.rs`'s
+  `availability_of` (T-072) now delegates to it — the column and the
+  event cannot drift. Two recorded follow-ups for the first frontend
+  consumer (round-2 review P3-2/P3-3; both files are outside this
+  task's scope): the webview cannot subscribe yet —
+  `capabilities/default.json` grants nothing, and the generated
+  `events.…listen()` needs `core:event:listen` (with the matching
+  `config_tests.rs` pin) added by the frontend task that first
+  listens; and `src/ipc/mock/events.ts`'s header still says the
+  bindings carry commands only — stale since this commit, to refresh
+  when the mock bus adopts `ProjectAvailabilityEvent` as its first
+  key.
+- _Triggers._ Startup: `availability::spawn_recheck` spawned in the
+  setup hook AFTER the database is managed and the retention task —
+  a background task, because dead-drive probes must not hold the
+  launch (SYS-001, NFR-002). Window: every window event routes
+  through `availability::on_window_event`; `Focused(true)` — which
+  is also how a window's opening is delivered — is the trigger, and
+  ANY window qualifies (every window renders project state; the slot
+  makes extra passes harmless). Sync: the reusable entry is
+  `recheck_and_emit` itself, awaited directly — the pipeline (T-118)
+  calls it as its DB-032 checkpoint, gets the diff back to branch or
+  log on, and keeps its own §9.4 phase-1 per-project probes (a
+  verdict can go stale between the checkpoint and the write; the
+  cache is never the pipeline's gate).
+- _The in-flight slot._ `spawn_recheck` coalesces: an atomic flag
+  taken by `compare_exchange` and released by an RAII guard's `Drop`
+  — a `Send` guard (it owns an `Arc`), so it is held across the
+  task's awaits for the whole pass, DB read to emit. Nobody ever
+  waits on the flag, and it frees itself on panic (the unwind drops
+  the guard) so a crashed recheck cannot silence every later one.
+  (The first cut used `if slot.try_lock().is_err() { return; }` over
+  a `std::sync::Mutex` — the guard was a temporary of the `if`
+  condition, dropped at the condition's end, and being `!Send` it
+  could not have crossed the await at all: the slot guarded nothing.
+  Round-1 review P1-1; the regression is pinned by a test that parks
+  a real pass mid-run on the gated database connection and observes
+  the slot taken.)
+- _Recovery mode._ No `Db` → the honest `NoDatabase` `AppError`
+  through the same `managed_db` edge every database command uses,
+  logged by the spawned triggers through
+  `availability_check_failed` (the `activity_list_failed` shape); no
+  event, no panic — the recovery screen has no project columns to
+  mark.
+- _Tests._ 9 unit (the pure diff semantics: baseline both halves,
+  both directions, unchanged-both-ways, reason flip, prune-then-
+  return-is-first-probe, probe order; the spec-literal event name;
+  the slot's take-once/free-on-drop mechanics) + 8 over the mock
+  runtime in `ipc_tests.rs`: the card's criterion end to end
+  (`fs::rename` the real `.git` fixture away → the recheck answers
+  exactly the one change and the typed listener receives it;
+  unchanged recheck silent; rename back → the recovery change and
+  event), the missing-at-startup half, the window seam
+  (`Focused(true)` rechecks and emits, `Focused(false)`/`Resized`
+  are ignored and emit nothing while a diff is pending — silence
+  proves no recheck), the startup spawn awaited by its returned join
+  handle (the deterministic seam; production drops it), the
+  coalescing slot BOTH ways — a real pass parked mid-run on the
+  gated database connection (observed taken, second spawn silent,
+  gate released → the parked pass emits, slot frees) and the simpler
+  externally-held slot — the empty active list, the honest
+  no-database answer for both the direct entry and the spawn, and
+  the registration pin (`lib.rs` source scan, the D-034 rationale)
+  covering the `collect_events!` wiring AND both trigger call sites
+  (round-1 review P2-1). Rust-side listeners deliver synchronously
+  inside `emit`, so every no-event assertion is a `try_recv` after
+  the call returned — no timeouts (the one bounded wait observes a
+  pass enter its in-flight state).
