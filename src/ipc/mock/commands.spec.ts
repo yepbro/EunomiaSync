@@ -72,6 +72,101 @@ describe('projectsList', () => {
   })
 })
 
+describe('projectsReorder', () => {
+  it('splices the new active order around the archived row and journals the moved count', async () => {
+    // D-093/D-115's composition: the archived row keeps its own SLOT,
+    // the active slots take the reversed active order, the table
+    // renumbers gaplessly, and one project.changed entry carries the
+    // moved count.
+    const rows = mockState().projects
+    const archived = rows.find((r) => r.state === 'archived')
+    expect(archived).toBeDefined()
+    // Scatter the archived row into a middle slot first (§6.4 keeps
+    // its place), like the projectsList pin does.
+    const displaced = rows.find((r) => r.state === 'active' && r.sortOrder === 2)
+    if (archived && displaced && archived !== displaced) {
+      const swap = archived.sortOrder
+      archived.sortOrder = displaced.sortOrder
+      displaced.sortOrder = swap
+    }
+    const sorted = [...rows].sort((a, b) => a.sortOrder - b.sortOrder)
+    const actives = sorted.filter((r) => r.state === 'active')
+    expect(actives.length).toBeGreaterThanOrEqual(2)
+    const reversed = [...actives].reverse()
+
+    await expect(commands.projectsReorder(reversed.map((r) => r.id))).resolves.toBeNull()
+
+    const after = [...mockState().projects].sort((a, b) => a.sortOrder - b.sortOrder)
+    expect(after.filter((r) => r.state === 'active').map((r) => r.id)).toEqual(
+      reversed.map((r) => r.id),
+    )
+    // The archived row keeps its own slot (D-093/D-115).
+    expect(after[1]?.id).toBe(archived?.id)
+    expect(after.map((r) => r.sortOrder)).toEqual(after.map((_, index) => index + 1))
+    const page = await commands.activityList({ actions: ['project.changed'], limit: 500 })
+    const entry = page.entries.find((e) => e.details?.startsWith('{"changed":'))
+    expect(entry, 'one project.changed entry carrying the moved count').toBeDefined()
+    expect(entry?.visibility).toBe('user')
+    expect(entry?.result).toBe('ok')
+    expect(entry?.entity_type).toBeNull()
+  })
+
+  it('answers a re-sent unchanged order as a no-op, journaling nothing', async () => {
+    const sorted = [...mockState().projects]
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .filter((r) => r.state === 'active')
+    const journalLength = mockState().activity.length
+
+    await expect(commands.projectsReorder(sorted.map((r) => r.id))).resolves.toBeNull()
+
+    expect(mockState().activity).toHaveLength(journalLength)
+  })
+
+  it('rejects an archived id alongside a complete active set with the typed envelope', async () => {
+    const sorted = [...mockState().projects]
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .filter((r) => r.state === 'active')
+    const archivedId = mockState().projects.find((r) => r.state === 'archived')?.id ?? ''
+    const journalLength = mockState().activity.length
+
+    await expect(
+      commands.projectsReorder([...sorted.map((r) => r.id), archivedId]),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'ordered_ids',
+        value: archivedId,
+        reason:
+          'the list must name every active project exactly once: 1 not an active project, 0 missing, 0 repeated',
+      },
+    })
+
+    expect(mockState().activity).toHaveLength(journalLength)
+  })
+
+  it('rejects the empty list and a repeated id, changing nothing', async () => {
+    const journalLength = mockState().activity.length
+
+    await expect(commands.projectsReorder([])).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'ordered_ids', value: '0 ids sent' },
+    })
+
+    const sorted = [...mockState().projects]
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .filter((r) => r.state === 'active')
+    const [first] = sorted
+    await expect(
+      commands.projectsReorder([...sorted.map((r) => r.id), first?.id ?? '']),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { reason: expect.stringContaining('1 repeated') },
+    })
+
+    expect(mockState().activity).toHaveLength(journalLength)
+  })
+})
+
 describe('projectAddManual', () => {
   it('adds a picked folder with derived fields and serves it back', async () => {
     const before = await commands.projectsList(true)

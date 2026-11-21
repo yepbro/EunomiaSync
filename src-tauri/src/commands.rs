@@ -5,13 +5,14 @@
 //! module's `markdown_preview` (T-056), the Projects module's
 //! `projects_list` (T-072), the System module's
 //! `dialog_pick_folder` (T-073), the Projects module's
-//! `project_add_manual` (T-074) and the Projects module's
-//! `exclusions_list`/`exclusion_remove` (T-078):
+//! `project_add_manual` (T-074), the Projects module's
+//! `exclusions_list`/`exclusion_remove` (T-078) and the Projects
+//! module's `projects_reorder` (T-080):
 //! `app_open_data_folder`, `db_backups_list`, `db_restore_backup`,
 //! `db_recreate`, `activity_list`, `settings_get`, `settings_set`,
 //! `app_info`, `markdown_preview`, `projects_list`,
 //! `dialog_pick_folder`, `project_add_manual`, `exclusions_list`,
-//! `exclusion_remove`.
+//! `exclusion_remove`, `projects_reorder`.
 //!
 //! Every command returns `Result<T, AppError>` (§7.10) and is generic
 //! over the Tauri runtime — the documented tauri-specta shape for
@@ -1309,25 +1310,25 @@ pub(crate) fn projects_store_to_app_error(error: ProjectsError) -> AppError {
             "ProjectsCorrupt",
             &format!("a stored {column} cell is outside its vocabulary"),
         ),
-        // The write-path outcomes a command consuming this mapper
-        // cannot produce itself (the read commands produce none of
-        // them; `exclusion_remove` pre-empts its one by-id outcome —
-        // NotFound — with the typed refusal before the mapper runs);
-        // if one ever arrives anyway, the same fallback keeps the
-        // family label and class-only text — never the `path_key` or
-        // id, which are stored, path-derived identifiers on the same
-        // SEC-008 surfaces.
+        // The write-path outcomes a command consuming this mapper does
+        // not map itself (`exclusion_remove` pre-empts its one by-id
+        // outcome — NotFound — with the typed refusal before the
+        // mapper runs, and `projects_reorder` maps its own
+        // `ReorderMismatch` the same way); if one ever arrives anyway,
+        // the same fallback keeps the family label and class-only text
+        // — never the `path_key` or id, which are stored,
+        // path-derived identifiers on the same SEC-008 surfaces.
         write_outcome => projects_fallback(
             "ProjectsError",
             match &write_outcome {
                 ProjectsError::DuplicatePathKey { .. } => {
-                    "a duplicate path key conflict reached a command that does not produce it"
+                    "a duplicate path key conflict reached a command that does not map it"
                 }
                 ProjectsError::NotFound { .. } => {
-                    "a by-id write outcome reached a command that does not produce it"
+                    "a by-id write outcome reached a command that does not map it"
                 }
                 ProjectsError::ReorderMismatch { .. } => {
-                    "a reorder mismatch reached a command that does not produce it"
+                    "a reorder mismatch reached a command that does not map it"
                 }
                 ProjectsError::Member { .. } | ProjectsError::Sql(_) => {
                     "an unexpected projects store outcome"
@@ -2141,6 +2142,303 @@ async fn exclusion_remove_impl<R: Runtime>(app: AppHandle<R>, id: String) -> Res
 }
 
 // ---------------------------------------------------------------------------
+// `projects_reorder` (T-080, §7.10 Projects module, §7.1 PRJ-019/020,
+// DB-005, LOG-001…004, D-051, D-093)
+// ---------------------------------------------------------------------------
+
+/// The three D-093 mismatch forms of a reorder input, counted at the
+/// command's own boundary — the active-set twin of the store's
+/// [`ProjectsError::ReorderMismatch`] payload (the same three numbers,
+/// judged before any write runs).
+#[derive(Debug)]
+struct ReorderForms {
+    /// Input ids that name no active project (an unknown id, or an
+    /// archived one — a stale screen's list).
+    unknown: Vec<String>,
+    /// Active projects the input omits.
+    missing: usize,
+    /// Ids the input repeats.
+    duplicates: usize,
+}
+
+impl ReorderForms {
+    /// Whether any form is present — the one condition that refuses
+    /// the reorder.
+    fn any(&self) -> bool {
+        !self.unknown.is_empty() || self.missing > 0 || self.duplicates > 0
+    }
+}
+
+/// Builds the full-table permutation a reorder writes from the stored
+/// order and the UI's active list (PRJ-019/020): the new active order
+/// is zipped into the stored table order — every slot the stored table
+/// fills with an **active** project receives the next id of the input,
+/// and every archived row keeps exactly its own slot and `sort_order`
+/// (the least destructive reading of D-093/§6.4: archive/restore
+/// already keep a row's position, and a column drag must not move the
+/// rows the matrix does not even render).
+///
+/// Returns the permutation plus how many positions actually change —
+/// the no-op verdict that keeps a replayed drag from writing (and
+/// journaling) anything — or the three mismatch forms when the input
+/// does not name the active set exactly once each.
+fn composed_reorder<'a>(
+    stored: &[(&'a str, bool)],
+    ordered_ids: &'a [String],
+) -> Result<(Vec<&'a str>, usize), ReorderForms> {
+    let mut seen: std::collections::HashSet<&str> =
+        std::collections::HashSet::with_capacity(ordered_ids.len());
+    let mut duplicates = 0usize;
+    for id in ordered_ids {
+        if !seen.insert(id.as_str()) {
+            duplicates += 1;
+        }
+    }
+    let active: std::collections::HashSet<&str> = stored
+        .iter()
+        .filter(|(_, is_active)| *is_active)
+        .map(|(id, _)| *id)
+        .collect();
+    let unknown: Vec<String> = ordered_ids
+        .iter()
+        .filter(|id| !active.contains(id.as_str()))
+        .cloned()
+        .collect();
+    let missing = active.difference(&seen).count();
+    let forms = ReorderForms {
+        unknown,
+        missing,
+        duplicates,
+    };
+    if forms.any() {
+        return Err(forms);
+    }
+    let mut input = ordered_ids.iter().map(String::as_str);
+    let mut permutation: Vec<&str> = Vec::with_capacity(stored.len());
+    let mut changed = 0usize;
+    for (id, is_active) in stored {
+        let new_id = if *is_active {
+            input
+                .next()
+                .expect("the input names exactly the active set")
+        } else {
+            *id
+        };
+        if *id != new_id {
+            changed += 1;
+        }
+        permutation.push(new_id);
+    }
+    Ok((permutation, changed))
+}
+
+/// A `projects_reorder` input rejection: `E_VALIDATION` in the
+/// field/value/reason shape (the [`rejected_field`] builder's list
+/// form), with the reason naming all three counts. The value echoes
+/// the offending caller ids — capped, so a buggy caller's unbounded
+/// list cannot bloat the envelope or its log line — or, when the
+/// offending form is missing-only, the count of ids the caller did
+/// send; stored ids never travel on these surfaces (the D-096 rule:
+/// `params` and the log line are exactly what the localization and
+/// the diagnostics read).
+fn rejected_reorder(forms: &ReorderForms, sent: usize) -> AppError {
+    // The per-id bound (UTF-8 code points, so a multi-byte id cannot
+    // panic the cut): a real project id is a 36-char UUIDv7, which
+    // passes intact — only an absurdly long caller string is cut.
+    const ECHO_LIMIT: usize = 5;
+    const ID_CHARS: usize = 64;
+    let value = if forms.unknown.is_empty() {
+        format!("{sent} ids sent")
+    } else {
+        let echo = forms.unknown[..forms.unknown.len().min(ECHO_LIMIT)]
+            .iter()
+            .map(|id| {
+                let bounded: String = id.chars().take(ID_CHARS).collect();
+                bounded
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if forms.unknown.len() > ECHO_LIMIT {
+            format!("{echo} (+{} more)", forms.unknown.len() - ECHO_LIMIT)
+        } else {
+            echo
+        }
+    };
+    rejected_field(
+        "ordered_ids",
+        &value,
+        &format!(
+            "the list must name every active project exactly once: \
+             {} not an active project, {} missing, {} repeated",
+            forms.unknown.len(),
+            forms.missing,
+            forms.duplicates
+        ),
+    )
+}
+
+/// Persists a new column order (§7.10 Projects module
+/// `projects_reorder`; §7.1 PRJ-019/020: the order is changed by
+/// dragging a column or through the "Move left / Move right" menu, and
+/// "the order is saved right away" — the AC pair: the order is kept
+/// after a restart).
+///
+/// `ordered_ids` is the complete list of **active** project ids in the
+/// new order — the columns the matrix renders, exactly the ids
+/// `projects_list`'s default active read serves (PRJ-019/020 reorders
+/// columns; the archived screen is not a column). Positions are
+/// table-wide (DB-005, D-093), so the command composes the full
+/// permutation inside its own transaction: the new active order is
+/// zipped into the stored table order with every archived row keeping
+/// its own slot ([`composed_reorder`] — the D-093 "splices the move
+/// in" recipe over `list(ListScope::All)`), and the store's
+/// [`reorder`](eunomia_store::projects::reorder) renumbers the whole
+/// table `1..=N`.
+///
+/// One transaction (D-037/D-051, §6.9 "an entity is never saved
+/// partly"): the ordered read, the composition, the renumbering and
+/// the LOG-001…004 journal entry — `project.changed` ("changing
+/// projects") at info/user/ok with [`Details::Bulk`] carrying how many
+/// positions moved, and no entity or project id: a reorder is one fact
+/// about many projects at once, the bulk parenthetical's shape. A
+/// failure between the writes rolls both back (the journal never
+/// claims an order that did not commit).
+///
+/// Idempotent (the replayed-drag rule): a list that composes to the
+/// stored order is a **verified no-op** — nothing is written and
+/// nothing is journaled (the journal must not claim a change that
+/// never happened, D-051), so re-sending the same order as many times
+/// as the UI retries converges with zero side effects. The shortcut
+/// yields only while the stored positions are the gapless `1..=N`
+/// DB-005 asks for: a tampered table is renumbered by the same call
+/// that serves a drag (the one writer that restores the invariant).
+///
+/// A list that does not name the active set exactly once each — an
+/// unknown or archived id, a missing active, a repeated id (a stale
+/// screen's list) — is the typed `E_VALIDATION` refusal naming all
+/// three counts ([`rejected_reorder`]): the whole operation is
+/// rejected before the first write, and the table is provably
+/// untouched. The store's own `ReorderMismatch` cannot follow a
+/// passing validation (one connection serializes the read and the
+/// write, D-037) but is mapped through the same refusal if it ever
+/// fires anyway — convergence, never a masked conflict (the D-103
+/// duplicate-race rule).
+///
+/// Failures reach the log with their §10 code
+/// ([`logging::projects_reorder_failed`]); a successful reorder is the
+/// journal entry itself (the D-051 mirror policy — info+user+ok is not
+/// mirrored to the file log).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn projects_reorder<R: Runtime>(
+    app: AppHandle<R>,
+    ordered_ids: Vec<String>,
+) -> Result<(), AppError> {
+    projects_reorder_impl(app, ordered_ids)
+        .await
+        .inspect_err(logging::projects_reorder_failed)
+}
+
+/// The body of [`projects_reorder`], split so the one logging edge
+/// covers every failure path (the `activity_list` shape).
+async fn projects_reorder_impl<R: Runtime>(
+    app: AppHandle<R>,
+    ordered_ids: Vec<String>,
+) -> Result<(), AppError> {
+    let database = managed_db(&app)?;
+    database
+        .run(move |transaction| {
+            // D-093: positions are table-wide, so the whole table in
+            // its current order is the base the move is spliced into —
+            // `list(Active)` alone is never a valid permutation.
+            let rows = eunomia_store::projects::list(transaction, ListScope::All)
+                .map_err(projects_store_to_app_error)?;
+            let stored: Vec<(&str, bool)> = rows
+                .iter()
+                .map(|project| {
+                    (
+                        project.id.as_str(),
+                        matches!(project.state, ProjectState::Active),
+                    )
+                })
+                .collect();
+            let (permutation, changed) =
+                composed_reorder(&stored, &ordered_ids).map_err(|forms| {
+                    // The typed refusal: caller input that does not
+                    // name the active set — nothing was written.
+                    rejected_reorder(&forms, ordered_ids.len())
+                })?;
+            if changed == 0 {
+                // The replayed-drag no-op — but only when the stored
+                // positions are ALREADY the gapless `1..=N` DB-005
+                // requires: a tampered, non-gapless table falls
+                // through to the renumbering, which is the one writer
+                // that restores the invariant. No shipped write path
+                // can produce such a table (creation appends `MAX + 1`
+                // and archive/restore keep positions, D-093) — the
+                // guard exists so the shortcut never preserves damage.
+                let gapless = rows.iter().enumerate().all(|(index, row)| {
+                    row.sort_order == i64::try_from(index + 1).expect("a table's length fits i64")
+                });
+                if gapless {
+                    return Ok(());
+                }
+            }
+            // DB-005's renumbering, still inside the operation's one
+            // transaction. A `ReorderMismatch` here is the
+            // store-contract twin of the validation above (normally
+            // pre-empted — the one connection serializes the read and
+            // the write, D-037): the same typed refusal, so a caller
+            // retry converges instead of meeting a misnamed fallback.
+            eunomia_store::projects::reorder(transaction, &permutation).map_err(
+                |error| match error {
+                    ProjectsError::ReorderMismatch {
+                        unknown,
+                        missing,
+                        duplicates,
+                    } => rejected_reorder(
+                        &ReorderForms {
+                            unknown,
+                            missing,
+                            duplicates,
+                        },
+                        permutation.len(),
+                    ),
+                    other => projects_store_to_app_error(other),
+                },
+            )?;
+            // LOG-001…004 ("changing projects") inside the operation's
+            // own transaction (D-051): one entry for the whole reorder,
+            // the bulk parenthetical's shape — the count of POSITIONS
+            // that moved rides `Details::Bulk`; no entity and no
+            // project id, because the change is about many projects at
+            // once and the Activity window's project filter must not
+            // mis-attribute it to one of them. The tampered-table
+            // repair path (a non-gapless table renumbered with zero
+            // positions moved) journals the same entry with `changed:
+            // 0` — kept deliberately: the operation DID rewrite the
+            // table, and a silent database rewrite with no journal
+            // trace would defeat the journal's audit purpose (the
+            // round-2 review's alternative, skipped here on purpose).
+            let mut entry = LogEntry::new(
+                Action::ProjectChanged,
+                Level::Info,
+                Visibility::User,
+                Outcome::Ok,
+            );
+            entry.details = Some(Details::Bulk {
+                changed: u64::try_from(changed).expect("a table wider than u64 rows is impossible"),
+            });
+            insert(transaction, &entry).map_err(activity_log_to_app_error)?;
+            // The D-051 mirror contract: one call per written entry
+            // (info+user+ok is the unmirrored shape today).
+            logging::action_logged(&entry);
+            Ok(())
+        })
+        .await
+}
+
+// ---------------------------------------------------------------------------
 // `markdown_preview` (T-056, §7.10 Library module, SEC-005, D-15, D-009)
 // ---------------------------------------------------------------------------
 
@@ -2892,6 +3190,172 @@ mod tests {
                 "no stored identifier travels in the diagnostic, got: {message}"
             );
         }
+    }
+
+    // ---- `projects_reorder` seam tests (T-080) -------------------------
+
+    #[test]
+    fn a_reorder_splices_the_active_order_around_the_archived_slots() {
+        // The composition rule (D-093's table-wide positions): the
+        // stored order [A1, Ar1, A2, Ar2, A3] (actives and archived
+        // interleaved, archived at their own slots) with the UI's
+        // active order [A3, A1, A2] composes to [A3, Ar1, A1, Ar2, A2]
+        // — every active slot takes the next input id in sequence, the
+        // archived rows keep their exact positions — with exactly the
+        // three active positions counted as changed.
+        let stored = [
+            ("a1", true),
+            ("r1", false),
+            ("a2", true),
+            ("r2", false),
+            ("a3", true),
+        ];
+        let input = ["a3", "a1", "a2"].map(str::to_owned);
+
+        let (permutation, changed) = composed_reorder(&stored, &input).expect("a valid active set");
+
+        assert_eq!(permutation, ["a3", "r1", "a1", "r2", "a2"]);
+        assert_eq!(changed, 3, "only the three active slots moved");
+    }
+
+    #[test]
+    fn a_reorder_that_composes_to_the_stored_order_is_a_verified_noop() {
+        // The replayed-drag rule: re-sending the current active order
+        // composes to the stored permutation — zero positions change,
+        // so the command writes and journals nothing. The single-active
+        // and empty-table shapes are the same rule's boundaries (one
+        // column cannot move; an empty matrix has nothing to move).
+        let stored: [(&str, bool); 3] = [("a1", true), ("r1", false), ("a2", true)];
+        let same = ["a1", "a2"].map(str::to_owned);
+        let (_, changed) = composed_reorder(&stored, &same).expect("the current order is valid");
+        assert_eq!(changed, 0);
+
+        let single = [("only", true)];
+        let (_, changed) =
+            composed_reorder(&single, &["only".to_owned()]).expect("the single column is valid");
+        assert_eq!(changed, 0);
+
+        let empty: [(&str, bool); 0] = [];
+        let (permutation, changed) =
+            composed_reorder(&empty, &[]).expect("an empty matrix accepts its empty order");
+        assert_eq!(permutation, Vec::<&str>::new());
+        assert_eq!(changed, 0);
+    }
+
+    #[test]
+    fn every_reorder_mismatch_form_is_counted_before_any_write() {
+        // The three D-093 forms at the command's active-set boundary:
+        // an unknown id (never a project), an archived id (a project,
+        // but not an active one — the stale-screen shape), a missing
+        // active, and a repeated id — each counted, none written.
+        let stored = [("a1", true), ("r1", false), ("a2", true)];
+
+        // An unknown id is `unknown` (and the actives it displaced are
+        // `missing`).
+        let forms = composed_reorder(&stored, &["a1".to_owned(), "ghost".to_owned()])
+            .expect_err("an unknown id must be rejected");
+        assert_eq!(forms.unknown, ["ghost".to_owned()]);
+        assert_eq!(forms.missing, 1, "a2 is absent from the list");
+        assert_eq!(forms.duplicates, 0);
+        assert!(forms.any());
+
+        // An archived id is the same `unknown` bucket at this boundary:
+        // it names no active project.
+        let forms = composed_reorder(&stored, &["r1".to_owned(), "a2".to_owned()])
+            .expect_err("an archived id must be rejected");
+        assert_eq!(forms.unknown, ["r1".to_owned()]);
+        assert_eq!(forms.missing, 1, "a1 is absent from the list");
+        assert_eq!(forms.duplicates, 0);
+
+        // A repeated id is counted on its own.
+        let forms = composed_reorder(
+            &stored,
+            &["a1".to_owned(), "a2".to_owned(), "a2".to_owned()],
+        )
+        .expect_err("a repeated id must be rejected");
+        assert!(forms.unknown.is_empty());
+        assert_eq!(forms.missing, 0);
+        assert_eq!(forms.duplicates, 1);
+
+        // The empty list against a non-empty active set is the pure
+        // missing form.
+        let forms = composed_reorder(&stored, &[]).expect_err("an empty list must be rejected");
+        assert!(forms.unknown.is_empty());
+        assert_eq!(forms.missing, 2);
+        assert_eq!(forms.duplicates, 0);
+    }
+
+    #[test]
+    fn a_reorder_refusal_carries_the_field_the_offending_ids_and_the_counts() {
+        // The `rejected_field` shape, list form: the field names the
+        // whole input, the value echoes only the offending CALLER ids
+        // (never stored ones — the D-096 rule), and the reason names
+        // all three counts so one assertion shape covers every form.
+        let forms = ReorderForms {
+            unknown: vec!["ghost".to_owned(), "r1".to_owned()],
+            missing: 2,
+            duplicates: 1,
+        };
+
+        let app_error = rejected_reorder(&forms, 5);
+
+        assert_eq!(app_error.code, ErrorCode::Validation);
+        assert_eq!(app_error.message_key, "errors.validation");
+        assert_eq!(
+            app_error.params.get("field").map(String::as_str),
+            Some("ordered_ids")
+        );
+        assert_eq!(
+            app_error.params.get("value").map(String::as_str),
+            Some("ghost, r1"),
+            "the value echoes the offending caller ids"
+        );
+        assert_eq!(
+            app_error.params.get("reason").map(String::as_str),
+            Some(
+                "the list must name every active project exactly once: \
+                 2 not an active project, 2 missing, 1 repeated"
+            )
+        );
+
+        // The missing-only form: no caller id offends, so the value
+        // names what the caller DID send (the empty-list boundary).
+        let forms = ReorderForms {
+            unknown: Vec::new(),
+            missing: 2,
+            duplicates: 0,
+        };
+        let app_error = rejected_reorder(&forms, 0);
+        assert_eq!(
+            app_error.params.get("value").map(String::as_str),
+            Some("0 ids sent")
+        );
+
+        // The echo is capped: a buggy caller's unbounded unknown list
+        // cannot bloat the envelope or its log line — neither by count…
+        let forms = ReorderForms {
+            unknown: (0..8).map(|index| format!("ghost-{index}")).collect(),
+            missing: 0,
+            duplicates: 0,
+        };
+        let app_error = rejected_reorder(&forms, 8);
+        assert_eq!(
+            app_error.params.get("value").map(String::as_str),
+            Some("ghost-0, ghost-1, ghost-2, ghost-3, ghost-4 (+3 more)")
+        );
+        // …nor by a single arbitrarily long id (each is cut at 64 code
+        // points; a real UUIDv7 id passes intact).
+        let forms = ReorderForms {
+            unknown: vec!["x".repeat(100)],
+            missing: 0,
+            duplicates: 0,
+        };
+        let app_error = rejected_reorder(&forms, 1);
+        let expected = "x".repeat(64);
+        assert_eq!(
+            app_error.params.get("value").map(String::as_str),
+            Some(expected.as_str())
+        );
     }
 
     #[test]

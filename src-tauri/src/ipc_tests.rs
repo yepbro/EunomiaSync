@@ -135,6 +135,20 @@
 //! slot (both a real pass parked mid-run on the gated database and
 //! the simpler externally-held slot), the empty active list, the
 //! honest no-database answer, and the registration pins.
+//!
+//! The `projects_reorder` tests (T-080, §7.10 Projects module, §7.1
+//! PRJ-019/020, DB-005, LOG-001…004) use the `projects_app` shape with
+//! the projects seeded through the T-071 repository: the card's
+//! acceptance criterion — the new order survives a real database
+//! REOPEN (the managed `Db` is dropped, the same data root is opened
+//! again through `Db::open`, and the stored `sort_order` still answers
+//! the new column order) — plus the archived-rows composition rule
+//! (their slots are untouched by a column drag), the one-transaction
+//! journal with its rollback proof, the verified no-op of a re-sent
+//! unchanged order, every typed refusal form with the table proven
+//! untouched, the corrupt-cell fallback, the empty and single-column
+//! boundaries, the honest no-database answer, and the registration
+//! pin.
 
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -4935,5 +4949,683 @@ fn the_project_availability_event_and_its_triggers_are_registered_with_the_spect
         lib.matches("availability::on_window_event").count(),
         1,
         "lib.rs must wire DB-032's window check point exactly once"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `projects_reorder` (T-080, §7.10 Projects module, §7.1 PRJ-019/020,
+// DB-005, LOG-001…004, D-051, D-093)
+// ---------------------------------------------------------------------------
+
+/// A mock app with `projects_reorder` registered over a fresh database
+/// — the `projects_app` shape plus the command under test.
+fn reorder_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::projects_reorder])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    (temp, app)
+}
+
+/// Invokes `projects_reorder` with the `orderedIds` wire value over the
+/// app's `main` webview.
+fn invoke_projects_reorder(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    ordered_ids: &[&str],
+) -> Result<(), serde_json::Value> {
+    let ids: Vec<String> = ordered_ids.iter().map(|id| (*id).to_owned()).collect();
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request("projects_reorder", serde_json::json!({ "orderedIds": ids })),
+    );
+    match response {
+        Ok(payload) => {
+            // The success payload is the unit value; deserializing it
+            // pins the wire shape (a `null` body, not something else).
+            payload
+                .deserialize::<()>()
+                .expect("the success payload must deserialize into the unit");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Every project row in stored `sort_order`, as `(id, sort_order,
+/// state)` triples — the assertions' window into the table (the
+/// `stored_projects` shape, keeping the position and state the
+/// reorder's semantics are about).
+fn stored_order(database: &crate::db::Db) -> Vec<(String, i64, String)> {
+    stored_projects(database)
+        .into_iter()
+        .map(|project| {
+            (
+                project.id,
+                project.sort_order,
+                project.state.as_str().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn projects_reorder_persists_the_new_column_order_across_a_database_reopen() {
+    // T-080's acceptance criterion: "the order is saved right away"
+    // (PRJ-019/020) and survives a restart — proven here at the layer
+    // the restart acts on: the managed `Db` is DROPPED (its connection
+    // closed), the same data root is opened again through `Db::open`,
+    // and the stored `sort_order` still answers the new column order,
+    // gapless (DB-005, D-093). The reorder's own journal entry is
+    // asserted in the transaction test below.
+    let (temp, app) = reorder_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let gamma = seed_project(
+        &database,
+        repo_dir(temp.path(), "gamma").display().to_string(),
+        "/gamma",
+        "Gamma",
+        "GAM",
+        "blue",
+    );
+    let alpha = seed_project(
+        &database,
+        repo_dir(temp.path(), "alpha").display().to_string(),
+        "/alpha",
+        "Alpha",
+        "ALP",
+        "red",
+    );
+    let beta = seed_project(
+        &database,
+        repo_dir(temp.path(), "beta").display().to_string(),
+        "/beta",
+        "Beta",
+        "BET",
+        "green",
+    );
+
+    // Act: a full reversal — the drag's result the UI would send.
+    invoke_projects_reorder(&webview, &[&beta, &gamma, &alpha])
+        .expect("saving the new order must succeed");
+
+    // The reopen: EVERY handle to the first connection closes first —
+    // the webview and the test's own `Db` clone both hold the app (and
+    // the clone holds the connection, D-037's `Arc<Mutex<…>>`), so
+    // `drop(webview)`, `drop(database)` and `drop(app)` must all run
+    // before the second open; then the same data root opens again and
+    // the fresh connection reads what the command committed (the
+    // `app_info` second-open shape).
+    drop(webview);
+    drop(database);
+    drop(app);
+    let reopened = crate::db::Db::open(temp.path())
+        .expect("reopening the database after the reorder must work");
+    assert_eq!(
+        stored_order(&reopened)
+            .iter()
+            .map(|(id, _, state)| (id.as_str(), state.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (beta.as_str(), "active"),
+            (gamma.as_str(), "active"),
+            (alpha.as_str(), "active"),
+        ],
+        "PRJ-019/020: the dragged order is the stored order after a reopen"
+    );
+    assert_eq!(
+        stored_order(&reopened)
+            .iter()
+            .map(|(_, position, _)| *position)
+            .collect::<Vec<_>>(),
+        [1, 2, 3],
+        "the renumbering stays gapless table-wide (DB-005)"
+    );
+
+    drop(reopened);
+    drop(temp);
+}
+
+#[test]
+fn projects_reorder_keeps_the_archived_rows_at_their_own_slots() {
+    // The composition rule over the table-wide positions (D-093, §6.4):
+    // the stored order [Alpha, Ar1, Beta, Ar2] — an archived row among
+    // the actives and one at the tail — reorders its ACTIVE slots to
+    // the UI's order while every archived row keeps exactly its own
+    // `sort_order` (a column drag must not move the rows the matrix
+    // does not render; archive/restore keep positions, and so does a
+    // reorder of the columns).
+    let (temp, app) = reorder_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let alpha = seed_project(
+        &database,
+        repo_dir(temp.path(), "alpha").display().to_string(),
+        "/alpha",
+        "Alpha",
+        "ALP",
+        "red",
+    );
+    let archived_middle = seed_project(
+        &database,
+        repo_dir(temp.path(), "archived-middle")
+            .display()
+            .to_string(),
+        "/archived-middle",
+        "Archived Middle",
+        "ARM",
+        "blue",
+    );
+    let beta = seed_project(
+        &database,
+        repo_dir(temp.path(), "beta").display().to_string(),
+        "/beta",
+        "Beta",
+        "BET",
+        "green",
+    );
+    let archived_tail = seed_project(
+        &database,
+        repo_dir(temp.path(), "archived-tail").display().to_string(),
+        "/archived-tail",
+        "Archived Tail",
+        "ART",
+        "purple",
+    );
+    archive_project(&database, archived_middle.clone());
+    archive_project(&database, archived_tail.clone());
+
+    // Act: the UI drags Beta's column before Alpha's.
+    invoke_projects_reorder(&webview, &[&beta, &alpha])
+        .expect("reordering around the archived rows must succeed");
+
+    // Assert: the actives swapped into the active slots 1 and 3; the
+    // archived rows still own the slots they had (2 and 4) — the
+    // full-table renumbering wrote around them.
+    assert_eq!(
+        stored_order(&database)
+            .iter()
+            .map(|(id, position, state)| (id.as_str(), *position, state.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (beta.as_str(), 1, "active"),
+            (archived_middle.as_str(), 2, "archived"),
+            (alpha.as_str(), 3, "active"),
+            (archived_tail.as_str(), 4, "archived"),
+        ]
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn projects_reorder_renumbers_and_journals_in_one_transaction() {
+    // LOG-001…004 ("changing projects", D-051): exactly one
+    // `project.changed` entry inside the operation's own transaction —
+    // info/user/ok, the count of moved positions in the Bulk detail,
+    // and no entity or project id (the reorder is one fact about many
+    // projects at once; the Activity window's project filter must not
+    // mis-attribute it).
+    let (temp, app) = reorder_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let a = seed_project(
+        &database,
+        repo_dir(temp.path(), "a").display().to_string(),
+        "/a",
+        "A",
+        "A",
+        "red",
+    );
+    let b = seed_project(
+        &database,
+        repo_dir(temp.path(), "b").display().to_string(),
+        "/b",
+        "B",
+        "B",
+        "blue",
+    );
+
+    invoke_projects_reorder(&webview, &[&b, &a]).expect("the reorder must succeed");
+
+    let journal = journal_entries(&database);
+    assert_eq!(journal.len(), 1, "one reorder, one entry");
+    assert_eq!(journal[0].action.as_str(), "project.changed");
+    assert_eq!(journal[0].level.as_str(), "info");
+    assert_eq!(journal[0].visibility.as_str(), "user");
+    assert_eq!(journal[0].result.as_str(), "ok");
+    assert_eq!(journal[0].entity, None, "no single project owns the change");
+    assert_eq!(journal[0].project_id, None);
+    assert_eq!(
+        journal[0].details,
+        Some(serde_json::json!({ "changed": 2 })),
+        "the Bulk detail carries how many positions moved"
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_failed_projects_reorder_rolls_back_the_renumbering_with_its_journal_entry() {
+    // D-051's in-transaction semantics, proven through the real
+    // command (the settings/exclusion rollback shape): the journal
+    // entry shares the operation's transaction, so a failure AFTER the
+    // renumbering succeeded rolls both back — the stored order stands
+    // and the journal claims nothing. The failure is staged
+    // deterministically inside the database: a trigger that rejects
+    // every journal insert (RAISE(ABORT) → SQLITE_CONSTRAINT → the
+    // shared base classifier's E_VALIDATION with the SQLite facts in
+    // details).
+    let (temp, app) = reorder_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let a = seed_project(
+        &database,
+        repo_dir(temp.path(), "a").display().to_string(),
+        "/a",
+        "A",
+        "A",
+        "red",
+    );
+    let b = seed_project(
+        &database,
+        repo_dir(temp.path(), "b").display().to_string(),
+        "/b",
+        "B",
+        "B",
+        "blue",
+    );
+    tauri::async_runtime::block_on(database.run(|tx| {
+        tx.execute_batch(
+            "CREATE TRIGGER reject_every_journal_entry BEFORE INSERT ON action_log
+             BEGIN SELECT RAISE(ABORT, 'test: reject'); END;",
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("staging the trigger must work");
+
+    let error = invoke_projects_reorder(&webview, &[&b, &a])
+        .expect_err("the staged abort must fail the reorder");
+    assert_eq!(
+        error["code"],
+        serde_json::json!("E_VALIDATION"),
+        "the constraint abort maps through the base classifier: {error}"
+    );
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("ConstraintViolation"),
+        "the SQLite facts travel in details: {error}"
+    );
+
+    // Assert: the renumbering rolled back with the journal insert —
+    // the stored order and the journal are exactly what they were.
+    assert_eq!(
+        stored_order(&database)
+            .iter()
+            .map(|(id, _, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        [a.as_str(), b.as_str()],
+        "the table kept its order"
+    );
+    assert_eq!(
+        journal_entries(&database).len(),
+        0,
+        "no entry claimed a reorder"
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn resending_the_current_order_is_a_verified_noop_that_writes_nothing() {
+    // The replayed-drag rule (make-operations-idempotent): a list that
+    // composes to the stored order is a no-op — nothing renumbered,
+    // nothing journaled. Re-sending the same NEW order after a real
+    // reorder is the same rule one step later: the second call changes
+    // zero positions and adds no journal entry.
+    let (temp, app) = reorder_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let a = seed_project(
+        &database,
+        repo_dir(temp.path(), "a").display().to_string(),
+        "/a",
+        "A",
+        "A",
+        "red",
+    );
+    let b = seed_project(
+        &database,
+        repo_dir(temp.path(), "b").display().to_string(),
+        "/b",
+        "B",
+        "B",
+        "blue",
+    );
+
+    // The current order, re-sent: a no-op with zero journal entries.
+    invoke_projects_reorder(&webview, &[&a, &b])
+        .expect("re-sending the current order must succeed");
+    assert_eq!(journal_entries(&database).len(), 0, "nothing changed");
+
+    // A real reorder, then its replay: one journal entry in total.
+    invoke_projects_reorder(&webview, &[&b, &a]).expect("the reorder must succeed");
+    invoke_projects_reorder(&webview, &[&b, &a]).expect("replaying the same order must succeed");
+    assert_eq!(
+        journal_entries(&database).len(),
+        1,
+        "the replay wrote nothing new"
+    );
+    assert_eq!(
+        stored_order(&database)
+            .iter()
+            .map(|(id, _, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        [b.as_str(), a.as_str()]
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn every_reorder_refusal_form_leaves_the_table_and_the_journal_untouched() {
+    // The three D-093 mismatch forms at the command's active-set
+    // boundary — an unknown id, an archived id (the stale-screen
+    // shape), a missing active (the empty list against a non-empty
+    // matrix), a repeated id — each answered with the typed
+    // `E_VALIDATION` envelope naming all three counts, with the whole
+    // operation rejected before the first write: the stored order and
+    // the journal are provably unchanged.
+    let (temp, app) = reorder_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let alpha = seed_project(
+        &database,
+        repo_dir(temp.path(), "alpha").display().to_string(),
+        "/alpha",
+        "Alpha",
+        "ALP",
+        "red",
+    );
+    let beta = seed_project(
+        &database,
+        repo_dir(temp.path(), "beta").display().to_string(),
+        "/beta",
+        "Beta",
+        "BET",
+        "green",
+    );
+    let archived = seed_project(
+        &database,
+        repo_dir(temp.path(), "archived").display().to_string(),
+        "/archived",
+        "Archived",
+        "ARC",
+        "blue",
+    );
+    archive_project(&database, archived.clone());
+    let ghost = "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f";
+
+    // An unknown id: reported as not-an-active-project, with the
+    // actives it displaced counted as missing.
+    let error = invoke_projects_reorder(&webview, &[&alpha, ghost])
+        .expect_err("an unknown id must be rejected");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"), "{error}");
+    assert_eq!(error["message_key"], serde_json::json!("errors.validation"));
+    assert_eq!(
+        error["params"],
+        serde_json::json!({
+            "field": "ordered_ids",
+            "value": ghost,
+            "reason": "the list must name every active project exactly once: \
+                       1 not an active project, 1 missing, 0 repeated",
+        })
+    );
+
+    // An archived id: the same not-an-active-project bucket (a stale
+    // screen's column list).
+    let error = invoke_projects_reorder(&webview, &[&alpha, &archived])
+        .expect_err("an archived id must be rejected");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(
+        error["params"]["value"],
+        serde_json::json!(archived),
+        "the offending caller id is echoed"
+    );
+    assert_eq!(
+        error["params"]["reason"],
+        serde_json::json!(
+            "the list must name every active project exactly once: \
+             1 not an active project, 1 missing, 0 repeated"
+        )
+    );
+
+    // The pure unknown form (the round-1 review gap): every active
+    // named exactly once PLUS one archived id — the exact stale-screen
+    // shape, with nothing missing. The composition must not run.
+    let error = invoke_projects_reorder(&webview, &[&alpha, &beta, &archived])
+        .expect_err("an archived id alongside a complete active set must be rejected");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(
+        error["params"]["reason"],
+        serde_json::json!(
+            "the list must name every active project exactly once: \
+             1 not an active project, 0 missing, 0 repeated"
+        ),
+        "the complete active set makes the refusal pure-unknown: {error}"
+    );
+
+    // The empty list against the non-empty active matrix: the pure
+    // missing form.
+    let error = invoke_projects_reorder(&webview, &[]).expect_err("an empty list must be rejected");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(
+        error["params"]["reason"],
+        serde_json::json!(
+            "the list must name every active project exactly once: \
+             0 not an active project, 2 missing, 0 repeated"
+        )
+    );
+
+    // A repeated id: counted on its own.
+    let error = invoke_projects_reorder(&webview, &[&alpha, &beta, &beta])
+        .expect_err("a repeated id must be rejected");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(
+        error["params"]["reason"],
+        serde_json::json!(
+            "the list must name every active project exactly once: \
+             0 not an active project, 0 missing, 1 repeated"
+        )
+    );
+
+    // Every refusal left the table and the journal exactly as they
+    // were: the creation order Alpha(1), Beta(2), Archived(3), with
+    // the archived row's position untouched (§6.4).
+    assert_eq!(
+        stored_order(&database)
+            .iter()
+            .map(|(id, position, state)| (id.as_str(), *position, state.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (alpha.as_str(), 1, "active"),
+            (beta.as_str(), 2, "active"),
+            (archived.as_str(), 3, "archived"),
+        ]
+    );
+    assert_eq!(journal_entries(&database).len(), 0, "nothing was journaled");
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn an_empty_matrix_and_a_single_column_are_noops() {
+    // The boundaries: a fresh database's empty active set accepts its
+    // empty order as a no-op (the drag surface has no columns), and a
+    // single active project has no other position to take — both
+    // succeed with nothing written and nothing journaled.
+    let (temp, app) = reorder_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+
+    invoke_projects_reorder(&webview, &[]).expect("the empty matrix accepts its empty order");
+    assert_eq!(journal_entries(&database).len(), 0);
+
+    let only = seed_project(
+        &database,
+        repo_dir(temp.path(), "only").display().to_string(),
+        "/only",
+        "Only",
+        "ONLY",
+        "red",
+    );
+    invoke_projects_reorder(&webview, &[&only]).expect("the single column is its own order");
+    assert_eq!(
+        stored_order(&database)
+            .iter()
+            .map(|(id, position, _)| (id.as_str(), *position))
+            .collect::<Vec<_>>(),
+        [(only.as_str(), 1)]
+    );
+    assert_eq!(journal_entries(&database).len(), 0);
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_corrupt_projects_cell_fails_the_reorder_with_the_fallback_envelope() {
+    // The corrupt-cells wire contract on the reorder's own read: the
+    // composition reads the whole table (`list(All)` — D-093), so a
+    // stored vocabulary cell outside its CHECK vocabulary fails the
+    // command with the recorded D-037 fallback and the
+    // `ProjectsCorrupt` diagnostic — never `E_VALIDATION` (corruption
+    // is not the caller's input) and never a raw cell on any SEC-008
+    // surface. Written through the `ignore_check_constraints` seam.
+    let (temp, app) = reorder_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let a = seed_project(
+        &database,
+        repo_dir(temp.path(), "a").display().to_string(),
+        "/a",
+        "A",
+        "A",
+        "red",
+    );
+    let b = seed_project(
+        &database,
+        repo_dir(temp.path(), "b").display().to_string(),
+        "/b",
+        "B",
+        "B",
+        "blue",
+    );
+    tauri::async_runtime::block_on(database.run(|tx| {
+        tx.execute_batch(
+            "PRAGMA ignore_check_constraints = 1;\n\
+             UPDATE projects SET state = 'bogus';\n\
+             PRAGMA ignore_check_constraints = 0;",
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("tampering the state cell through the executor must work");
+
+    let error = invoke_projects_reorder(&webview, &[&b, &a])
+        .expect_err("a corrupt cell must fail the reorder");
+
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(error["message_key"], serde_json::json!("errors.db_locked"));
+    assert_eq!(
+        error["params"],
+        serde_json::json!({}),
+        "no raw cell travels"
+    );
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("ProjectsCorrupt")
+    );
+    assert_eq!(
+        error["details"]["os_message"],
+        serde_json::json!("a stored state cell is outside its vocabulary"),
+        "the diagnostic names the column and class only"
+    );
+    // The renumbering never ran: the raw table keeps its creation
+    // order (read as raw cells — the repository read now fails on the
+    // tampered state).
+    let positions: Vec<(String, i64)> = tauri::async_runtime::block_on(database.run(|tx| {
+        let mut statement = tx
+            .prepare("SELECT id, sort_order FROM projects ORDER BY sort_order")
+            .map_err(crate::db::sqlite_error_to_app_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(crate::db::sqlite_error_to_app_error)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("reading the raw positions must work");
+    assert_eq!(
+        positions
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        [a.as_str(), b.as_str()],
+        "the table was not renumbered"
+    );
+
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn projects_reorder_answers_honestly_without_a_database() {
+    // The `projects_list` rule: recovery mode never pretends a write
+    // succeeded — the honest `NoDatabase` fallback, nothing written
+    // anywhere (there is no database to write to).
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::projects_reorder])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    let error = invoke_projects_reorder(
+        &main_webview(&app),
+        &["0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f"],
+    )
+    .expect_err("the no-database state must fail honestly");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(error["message_key"], serde_json::json!("errors.db_locked"));
+    assert_eq!(error["details"]["os_kind"], serde_json::json!("NoDatabase"));
+}
+
+#[test]
+fn the_projects_reorder_command_is_registered_with_the_specta_builder() {
+    // The §7.10 Projects-module name (D-009's fixed registry),
+    // registered exactly once (the D-034 wiring-pin rationale) — the
+    // bindings carry `projectsReorder` to the frontend through it.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("commands::projects_reorder").count(),
+        1,
+        "lib.rs must register the `projects_reorder` command exactly once (§7.10, D-009)"
     );
 }

@@ -302,6 +302,60 @@ export const commands = {
 	 */
 	projectsList: (includeArchived: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<ProjectColumnEntry_Serialize[]>("projects_list", { includeArchived }, options),
 	/**
+	 *  Persists a new column order (§7.10 Projects module
+	 *  `projects_reorder`; §7.1 PRJ-019/020: the order is changed by
+	 *  dragging a column or through the "Move left / Move right" menu, and
+	 *  "the order is saved right away" — the AC pair: the order is kept
+	 *  after a restart).
+	 * 
+	 *  `ordered_ids` is the complete list of **active** project ids in the
+	 *  new order — the columns the matrix renders, exactly the ids
+	 *  `projects_list`'s default active read serves (PRJ-019/020 reorders
+	 *  columns; the archived screen is not a column). Positions are
+	 *  table-wide (DB-005, D-093), so the command composes the full
+	 *  permutation inside its own transaction: the new active order is
+	 *  zipped into the stored table order with every archived row keeping
+	 *  its own slot ([`composed_reorder`] — the D-093 "splices the move
+	 *  in" recipe over `list(ListScope::All)`), and the store's
+	 *  [`reorder`](eunomia_store::projects::reorder) renumbers the whole
+	 *  table `1..=N`.
+	 * 
+	 *  One transaction (D-037/D-051, §6.9 "an entity is never saved
+	 *  partly"): the ordered read, the composition, the renumbering and
+	 *  the LOG-001…004 journal entry — `project.changed` ("changing
+	 *  projects") at info/user/ok with [`Details::Bulk`] carrying how many
+	 *  positions moved, and no entity or project id: a reorder is one fact
+	 *  about many projects at once, the bulk parenthetical's shape. A
+	 *  failure between the writes rolls both back (the journal never
+	 *  claims an order that did not commit).
+	 * 
+	 *  Idempotent (the replayed-drag rule): a list that composes to the
+	 *  stored order is a **verified no-op** — nothing is written and
+	 *  nothing is journaled (the journal must not claim a change that
+	 *  never happened, D-051), so re-sending the same order as many times
+	 *  as the UI retries converges with zero side effects. The shortcut
+	 *  yields only while the stored positions are the gapless `1..=N`
+	 *  DB-005 asks for: a tampered table is renumbered by the same call
+	 *  that serves a drag (the one writer that restores the invariant).
+	 * 
+	 *  A list that does not name the active set exactly once each — an
+	 *  unknown or archived id, a missing active, a repeated id (a stale
+	 *  screen's list) — is the typed `E_VALIDATION` refusal naming all
+	 *  three counts ([`rejected_reorder`]): the whole operation is
+	 *  rejected before the first write, and the table is provably
+	 *  untouched. The store's own `ReorderMismatch` cannot follow a
+	 *  passing validation (one connection serializes the read and the
+	 *  write, D-037) but is mapped through the same refusal if it ever
+	 *  fires anyway — convergence, never a masked conflict (the D-103
+	 *  duplicate-race rule).
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::projects_reorder_failed`]); a successful reorder is the
+	 *  journal entry itself (the D-051 mirror policy — info+user+ok is not
+	 *  mirrored to the file log).
+	 */
+	projectsReorder: (orderedIds: string[], options?: InvokeOptions) => __TAURI_INVOKE<null>("projects_reorder", { orderedIds }, options),
+	/**
 	 *  Reads every §6.5 setting with its default applied (spec §7.10
 	 *  Settings module `settings_get`; the §7.2 window opens on this map).
 	 * 

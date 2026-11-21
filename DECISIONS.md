@@ -9783,3 +9783,124 @@ test-only convenience; the unknown-id test now also pins the cache
 half of all-or-nothing (a valid follow-up pass must still emit); the
 baseline test pins the fixture's `'not_readable'` literal instead of
 casting the row value through the reason union.
+
+### D-115 — `projects_reorder`: the active-order input spliced around the archived rows' own slots, the verified no-op, and the bulk `project.changed` journal — 2026-11-21
+
+Problem: T-080 turns §7.10's `projects_reorder` into the PRJ-019/020
+persistence ("the order is saved right away", AC "kept after a
+restart") over the frozen T-071 repository (D-093), whose `reorder`
+takes a permutation of EVERY id in the table. Four points were open:
+(1) what the UI sends — the store wants the whole table, the drag
+surface is the active columns alone; (2) where the archived rows land
+in the composed permutation (D-093's `reorder` doc says "builds the
+new order from `list(All)` … splices the move in, and passes the full
+permutation", or "list(Active) plus the archived ids in their relative
+order" — the parenthetical reads as concatenation, the main clause as
+interleaving, and the two differ); (3) how the D-093 refusal forms
+map onto §7.10 when they reach a command that CAN produce them; (4)
+whether a reorder journals, and in what shape, given LOG-001…004's
+"changing projects" and D-051's frozen vocabulary.
+
+Solution: `projects_reorder(ordered_ids: Vec<String>) -> ()` in
+`commands.rs`, registered in `collect_commands!`, plus a
+`logging::projects_reorder_failed` facade edge (the D-096 follow-up
+pattern D-103/D-106 adopted).
+
+- _The input is the complete ACTIVE order._ PRJ-019/020 reorders
+  columns — exactly the rows `projects_list`'s default active read
+  serves; the archived screen is not a column. The command validates
+  the list against the active set read in the same transaction, and
+  composes the full permutation itself (the store stays frozen,
+  D-093).
+- _Archived rows keep their own slots._ The new active order is
+  zipped into the stored table order: every slot the stored table
+  fills with an active project takes the next input id, every
+  archived row keeps its exact `sort_order`. The concatenation
+  reading of the store doc's parenthetical was rejected: it MOVES
+  archived rows (to the tail) on a drag that does not concern them,
+  while the splice reading leaves their positions literally
+  untouched — the same least-destructive posture D-093 already chose
+  for archive/restore ("keeping the position… reinforced by
+  PRJ-013…018's restore 'bringing the project back' — with its
+  place"), and §6.4's archive row "says nothing about `sort_order`".
+  The restore flow lands a restored project back at its own place
+  among the columns under this reading, not at the tail.
+- _The three refusal forms are the typed `E_VALIDATION`, mapped from
+  both sides._ The command's own validation counts the D-093 forms at
+  the active-set boundary — input ids that name no active project
+  (unknown OR archived: a stale screen's list), active projects the
+  list omits, and repeats — and refuses with the `rejected_field`
+  shape (`field: "ordered_ids"`, the reason naming all three counts,
+  the value echoing only the offending CALLER ids — capped at five
+  ids and 64 code points each, or the sent count when nothing
+  offends — never stored ones: stored ids stay off the params
+  surfaces, the D-096 rule). Nothing is
+  written. The store's `ReorderMismatch` cannot follow a passing
+  validation (one connection serializes the read and the write,
+  D-037) but is mapped through the SAME refusal if it ever fires
+  anyway — convergence, never a masked conflict (the D-103
+  duplicate-race rule); the shared `projects_store_to_app_error`
+  keeps its fallback arm unchanged.
+- _A reorder journals as ONE bulk `project.changed` entry._
+  LOG-001…004 puts "changing projects" in the journal and D-051 maps
+  it to `ProjectChanged`, so a reorder is journaled — at info/user/ok
+  inside the operation's own transaction, with `Details::Bulk` (the
+  enum's own "how many rows a bulk operation changed") carrying how
+  many POSITIONS moved, and no entity and no `project_id`: the change
+  is one fact about many projects at once, and the Activity window's
+  project filter must not mis-attribute it to one of them (the
+  `exclusion_remove` no-entity rationale). The `Bulk` field doc says
+  "changed assignments" — the assignments producer's own reading; the
+  enum-level wording is the authority this command relies on, and a
+  store-side task may generalize the field doc.
+- _The replayed drag is a verified no-op._ The composition returns
+  how many positions actually change; zero means the re-sent order
+  equals the stored one, and the command writes NOTHING — no
+  renumbering, no journal entry (the journal must not claim a change
+  that never happened, D-051; the store's fieldless-update no-op
+  precedent). The shortcut yields only while the stored positions are
+  already the gapless `1..=N` (DB-005): a tampered, non-gapless table
+  falls through to the renumbering — the one writer that restores the
+  invariant (the round-1 review's defense). A retry storm around one
+  drag converges with zero side effects (the
+  make-operations-idempotent rule).
+- _Acceptance, at the reopen boundary._ The AC pair is proven at the
+  layer the restart acts on: the IPC test invokes the command, then
+  drops EVERY handle to the first connection (the webview and the
+  test's own `Db` clone both keep the connection alive — D-037's
+  `Arc<Mutex<…>>` — so `drop(webview)`, `drop(database)`,
+  `drop(app)`), reopens the same data root through `Db::open`, and
+  reads the stored order back — the dragged order with the gapless
+  `1..=N` intact (the `app_info` second-open shape; a process-level
+  restart adds nothing the reopen does not already exercise).
+
+Tests: 4 unit tests pin the pure seam (`composed_reorder` /
+`rejected_reorder`): the splice around archived slots with the moved
+count, the no-op boundaries (current order, single column, empty
+matrix), every mismatch form counted (unknown, archived-as-unknown,
+missing, empty-list-vs-actives, repeats), and the envelope params
+(caller ids echoed and capped, the sent count for the missing-only
+form). 10 IPC tests over the mock runtime: the reopen criterion, the
+archived-slots composition (an archived row among actives and one at
+the tail), the one-transaction renumber + journal with its rollback
+proof (the trigger shape), the replayed no-op (both before and after
+a real reorder), every refusal form — including the pure-unknown
+stale-screen shape (a complete active set plus one archived id) —
+with the table and journal proven untouched, the corrupt-cell
+fallback envelope on the command's own `list(All)` read (raw SQL
+asserts the table was not renumbered), the empty/single boundaries,
+the honest no-database answer, and the registration pin; plus a
+logging pin for the `projects_reorder_failed` edge (the T-078 shape)
+and a four-case mock suite in `commands.spec.ts` (splice + journal,
+no-op, the archived refusal, empty/duplicate refusals). Bindings
+regenerated: `projectsReorder`.
+
+Scope note: the regenerated `src/bindings.ts` forced two frontend
+mock-layer edits — `src/ipc/mock/commands.ts` (the D-141 loud-drift
+rule: every bindings command needs a mock or `pnpm run typecheck`
+fails) and `src/ipc/mode.spec.ts` (the explicit shipped-set pin). The
+mock mirrors the command's semantics honestly (validation, splice,
+renumber, bulk journal, no-op). Recorded for the orchestrator: the
+brief's `src/**` freeze was overridden by its own green-checks
+requirement; both edits are additive hunks in IPC infrastructure, not
+the columns UI the parallel task owns.

@@ -232,6 +232,62 @@ export const mockCommands: IpcCommands = {
   },
 
   /**
+   * `projects_reorder` (§7.10, T-080): validates exactly like the real
+   * command — the list must name every active project exactly once each
+   * (unknown/archived ids, missing actives and repeats are the typed
+   * `E_VALIDATION` refusal naming the counts) — then renumbers the table
+   * `1..=N` with the archived rows keeping their own slots (D-093),
+   * journals one `project.changed` entry carrying the moved count, and
+   * answers a re-sent unchanged order as a no-op (nothing journaled).
+   */
+  async projectsReorder(orderedIds) {
+    const state = mockState()
+    const rows = [...state.projects].sort((a, b) => a.sortOrder - b.sortOrder)
+    const activeIds = rows.filter((p) => p.state === 'active').map((p) => p.id)
+    const seen = new Set<string>()
+    let duplicates = 0
+    for (const id of orderedIds) {
+      if (seen.has(id)) duplicates++
+      else seen.add(id)
+    }
+    const unknown = orderedIds.filter((id) => !activeIds.includes(id))
+    const missing = activeIds.filter((id) => !seen.has(id)).length
+    if (unknown.length > 0 || missing > 0 || duplicates > 0) {
+      // The value mirrors the real envelope exactly: the offending
+      // caller ids capped at five ids and 64 code points each, or —
+      // when nothing offends — what the caller did send (D-115).
+      const ECHO_LIMIT = 5
+      const ID_CHARS = 64
+      const bounded = (id: string): string => Array.from(id).slice(0, ID_CHARS).join('')
+      const value =
+        unknown.length === 0
+          ? `${orderedIds.length} ids sent`
+          : unknown.length <= ECHO_LIMIT
+            ? unknown.map(bounded).join(', ')
+            : `${unknown.slice(0, ECHO_LIMIT).map(bounded).join(', ')} (+${unknown.length - ECHO_LIMIT} more)`
+      return rejectWith('E_VALIDATION', 'validation.invalid_value', {
+        field: 'ordered_ids',
+        value,
+        reason: `the list must name every active project exactly once: ${unknown.length} not an active project, ${missing} missing, ${duplicates} repeated`,
+      })
+    }
+    // The composition (D-093): the active slots take the input ids in
+    // sequence, the archived rows keep their own slots.
+    const input = [...orderedIds]
+    const reordered = rows.map((p) => (p.state === 'active' ? (input.shift() as string) : p.id))
+    const changed = rows.filter((p, index) => p.id !== reordered[index]).length
+    if (changed === 0) return null
+    let position = 0
+    for (const id of reordered) {
+      position++
+      const row = state.projects.find((p) => p.id === id)
+      if (row) row.sortOrder = position
+    }
+    journal('project.changed', { details: JSON.stringify({ changed }) })
+    return null
+  },
+
+  /**
    * `project_add_manual` (§7.10/S1): the duplicate arms by normalized path,
    * the add with fields derived exactly like the Rust command (name from
    * the folder, DB-042 label, D-29 color, appended `sort_order`, write

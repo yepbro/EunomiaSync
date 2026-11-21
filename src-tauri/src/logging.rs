@@ -832,6 +832,32 @@ pub(crate) fn exclusion_remove_failed(error: &AppError) {
     );
 }
 
+/// The `projects_reorder` command failed (T-080, §10's every-error
+/// rule): the `exclusion_remove_failed` shape — the reachable §10
+/// answers are the typed `E_VALIDATION` refusal of a list that does
+/// not name the active set exactly once each (a stale screen's order),
+/// the shared base classifier's SQL classes (`ProjectsError::Sql`
+/// through the ordered read and the renumbering, `StorageError::Sql`
+/// through the journal insert — busy exhaustion, a corrupt database, a
+/// constraint abort), the store fallback of a corrupt projects cell
+/// (`ProjectsCorrupt`), and the honest no-database fallback. A
+/// successful reorder is the journal's own `project.changed` entry,
+/// written inside the operation's transaction (D-051) — never
+/// duplicated into the file log (the info+user+ok unmirrored shape);
+/// the verified no-op (a re-sent unchanged order) writes nothing and
+/// logs nothing.
+pub(crate) fn projects_reorder_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::projects",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "saving the new project order failed"
+    );
+}
+
 /// The availability recheck failed (T-079, D-09/DB-032, §10's
 /// every-error rule): the payload is the error's own §7.10 vocabulary,
 /// in the `activity_list_failed` shape. Logged by the fire-and-forget
@@ -2253,6 +2279,62 @@ mod tests {
                 && log.contains("code=\"E_VALIDATION\"")
                 && log.contains("no exclusion with this id"),
             "the remove edge carries its code literal and the refusal's reason, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_projects_reorder_failure_line_carries_the_code_and_payload() {
+        // The reorder command's §10 edge (T-080), in the exclusion pin
+        // shape (the round-1 review's ask): the reachable classes are
+        // the typed refusal of a stale list (E_VALIDATION with the
+        // field/value/reason params) and the corrupt-cell fallback of
+        // the command's own `list(All)` read (E_DB_LOCKED with the
+        // `ProjectsCorrupt` diagnostic). A successful reorder is the
+        // journal entry itself and the verified no-op writes nothing —
+        // both halves structural (no tracing call exists on those
+        // paths).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut stale_list = AppError::new(crate::errors::ErrorCode::Validation);
+        stale_list
+            .params
+            .insert("field".to_owned(), "ordered_ids".to_owned());
+        stale_list.params.insert(
+            "value".to_owned(),
+            "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f".to_owned(),
+        );
+        stale_list.params.insert(
+            "reason".to_owned(),
+            "the list must name every active project exactly once: 1 not an active project, \
+             0 missing, 0 repeated"
+                .to_owned(),
+        );
+        let mut corrupt = AppError::new(crate::errors::ErrorCode::DbLocked);
+        corrupt.details = Some(crate::errors::ErrorDetails {
+            os_code: None,
+            os_kind: Some("ProjectsCorrupt".to_owned()),
+            os_message: Some("a stored state cell is outside its vocabulary".to_owned()),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            projects_reorder_failed(&stale_list);
+            projects_reorder_failed(&corrupt);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("saving the new project order failed")
+                && log.contains("code=\"E_VALIDATION\"")
+                && log.contains("ordered_ids"),
+            "the refusal line carries its code literal and the field, got: {log}"
+        );
+        assert!(
+            log.contains("code=\"E_DB_LOCKED\"")
+                && log.contains("os_kind=Some(\"ProjectsCorrupt\")"),
+            "the corrupt-cell line carries the fallback code and diagnostic, got: {log}"
         );
         drop(temp);
     }
