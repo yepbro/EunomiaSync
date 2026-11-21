@@ -9537,3 +9537,134 @@ lib is ES2020, no `Object.hasOwn`), with a prototype-named-key test;
 P3-2 — containment assertions (disclosure/copy/status outside the
 alert), the failed-state revert test, and the payload assertion in the
 writeText-rejects case.
+
+### D-114 — Frontend date/time helpers on `Intl`: the `GMT±hh:mm` zone form, per-call locale, and the typed error boundary — 2026-11-21
+
+Problem: UI-020 (spec §11.5) requires dates "formatted with `Intl` in
+the system locale" and "time is always shown with the time zone";
+MAIN-027's sync panel and PRJ-021's settings modal show the last-sync
+time as "local time and time zone" — but the spec pins no zone FORM
+(IANA name or offset), no default/override split for locale and zone,
+and no behavior for bad inputs (an unparseable DB-002 string, an
+unusable zone identifier). The backend marker precedent (ALG-032,
+D-104) prints "name + offset" into file contents — a different surface
+with different rules.
+
+Solution (T-144): `src/date/` — pure helpers over
+`Intl.DateTimeFormat`, no dependencies, no consumers wired yet (the
+future UI column over the existing `projects.last_synced_at` wire
+field and the sync panel import them).
+
+- **Zone form: the offset alone.** `formatDateTime` renders
+  `timeZoneName: 'longOffset'` — `Nov 17, 2026, 2:03:22 PM GMT+01:00`
+  — uniform for every zone spelling including UTC (`GMT+00:00`, not
+  bare `GMT`): explicit components make V8 print the zero offset.
+  Rationale: the UI spec says "time zone", and its own offset habit is
+  `UTC±hh:mm` (ALG-032's fallback arm, DB-002's `Z`); the
+  IANA-name-plus-offset form is the file marker's contract (ALG-032,
+  D-104), deliberately NOT reused for the UI. A UI column showing
+  `Europe/Prague` on every row would repeat what one offset says once.
+- **Locale and zone are parameters, never globals.** Both default to
+  `undefined`; the locale flows to `Intl` as-is (its own system-locale
+  default, per UI-020), and an undefined zone OMITS the option so the
+  engine applies the system zone natively — which also degrades an
+  unidentifiable system zone (`Etc/Unknown`) gracefully to UTC.
+  `systemTimeZone()` exports the resolved name when Intl can both
+  resolve and accept it, and otherwise a synthesized fixed-offset
+  identifier (the round-1 POSIX-TZ fix, below) — the return value is
+  always safe to display or re-pass; `Etc/Unknown` must be sanitized
+  because V8 REJECTS it as an explicit `timeZone` while happily
+  defaulting to it.
+- **ECMA-402 constraint that shaped the code:** `dateStyle`/`timeStyle`
+  cannot combine with ANY component option — `timeZoneName` included —
+  (TypeError, verified on Node 22.23/V8); hence explicit
+  year/month/day/hour/minute/second components for the zone-bearing
+  form, `dateStyle: 'medium'` for the date-only form (`timeZone` is not
+  a component, so it composes there).
+- **Zone parameter accepts IANA names and `±hh:mm` fixed-offset
+  identifiers** (`+05:45`), the engine's supported subset; the `UTC±h`
+  spelling throws in V8 and is rejected like any unknown name. Bad
+  inputs throw a typed `DateFormatError` with a `kind` discriminant
+  (`'invalid-date'` | `'invalid-time-zone'`) and the engine's
+  `RangeError` as `cause` — callers branch on `kind`, not message
+  text. The zone is validated by a probe constructor with a FIXED valid
+  locale, so a structurally invalid caller locale (e.g. `en_US`)
+  surfaces as the engine's own unwrapped `RangeError`, never
+  misattributed as a zone failure. No silent fallback: a wrong zone
+  name must fail loudly (the system-zone default is a documented
+  absence, not a catch).
+- **`formatDate` takes a zone too.** A date-only rendering still needs
+  the zone to pick the calendar day: `2026-11-17T23:30:00Z` is Nov 17
+  in New York, Nov 18 in Tokyo (pinned). No zone NAME is rendered — a
+  date carries no wall time to qualify.
+- **Determinism (CI runners have different zones):** every expectation
+  uses a fixed UTC instant (the DB-002 string form), an explicit zone
+  and an explicit locale; nothing depends on the process TZ. The two
+  default-behavior pins are runner-independent equivalences:
+  `formatDateTime(t)` must equal the call with `systemTimeZone()`
+  explicitly, and the parameter-less call must equal the call with
+  `resolvedOptions().locale` — both hold on any runner because both
+  sides read the same system default (verified for `TZ=`,
+  `TZ=Invalid/Zone` and a named zone). DST coverage: the Prague
+  fall-back pair (same wall clock 2:30 AM, offset `+02:00` → `+01:00`)
+  and the New York spring-forward pair (wall clock jumps 1:30 → 3:30)
+  pin that the offset is the one in force AT the instant; Tokyo/Accra
+  pin fixed offsets; `+05:45` pins the offset-identifier arm. The
+  always-with-zone criterion (UI-020) is pinned twice: exact strings
+  (offset inside them) and a `/GMT[+-]\d{2}:\d{2}$/` property check
+  across all zone spellings — dropping `timeZoneName` fails both.
+  Expected strings verified against Node 22.23's ICU; locale pins use
+  `en`, `cs-CZ`, `de-DE`.
+
+Round-1 review (deepseek-v4.1-flash) — CHANGES REQUIRED: 1×P1, 1×P2,
+5×P3; all taken. What they changed:
+
+- **POSIX-TZ runners broke the system-zone contract (P1, reproduced).
+  `TZ=UTC-3` makes the engine APPLY +03:00 while
+  `resolvedOptions().timeZone` stays `undefined`, so `systemTimeZone()`
+  returned `'UTC'` — the "safe to re-pass" promise was silently wrong
+  and the default-equivalence pin failed on such a runner. Fix:
+  `systemTimeZone()` now synthesizes a fixed-offset identifier
+  (`offsetTimeZoneIdentifier(-new Date().getTimezoneOffset())`, a new
+  exported pure helper) whenever the resolved name is missing or
+  unusable. POSIX rules WITH transitions (`PST8PDT,…`, even with fake
+  abbreviations) resolve to real IANA names in ICU — verified — so the
+  synthesized arm only fires for fixed-offset POSIX zones, where it is
+  exact at every instant; the call-moment caveat is documented anyway.
+  The suite now passes under `TZ=UTC-3`, `TZ=`, `TZ=Invalid/Zone` and
+  `TZ=PST8PDT,…` alike (the equivalence pins hold on each).
+- **`longOffset` needs WebKit ≥ 15.4 (P2).** NFR-001's floor is macOS
+  12, and the Tauri WKWebView on macOS 12.0–12.2 throws a bare
+  RangeError on the option value — every `formatDateTime` call would
+  die there. Fix: one-time feature detect at module load, degrading to
+  `timeZoneName: 'short'` (`GMT+1`, `CEST`) — still an explicit zone
+  marker per UI-020; only the exact `±hh:mm` shape is lost on those
+  WebKits. The suite (Node 22) always exercises `longOffset`; the
+  `'short'` arm is one line resting on Intl's own contract.
+- **Formatter cache (P3).** Construction ≈ 0.36 ms vs ≈ 3.6 µs per
+  cached `format()` (reviewer-measured, Node 22); the matrix may format
+  hundreds of stamps per render. Formatters are now cached per (shape,
+  locale, zone) in a Map capped at 64 and cleared wholesale on overflow
+  — the overflow path trades speed, never output.
+- **Test honesty (P3).** Two tautological assertions dropped
+  (`instanceof Error` under an `instanceof DateFormatError` guard; a
+  try/catch re-proving what `toThrow(RangeError)` already implied —
+  `DateFormatError` extends `Error`, not `RangeError`). The cs-CZ/de-DE
+  exact dateTime strings became structural pins (24-hour wall time +
+  `GMT±hh:mm` suffix — the spec-relevant halves), because month
+  abbreviations drift with CI's floating Node 22 ICU; the all-numeric
+  cs-CZ date-only pin stays exact (D-111 spirit: exact pins only on
+  platform-stable facts). `formatDate` gained its own default-zone
+  equivalence pin. D-114's "future `last_synced_at` column" wording
+  corrected — the wire field exists; the UI column is the future part.
+
+Round-2 review (hy4-flash-free) — APPROVED, no P0/P1; 3×P2, all taken:
+the locale cache key now JSON-encodes pre-stringified parts (a plain
+comma join let the invalid string locale `'en,fr'` silently reuse the
+`['en','fr']` array's formatter — call-order-dependent acceptance, now
+impossible: string keys are quoted, array keys bracketed); the
+invalid-locale test now passes a zone so the fixed-'en' validation
+probe it describes actually runs in the call; D-114's body was brought
+back in sync with the code (the pre-round-1 text still claimed a
+`'UTC'` fallback for unusable names where the code synthesizes the
+offset identifier — the entry contradicted its own round-1 record).
