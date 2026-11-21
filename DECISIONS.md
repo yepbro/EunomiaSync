@@ -10633,3 +10633,31 @@ Round-2 review (hy4-flash-free) — APPROVE, no P0/P1/P2; two P3
   precisely so the service does not duplicate it; a hardcoded 200
   here would silently diverge the day the spec range changes, and
   an over-200 value only keeps more copies (harmless direction).
+
+### D-124 — AGENTS.md gains Project Rules distilled from this file's recurring failure modes — 2026-11-21
+
+Problem: the problems recorded in DECISIONS.md are strongly recurring —
+spec prose open to several readings, unverified assumptions about
+library APIs and platform behavior, false-green tests, platform blind
+spots from the Linux dev machine, user content reaching diagnostic
+surfaces, exit codes masked by pipes, guards protecting nothing — but
+each was caught only after the fact (review rounds, CI, post-merge
+fixes); the agent-facing instructions encoded nothing preventive, so
+every new task re-faced the same classes from scratch.
+
+Solution: AGENTS.md section 3 ("Project Rules") — eleven rules mapped
+one-to-one onto the failure modes above: resolve spec ambiguity before
+coding, with the chosen reading recorded here; verify facts against the
+installed sources and cite file/line; platform facts behind cfg gates,
+test expectations built with project helpers; every test falsifiable —
+independent oracles plus a mutation check; green means exit code
+(`$?`/`PIPESTATUS`, no `cmd | tail/grep &&` chains); stated linear
+complexity for untrusted text/path input; a guard lives across its whole
+protected region; user content never reaches diagnostics; dependencies
+and unsafe are owner rulings with cargo-deny green; frozen zones of
+parallel tasks stay untouched, forced deviations recorded here; docs
+must not lie, and what automation cannot prove goes to the manual smoke
+checklist. The rules deliberately duplicate nothing governed by the
+global AGENTS.md (the DECISIONS duty, one commit per task, check
+gates); each rule is phrased to be checkable at review. This entry is
+the traceable link the section cites back to.
