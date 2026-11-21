@@ -62,6 +62,13 @@ pub(crate) mod markdown;
 // session diff cache, and the startup/focus triggers wired below.
 pub(crate) mod availability;
 
+// The dirty-flag recalculation service (spec §7.10's `state://dirty`
+// event; DB-021/DB-022's three recalculation points; T-101): the
+// DB-021 verdict over the T-100 snapshot, the session diff cache, the
+// coalescing debounce bus behind `Db::run`'s commit seam, and the
+// startup/sync triggers wired below.
+pub(crate) mod dirty_recalc;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -109,16 +116,21 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::settings_set::<tauri::Wry>,
         ])
         // The registered §7.10 events: `state://project-availability`
-        // (T-079, D-09/DB-032) — the first event the builder carries,
-        // emitted by `availability::recheck_and_emit` at DB-032's
-        // three check points. The wire name is the spec's literal
-        // `state://…` spelling (pinned by the manual `Event`
-        // implementation in `availability.rs`); the generated
-        // TypeScript accessor is its camelCase form
-        // (`stateProjectAvailability`). Every later event task
-        // (sync://progress, state://dirty, …) lists its own §7.10
-        // name here.
-        .events(collect_events![availability::ProjectAvailabilityEvent,])
+        // (T-079, D-09/DB-032) and `state://dirty` (T-101,
+        // DB-021/DB-022) — the events the builder carries, emitted by
+        // `availability::recheck_and_emit` at DB-032's three check
+        // points and by `dirty_recalc::recalc_and_emit` at DB-022's
+        // three recalculation points. The wire names are the spec's
+        // literal `state://…` spellings (pinned by the manual `Event`
+        // implementations in `availability.rs` and `dirty_recalc.rs`);
+        // the generated TypeScript accessors are their camelCase
+        // forms (`stateProjectAvailability`, `stateDirty`). Every
+        // later event task (sync://progress, state://file-changed, …)
+        // lists its own §7.10 name here.
+        .events(collect_events![
+            availability::ProjectAvailabilityEvent,
+            dirty_recalc::DirtyEvent,
+        ])
         // `AppError` (§7.10: every command returns `Result<T, AppError>`)
         // is registered directly instead of through a command
         // signature: the type must stay reachable even when a command
@@ -267,6 +279,20 @@ pub fn run() {
             // of panicking on a missing lookup).
             app.manage(availability::AvailabilityState::new());
 
+            // The dirty-flag session cache (DB-021/DB-022, T-101):
+            // the last known dirty verdicts per active project, the
+            // capacity-1 trigger bus behind the 150 ms debounce, and
+            // the pass counter. Managed here for the same reason as
+            // the availability cache — infallible, needed in every
+            // mode (the commit hook reads it through the managed
+            // state at fire time, and in recovery mode it exists
+            // unused: no service is spawned, no hook is ever set).
+            // The bus's receiving half waits in `dirty_triggers` for
+            // the service spawn below — the pair travels together
+            // because the channel is the state's own coalescing seam.
+            let (dirty_state, dirty_triggers) = dirty_recalc::DirtyState::new();
+            app.manage(dirty_state);
+
             // Machine-level config (spec §5.8, SYS-011…013): read or
             // create `config.toml` from the data directory — before
             // logging (SYS-011: the log level comes from here) and
@@ -350,7 +376,7 @@ pub fn run() {
             // and reopens it"). The frontend screen itself is the
             // recovery-UI task's; this hook's contract is: corrupt →
             // logged, alive, database-less.
-            let database = match db::Db::open(&data_dir) {
+            let mut database = match db::Db::open(&data_dir) {
                 Ok(database) => database,
                 Err(error @ db::DbInitError::Corrupt { .. }) => {
                     // The typed verdict exists (the match arm owns
@@ -380,6 +406,14 @@ pub fn run() {
                     return Err(error.into());
                 }
             };
+            // The DB-022 commit seam (T-101): every transaction that
+            // commits with row changes drops one trigger permit onto
+            // the dirty-recalc bus, which debounces it 150 ms and
+            // recalculates. Installed on the `mut` handle before the
+            // database is managed and the first operation can run —
+            // `set_commit_hook`'s `&mut self` is the proof nothing is
+            // in flight while the hook appears.
+            database.set_commit_hook(dirty_recalc::commit_hook(app.handle().clone()));
             // The ERR-001 daily backup (spec §10): after the database
             // is open and migrated, one `VACUUM INTO` copy per UTC day
             // (`db-backups/daily-YYYYMMDD.sqlite3`), the newest 7 kept
@@ -414,6 +448,19 @@ pub fn run() {
             // logged through the facade, the launch unaffected (D-054).
             let retention_db = database.clone();
             app.manage(database);
+            // DB-022's startup recalculation point (T-101): the
+            // service task over the trigger bus, spawned — not
+            // awaited — so the set-L build pass cannot hold the
+            // launch (SYS-001; NFR-002's startup budget). The spawn
+            // sends the startup trigger itself, before the retention
+            // task's first cleanup can occupy the bus's one permit
+            // with a debounced Commit (either way exactly one pass
+            // runs — the coalescing). The pass emits `state://dirty`
+            // only for projects found dirty against the clean
+            // baseline (OUT-013's startup warning; `dirty_recalc.rs`
+            // module docs); a failure records nothing and waits for
+            // the next trigger (at-least-once).
+            dirty_recalc::spawn_service(app.handle().clone(), dirty_triggers);
             retention::spawn_daily_cleanup(retention_db);
 
             // DB-032's startup check point (D-09, T-079): one
@@ -449,6 +496,9 @@ mod recovery_tests;
 
 #[cfg(test)]
 mod ipc_tests;
+
+#[cfg(test)]
+mod dirty_recalc_tests;
 
 #[cfg(test)]
 mod tests {

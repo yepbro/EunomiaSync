@@ -412,6 +412,7 @@ export const commands = {
 
 /** Events */
 export const events = {
+	stateDirty: makeEvent<DirtyEvent, DirtyEvent>("state://dirty"),
 	stateProjectAvailability: makeEvent<ProjectAvailabilityEvent_Serialize, ProjectAvailabilityEvent_Deserialize>("state://project-availability"),
 };
 
@@ -1040,6 +1041,27 @@ export type DbBackupInfo = {
 };
 
 /**
+ *  The `state://dirty` event payload (§7.10): only the projects whose
+ *  dirty verdict changed since the previous pass, in `sort_order`
+ *  (the snapshot order). Never emitted with an empty `changes`.
+ * 
+ *  The event name is the spec's literal wire name, pinned by the
+ *  manual [`tauri_specta::Event`] implementation below for the same
+ *  reason as `availability`'s (D-112): the derive macro would build
+ *  the name from the struct's identifier and cannot produce the
+ *  `state://` prefix, and the `derive` cargo feature that ships it is
+ *  not enabled (the workspace pins
+ *  `tauri-specta = "=2.0.0-rc.29"` with `typescript` only).
+ */
+export type DirtyEvent = {
+	/**
+	 *  The changed projects; empty diffs are not emitted (see the
+	 *  module docs' diff contract).
+	 */
+	changes: ProjectDirtyChange[],
+};
+
+/**
  *  The closed registry of MVP error codes — the `Code` column of the
  *  spec §10 table, exactly the twenty codes the T-013 card lists.
  * 
@@ -1634,6 +1656,26 @@ export type ProjectColumnEntry_Serialize = {
 	 *  shape; `None` until the first sync writes it.
 	 */
 	last_synced_at: string | null,
+};
+
+/**
+ *  One entry of the `state://dirty` diff (§7.10): the project a
+ *  change is about, addressed the way every project action addresses
+ *  it (its row id), plus the verdict that now holds. The display name
+ *  is deliberately absent — the UI already holds it keyed by id from
+ *  `projects_list`, and a copy here could only drift (D-112).
+ */
+export type ProjectDirtyChange = {
+	/**
+	 *  The project row id (UUIDv7 TEXT, DB-002) whose dirty verdict
+	 *  changed since the previous pass.
+	 */
+	project_id: string,
+	/**
+	 *  The verdict that now holds: unsynced build changes exist
+	 *  (DB-021) — the dot icon MAIN-028 marks the column with.
+	 */
+	dirty: boolean,
 };
 
 /**

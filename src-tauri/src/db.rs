@@ -230,6 +230,18 @@ pub(crate) struct Db {
     /// database" is a fresh bootstrap). Consumed by the `app_info`
     /// command (T-031).
     created_fresh: bool,
+    /// The "a write committed" seam (DB-022, T-101): fired by
+    /// [`Db::run`] after a transaction **committed with at least one
+    /// row change** — read-only transactions and no-op writes fire
+    /// nothing, which is what keeps the dirty-recalc service's own
+    /// snapshot read from re-triggering itself. `None` until
+    /// [`Db::set_commit_hook`] installs one (the setup hook does,
+    /// with `dirty_recalc::commit_hook`); a `Db` without a hook
+    /// behaves exactly as before the seam existed. The closure runs
+    /// on the blocking pool while the connection mutex is still held,
+    /// so it must never block — the installed one only `try_send`s
+    /// onto a capacity-1 channel.
+    commit_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Db {
@@ -343,7 +355,21 @@ impl Db {
             connection: Arc::new(Mutex::new(connection)),
             backups_dir,
             created_fresh,
+            commit_hook: None,
         })
+    }
+
+    /// Installs the "a write committed" seam ([`Db::run`]'s hook,
+    /// DB-022/T-101) — the one writer of the [`Db::commit_hook`]
+    /// field. Called once by the `setup` hook after a successful
+    /// open, before the database is managed and the first operation
+    /// can run; `&mut self` is the proof that no operation is in
+    /// flight while the hook appears (every `run` clones the field's
+    /// `Arc` under the same guarantee). The hook itself is built by
+    /// [`crate::dirty_recalc::commit_hook`]; nothing in this module
+    /// knows what it does — the seam is deliberately dumb.
+    pub(crate) fn set_commit_hook(&mut self, hook: Arc<dyn Fn() + Send + Sync>) {
+        self.commit_hook = Some(hook);
     }
 
     /// Whether this database was created from scratch by the open that
@@ -469,8 +495,11 @@ impl Db {
     {
         // Clone the handle before entering the closure: the closure
         // must own its connection access ('static for spawn_blocking),
-        // not borrow it from the managed state.
+        // not borrow it from the managed state. The commit hook rides
+        // along the same way (an `Arc` clone — the hook, when
+        // installed, is shared with every run, never per-call).
         let connection = Arc::clone(&self.connection);
+        let commit_hook = self.commit_hook.clone();
         let joined = async_runtime::spawn_blocking(move || {
             let mut operation = operation;
             // 0-based: attempt 0 is the original run; retries are
@@ -482,7 +511,7 @@ impl Db {
                 // The guard is dropped inside `attempt_once` before
                 // this returns — the connection is free during the
                 // pause, and the next attempt re-locks it.
-                match attempt_once(&connection, &mut operation) {
+                match attempt_once(&connection, commit_hook.as_ref(), &mut operation) {
                     AttemptOutcome::Success(value) => return Ok(value),
                     AttemptOutcome::Failed(error) => return Err(error),
                     AttemptOutcome::Busy(error) => {
@@ -531,11 +560,31 @@ impl Db {
 /// this returns (the `Transaction` drop sends the `ROLLBACK`, and a
 /// failed `commit` drops it the same way), which is what makes the
 /// caller's retry a fresh run rather than a resume.
-fn attempt_once<T, F>(connection: &Mutex<Connection>, operation: &mut F) -> AttemptOutcome<T>
+///
+/// `commit_hook` is the DB-022/T-101 "a write committed" seam: after
+/// a successful commit, the transaction fires it **iff it changed at
+/// least one row** — the `total_changes` delta over the guarded
+/// connection, read while the guard is still held so no other
+/// operation's writes can blur it. Reads and no-op writes stay
+/// silent, a busy-retry run fires exactly once (only its successful
+/// attempt reaches this branch), and a rolled-back attempt never
+/// fires. The hook runs with the mutex still held (the guard drops at
+/// the function's end), so it must never block.
+fn attempt_once<T, F>(
+    connection: &Mutex<Connection>,
+    commit_hook: Option<&Arc<dyn Fn() + Send + Sync>>,
+    operation: &mut F,
+) -> AttemptOutcome<T>
 where
     F: FnMut(&Transaction<'_>) -> Result<T, AppError>,
 {
     let guard = lock_recovering_poison(connection);
+    // The row-change baseline of this attempt: `total_changes` counts
+    // every INSERT/UPDATE/DELETE the connection ever ran, so the
+    // delta across the transaction is exactly "this transaction wrote
+    // rows" — the discrimination DB-022's trigger needs (a read-only
+    // transaction's commit fires nothing).
+    let changes_before = guard.total_changes();
     let transaction = match guard.unchecked_transaction() {
         Ok(transaction) => transaction,
         // `BEGIN DEFERRED` takes no lock, so busy here is unlikely —
@@ -550,7 +599,14 @@ where
             // A failed commit also drops the transaction (rusqlite
             // sends the ROLLBACK), so nothing half-applied stays
             // behind on that path either.
-            Ok(()) => AttemptOutcome::Success(value),
+            Ok(()) => {
+                if guard.total_changes() != changes_before
+                    && let Some(hook) = commit_hook
+                {
+                    hook();
+                }
+                AttemptOutcome::Success(value)
+            }
             Err(error) if rusqlite_error_is_busy_locked(&error) => {
                 AttemptOutcome::Busy(sqlite_error_to_app_error(error))
             }

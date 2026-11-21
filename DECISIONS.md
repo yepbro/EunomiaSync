@@ -10328,3 +10328,136 @@ APPROVE): the envelope's doc no longer claims the echoed value is
 literally the caller's input at every seam — it is the lossy
 rendering of the offending path (literally the input at the session
 gate, the lossy spelling of the refused path at the others).
+
+### D-121 — The dirty recalculation service: the commit seam fires on row changes, the capacity-1 bus is the debounce, chunked mini-snapshots hold the set-L budget, and the diff baseline is clean — 2026-11-21
+
+Problem: T-101 turns DB-022 into the background service behind the
+§7.10 `state://dirty` event (DB-021's rule, OUT-013, MAIN-028): hashes
+of all active projects recalculated 150 ms after each committed
+transaction, at startup, and after a sync. Six points were open: how
+"after each committed transaction" reaches a background task from the
+D-037 executor without re-triggering on its own reads; what the hash
+input is now that ALG-030 has landed (D-064's seam sentence predates
+it); what the event's diff is taken against on the first observation;
+whether the §12.2 set-L budget (500 ms) holds over the T-100 snapshot;
+and what the future sync pipeline consumes.
+
+Solution: `src-tauri/src/dirty_recalc.rs`, the D-112 service shape.
+
+- _The commit seam is a row-change predicate._ `Db` gains
+  `commit_hook: Option<Arc<dyn Fn() + Send + Sync>>` +
+  `set_commit_hook(&mut self)`; `attempt_once` fires it after a
+  successful commit iff the guarded connection's `total_changes()`
+  moved (read before `BEGIN`, read after `COMMIT`, guard still held).
+  Read-only transactions — the service's own snapshot read included —
+  and zero-row writes fire nothing (no self-retrigger loop); a
+  busy-retry run fires exactly once (only its successful attempt
+  commits); a rolled-back attempt never fires. The hook runs under
+  the connection mutex, so its contract is "never block" — the
+  installed closure only `try_send`s.
+- _The bus is the debounce._ One `tauri::async_runtime` mpsc channel
+  of capacity 1 (a tokio re-export — no new dependency): permits are
+  triggers, a full channel swallows the next `try_send`, and that IS
+  the coalescing. The single-consumer service task sleeps 150 ms on
+  `Trigger::Commit`, drains collapsed permits, runs one pass, returns
+  to `recv`; a commit landing during a pass leaves a fresh permit for
+  the next window — no lost trigger, no queue-jump, no in-flight slot
+  (the channel serializes). The startup trigger (`Immediate`, no
+  debounce) is sent by `spawn_service` before its spawn, so it cannot
+  race the task's first `recv`.
+- _The hash input is the assembled managed text._ D-064 pinned the
+  seam as "the assembled managed, marker excluded"; with ALG-030
+  (D-065) landed that is no longer `build_body`'s output alone: scheme
+  A wraps the body with the D-21 reading lines (the private
+  `managed_block` join), B and C take the body alone (`assembly_b`'s
+  own docs). `managed_text` mirrors the private helper byte-exactly
+  (the public `build_content` panics on B by design), pinned by tests
+  that strip `build_content`'s marker tail for A and C and check B
+  against the body. The target path rides through
+  `backup_name::target_file_name` (§9.4 phase 1 step 2's spelling).
+- _The diff baseline is clean._ D-112's shape with the opposite
+  implicit baseline: an unobserved project counts as clean, so the
+  first pass reports exactly the dirty ones (OUT-013's startup
+  warning — every dirty project IS a change; a fully-clean startup is
+  silent), later contradictions arrive in both directions (dirty →
+  clean after a sync included — MAIN-028's dot must clear), empty
+  diffs are silent, and emit-then-record keeps delivery
+  at-least-once. `recalc_and_emit` is also the after-sync seam §9.4
+  phase 4 step 5 names: the pipeline awaits it once its DB-024 hash
+  updates committed.
+- _The set-L budget holds on chunked mini-snapshots._ `build_body` is
+  per-project and rescans the snapshot's whole assignment list every
+  call — its own docs assign the multi-project batching to the caller,
+  and this service is that caller. Measured on set L (release, this
+  8-core box under unrelated load ≈5): naive per-project calls cost
+  ~725 ms compute (500 × 100,000 assignment comparisons — the
+  quadratic the budget cannot hold); singleton mini-snapshots per
+  project still cost ~600 ms (cloning and re-validating the
+  1,100-item library 500 times — four million short-lived
+  allocations); **chunks of 25 projects** bring the sequential compute
+  to ~210 ms and the whole pass — one read transaction (~310 ms, the
+  T-100 snapshot read + `projects::list`, the store's own §12.2 share)
+  plus the 20 chunks spread over parallel `spawn_blocking` tasks plus
+  the emit — to **~430–545 ms release / ~2.0 s debug**, with the
+  verdict order deterministic (handles awaited in chunk order). The
+  scoping is body-equivalent by construction: filtering assignments by
+  project id is exactly what `selected_variants` does inside. The
+  release-suite review catch worth keeping: the first chunked version
+  dropped the last partial chunk (`get(start..start+25)` past the
+  slice end) — every small fixture is one partial chunk, so the suite
+  went red the moment it ran in release; the end is clamped now. The
+  test asserts the exact verdict list (500 dirty, id-for-id against
+  the sequential reference) and keeps a 10 s regression tripwire
+  instead of asserting the 500 ms figure (CI runners vary; the budget
+  row stays a reference-machine release measurement — the numbers
+  above travel with this entry).
+- _Deliberate logging gap._ This window's parallel task owns
+  `logging.rs`, so the `dirty_check_failed`/`dirty_emit_failed`
+  facade lines (the `availability_*` shape) could not be added; the
+  failure paths degrade safely without them (a failed pass records
+  nothing, the next trigger re-runs it), and the lines are a recorded
+  follow-up for the first task allowed to edit `logging.rs`.
+
+Testing: 19 unit tests in the module (the diff semantics over the
+clean baseline — first-observation both halves, both directions,
+unchanged silence, prune-then-return, order; the verdict computation —
+never-synced both spellings, the no-assignments exception against
+reading lines, stored-matching clean, stored-differing dirty, the
+extra-file settings change, snapshot order, the crossing-wires scoping
+proof; the managed mirror against `build_content` for A/C and the body
+for B; the wire-name literal) + 9 mock-runtime tests in
+`dirty_recalc_tests.rs` (the card's criteria end to end —
+edit→dirty→event, sync-эталон→clean→event, hidden-instruction edit
+silent while the pass counter proves the pass ran; the startup spawn;
+the debounce floor and burst coalescing; read-only discrimination;
+the executor seam's fire matrix — write fires once, read and zero-row
+write and rollback stay silent; the honest no-database answer; the
+set-L budget; and the `lib.rs` wiring source-scan pin).
+
+Round-1 review addendum (D-121, same task): findings fixed here —
+the stale-record guard (an older overlapping pass can no longer rewind
+the cache; its event may still carry a superseded change, at-least-once,
+next pass corrects — the docs' earlier "duplicates are benign" claim
+sharpened to this), the clean-hash pins for scheme B, scheme C and
+enabled extras (the `extra_file_lines` argument order and the C target
+spelling were unpinned by any passing case), the reasoned `expect` over
+`unwrap_or_default` in the chunk build, the partial-chunk order test,
+and the read-split print in the L test (the reviewer's "duplicated
+projects::list costs 341 ms" diagnosis is refuted by it: the list is
+~1.6 ms; the ~330 ms lives inside the store's `build_snapshot::read`,
+the T-100 §12.2 share). Findings routed to their owning tasks (fix
+sites outside this task's window): `commands.rs`'s `dirty_verdict`
+seam still answers the constant `false` — its own doc names this task
+as the taker, but the file belongs to the parallel window (the UI's
+initial dirty state must come from there or a full-set read API; a
+one-shot startup diff cannot bootstrap a late subscriber); the
+recovery restore/recreate path reopens a `Db` with no commit hook and
+no service spawn (the same gap availability has there — the recovery
+commands' task re-arms both); the mid-sync recalculation cadence
+(§9.4 phase 3's per-project hash transactions will each trigger a
+debounced ~0.5 s pass — the pipeline task should pause or coalesce the
+bus during a run); and the logging facade lines remain the recorded
+follow-up. The DB-022 payload reading is made explicit: the spec's
+"list of dirty projects" arrives as the first event's full list (the
+clean baseline makes every dirty project a first change) and as diffs
+afterwards — D-112's event shape, now stated rather than implied.
