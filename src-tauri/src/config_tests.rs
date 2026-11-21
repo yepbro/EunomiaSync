@@ -41,11 +41,14 @@
 //! The plugin surface (SEC-001, §5.6) is pinned the same way: exactly the
 //! four spec §5.3 plugins are wired (`dialog`, `updater`,
 //! `single-instance`, `opener`), every one of them is invoked from Rust
-//! only — the frontend depends on no plugin JavaScript package and the
-//! capability grants the webview no permissions at all — and
+//! only — the frontend depends on no plugin JavaScript package — and
 //! `single-instance` stays the first registered plugin (plugin
 //! requirement), while the app keeps defining no ACL manifest of its own
 //! (the precondition that leaves application commands ungated). The
+//! capability's grant stayed empty until the first event consumer: since
+//! T-246 (D-112's follow-up) it is exactly the event subscription
+//! lifecycle — `core:event:allow-listen` plus `core:event:allow-unlisten`
+//! — pinned by its own test below; everything else stays denied. The
 //! updater registers from a deliberately disabled
 //! `plugins.updater` stub in `tauri.conf.json`: the plugin refuses to
 //! initialize without the section (its config has a required `pubkey`
@@ -1101,7 +1104,7 @@ fn capability_files() -> Vec<String> {
 }
 
 #[test]
-fn capability_grants_the_webview_no_permissions_at_all() {
+fn capability_grants_the_webview_only_event_listening() {
     // Arrange & Act: the real capability set tauri would load. The file
     // set itself is pinned to exactly one file — a second capability
     // file (any accepted extension, at any depth) cannot appear
@@ -1119,27 +1122,47 @@ fn capability_grants_the_webview_no_permissions_at_all() {
          D-024)"
     );
 
-    // Assert: SEC-001 / D-024 — the webview talks only to application
-    // commands, and application commands are not capability-gated, so the
-    // honest grant is the empty set. Anything listed in the capability
-    // (`opener:`, `dialog:`, `fs:`, `shell:`, or even a `core:*` default
-    // set) hands a native API back to the webview; extend consciously —
-    // together with this pin and D-024 — only when the frontend actually
-    // needs one.
+    // Assert: SEC-001 / D-024 kept the grant empty until the first
+    // frontend event consumer; T-246 (D-112's follow-up) extends it
+    // consciously by exactly the event SUBSCRIPTION lifecycle. The
+    // generated `events.stateProjectAvailability.listen()` reaches the
+    // core event plugin's `plugin:event|listen` command, and the
+    // unsubscribe handle it returns reaches `plugin:event|unlisten` —
+    // a webview that could subscribe but not unsubscribe would leak a
+    // listener per subscription, so the pin carries both halves. Note
+    // the identifiers' real spelling: tauri 2.12.6's core event
+    // permissions are `core:event:allow-listen`/`-unlisten` (there is no
+    // `core:event:listen`; an unknown identifier fails the build).
+    // Everything else — `core:event:allow-emit`, `-emit-to`, any
+    // `opener:`/`dialog:`/`fs:`/`shell:` permission — stays denied:
+    // plugins and emits belong to the Rust side, and application
+    // commands are not capability-gated. Extend consciously — together
+    // with this pin and D-024 — only when the frontend actually needs
+    // one more permission.
     let raw = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json"),
     )
     .expect("capabilities/default.json should be readable");
     let capability: Value =
         serde_json::from_str(&raw).expect("capabilities/default.json should be valid JSON");
-    let permissions = capability["permissions"]
+    let permissions: Vec<&str> = capability["permissions"]
         .as_array()
-        .expect("capabilities/default.json should list `permissions` as an array");
-    assert!(
-        permissions.is_empty(),
-        "capabilities/default.json must grant nothing to the webview \
-         (SEC-001: plugins are invoked from Rust; application commands \
-         are not gated), found: {permissions:?}"
+        .expect("capabilities/default.json should list `permissions` as an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("every capability permission must be a string identifier")
+        })
+        .collect();
+    assert_eq!(
+        permissions,
+        ["core:event:allow-listen", "core:event:allow-unlisten"],
+        "capabilities/default.json must grant the webview exactly the \
+         event subscription lifecycle — `core:event:allow-listen` plus \
+         `core:event:allow-unlisten` (T-246, D-112) — and nothing else: \
+         SEC-001 keeps plugins and event emits on the Rust side, and \
+         application commands are not capability-gated"
     );
 
     // Assert: no inline capability may slip past the file pins. A
@@ -1168,19 +1191,20 @@ fn app_defines_no_acl_manifest() {
     let permissions_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("permissions");
     let build_script = include_str!("../build.rs");
 
-    // Assert: the empty capability (D-024) only leaves application
-    // commands callable while the app defines no ACL manifest of its own.
-    // With one, tauri-build inserts `__app-acl__`, `has_app_acl` flips
-    // true, and the invoke path starts gating every application command
-    // the empty capability does not grant — the whole IPC surface would
-    // die at runtime while every other test stays green. Granting app
-    // commands consciously (permissions directory plus capability
+    // Assert: the listen-only capability (D-024, extended by T-246
+    // without touching application commands) only leaves application
+    // commands callable while the app defines no ACL manifest of its
+    // own. With one, tauri-build inserts `__app-acl__`, `has_app_acl`
+    // flips true, and the invoke path starts gating every application
+    // command the capability does not grant — the whole IPC surface
+    // would die at runtime while every other test stays green. Granting
+    // app commands consciously (permissions directory plus capability
     // entries) must update this test and D-024 together.
     assert!(
         !permissions_dir.exists(),
         "src-tauri/permissions/ must not exist: defining an app ACL \
          manifest would capability-gate every application command while \
-         the capability grants nothing (D-024)"
+         the capability grants no application-command permissions (D-024)"
     );
     // The ACL form needs an `AppManifest` value, and every spelling that
     // provides one names the struct (`AppManifest::new()`, `use
@@ -1193,7 +1217,7 @@ fn app_defines_no_acl_manifest() {
         "build.rs must not declare an app ACL manifest \
          (tauri_build::Attributes::app_manifest with the AppManifest \
          struct): it would capability-gate every application command the \
-         empty capability does not grant (D-024)"
+         capability does not grant (D-024)"
     );
 }
 

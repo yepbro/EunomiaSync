@@ -9668,3 +9668,118 @@ probe it describes actually runs in the call; D-114's body was brought
 back in sync with the code (the pre-round-1 text still claimed a
 `'UTC'` fallback for unusable names where the code synthesizes the
 offset identifier — the entry contradicted its own round-1 record).
+
+### D-116 — The event-listen capability and the typed mock bus — 2026-11-21
+
+Problem: T-246 closes D-112's two recorded follow-ups. (1) The webview
+cannot subscribe to `state://project-availability`: D-024's capability
+grants nothing, and the generated `events.…listen()` reaches the core
+event plugin's `plugin:event|listen` command, which the ACL gates. (2)
+`src/ipc/mock/events.ts` still documents `src/bindings.ts` as
+commands-only — stale since T-079 — and its bus is loose-keyed
+(`Record<string, unknown>`), so the mock layer had no typed seam for the
+event the backend now emits.
+
+Solution:
+
+- _The capability grant, spelled honestly._ The task card's shorthand
+  `core:event:listen` is not an ACL identifier: tauri 2.12.6's core
+  event permissions are `core:event:allow-listen`/`-unlisten`
+  (plus `-emit`/`-emit-to` and the `default` set), and an unknown
+  identifier fails the build (`permission … not found` in the ACL
+  resolver — verified against the installed
+  `tauri-utils-2.10.3`/`tauri-2.12.6` sources). The grant is therefore
+  exactly `["core:event:allow-listen", "core:event:allow-unlisten"]`:
+  the SUBSCRIPTION lifecycle, both halves — the JS `listen()` returns
+  an unlisten function that invokes `plugin:event|unlisten`, so a
+  listen-only grant would let the webview subscribe but never end a
+  subscription (a listener leak per mount; the mock bus tests
+  unsubscribe as part of the same seam, and the real side must support
+  what the mock promises). Emits and everything else stay denied
+  (SEC-001: events are emitted from Rust). The pin in
+  `config_tests.rs` is renamed and repinned from "empty set" to this
+  exact two-element list (proven: dropping the grant turns it red with
+  the pin's message), the module docs' "no permissions at all" sentence
+  is updated, and the no-app-ACL pins keep their meaning with corrected
+  wording — application commands are still ungated and still granted
+  nothing.
+- _The typed mock bus._ `IpcEventMap` (in `mock/events.ts`) keys the
+  bus by the §7.10 wire names with the payload types generated into
+  `bindings.ts`, re-exported through `contract.ts` as the
+  `*_Serialize` wire halves (`ProjectAvailabilityEventWire` — the
+  shape the Rust side emits, the same rule the command wire types
+  follow). `mockEventBus` is now `EventBus<IpcEventMap>` (strictly
+  keyed; tests for names the backend does not emit yet instantiate
+  local buses, the pattern the T-141 spec already used), and a small
+  factory `busEvent(bus, name)` binds one event into a standalone
+  `{ on, emit }` accessor — `mockEvents.stateProjectAvailability`,
+  named after the generated camelCase accessor so the facade task can
+  serve both backends behind one `ipc.events`. The accessors are
+  deliberately synchronous over the mock bus, unlike the real
+  promise-based `listen`/`emit`; bridging that difference is the
+  facade task's line, not the mock's.
+- _The mock event source._ `applyMockAvailability(verdicts)` in
+  `mock/state.ts` — the twin of the backend's check pass
+  (`availability::recheck_and_emit`): a per-session verdict cache
+  (cleared by `resetMockState`, the mock twin of `AvailabilityState`)
+  is what verdicts diff against, NOT the row — a project never probed
+  this session counts as `(available, no reason)`, D-112's baseline
+  rule, so a healthy first check is silent while a first probe of a
+  gone folder IS a change (reproducible: a fixture-unavailable row's
+  first CONFIRMING verdict emits). Only contradictions are changes
+  (flip either direction, or a new reason on a still-unavailable
+  project); available ⇒ `unavailable_reason: null` (the input is a
+  discriminated union, so "available with a reason" is
+  unrepresentable; reasons are the four D-084 spellings); one call =
+  one pass = ONE event with the changes in `sort_order`, `null` and
+  no emit for an empty diff (an empty input array included); the pass
+  is all-or-nothing — an unknown id throws before any verdict is
+  applied, cached, or emitted (a half-applied silent pass is the
+  divergence the backend's at-least-once rule exists to prevent), and
+  a mid-pass revert leaves no entry (the diff is the pass's net
+  effect, last verdict per id); active rows only (the backend's pass
+  reads the active list — an archived project is skipped, not
+  recorded); verdicts are recorded on the cache and the rows, so
+  `projects_list` reads them back. Like the backend seam, it returns
+  the emitted diff (or `null`) — the observable the sync pipeline's
+  checkpoint answers with. Known limit: the backend prunes a project's
+  cache entry when it leaves the active list; the mock's cache is
+  replaced only by `resetMockState` (no mock command mutates project
+  state yet, so the archive/restore round-trip is a hand-edited row).
+- _Deferred by file scope (round-1 review P2-1/P3s), for the owning
+  tasks._ The capability grant makes these current-state statements
+  stale, all in files this task must not touch: `ARCHITECTURE.md`
+  ("the capability grants it no permissions at all"), `commands.rs`
+  ("capabilities/default.json stays empty" ×2 and one "stays
+  plugin-free" comment), `lib.rs` ("only application commands … cross
+  the IPC boundary"), `recovery_tests.rs` ("The empty-capability
+  contract" heading phrase), `docs/spec.md` §5.6 SEC-001 ("capabilities
+  lists only the app commands"), and `src/ipc/index.ts` ("the facade
+  serves commands only today"). Same for the mock's wire-name literal
+  not being tied to the backend's `Event::NAME` (the generated
+  bindings export no name constant; a Rust-side rename would leave the
+  mock silently diverged — the facade/consumer task should pin the two
+  together), and for `core:event:allow-listen` not being
+  event-name-scoped (tauri 2.12.6 core event permissions carry no
+  per-event scope; the webview may listen to any app event — accepted
+  residual risk: every §7.10 payload is data the commands already
+  return to the same window).
+
+Review: two rounds on different models (reports in
+`.opencode/reviews/t246-round1.md` / `t246-round2.md`, owner-local).
+Round 1 `deepseek-v4.1-flash` — no P0/P1; P2-2 (the pass applied
+verdicts before the unknown-id throw and emitted nothing) and P2-3
+(the row-as-cache seed made D-112's baseline rule unreproducible)
+fixed by the all-or-nothing rewrite above; P2-1 and the P3s resolved
+by the deferral bullet, the `mockEvents` doc rewording, the unused
+`ProjectAvailabilityChangeWire` re-export removal, and the spec
+hardening (guaranteed unsubscription, empty-pass and revert-pair and
+baseline tests, read-back through `projects_list`). Round 2
+`hy4-flash-free` — APPROVE, no P0/P1/P2; its three optional P3s
+applied: the `mockEvents` doc now says explicitly that only
+`listen`/`once` are usable from the webview while the generated
+`emit`/`emitTo` stay denied (SEC-001) and the mock `emit` is a
+test-only convenience; the unknown-id test now also pins the cache
+half of all-or-nothing (a valid follow-up pass must still emit); the
+baseline test pins the fixture's `'not_readable'` literal instead of
+casting the row value through the reason union.

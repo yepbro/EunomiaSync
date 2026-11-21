@@ -12,6 +12,7 @@ import type {
   AddedProjectWire,
   DbBackupInfo,
   ExclusionEntry,
+  ProjectAvailabilityEventWire,
   ProjectColumnEntryWire,
   SettingItem,
 } from '../contract'
@@ -24,6 +25,7 @@ import {
   type FixtureProfile,
 } from '../fixtures/generator'
 import { DEFAULT_SETTINGS } from '../fixtures/settings'
+import { mockEventBus } from './events'
 
 /** The §6.2 CHECK vocabularies, as literal unions for the mock rows. */
 export type MockProjectState = 'active' | 'archived'
@@ -101,6 +103,126 @@ export function toAddedProject(row: MockProjectRow): AddedProjectWire {
     // editing the row directly.
     write_access_warning: null,
   }
+}
+
+// ---------------------------------------------------------------------------
+// The §7.10 `state://project-availability` source (T-246): the mock twin
+// of the backend's check pass (`availability::recheck_and_emit`, D-112).
+// The bus lives in `./events`; this is the seam that feeds it — the mock
+// has no filesystem to probe, so tests and fixtures state the verdicts
+// and the seam computes the diff exactly as the backend's session cache
+// does: against a per-session verdict cache (not the rows), where a
+// project never probed this session diffs against the implicit
+// `(available, no reason)` baseline. The rows are the served state alone
+// (`projects_list` maps from them). Known limit, deliberate: the backend
+// prunes a project's cache entry when it leaves the active list, while
+// the mock's cache is replaced only by `resetMockState` — no mock command
+// mutates project state yet, and a row archived/restored by direct
+// editing keeps its recorded verdict.
+// ---------------------------------------------------------------------------
+
+/** The D-084 unavailable-reason spellings (single-sourced in the backend's
+ * `Verdict::probe`; mirrored here so a mock verdict cannot invent one). */
+export type MockUnavailableReason = 'missing' | 'not_a_directory' | 'not_readable' | 'no_git_entry'
+
+/**
+ * One probe verdict for [`applyMockAvailability`]. An available folder
+ * carries no reason — the union makes "available with a reason"
+ * unrepresentable, which maps onto the wire's `unavailable_reason: null`.
+ */
+export type MockAvailabilityVerdict =
+  | { projectId: string; available: true }
+  | { projectId: string; available: false; unavailableReason: MockUnavailableReason }
+
+/** The verdict pair the session cache records for one probed project. */
+type RecordedVerdict = { available: boolean; reason: string | null }
+
+/**
+ * The implicit baseline for a project never probed this session (D-112):
+ * `(available, no reason)` — a healthy first check emits nothing, and a
+ * project first probed while its folder is gone IS a change.
+ */
+const NEVER_PROBED: RecordedVerdict = { available: true, reason: null }
+
+/** The session verdict cache — the mock twin of the backend's
+ * `AvailabilityState`; replaced wholesale by `resetMockState`. */
+let availabilityCache = new Map<string, RecordedVerdict>()
+
+/**
+ * Applies new availability verdicts the way the backend's check pass does
+ * (D-112: `availability::recheck_and_emit`) and broadcasts the §7.10
+ * `state://project-availability` event over [`mockEventBus`] — returning
+ * the emitted diff, or `null` when nothing changed (the event is never
+ * emitted with an empty diff).
+ *
+ * Semantics, mirroring the backend's session diff cache:
+ * - the diff is against the SESSION cache, not the row: a project never
+ *   probed this session (since the last `resetMockState`) counts as
+ *   `(available, no reason)` — D-112's baseline rule, so a healthy first
+ *   check is silent while a first probe of a gone folder is a change;
+ * - the pass is all-or-nothing: an unknown project id throws before any
+ *   verdict is applied, cached, or emitted (a half-applied pass that
+ *   emits nothing is exactly the divergence the backend's at-least-once
+ *   rule exists to prevent);
+ * - a project listed twice keeps its LAST verdict, and a mid-pass revert
+ *   leaves no change entry — the diff is the pass's net effect, the one
+ *   comparison the backend makes against its cache;
+ * - changes are contradictions only: a flip in either direction, or a
+ *   new reason on a project that stays unavailable;
+ * - changes are ordered by `sort_order` (probe order) and emitted as ONE
+ *   event per call, like one backend pass;
+ * - only ACTIVE rows are probed (the backend's pass reads the active
+ *   list): a verdict for an archived project is skipped, not recorded;
+ * - verdicts are recorded on the cache and the rows, so `projects_list`
+ *   reads them back.
+ */
+export function applyMockAvailability(
+  verdicts: readonly MockAvailabilityVerdict[],
+): ProjectAvailabilityEventWire | null {
+  const rows = mockState().projects
+  const byId = new Map(rows.map((row) => [row.id, row]))
+  // Phase 1 — validate the whole pass before any side effect: a bad id
+  // throws with the store and the cache untouched.
+  for (const verdict of verdicts) {
+    if (!byId.has(verdict.projectId)) {
+      throw new Error(`applyMockAvailability: unknown project id ${verdict.projectId}`)
+    }
+  }
+  // Phase 2 — the pass's net verdict per active project (last verdict
+  // per id wins; archived rows are not probed).
+  const net = new Map<string, MockAvailabilityVerdict>()
+  for (const verdict of verdicts) {
+    if (byId.get(verdict.projectId)!.state === 'active') net.set(verdict.projectId, verdict)
+  }
+  // Phase 3 — diff against the session cache, then record: every probed
+  // verdict is recorded (a confirming probe updates the cache like the
+  // backend's), and only contradictions become change entries.
+  const changedRows: MockProjectRow[] = []
+  for (const [projectId, verdict] of net) {
+    const row = byId.get(projectId)!
+    const recorded = availabilityCache.get(projectId) ?? NEVER_PROBED
+    const isChange =
+      verdict.available !== recorded.available ||
+      (!verdict.available && verdict.unavailableReason !== recorded.reason)
+    availabilityCache.set(projectId, {
+      available: verdict.available,
+      reason: verdict.available ? null : verdict.unavailableReason,
+    })
+    row.available = verdict.available
+    row.unavailableReason = verdict.available ? null : verdict.unavailableReason
+    if (isChange) changedRows.push(row)
+  }
+  if (changedRows.length === 0) return null
+  changedRows.sort((a, b) => a.sortOrder - b.sortOrder)
+  const event: ProjectAvailabilityEventWire = {
+    changes: changedRows.map((row) => ({
+      project_id: row.id,
+      available: row.available,
+      unavailable_reason: row.unavailableReason,
+    })),
+  }
+  mockEventBus.emit('state://project-availability', event)
+  return event
 }
 
 /** Default write settings a new project copies from `default.*` (PRJ-012). */
@@ -207,6 +329,9 @@ export function resetMockState(profile: FixtureProfile): MockState {
     exclusions: bundle.exclusions.map(toExclusionEntry),
     nextActivityId: 1_000_000,
   }
+  // A fresh world is a fresh session: no project has been probed yet, so
+  // the availability cache restarts from the D-112 baseline.
+  availabilityCache = new Map()
   return state
 }
 

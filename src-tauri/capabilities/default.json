@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window. SEC-001: the webview invokes only application commands (not capability-gated); Tauri plugins run in Rust exclusively. Plugin and core-plugin commands (opener, dialog, updater, fs, shell, event, path, window, ...) are deliberately granted nothing — extend this list consciously, with a matching config_tests.rs pin, only when the frontend actually needs a specific API.",
+  "description": "Capability for the main window. SEC-001: the webview invokes only application commands (not capability-gated); Tauri plugins run in Rust exclusively. Plugin and core-plugin commands (opener, dialog, updater, fs, shell, path, window, ...) are deliberately granted nothing — extend this list consciously, with a matching config_tests.rs pin, only when the frontend actually needs a specific API. The one conscious extension so far (T-246, D-112 follow-up): the event SUBSCRIPTION lifecycle — core:event:allow-listen plus core:event:allow-unlisten — so the webview can subscribe to §7.10 events (state://project-availability) and end the subscription; emitting (core:event:allow-emit / -emit-to) and everything else stays denied.",
   "windows": ["main"],
-  "permissions": []
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }
