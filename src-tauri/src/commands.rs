@@ -1785,8 +1785,8 @@ fn setting_item((key, value): (SettingKey, SettingValue)) -> SettingItem {
 /// command (D-037), so a value committed by a later `settings_set` is
 /// what the next `settings_get` returns — the §7.2 "applies without a
 /// restart" mechanism: nothing between the screen and the table caches
-/// settings (the future scanner reads through this same repository
-/// path, T-012/D-032's honest-boundary adaptation).
+/// settings (the scan command reads the same table through its own
+/// repository path, T-012/D-032's honest-boundary adaptation).
 ///
 /// A successful read is never journaled and gets no routine log line
 /// (the `activity_list` rationale: reading is not an event); failures

@@ -149,6 +149,16 @@ pub(crate) mod sync_phase4;
 // writes a file.
 pub(crate) mod file_watch;
 
+// The scan commands and the `scan://progress` event (spec §7.10
+// Projects module `scan_start`/`scan_cancel`, §9.6, PRJ-002,
+// SYS-003/NFR-015, ALG-053, ERR-002; T-076): the command layer over
+// the eunomia-fs walker and classifier — the SEC-003-validated root,
+// the per-scan settings/registry snapshot, the blocking-pool walk
+// with the ≥100 ms-throttled progress events, the managed cancel
+// slot, and the found/candidate-set answer that persists nothing
+// (T-077's `scan_commit` is the only writer).
+pub(crate) mod scan;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -171,8 +181,9 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // `projects_list` (T-072), the System module's
         // `dialog_pick_folder` (T-073), the Projects module's
         // `project_add_manual` (T-074), the Projects module's
-        // `exclusions_list`/`exclusion_remove` (T-078) and the
-        // Projects module's `projects_reorder` (T-080). Every later
+        // `exclusions_list`/`exclusion_remove` (T-078), the Projects
+        // module's `projects_reorder` (T-080) and the Projects
+        // module's `scan_start`/`scan_cancel` (T-076). Every later
         // command task (library, …) lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
         // commands that take an `AppHandle`), so the registration pins
@@ -192,28 +203,35 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::project_add_manual::<tauri::Wry>,
             commands::projects_list::<tauri::Wry>,
             commands::projects_reorder::<tauri::Wry>,
+            scan::scan_cancel::<tauri::Wry>,
+            scan::scan_start::<tauri::Wry>,
             commands::settings_get::<tauri::Wry>,
             commands::settings_set::<tauri::Wry>,
             commands::sync_run::<tauri::Wry>,
         ])
         // The registered §7.10 events: `state://project-availability`
         // (T-079, D-09/DB-032), `state://dirty` (T-101,
-        // DB-021/DB-022) and `state://file-changed` (T-102, §5.7
-        // SYS-007…009) — the events the builder carries, emitted by
+        // DB-021/DB-022), `state://file-changed` (T-102, §5.7
+        // SYS-007…009) and `scan://progress` (T-076, SYS-003/ALG-053)
+        // — the events the builder carries, emitted by
         // `availability::recheck_and_emit` at DB-032's three check
         // points, by `dirty_recalc::recalc_and_emit` at DB-022's
-        // three recalculation points, and by `file_watch`'s service
-        // at §5.7's watch points. The wire names are the spec's
-        // literal `state://…` spellings (pinned by the manual `Event`
-        // implementations in `availability.rs`, `dirty_recalc.rs` and
-        // `file_watch.rs`); the generated TypeScript accessors are
+        // three recalculation points, by `file_watch`'s service
+        // at §5.7's watch points, and by the scan command's walk
+        // callback through its throttled seam. The wire names are
+        // the spec's literal `state://…`/`scan://…` spellings
+        // (pinned by the manual `Event` implementations in
+        // `availability.rs`, `dirty_recalc.rs`, `file_watch.rs` and
+        // `scan.rs`); the generated TypeScript accessors are
         // their camelCase forms (`stateProjectAvailability`,
-        // `stateDirty`, `stateFileChanged`). Every later event task
-        // (sync://progress, …) lists its own §7.10 name here.
+        // `stateDirty`, `stateFileChanged`, `scanProgress`). Every
+        // later event task (sync://progress, …) lists its own §7.10
+        // name here.
         .events(collect_events![
             availability::ProjectAvailabilityEvent,
             dirty_recalc::DirtyEvent,
             file_watch::FileChangedEvent,
+            scan::ScanProgressEvent,
         ])
         // `AppError` (§7.10: every command returns `Result<T, AppError>`)
         // is registered directly instead of through a command
@@ -380,6 +398,18 @@ pub fn run() {
             // mode the slot simply stays empty (a sync refuses at
             // phase 0, so there is never a live run to cancel).
             app.manage(commands::SyncCancelSlot::new());
+
+            // The live scan's published cancel token (§7.10's
+            // `scan_cancel`, T-076): `scan_start` publishes the token
+            // it drives the walk with for the scan's lifetime and
+            // clears it on every exit (the RAII lease inside
+            // `scan_start_with`) — the D-147 slot shape, one step (the
+            // slot IS the guard). Managed beside the sync slot for
+            // the same reason — infallible, needed in every mode: the
+            // cancel command must FIND the state, and in recovery
+            // mode the slot simply stays empty (a scan refuses at the
+            // settings read — no database).
+            app.manage(scan::ScanCancelSlot::new());
 
             // The availability session cache (D-09/DB-032, T-079):
             // the last D-084 verdicts per active project, plus the
@@ -682,6 +712,9 @@ mod sync_phase3_tests;
 
 #[cfg(test)]
 mod sync_phase4_tests;
+
+#[cfg(test)]
+mod scan_tests;
 
 #[cfg(test)]
 mod tests {

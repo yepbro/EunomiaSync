@@ -2,15 +2,17 @@
 //
 // `src/bindings.ts` carries its first generated event since T-079/D-112:
 // `events.stateProjectAvailability` over the wire name
-// `state://project-availability`. The bus below is therefore keyed by
+// `state://project-availability`; `events.scanProgress` over
+// `scan://progress` joined it with T-076/D-153. The bus below is
+// therefore keyed by
 // `IpcEventMap` — the spec's event names mapped to their generated payload
 // types (re-exported through `../contract`, D-003) — so mock emits and
 // subscriptions are payload-typed against the real wire, and `mockEvents`
 // exposes one typed accessor per event, named after the camelCase accessor
 // the generated `events` object uses (the facade task will serve the real
 // and mock sides behind one `ipc.events`). The remaining §7.10 names
-// (`scan://progress`, `sync://progress`, `state://dirty`,
-// `state://file-changed`, D-009's registry) join the map with their own
+// (`sync://progress`, `state://dirty`, `state://file-changed`,
+// D-009's registry) join the map with their own
 // generated payload types as their emitting backend tasks land.
 //
 // The bus itself stays deliberately plain: a small typed publish/subscribe
@@ -21,7 +23,7 @@
 // event names the backend does not emit yet instantiate their own
 // strictly-typed buses with local payload maps.
 
-import type { ProjectAvailabilityEventWire } from '../contract'
+import type { ProjectAvailabilityEventWire, ScanProgressEventWire } from '../contract'
 
 /** Listener lifetime handle: call to stop receiving. */
 export type Unsubscribe = () => void
@@ -73,13 +75,14 @@ export function createEventBus<Events extends Record<string, unknown>>(): EventB
  * The §7.10 events the mock backend broadcasts, keyed by the spec's wire
  * names and valued with the payload types generated into
  * `src/bindings.ts` (re-exported through `../contract` as the
- * `*_Serialize` wire halves — the shapes the Rust side emits). One key
- * today: `state://project-availability` (T-079/D-112); every later event
- * task adds its key here together with its Rust registration in
- * `specta_builder().events(...)`.
+ * `*_Serialize` wire halves — the shapes the Rust side emits).
+ * `state://project-availability` (T-079/D-112) and `scan://progress`
+ * (T-076/D-153); every later event task adds its key here together
+ * with its Rust registration in `specta_builder().events(...)`.
  */
 export type IpcEventMap = {
   'state://project-availability': ProjectAvailabilityEventWire
+  'scan://progress': ScanProgressEventWire
 }
 
 /** One event of a bus bound to a standalone accessor (see [`busEvent`]). */
@@ -126,4 +129,5 @@ export const mockEventBus: EventBus<IpcEventMap> = createEventBus()
  */
 export const mockEvents = {
   stateProjectAvailability: busEvent(mockEventBus, 'state://project-availability'),
+  scanProgress: busEvent(mockEventBus, 'scan://progress'),
 } as const

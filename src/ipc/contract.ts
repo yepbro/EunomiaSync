@@ -44,6 +44,12 @@ export type {
   ProjectAddResult_Serialize as ProjectAddResultWire,
   ProjectAvailabilityEvent_Serialize as ProjectAvailabilityEventWire,
   ProjectColumnEntry_Serialize as ProjectColumnEntryWire,
+  ScanClassWire,
+  ScanProgressEvent as ScanProgressEventWire,
+  ScanRunOutcome_Serialize as ScanRunOutcomeWire,
+  ScanSkipReason,
+  ScanSkip_Serialize as ScanSkipWire,
+  ScannedRepository,
   SettingChange,
   SettingItem,
 } from '../bindings'

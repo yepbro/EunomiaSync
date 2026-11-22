@@ -69,6 +69,14 @@ export type MockState = {
   exclusions: ExclusionEntry[]
   /** The journal's next autoincrement id (§6.2 `action_log.id`). */
   nextActivityId: number
+  /**
+   * Whether a mock scan is live (§7.10 `scan_start`/`scan_cancel`): the
+   * second-start `E_SYNC_RUNNING` arm's flag, cleared on every exit of
+   * the mock walk.
+   */
+  scanning: boolean
+  /** The live mock scan's cancel latch (`scan_cancel` flips it). */
+  scanCancelled: boolean
 }
 
 /** Maps a store row to the `projects_list` wire shape (MAIN-028 fields). */
@@ -336,6 +344,8 @@ export function resetMockState(profile: FixtureProfile): MockState {
     backups: generateDbBackups(profile),
     exclusions: bundle.exclusions.map(toExclusionEntry),
     nextActivityId: 1_000_000,
+    scanning: false,
+    scanCancelled: false,
   }
   // A fresh world is a fresh session: no project has been probed yet, so
   // the availability cache restarts from the D-112 baseline.

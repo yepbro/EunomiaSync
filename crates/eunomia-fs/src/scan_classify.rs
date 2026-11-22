@@ -52,7 +52,8 @@
 //! root carries the link prefix and keys by its text, so a
 //! registered repository behind it would classify `new` against
 //! its canonical registry key. The command layer that owns the
-//! root choice (the scan command task) owns this obligation, the
+//! root choice (T-076's `scan_start`, whose SEC-003 gate answers
+//! the canonical root) owns this obligation, the
 //! same way it owns building [`ScanRegistry`]; a pinned test in
 //! this module documents the failure mode so the obligation cannot
 //! be assumed away. A path that is not canonical still classifies,

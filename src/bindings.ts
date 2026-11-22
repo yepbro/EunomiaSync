@@ -415,6 +415,29 @@ export const commands = {
 	 */
 	projectsReorder: (orderedIds: string[], options?: InvokeOptions) => __TAURI_INVOKE<null>("projects_reorder", { orderedIds }, options),
 	/**
+	 *  Serves PRJ-002's "Cancel" and NFR-015's "closing the scan window
+	 *  means cancel" (§7.10 `scan_cancel`): latches the live scan's
+	 *  token, which the walk observes on its next entry check and
+	 *  answers with [`ScanRunOutcome::Cancelled`] — nothing persisted.
+	 * 
+	 *  Idempotent by design: with no scan live the command is the
+	 *  documented no-op `Ok(())` — the window-close race (the scan
+	 *  finishing between the user's click and this call's read) must not
+	 *  error in the loser branch, and the postcondition "no scan keeps
+	 *  running" holds either way.
+	 */
+	scanCancel: (options?: InvokeOptions) => __TAURI_INVOKE<null>("scan_cancel", undefined, options),
+	/**
+	 *  Serves PRJ-002's "Scan folder" (§7.10 `scan_start`): validates
+	 *  the root through SEC-003, snapshots the settings and the
+	 *  classification registry, walks the tree on the blocking pool with
+	 *  the throttled `scan://progress` events, and answers the found
+	 *  candidate set — or the payload-less cancelled verdict. Every
+	 *  failure path flows through the ONE logging edge
+	 *  ([`logging::scan_start_failed`], the D-096 law).
+	 */
+	scanStart: (path: string, options?: InvokeOptions) => __TAURI_INVOKE<ScanRunOutcome_Serialize>("scan_start", { path }, options),
+	/**
 	 *  Reads every §6.5 setting with its default applied (spec §7.10
 	 *  Settings module `settings_get`; the §7.2 window opens on this map).
 	 * 
@@ -425,8 +448,8 @@ export const commands = {
 	 *  command (D-037), so a value committed by a later `settings_set` is
 	 *  what the next `settings_get` returns — the §7.2 "applies without a
 	 *  restart" mechanism: nothing between the screen and the table caches
-	 *  settings (the future scanner reads through this same repository
-	 *  path, T-012/D-032's honest-boundary adaptation).
+	 *  settings (the scan command reads the same table through its own
+	 *  repository path, T-012/D-032's honest-boundary adaptation).
 	 * 
 	 *  A successful read is never journaled and gets no routine log line
 	 *  (the `activity_list` rationale: reading is not an event); failures
@@ -474,6 +497,7 @@ export const commands = {
 
 /** Events */
 export const events = {
+	scanProgress: makeEvent<ScanProgressEvent, ScanProgressEvent>("scan://progress"),
 	stateDirty: makeEvent<DirtyEvent, DirtyEvent>("state://dirty"),
 	stateFileChanged: makeEvent<FileChangedEvent, FileChangedEvent>("state://file-changed"),
 	stateProjectAvailability: makeEvent<ProjectAvailabilityEvent_Serialize, ProjectAvailabilityEvent_Deserialize>("state://project-availability"),
@@ -1808,6 +1832,252 @@ export type ProjectFileChange = {
 	external_changed: boolean,
 	/**  SYS-009: the target file is gone after a recorded sync. */
 	file_deleted: boolean,
+};
+
+/**
+ *  ALG-053's class vocabulary on the wire, serialized as the spec's
+ *  own words (`new`, `known`, `archived`, `excluded`) — the log and
+ *  dialog spelling the classifier's `Display` already pins.
+ */
+export type ScanClassWire = 
+/**  Never added, never excluded: PRJ-002's "New" group. */
+"new" | 
+/**  An active project: PRJ-002's "Already added" group. */
+"known" | 
+/**  An archived project: "Skipped" with the restore offer. */
+"archived" | 
+/**  In `project_exclusions` with no project row: "Skipped". */
+"excluded";
+
+/**
+ *  The `scan://progress` event payload (§7.10, SYS-003, PRJ-002's
+ *  scan-window facts): the three live numbers the window renders
+ *  while the walk runs.
+ * 
+ *  The event name is the spec's literal wire name, pinned by the
+ *  manual [`Event`] implementation (the D-112 ruling: the derive
+ *  macro cannot produce the `://` spelling). Emitted from Rust only;
+ *  the webview subscribes through the T-246 listen/unlisten grant.
+ */
+export type ScanProgressEvent = {
+	/**  Folders the walk has made a decision about so far. */
+	checked: number,
+	/**
+	 *  Repositories found so far (all classes — the class is the
+	 *  registry's verdict, reported in the answer, not the walk).
+	 */
+	found: number,
+	/**
+	 *  The newest visited path (the walk's current position;
+	 *  lossily rendered only for non-UTF-8 skips).
+	 */
+	current_path: string,
+};
+
+/**
+ *  The `scan_start` command's wire answer (§7.10, ERR-002): either
+ *  the completed scan's candidate set, or — payload-less, the
+ *  structural pin of "an interrupted scan saves nothing" — the
+ *  cancelled verdict. Cancellation is NOT an `Err`: the user asked
+ *  for it (the `sync_run_aborted` posture), and an error envelope
+ *  would imply a failure where a decision happened.
+ */
+export type ScanRunOutcome = ScanRunOutcome_Serialize | ScanRunOutcome_Deserialize;
+
+/**
+ *  The `scan_start` command's wire answer (§7.10, ERR-002): either
+ *  the completed scan's candidate set, or — payload-less, the
+ *  structural pin of "an interrupted scan saves nothing" — the
+ *  cancelled verdict. Cancellation is NOT an `Err`: the user asked
+ *  for it (the `sync_run_aborted` posture), and an error envelope
+ *  would imply a failure where a decision happened.
+ */
+export type ScanRunOutcome_Deserialize = 
+/**
+ *  The walk ran to completion: the terminal counters (the same
+ *  facts the progress event carried, at their final values) and
+ *  the classified result the UI groups into New / Already added
+ *  / Skipped. Nothing is persisted with them — `scan_commit`
+ *  (T-077) is the only writer.
+ */
+{ outcome: "completed"; 
+/**
+ *  Folders the walk made a decision about (found, plain and
+ *  skipped alike — the window's "folders checked" counter's
+ *  final value).
+ */
+checked: number; 
+/**  Repository events delivered, all classes combined. */
+found: number; 
+/**
+ *  Every found repository with its key and class, in walk
+ *  delivery order (unspecified beyond the parent-before-
+ *  child guarantee the walker pins; the UI sorts for
+ *  display).
+ */
+repositories: ScannedRepository[]; 
+/**  The walker's skips with their reasons. */
+skipped: ScanSkip_Deserialize[] } | 
+/**
+ *  The cancel token latched and a walker thread observed it:
+ *  everything the walk accumulated is dropped, nothing was
+ *  written anywhere, and the answer deliberately carries no
+ *  partial anything (ERR-002).
+ */
+{ outcome: "cancelled" };
+
+/**
+ *  The `scan_start` command's wire answer (§7.10, ERR-002): either
+ *  the completed scan's candidate set, or — payload-less, the
+ *  structural pin of "an interrupted scan saves nothing" — the
+ *  cancelled verdict. Cancellation is NOT an `Err`: the user asked
+ *  for it (the `sync_run_aborted` posture), and an error envelope
+ *  would imply a failure where a decision happened.
+ */
+export type ScanRunOutcome_Serialize = 
+/**
+ *  The walk ran to completion: the terminal counters (the same
+ *  facts the progress event carried, at their final values) and
+ *  the classified result the UI groups into New / Already added
+ *  / Skipped. Nothing is persisted with them — `scan_commit`
+ *  (T-077) is the only writer.
+ */
+{ outcome: "completed"; 
+/**
+ *  Folders the walk made a decision about (found, plain and
+ *  skipped alike — the window's "folders checked" counter's
+ *  final value).
+ */
+checked: number; 
+/**  Repository events delivered, all classes combined. */
+found: number; 
+/**
+ *  Every found repository with its key and class, in walk
+ *  delivery order (unspecified beyond the parent-before-
+ *  child guarantee the walker pins; the UI sorts for
+ *  display).
+ */
+repositories: ScannedRepository[]; 
+/**  The walker's skips with their reasons. */
+skipped: ScanSkip_Serialize[] } | 
+/**
+ *  The cancel token latched and a walker thread observed it:
+ *  everything the walk accumulated is dropped, nothing was
+ *  written anywhere, and the answer deliberately carries no
+ *  partial anything (ERR-002).
+ */
+{ outcome: "cancelled" };
+
+/**
+ *  One entry of the scan answer's "Skipped" group (PRJ-002): the
+ *  path, the reason vocabulary, and — for the access refusals — the
+ *  OS code the UI's fix-it hint quotes ("os error 13 — permission
+ *  denied; fix the rights and rescan").
+ */
+export type ScanSkip = ScanSkip_Serialize | ScanSkip_Deserialize;
+
+/**
+ *  The skip-reason vocabulary on the wire (PRJ-002's list): the
+ *  walker's four reasons plus nothing else — the "archived or in
+ *  exclusions" reason is a repository's [`ScanClassWire`], carried
+ *  on the repository rows, not a skip row.
+ */
+export type ScanSkipReason = 
+/**
+ *  The folder's name is excluded (the settings list or the
+ *  ALG-051 system folders); not descended into.
+ */
+"excluded" | 
+/**
+ *  `.git` is a file or link — the submodule/worktree form; the
+ *  user can add it by hand (D-06).
+ */
+"submodule_or_worktree" | 
+/**
+ *  The path's text is not valid UTF-8 (the D-086 addendum); the
+ *  subtree under it is unregistrable.
+ */
+"not_utf8" | 
+/**
+ *  The OS refused to inspect the folder (PRJ-007); the walk
+ *  continued with the siblings. The OS code rides
+ *  [`ScanSkip::os_code`].
+ */
+"access";
+
+/**
+ *  One entry of the scan answer's "Skipped" group (PRJ-002): the
+ *  path, the reason vocabulary, and — for the access refusals — the
+ *  OS code the UI's fix-it hint quotes ("os error 13 — permission
+ *  denied; fix the rights and rescan").
+ */
+export type ScanSkip_Deserialize = {
+	/**
+	 *  The skipped entry's path (lossily rendered only for the
+	 *  non-UTF-8 skips, whose bytes no wire string can hold).
+	 */
+	path: string,
+	/**  Why the scan skipped it. */
+	reason: ScanSkipReason,
+	/**
+	 *  The raw OS error code behind an access skip; `None` for the
+	 *  reasons that are facts about a name or the text (§10's
+	 *  first-class log fact, riding the wire for the hint).
+	 */
+	os_code?: number | null,
+};
+
+/**
+ *  One entry of the scan answer's "Skipped" group (PRJ-002): the
+ *  path, the reason vocabulary, and — for the access refusals — the
+ *  OS code the UI's fix-it hint quotes ("os error 13 — permission
+ *  denied; fix the rights and rescan").
+ */
+export type ScanSkip_Serialize = {
+	/**
+	 *  The skipped entry's path (lossily rendered only for the
+	 *  non-UTF-8 skips, whose bytes no wire string can hold).
+	 */
+	path: string,
+	/**  Why the scan skipped it. */
+	reason: ScanSkipReason,
+	/**
+	 *  The raw OS error code behind an access skip; `None` for the
+	 *  reasons that are facts about a name or the text (§10's
+	 *  first-class log fact, riding the wire for the hint).
+	 */
+	os_code: number | null,
+};
+
+/**
+ *  One found repository with its ALG-053 facts, on the
+ *  `scan_start` wire: the path exactly as the walk reported it, its
+ *  `path_key`, and the registry's class. PRJ-002's three result
+ *  groups are the UI's mapping over this list — `new` feeds the
+ *  "New" checkboxes, `known` the "Already added" group, and
+ *  `archived`/`excluded` the "Skipped" group with the reason
+ *  "archived or in exclusions" (the class IS the reason for these
+ *  two); T-077's `scan_commit` consumes the user's selection from
+ *  the same list.
+ */
+export type ScannedRepository = {
+	/**
+	 *  The repository root exactly as the walk reported it (the
+	 *  canonical root's descendant spelling; a verbatim fact, never
+	 *  re-keyed here).
+	 */
+	path: string,
+	/**
+	 *  The repository's registered identity
+	 *  ([`eunomia_fs::paths::path_key`]) — the string the store
+	 *  holds when the class is not `new`.
+	 */
+	path_key: string,
+	/**
+	 *  The registry's verdict (ALG-053's four classes, serialized
+	 *  as the spec's own lower-case words).
+	 */
+	class: ScanClassWire,
 };
 
 /**

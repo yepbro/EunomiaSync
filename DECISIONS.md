@@ -15615,6 +15615,237 @@ accurate word for what T-250 encountered, not a claim that the
 numbers were never written. D-151 item 2's "no current entry records
 the ruling" is superseded: D-072 records it again.
 
+### D-153 — T-076: the `scan_start`/`scan_cancel` commands and the throttled `scan://progress` event — 2026-11-22
+
+Problem: PRJ-002's scan window needs its backend: two §7.10
+commands (`scan_start`, `scan_cancel`) and the `scan://progress`
+event (SYS-003/ALG-053: no more than 10 emissions per second,
+carrying folders-checked, found, current path), over the landed
+walker (`eunomia-fs` `scan.rs`, D-086-era), the classifier
+(`scan_classify.rs`, T-075) and the settings store
+(`scan.max_depth`/`scan.exclude_names`, D-04/D-05). ERR-002: an
+interrupted scan saves nothing. T-077 (`scan_commit`) stays out.
+
+Readings chosen (Rule 1, recorded before implementation):
+
+- **The answer shape.** `scan_start` runs the whole walk (on the
+  blocking pool, SYS-001 — the `sync_run` precedent) and answers
+  the found/candidate set when it ends: NFR-015's "runs in the
+  background, the window stays responsive" is about the UI thread
+  (an async command + `spawn_blocking` + progress events), not
+  about a detached task — and §7.10's `scan_commit` being a
+  SEPARATE command means the answer must carry the result for the
+  UI to select from, while ERR-002 means nothing server-side may
+  outlive a cancelled call. The outcome is a tagged enum the
+  `SyncRunOutcome` way: `Completed { checked, found, repositories,
+skipped }` and `Cancelled` — the Cancelled arm carries NO
+  payload, structurally: an interrupted scan has no result to show
+  and nothing to keep (the walker's docs leave "trust or drop
+  events after a Cancelled" to this layer; the answer drops them).
+- **The progress payload** is the card's three facts:
+  `{ checked, found, current_path }`. `checked` counts every walk
+  event (each is one folder the walk made a decision about —
+  found, plain, or skipped), `found` counts repository events, and
+  `current_path` is the newest event's path (lossy-rendered only
+  for the non-UTF-8 skips the walker itself reports — the
+  consumer's rendering, per `scan.rs`'s docs).
+- **The throttle** is event-driven coalescing with ≥100 ms
+  spacing (`PROGRESS_MIN_INTERVAL = 100 ms`, the arithmetic of
+  "≤10 per second"): every event updates the coalesced state; an
+  emission fires only when no emission happened in the last
+  100 ms. There is deliberately NO timer-based and NO
+  end-of-walk trailing flush: a forced final emission can land
+  < 100 ms after the previous one and break the very bound the
+  card pins, and the terminal state lands in the command's ANSWER,
+  which supersedes progress the moment the walk ends. While events
+  flow, the newest coalesced state reaches the UI within ≤ ~100 ms.
+- **The cancel token lifecycle** mirrors D-147's slot shape in a
+  dedicated `scan::ScanCancelSlot` (managed in every mode, cleared
+  on every exit by a RAII lease, `clear_if_current` by `Arc`
+  identity) but collapses D-147's two-step publish into ONE: the
+  slot IS the guard — `try_publish` (set-if-empty) decides the
+  single live scan, and there is no separate flag whose race the
+  second step would reconcile (the walk starts immediately after
+  the publication; a cancel latched during the SEC-003/settings
+  reads is honored on the walk's first entry check, the same
+  missed-cancel window D-147's pre-take publish closes). The token
+  is `eunomia_fs::scan::CancelToken` — the walker's own primitive,
+  exactly what that crate's docs assigned to "T-076's plumbing";
+  the sync token stays a separate latch (no coupling).
+- **A second `scan_start` while one is live** answers the
+  `E_SYNC_RUNNING` envelope (`sync_running_refusal`): §10's only
+  "already running — command rejected — wait until it finishes"
+  row, and the closed twenty-code registry (the `errors_tests`
+  bindings pin forbids a twenty-first `E_SCAN_RUNNING` literal).
+  `scan_cancel` with nothing live is an idempotent `Ok(())` —
+  NFR-015's "closing the scan window means cancel" races the
+  walk's natural end and must not error in the loser branch.
+- **The scan root** goes through `session_paths::validate_ui_path`
+  (SEC-003: session-picked or a registered project), whose
+  canonical answer is the walk root — the `scan_classify` caller
+  obligation (the registry keys and the walked paths must spell
+  the identity the same way). Settings (`scan.max_depth` →
+  `NonZeroUsize`, `scan.exclude_names`) and the three registry key
+  sets (active, archived, exclusions) load in ONE `Db::run` read
+  transaction before the walk — the per-scan snapshot rule that
+  keeps classification deterministic over the scan's lifetime.
+- **Events follow the T-246 capability truth**: `scan://progress`
+  is a manual `tauri_specta::Event` impl (the derive macro cannot
+  produce the `://` wire name, D-112), emitted from Rust only, and
+  the webview subscribes through the existing
+  `core:event:allow-listen`/`-unlisten` grant — no capability
+  change.
+- **Errors**: cancellation is NOT an error (the `Cancelled`
+  outcome); failures map to the honest existing codes — the
+  SEC-003 `E_VALIDATION` refusal (which is also what a root that
+  cannot be RESOLVED meets at that gate: `validate_ui_path` maps
+  every unresolvable spelling to the allowlist sentence, T-073's
+  recorded behavior), `settings_cell_to_app_error`/
+  `projects_store_to_app_error`/`storage_fallback` for store
+  reads, the D-037 no-database fallback, and
+  `join_failure_to_app_error` — with ONE log edge per failure
+  (`logging::scan_start_failed`, D-096) plus the class-only info
+  line `logging::scan_cancelled` (the ERR-002 record) and
+  `logging::scan_progress_emit_failed` for a refused emission
+  (display-only, never fatal to the walk — the answer carries the
+  truth). A root that vanishes AFTER the gate is not a command
+  failure at all: the walker reports it as an `Access` skip and
+  the scan still `Completed` (PRJ-007's rule — the refusal never
+  aborts a walk; corrected in the round-1 review).
+
+Solution: `src-tauri/src/scan.rs` (the new module, registered at the
+`lib.rs` anchor beside `file_watch`) — the wire DTOs
+(`ScanRunOutcome` (tagged `outcome`/camelCase, the `SyncRunOutcome`
+shape), `ScannedRepository`, `ScanClassWire`, `ScanSkip`/
+`ScanSkipReason`, `ScanProgressEvent` with the manual `Event` impl
+pinning `scan://progress`), `ProgressTracker` (the pure
+counters+throttle over an injected timestamp), `WalkState` (the
+one-mutex accumulator), `ScanCancelSlot` + `ScanLease` (the
+lifecycle table above), and the commands: `scan_start` →
+`scan_start_with(app, path, token)` (the `dialog_pick_folder_with`
+split, one `logging::scan_start_failed` edge) and `scan_cancel`
+(idempotent, missing-state fallback). `lib.rs` registers both
+commands, the event, and manages the slot beside `SyncCancelSlot`
+in every mode. The mock chain follows D-108/D-141: `bindings.ts`
+regenerated (commands `scanStart`/`scanCancel`, event `scanProgress`,
+all DTOs), `contract.ts` re-exports the wire halves,
+`mock/events.ts` gains the `scan://progress` key + `scanProgress`
+accessor, `mock/state.ts` the `scanning`/`scanCancelled` latches,
+and `mock/commands.ts` a prefix-classifying microtask-step walk
+(the store's own rows keep their registry classes, one synthetic
+`new` discovery, one exclude-name skip; cancel checked between
+steps; the ≥100 ms throttle deliberately has no mock twin — the six
+emissions are the observable, the rate bound is the Rust seam's
+test). Stale docs fixed in the same change (Rule 11): the
+`ipc_tests.rs` "T-076 does not exist yet" line, `session_paths.rs`'s
+"upcoming `scan_start`", the fs crate's "T-076 owns the plumbing"
+tenses, `scan_classify.rs`'s "(the scan command task)", the
+`ARCHITECTURE.md` module row, and the events/mock comment census.
+`spec.md` untouched — §7.10 already names `scan_start`/`scan_cancel`
+and `scan://progress`, and no claim there drifted.
+
+Tests (16 Rust + 7 TS, all through public APIs):
+
+- `scan.rs` unit suite (simulated clock, no wall-second sleeps):
+  the 100 ms literal; the wire name `scan://progress`; the first
+  event emits immediately with its own facts; repository vs plain
+  counting; a burst's coalescing lands the NEWEST state; and the
+  rate bound — 10 001 events at 1/ms over 10 simulated seconds
+  emit exactly 101 times (0,100,…,10 000 ms), consecutive spacing
+  ≥ 100 ms, and EVERY sliding one-second window holds ≤ 10 (the
+  spec's own words as the oracle).
+- `scan_tests.rs` (mock runtime, real `Db`, real `.git` fixtures,
+  picks through the real dialog seam): the acceptance pair — a
+  mid-walk cancel (the progress listener latches the slot's token
+  from INSIDE the synchronous emit; hundreds of remaining entries
+  guarantee a later entry observes it) answers `Cancelled`, the
+  slot was occupied mid-walk and is empty after, and the census
+  `(projects, exclusions, journal)` is UNCHANGED; the pre-latched
+  token twin (zero events); the completed scan's four classes
+  against a seeded registry (new ×2 incl. the nested find, known,
+  archived, excluded), the skip vocabulary on the wire (each found
+  repo's own `.git` skipped `excluded` by the D-05 default list,
+  the `.git`-file folder `submodule_or_worktree`), `checked == 14`
+  (the every-event arithmetic: root + 5 repos + 6 skips + 2 plain),
+  progress payloads monotone and capped by the terminal counts, and
+  the census unchanged on the happy path too; the settings shaping
+  the walk (`scan.max_depth` 1 hides a depth-2 repo; a seeded
+  exclude name skips its folder); `scan_cancel`'s two arms (no-op
+  when idle; the latch lands on the caller's own `Arc` — the
+  identity proof); the second-start `E_SYNC_RUNNING` refusal (the
+  held token untouched, still published); SEC-003 (a foreign path
+  is `E_VALIDATION` with the `path` field, slot stays empty); the
+  no-database fallback (`E_DB_LOCKED` + `NoDatabase`); the four
+  registration pins; and the wiring-level emission bound (a real
+  3001-folder walk emits within `duration/100ms + 1`, far under the
+  unthrottled 3001).
+- TS (`commands.spec.ts`, `events.spec.ts`, `mode.spec.ts`): the
+  mock's classification over the fixture world (3 known + 1
+  archived + 2 excluded + 1 new, the node_modules skip), the
+  progress climb on the bus, the mid-walk cancel →
+  `{outcome:'cancelled'}` with the store untouched, the
+  `E_SYNC_RUNNING` second start, the idle no-op cancel, the
+  empty-path `E_VALIDATION`, the `scanProgress` accessor lifetime,
+  and the D-108 shipped-set pin extended.
+
+Mutation checks (all red under the mutation, green after revert):
+M1 the throttle gate dropped (`may_emit = true`) → both rate tests
+red (3001 emissions vs a ceiling of 2 over a 190 ms walk); M2
+`clear_if_current` disabled → five slot-lifecycle assertions red;
+M3 the `try_publish` guard dropped → the second start completes
+instead of refusing; M4 the `Cancelled` arm answering `Completed`
+→ both cancel tests red at the outcome pin. `cargo fmt --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (534 + 86 + 12), `pnpm lint`,
+`pnpm typecheck`, `pnpm exec vitest run` (286) — all green by exit
+code; `src/bindings.ts` regenerated and pinned by the export test.
+
+Frozen zones untouched (`file_watch.rs`, `crates/eunomia-store/
+tests/**`); the fs-crate edits are comment-tense fixes only (Rule
+11), no behavior. Follow-ups for the board: T-077 (`scan_commit`)
+consumes the answer's selection and is the ONLY writer; T-120
+(`sync_cancel`) remains the sync slot's consumer; the `ipc/index.ts`
+facade claims about events are the standing D-250 follow-up card
+(the facade serves commands only — this task did not widen it).
+Honest boundaries: the ≤10/s bound over the WIRE is proven at the
+tracker unit (simulated clock) plus the wiring-level duration
+ceiling — a per-emission wall-clock assertion over a live walk was
+rejected as flaky by design (the D-140 posture); `scan_cancel`'s
+effect on a live scan is proven as (listener-latched mid-walk
+cancel → the walk quits and answers `Cancelled`) + (the identity
+proof: the command latches the very `Arc` the walk consults) — no
+racy "cancel exactly between two entries" test exists; and the
+mock's step loop models the walk's cancel seam, not its duration.
+
+Reviews, two rounds on two models (reports in
+`.opencode/reviews/t076-round1.md` / `t076-round2.md`, owner-local).
+Round 1 (deepseek-v4.1-flash): approve — two P2s and six P3s, all
+fixed: the four further stale "T-076 does not exist" comment lines
+in `ipc_tests.rs` (P2 — the D-153 sweep-claim was incomplete),
+D-153's own false "`E_PROJECT_UNAVAILABLE` for a root that
+vanished" claim (P2 — the gate answers the SEC-003 `E_VALIDATION`
+sentence for an unresolvable root, and a MID-WALK vanish is an
+`Access` skip inside a `Completed` answer, never a command error;
+the record now says both), the stale "future scanner" comment in
+`settings_get`'s docs, `ScanEvent`'s "a later task's" wording,
+the scan module's wrong "a classification" inside the lock claim
+(classification runs outside it), the mock's guard ORDER (the
+live-scan refusal now precedes the empty-path validation,
+mirroring production), the mock's root-equality miss (a project
+AT the scan root now classifies), and `contract.ts`'s export
+ordering. The P3 note on the half-open-window convention was
+taken as a no-action observation (recorded here). Round 2
+(hy4-flash-free): approve, ZERO findings — all ten focus areas
+verified HOLDS (persistence pin, throttle oracle, lease lifecycle,
+guard races, T-246 capability truth, blocking-pool discipline, no
+weakened tests, frozen zones, bindings/mock consistency, SEC-008).
+One full-`cargo test --workspace` run showed
+`a_recreated_directory_is_re_armed_by_the_next_set`
+(`crates/eunomia-fs/tests/watcher.rs`) failing once — an inotify
+timing flake under the parallel build, unrelated to this diff (the
+fs-crate changes are comment-only): it passes 3/3 in isolation and
+the repeat full run is green by exit code.
+
 ### D-152 — T-267: the watcher's swapped `extra_file_lines` arguments fixed red-first, and the fourth content-build copy joined onto the shared pass — 2026-11-22
 
 Problem: two halves on one card. (1) D-145's round-1 P1, pre-existing

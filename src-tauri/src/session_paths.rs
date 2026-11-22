@@ -162,8 +162,9 @@ impl SessionPaths {
 /// session-list lock is never held across either.
 ///
 /// The first production caller is `project_add_manual` (T-074), which
-/// calls this as its input gate before anything else; the upcoming
-/// `scan_start`/`project_relink` follow.
+/// calls this as its input gate before anything else; the scan
+/// command `scan_start` (T-076) gates the scan root through it the
+/// same way, and the upcoming `project_relink` follows.
 pub(crate) async fn validate_ui_path<R: Runtime>(
     app: &AppHandle<R>,
     path: &str,

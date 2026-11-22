@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ProjectAvailabilityEventWire } from '../contract'
+import type { ProjectAvailabilityEventWire, ScanProgressEventWire } from '../contract'
 import type { FixtureProfile } from '../fixtures/generator'
 import { mockCommands } from './commands'
 import {
@@ -10,8 +10,10 @@ import {
 } from './state'
 import { busEvent, createEventBus, mockEventBus, mockEvents } from './events'
 
-/** A test-local payload map — the typing pattern for §7.10 names the
- * backend does not emit yet. */
+/** A test-local payload map for the bus-mechanics tests: locally-typed
+ * payloads, deliberately NOT the generated wire shapes (`scan://progress`
+ * gained its real generated payload in `IpcEventMap` with T-076; these
+ * fixtures keep testing the bus, not the event). */
 interface TestEvents extends Record<string, unknown> {
   'scan://progress': { done: number; total: number }
   'state://dirty': { projectIds: string[] }
@@ -138,6 +140,34 @@ describe('mockEvents', () => {
     }
 
     mockEvents.stateProjectAvailability.emit(payload)
+
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(mockEventBus.listenerCount()).toBe(0)
+  })
+
+  it('scanProgress carries the generated payload type over the bus', () => {
+    // T-076's §7.10 event on the mock side: the accessor is bound to
+    // the wire name `scan://progress` with the generated payload
+    // shape — the same subscribe/emit/unsubscribe lifetime pin as
+    // availability's.
+    const listener = vi.fn()
+    const payload: ScanProgressEventWire = {
+      checked: 14,
+      found: 5,
+      current_path: '/home/dev/src/repo-new',
+    }
+    const stop = mockEvents.scanProgress.on(listener)
+    try {
+      mockEvents.scanProgress.emit(payload)
+
+      expect(listener).toHaveBeenCalledTimes(1)
+      expect(listener).toHaveBeenCalledWith(payload)
+      expect(mockEventBus.listenerCount()).toBe(1)
+    } finally {
+      stop()
+    }
+
+    mockEvents.scanProgress.emit(payload)
 
     expect(listener).toHaveBeenCalledTimes(1)
     expect(mockEventBus.listenerCount()).toBe(0)

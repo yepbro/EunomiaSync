@@ -35,6 +35,8 @@ describe('the mock command surface', () => {
       'projectAddManual',
       'projectsList',
       'projectsReorder',
+      'scanCancel',
+      'scanStart',
       'settingsGet',
       'settingsSet',
       'syncRun',

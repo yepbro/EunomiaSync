@@ -113,10 +113,10 @@
 //! classifies `excluded`; after the command, the SAME scan +
 //! classification classifies it `new`, §6.4's "the path is found by a
 //! scan again" — the walker and classifier are driven directly, the
-//! scan command layer T-076 does not exist yet), the list's every
-//! field in the stable order, the empty-database and honest
-//! no-database answers, the corrupt-cell fallback envelope, the
-//! removal's one-transaction delete + journal (with the rollback
+//! T-076 scan commands' own suite lives in `scan_tests.rs`), the
+//! list's every field in the stable order, the empty-database and
+//! honest no-database answers, the corrupt-cell fallback envelope,
+//! the removal's one-transaction delete + journal (with the rollback
 //! proof in the settings test's trigger shape), the typed
 //! unknown-id refusal, and the registration pins.
 //!
@@ -4123,7 +4123,7 @@ fn invoke_exclusion_remove(
 }
 
 /// Builds the ALG-053 [`ScanRegistry`] exactly the way the scan
-/// command task (T-076) will build it from the store: the three
+/// command (`scan_start`, T-076) builds it from the store: the three
 /// membership sets read through the repositories (D-093), keys as
 /// stored (D-098's snapshot contract).
 fn scan_registry_from(database: &crate::db::Db) -> eunomia_fs::scan_classify::ScanRegistry {
@@ -4149,10 +4149,10 @@ fn scan_registry_from(database: &crate::db::Db) -> eunomia_fs::scan_classify::Sc
 }
 
 /// Runs the walker + classifier directly over `root` — the T-076
-/// composition in miniature (the scan command layer does not exist
-/// yet): the root is canonicalized first (the caller obligation
+/// composition in miniature (the scan command's own suite lives in
+/// `scan_tests.rs`): the root is canonicalized first (the caller obligation
 /// D-098 records), the walk uses §6.5's default depth and D-05's
-/// default exclusion names exactly as T-076 will load them from the
+/// default exclusion names exactly as `scan_start` loads them from the
 /// settings, and every found repository is classified against
 /// `registry`.
 fn scan_classified_from(
@@ -4214,8 +4214,8 @@ fn removing_an_exclusion_makes_the_next_scan_classify_the_path_new() {
     // T-078's acceptance criterion, composed with T-075/D-098 end to
     // end: a real `.git` fixture on disk, a real exclusion row in the
     // store, the real command over IPC — the scan + classification
-    // (driven directly: the scan command layer, T-076, does not exist
-    // yet) answers `excluded` before the removal and `new` after it,
+    // (driven directly, the `scan_tests.rs` miniature) answers
+    // `excluded` before the removal and `new` after it,
     // while a never-excluded sibling stays `new` throughout (§6.4:
     // "the path is found by a scan again").
     let (temp, app) = exclusions_app();

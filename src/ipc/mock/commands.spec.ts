@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { mockCommands } from './commands'
 import { mockState, resetMockState } from './state'
+import { mockEvents } from './events'
 import type { FixtureProfile } from '../fixtures/generator'
 
 /** A small pinned world: 4 projects (last one archived), 3 instructions. */
@@ -744,5 +745,87 @@ describe('syncRun (the mock stand-in, T-118/D-144)', () => {
     expect(byId.get(skipped.id)?.last_synced_at).toBeNull()
     expect(byId.get(skipped.id)?.external_changed).toBe(true)
     expect(byId.get(skipped.id)?.file_deleted).toBe(false)
+  })
+})
+
+describe('scanStart / scanCancel', () => {
+  /** The fixture world's scan root: every project lives under it. */
+  const ROOT = '/home/dev/src'
+
+  it('classifies the store over the root and answers the candidate set', async () => {
+    // The mock's registry classes: the PROFILE world holds 3 active
+    // (known), 1 archived, 2 excluded paths under the root, and the
+    // synthetic discovery keeps "New" non-empty; the first §6.5
+    // default exclude name is the one skipped folder.
+    const outcome = await commands.scanStart(ROOT)
+
+    expect(outcome.outcome).toBe('completed')
+    if (outcome.outcome !== 'completed') return
+    const classes = new Set(outcome.repositories.map((repo) => repo.class))
+    expect(outcome.repositories.filter((repo) => repo.class === 'known')).toHaveLength(3)
+    expect(outcome.repositories.filter((repo) => repo.class === 'archived')).toHaveLength(1)
+    expect(outcome.repositories.filter((repo) => repo.class === 'excluded')).toHaveLength(2)
+    expect(outcome.repositories.filter((repo) => repo.class === 'new')).toHaveLength(1)
+    expect(outcome.found).toBe(7)
+    expect(outcome.checked).toBeGreaterThan(outcome.found)
+    expect(outcome.skipped).toEqual([
+      { path: `${ROOT}/node_modules`, reason: 'excluded', os_code: null },
+    ])
+    // The store is untouched either way: nothing was added (ERR-002's
+    // twin — `scan_commit` is T-077's).
+    expect(mockState().projects).toHaveLength(4)
+    expect(classes.size).toBe(4)
+  })
+
+  it('emits scan://progress while it walks, climbing to the terminal counts', async () => {
+    const seen: Array<{ checked: number; found: number; current_path: string }> = []
+    const stop = mockEvents.scanProgress.on((payload) => seen.push(payload))
+    try {
+      const outcome = await commands.scanStart(ROOT)
+      if (outcome.outcome !== 'completed') throw new Error('the uncanceled walk must complete')
+      expect(seen.length).toBeGreaterThan(1)
+      for (const pair of seen.flatMap((payload, i) => (i > 0 ? [[seen[i - 1]!, payload]] : []))) {
+        expect(pair[0]!.checked).toBeLessThanOrEqual(pair[1]!.checked)
+        expect(pair[0]!.found).toBeLessThanOrEqual(pair[1]!.found)
+      }
+      for (const payload of seen) {
+        expect(payload.current_path.startsWith(ROOT)).toBe(true)
+        expect(payload.checked).toBeLessThanOrEqual(outcome.checked)
+        expect(payload.found).toBeLessThanOrEqual(outcome.found)
+      }
+    } finally {
+      stop()
+    }
+  })
+
+  it('a cancel mid-walk answers the payload-less cancelled outcome, adding nothing', async () => {
+    const pending = commands.scanStart(ROOT)
+    await commands.scanCancel()
+    const outcome = await pending
+
+    expect(outcome).toEqual({ outcome: 'cancelled' })
+    expect(mockState().projects).toHaveLength(4)
+    expect(mockState().scanning).toBe(false)
+  })
+
+  it('a second start while one is live rejects E_SYNC_RUNNING', async () => {
+    const pending = commands.scanStart(ROOT)
+    await expect(commands.scanStart(ROOT)).rejects.toMatchObject({
+      code: 'E_SYNC_RUNNING',
+    })
+    const outcome = await pending
+    expect(outcome.outcome).toBe('completed')
+    expect(mockState().scanning).toBe(false)
+  })
+
+  it('a cancel with nothing live is the idempotent no-op', async () => {
+    await expect(commands.scanCancel()).resolves.toBeNull()
+  })
+
+  it('rejects an empty path with the E_VALIDATION field envelope', async () => {
+    await expect(commands.scanStart('   ')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'path' },
+    })
   })
 })

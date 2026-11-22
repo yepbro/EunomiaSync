@@ -1636,6 +1636,58 @@ pub(crate) fn sync_run_degraded(
     );
 }
 
+/// The `scan_start` command's ONE failure edge (T-076, the D-096
+/// law): every `Err` path of the command — the `E_SYNC_RUNNING`
+/// second-start refusal, the SEC-003 rejection, a vanished root,
+/// the settings/registry read, the blocking-pool join — flows
+/// through here with the error's own §7.10 vocabulary. `error`
+/// level per §10's every-error rule. A *successful* scan logs
+/// nothing: a read-only walk that answers its result is not an
+/// event (the `AlreadyPresent` posture); the cancelled stop is the
+/// decision's own info line ([`scan_cancelled`]).
+pub(crate) fn scan_start_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::scan",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "running a repository scan failed"
+    );
+}
+
+/// A scan stopped by its user (T-076, ERR-002): the cancel token
+/// latched and a walker thread observed it — everything the walk
+/// accumulated was dropped and NOTHING was saved (the command wrote
+/// nothing anywhere by construction; the answer's `Cancelled` arm
+/// carries no payload). `info` + the class-only count of folders
+/// the walk had decided by then: the stop is a decision, not a
+/// failure (the `sync_run_aborted` posture), and the count is the
+/// triage fact (SEC-008 — no paths ride the line).
+pub(crate) fn scan_cancelled(checked: u32) {
+    tracing::info!(
+        target: "eunomia::scan",
+        checked,
+        "the repository scan was cancelled; nothing was saved"
+    );
+}
+
+/// Emitting a `scan://progress` event failed (T-076): the walk
+/// itself is unaffected — the emission is display-only, throttled
+/// to at most ten per second, and the command's ANSWER carries the
+/// terminal state the dropped event would have previewed.
+/// `warn`, not `error`, for exactly the `availability_emit_failed`
+/// reason: a missed UI update, not lost state. The tauri error is
+/// the whole payload — it carries no user paths.
+pub(crate) fn scan_progress_emit_failed(error: &tauri::Error) {
+    tracing::warn!(
+        target: "eunomia::scan",
+        error = %error,
+        "emitting a scan progress event failed; the scan continues"
+    );
+}
+
 /// The availability recheck failed (T-079, D-09/DB-032, §10's
 /// every-error rule): the payload is the error's own §7.10 vocabulary,
 /// in the `activity_list_failed` shape. Logged by the fire-and-forget

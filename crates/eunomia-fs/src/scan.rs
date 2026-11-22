@@ -216,10 +216,12 @@ const MAX_WALK_THREADS: usize = 4;
 /// already delivered before the flip are simply delivered — so no
 /// stronger ordering (and no other synchronization) is warranted.
 ///
-/// T-076 owns the plumbing (a `cancel` command flipping the token the
-/// running scan holds); this type is the primitive that plumbing uses.
-/// The sync pipeline's cancellation (SYS-003 covers both) should reuse
-/// this type or relocate it, not grow a second one.
+/// T-076's command layer (`src-tauri/src/scan.rs`) owns the plumbing
+/// (the `scan_cancel` command flipping the token the running scan
+/// holds through the managed slot); this type is the primitive that
+/// plumbing uses. The sync pipeline's cancellation (SYS-003 covers
+/// both) should reuse this type or relocate it, not grow a second
+/// one.
 #[derive(Debug, Clone, Default)]
 pub struct CancelToken {
     cancelled: Arc<AtomicBool>,
@@ -277,8 +279,9 @@ pub struct ScanOptions {
 /// consumer's callback.
 ///
 /// The three variants are PRJ-002's scan-window facts: repositories
-/// land in "New"/"Already added" (the classification is a later task's),
-/// plain directories count as "folders checked", and skips land in
+/// land in "New"/"Already added" (the classification layer's,
+/// `scan_classify` + the command), plain directories count as
+/// "folders checked", and skips land in
 /// "Skipped" with the reason. Events own their paths, so the callback
 /// may store paths without re-cloning on the walker's account — and
 /// `&ScanEvent` delivery keeps read-only consumers (a progress counter)

@@ -32,13 +32,18 @@ import type {
   IpcCommands,
   MarkdownPreview,
   ProjectAddResultWire,
+  ScanRunOutcomeWire,
+  ScannedRepository,
   SettingChange,
+  SettingItem,
+  ScanSkipWire,
 } from '../contract'
 import type { SyncRunOutcome_Serialize } from '../../bindings'
 import { version as appVersion } from '../../../package.json'
 import { defaultLabel, pathKeyOf } from '../fixtures/domain'
 import { ACTION_MEMBERS, PALETTE } from '../fixtures/generator'
 import { rejectWith } from './errors'
+import { mockEvents } from './events'
 import {
   defaultsFromSettings,
   freshRowId,
@@ -603,6 +608,65 @@ export const mockCommands: IpcCommands = {
   },
 
   /**
+   * `scan_start` (§7.10, §9.6, PRJ-002; T-076/D-153): a stand-in over
+   * the mock state, not a walker mirror (D-108's limits posture — no
+   * filesystem): the scan root is a trusted string, and the "walk"
+   * classifies the mock store by path prefix — every project row
+   * under the root keeps its registry class (`known` for active,
+   * `archived` for archived rows), every exclusion row under it is
+   * `excluded`, and one synthetic `new` repository
+   * (`<root>/discovered-repo`) keeps the "New" group non-empty. The
+   * walk itself is a short microtask step loop (the yield is what
+   * makes `scanCancel` observable mid-scan); each step checks the
+   * cancel latch and emits one `scan://progress` payload, and a
+   * latched cancel answers the payload-less `cancelled` outcome
+   * (ERR-002: nothing is added to the store either way —
+   * `scan_commit` is T-077's). A second start while one is live
+   * rejects `E_SYNC_RUNNING` (the slot guard's mock twin). NOT
+   * modelled, like `project_add_manual`'s list: the SEC-003 gate
+   * (paths are trusted) — only the empty path is rejected, with the
+   * real command's `E_VALIDATION` field envelope.
+   */
+  async scanStart(path: string): Promise<ScanRunOutcomeWire> {
+    // The live-scan guard precedes input validation, mirroring the
+    // real command's order (the slot publication is its first act):
+    // with a scan live, "wait" is the answer whatever the input is.
+    const state = mockState()
+    if (state.scanning) {
+      return rejectWith('E_SYNC_RUNNING', 'errors.sync_running')
+    }
+    if (path.trim() === '') {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'path',
+        value: path,
+        reason: 'the scan root must not be empty',
+      })
+    }
+    state.scanning = true
+    state.scanCancelled = false
+    try {
+      return await runMockScan(path)
+    } finally {
+      state.scanning = false
+      state.scanCancelled = false
+    }
+  },
+
+  /**
+   * `scan_cancel` (§7.10, NFR-015; T-076/D-153): flips the live
+   * scan's latch — the mock walk observes it on its next step and
+   * answers `cancelled`. With nothing live it is the documented
+   * idempotent no-op (the window-close race must not error).
+   */
+  async scanCancel() {
+    const state = mockState()
+    if (state.scanning) {
+      state.scanCancelled = true
+    }
+    return null
+  },
+
+  /**
    * `sync_run` (§7.10, §9.4; T-118): a stand-in over the mock state,
    * not a pipeline mirror (D-108's limits posture): no library or
    * assignment state exists here, so no build is possible — every
@@ -684,6 +748,90 @@ export const mockCommands: IpcCommands = {
       },
     }
   },
+}
+
+/**
+ * The mock walk of [`mockCommands.scanStart`]: classifies the store by
+ * path prefix, then delivers the terminal state over a short microtask
+ * step loop — one `scan://progress` emission per step (the real
+ * backend's ≥100 ms throttle has no mock twin: the six emissions ARE
+ * the observable, and the rate bound is the Rust seam's test), the
+ * cancel latch checked between every step (a latched cancel answers
+ * the payload-less `cancelled` outcome with the store untouched).
+ */
+async function runMockScan(root: string): Promise<ScanRunOutcomeWire> {
+  const state = mockState()
+  const trimmed = root.trim().replace(/\/+$/, '')
+  const prefix = trimmed + '/'
+  // The root itself matches too: a registered project scanned AS the
+  // root is under it (the real walk roots on the canonical path).
+  const under = (path: string) => path === trimmed || path.startsWith(prefix)
+  const repositories: ScannedRepository[] = state.projects
+    .filter((row) => under(row.path))
+    .map((row) => ({
+      path: row.path,
+      path_key: pathKeyOf(row.path),
+      class: row.state === 'active' ? ('known' as const) : ('archived' as const),
+    }))
+  for (const exclusion of state.exclusions) {
+    if (under(exclusion.path)) {
+      repositories.push({
+        path: exclusion.path,
+        path_key: pathKeyOf(exclusion.path),
+        class: 'excluded',
+      })
+    }
+  }
+  const discovered = `${prefix}discovered-repo`
+  repositories.push({ path: discovered, path_key: pathKeyOf(discovered), class: 'new' })
+
+  // The §6.5 defaults' first exclude name is the mock's one skipped
+  // folder (the real walk skips every found repository's own `.git`
+  // with this reason — one row carries the vocabulary here).
+  const excludeNames = settingStrings(state.settings, 'scan.exclude_names')
+  const skipped: ScanSkipWire[] =
+    excludeNames.length > 0
+      ? [{ path: `${prefix}${excludeNames[0]}`, reason: 'excluded', os_code: null }]
+      : []
+  const checked = repositories.length * 2 + skipped.length + 2
+
+  for (let step = 1; step <= 6; step += 1) {
+    // The inter-step yield is the seam `scanCancel` lands through; a
+    // latched cancel ends the walk with the payload-less answer.
+    await Promise.resolve()
+    if (state.scanCancelled) {
+      return { outcome: 'cancelled' }
+    }
+    const ratio = step / 6
+    mockEvents.scanProgress.emit({
+      checked: Math.round(checked * ratio),
+      found: Math.round(repositories.length * ratio),
+      current_path: step === 6 ? discovered : `${prefix}folder-${step}`,
+    })
+  }
+  return {
+    outcome: 'completed',
+    checked,
+    found: repositories.length,
+    repositories,
+    skipped,
+  }
+}
+
+/** One §6.5 string-list setting's current values ([] when unset or
+ * malformed — the value rides the wire as canonical JSON text, the
+ * `SettingItem.value` contract). */
+function settingStrings(settings: SettingItem[], key: string): string[] {
+  const found = settings.find((item) => item.key === key)
+  if (!found) return []
+  try {
+    const parsed: unknown = JSON.parse(found.value)
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')
+      ? (parsed as string[])
+      : []
+  } catch {
+    return []
+  }
 }
 
 export { SETTING_VALUE_SHAPES }

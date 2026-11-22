@@ -90,6 +90,7 @@ src-tauri/
   src/markdown.rs          # Markdown preview renderer (pulldown-cmark; preview only) (working)
   src/recovery.rs          # Recovery-screen file mechanics       (working)
   src/retention.rs         # LOG-006 retention task: journal/runs prune daily (working)
+  src/scan.rs              # scan_start/scan_cancel commands, scan://progress (working)
   src/session_paths.rs     # SEC-003 session allowlist + UI path check (working)
   src/single_instance.rs   # Single-instance handoff: restore + focus (SYS-006) (working)
   src/sync_phase0.rs       # Sync phase 0: flag, run record, built content (working)
