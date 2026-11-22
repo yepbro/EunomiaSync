@@ -800,7 +800,9 @@ column carrier). On Linux, the `fs.inotify.max_user_watches` limit
 must be
 respected: an event-queue overflow degrades to one full re-check
 through the `Backend` event (SYS-010), while a REFUSED watch (an
-unwatchable root, the watch limit itself) leaves the file unwatched —
+unwatchable root, the watch limit itself, or a refused re-arm the
+backend's refusal class proves fatal to the watch — D-148's liveness
+attribute) leaves the file unwatched —
 silently for events, but recorded as the wanted-but-unwatched set the
 future warning line and SYS-010's non-blocking notice read; neither
 case ever crashes, and the diagnostic log lines are a recorded

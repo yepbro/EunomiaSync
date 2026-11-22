@@ -18,6 +18,13 @@
 //! `fs.inotify.max_user_watches` is genuinely exhausted), so those
 //! tests run the real convergence against an injected backend with
 //! a controlled refusal — the `WatchBackend` seam, D-137's P3-7.
+//! The liveness battery beside it (T-260, D-139's phantom-entry
+//! follow-up) pins the honesty both ways: a refused re-arm that
+//! PROVES the watch dead (the directory gone for good with a real
+//! backend; the limit class with the seam) stops counting as
+//! watched and reports the gap, while a non-evidential refusal
+//! (`Other`) keeps a converged watch counted — no phantom entry,
+//! and no phantom gap either.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -25,7 +32,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eunomia_fs::watcher::{TargetWatcher, WatchBackend, WatchEvent, WatchRefused};
+use eunomia_fs::watcher::{
+    TargetWatcher, WatchBackend, WatchEvent, WatchRefusalKind, WatchRefused,
+};
 
 /// The test debounce: short enough to keep the suite quick, a real
 /// window the backend actually debounces inside.
@@ -391,6 +400,52 @@ fn set_of(paths: &[PathBuf]) -> BTreeSet<PathBuf> {
 // ---- the SYS-010 seam and the re-arm ------------------------------------
 
 #[test]
+fn a_wanted_directory_deleted_for_good_leaves_watched_files_and_reports_the_gap() {
+    // D-139's phantom, the gone-for-good shape: a converged directory
+    // that is deleted and never comes back must stop counting as
+    // watched — the re-arm refusal (notify's PathNotFound) proves the
+    // watch cannot exist (the kernel ended it with the silent
+    // IN_IGNORED at deletion). Before the liveness fix the map kept
+    // the entry: `watched_files` claimed a watch that could not exist
+    // and `unwatched_files` under-reported. The directory's RETURN
+    // re-arms on the very next set (the unconditional retry — the
+    // D-139 missing-root recovery path).
+    let temp = tempfile::tempdir().expect("creating a temp directory must work");
+    let dir = temp.path().join("root");
+    let target = dir.join("AGENTS.md");
+    write(&target, "one");
+    let (mut watcher, _receiver) = watcher();
+    watcher.set_files(&one_file(&target));
+    assert_eq!(watcher.watched_files(), set_of(&one_file(&target)));
+
+    std::fs::remove_dir_all(&dir).expect("removing the directory must work");
+    watcher.set_files(&one_file(&target)); // the refused re-arm
+    assert!(
+        watcher.watched_files().is_empty(),
+        "a wanted directory deleted for good keeps no phantom watch: {:#?}",
+        watcher.watched_files()
+    );
+    assert_eq!(
+        watcher.unwatched_files(),
+        set_of(&one_file(&target)),
+        "the gone-for-good directory's file is reported through the seam, \
+         not swallowed"
+    );
+
+    write(&target, "the directory exists again");
+    watcher.set_files(&one_file(&target));
+    assert_eq!(
+        watcher.watched_files(),
+        set_of(&one_file(&target)),
+        "the returned directory re-arms on the next pass"
+    );
+    assert!(
+        watcher.unwatched_files().is_empty(),
+        "a converged set has no gap to report"
+    );
+}
+
+#[test]
 #[cfg(not(target_os = "macos"))] // FSEvents latency on virtualized CI runners: events observed never arriving (CI 45006557685); the fake-backend seam tests below still run everywhere, and local macOS runs can lift the gate
 fn a_refused_watch_is_reported_through_the_unwatched_seam() {
     // SYS-010's observable: a wanted file whose directory the backend
@@ -466,8 +521,14 @@ type WatchLog = Arc<Mutex<Vec<PathBuf>>>;
 /// kernel refuses an EXISTING healthy directory and no fixture can.
 /// The plan is shared with the test so the limit can be lifted with
 /// the watcher already built; a refusal is persistent until the plan
-/// says otherwise, which is what a kernel limit does.
+/// says otherwise, which is what a kernel limit does. The refusal
+/// carries a caller-chosen [`WatchRefusalKind`] so the liveness
+/// battery can separate the evidence classes: `Limit` is the
+/// faithful model of the watch limit, `Other` the no-evidence
+/// refusal that must leave a converged watch counted.
 struct LimitBackend {
+    /// The refusal's evidence class (see [`WatchRefusalKind`]).
+    kind: WatchRefusalKind,
     /// The shared plan (see [`LimitPlan`]).
     limit_from: LimitPlan,
     /// The shared re-arm log (see [`WatchLog`]) — what the
@@ -476,14 +537,25 @@ struct LimitBackend {
 }
 
 impl LimitBackend {
-    /// The backend refusing from the `refuse_from`-th arm call on,
-    /// plus the handles the test keeps (the plan to lift, the log
-    /// to read).
+    /// The backend refusing with the `Limit` class from the
+    /// `refuse_from`-th arm call on, plus the handles the test keeps
+    /// (the plan to lift, the log to read).
     fn refusing_from(refuse_from: usize) -> (Self, LimitPlan, WatchLog) {
+        Self::refusing_from_with(WatchRefusalKind::Limit, refuse_from)
+    }
+
+    /// The same backend with a caller-chosen refusal class — the
+    /// liveness battery's way to separate an evidential refusal
+    /// (`Limit`) from a non-evidential one (`Other`).
+    fn refusing_from_with(
+        kind: WatchRefusalKind,
+        refuse_from: usize,
+    ) -> (Self, LimitPlan, WatchLog) {
         let limit_from: LimitPlan = Arc::new(Mutex::new(Some(refuse_from)));
         let watch_calls: WatchLog = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
+                kind,
                 limit_from: Arc::clone(&limit_from),
                 watch_calls: Arc::clone(&watch_calls),
             },
@@ -513,11 +585,15 @@ impl WatchBackend for LimitBackend {
             // (Linux maps the watches limit's ENOSPC to it; the
             // instances limit's EMFILE stays a plain I/O error), and
             // the convergence under test never branches on the
-            // reason — a platform-neutral test states no errno
+            // reason text — a platform-neutral test states no errno
             // (D-111).
-            Err(WatchRefused::new(
-                "the synthetic inotify watch limit (SYS-010)".to_owned(),
-            ))
+            let reason = match self.kind {
+                WatchRefusalKind::Limit => "the synthetic inotify watch limit (SYS-010)",
+                WatchRefusalKind::Gone | WatchRefusalKind::Other => {
+                    "a synthetic non-limit refusal (SYS-010)"
+                }
+            };
+            Err(WatchRefused::new(self.kind, reason.to_owned()))
         } else {
             Ok(())
         }
@@ -537,14 +613,16 @@ fn a_watch_limit_hit_mid_set_leaves_the_later_directories_unwatched() {
     // onward; the wanted map's BTreeMap order is alpha, beta,
     // gamma). The honest degrade: the later directories are
     // unwatched — exactly them, through the seam — while the
-    // already-converged directory STAYS converged: its re-arm is
-    // refused too, and the map keeps the evidence it has. (A
-    // genuinely LIVE watch's re-arm cannot be refused by the
-    // watches limit — the kernel updates the existing mark without
-    // allocating — so the refused re-arm of a converged directory
-    // stands for the lost-watch-plus-limit shape: the backend lost
-    // the watch behind the caller's back and the limit blocks the
-    // re-add.) The same set again answers identically — idempotent
+    // already-converged directory keeps its convergence on the
+    // FIRST pass. (A genuinely LIVE watch's re-arm cannot be
+    // refused by the watches limit — the kernel updates the
+    // existing mark without allocating — so once the NEXT pass's
+    // re-arm of the converged directory is refused too, that
+    // refusal PROVES the watch lost: the lost-watch-plus-limit
+    // phantom of D-139's follow-up. The liveness attribute moves
+    // the entry out of `watched_files` and into the seam — the map
+    // still keeps its names (nothing is evicted), the reports stop
+    // lying.) The same set again answers identically — idempotent
     // under the limit.
     let temp = tempfile::tempdir().expect("creating a temp directory must work");
     let (_alpha_dir, alpha) = target_under(&temp, "alpha");
@@ -567,16 +645,140 @@ fn a_watch_limit_hit_mid_set_leaves_the_later_directories_unwatched() {
     );
 
     watcher.set_files(&all);
-    assert_eq!(
-        watcher.watched_files(),
-        set_of(std::slice::from_ref(&alpha)),
-        "the already-converged directory survives its refused re-arm"
+    assert!(
+        watcher.watched_files().is_empty(),
+        "the converged directory's refused re-arm is a lost watch, not a \
+         live one — no phantom entry: {:#?}",
+        watcher.watched_files()
     );
     assert_eq!(
         watcher.unwatched_files(),
-        set_of(&[beta.clone(), gamma.clone()]),
+        set_of(&[alpha.clone(), beta.clone(), gamma.clone()]),
+        "the whole set is honestly unwatched under the standing limit"
+    );
+
+    watcher.set_files(&all);
+    assert!(
+        watcher.watched_files().is_empty(),
+        "a repeated pass under the limit answers identically"
+    );
+    assert_eq!(
+        watcher.unwatched_files(),
+        set_of(&[alpha, beta, gamma]),
         "the same set under the same limit answers identically"
     );
+}
+
+#[test]
+fn a_limit_refused_re_arm_of_a_converged_directory_leaves_watched_files_and_reports_the_gap() {
+    // D-139's phantom, the lost-watch-plus-limit shape in its
+    // minimal form: the backend lost the converged watch behind the
+    // caller's back (a deleted-and-recreated directory's IN_IGNORED)
+    // and the limit refuses the re-add — the exact shape a genuinely
+    // live watch can never be in (the kernel updates an existing
+    // mark without allocating). The liveness attribute reads the
+    // refusal's class as proof the watch is gone: the entry stops
+    // counting as watched, the gap surfaces through the seam, and
+    // lifting the limit converges again with no flag to clear (the
+    // unconditional re-arm IS the retry).
+    let temp = tempfile::tempdir().expect("creating a temp directory must work");
+    let (_dir, target) = target_under(&temp, "alpha");
+    let (backend, limit_from, _watch_calls) = LimitBackend::refusing_from(2);
+    let mut watcher = TargetWatcher::with_backend(backend);
+
+    watcher.set_files(&one_file(&target)); // arm call 1: armed
+    assert_eq!(watcher.watched_files(), set_of(&one_file(&target)));
+    assert!(
+        watcher.unwatched_files().is_empty(),
+        "a converged set has no gap to report"
+    );
+
+    watcher.set_files(&one_file(&target)); // arm call 2: the refused re-arm
+    assert!(
+        watcher.watched_files().is_empty(),
+        "a limit-refused re-arm of a converged directory is a lost watch, \
+         not a live one: {:#?}",
+        watcher.watched_files()
+    );
+    assert_eq!(
+        watcher.unwatched_files(),
+        set_of(&one_file(&target)),
+        "the lost watch is reported through the seam, not swallowed"
+    );
+
+    watcher.set_files(&one_file(&target)); // arm call 3: still under the limit
+    assert!(
+        watcher.watched_files().is_empty(),
+        "the refusal persists; so does the honest answer"
+    );
+    assert_eq!(watcher.unwatched_files(), set_of(&one_file(&target)));
+
+    *limit_from
+        .lock()
+        .expect("the plan handle is the test's own") = None;
+    watcher.set_files(&one_file(&target)); // arm call 4: the lift converges
+    assert_eq!(
+        watcher.watched_files(),
+        set_of(&one_file(&target)),
+        "the lifted limit lets the very next set converge"
+    );
+    assert!(
+        watcher.unwatched_files().is_empty(),
+        "a converged set has no gap to report"
+    );
+}
+
+#[test]
+fn a_non_evidential_refused_re_arm_keeps_the_converged_watch_counted() {
+    // The other half of the evidence rule — the reason the refusal
+    // CLASS exists (D-139: "evicting on refusal reason alone cannot
+    // fix both halves without evicting genuinely live watches"): a
+    // refusal of class `Other` (an I/O hiccup, a permissions refusal)
+    // says NOTHING about the watch's life — an existing kernel watch
+    // keeps delivering through one — so a converged watch's carried
+    // liveness stands. Collapsing the rule to "any refusal kills
+    // liveness" would answer this world with a phantom GAP instead:
+    // a wanted file reported unwatched while its watch still
+    // delivers. The repeated pass under the standing refusal answers
+    // identically, and the first successful re-arm is ordinary
+    // convergence again.
+    let temp = tempfile::tempdir().expect("creating a temp directory must work");
+    let (_dir, target) = target_under(&temp, "alpha");
+    let (backend, plan, _watch_calls) =
+        LimitBackend::refusing_from_with(WatchRefusalKind::Other, 2);
+    let mut watcher = TargetWatcher::with_backend(backend);
+
+    watcher.set_files(&one_file(&target)); // arm call 1: armed
+    assert_eq!(watcher.watched_files(), set_of(&one_file(&target)));
+    assert!(
+        watcher.unwatched_files().is_empty(),
+        "a converged set has no gap to report"
+    );
+
+    watcher.set_files(&one_file(&target)); // arm call 2: the `Other` refusal
+    assert_eq!(
+        watcher.watched_files(),
+        set_of(&one_file(&target)),
+        "a non-evidential refusal does not kill a converged watch: no \
+         phantom gap"
+    );
+    assert!(
+        watcher.unwatched_files().is_empty(),
+        "the seam reports nothing the watcher has no evidence for"
+    );
+
+    watcher.set_files(&one_file(&target)); // arm call 3: the refusal persists
+    assert_eq!(
+        watcher.watched_files(),
+        set_of(&one_file(&target)),
+        "the carried liveness stands while the refusal stands"
+    );
+    assert!(watcher.unwatched_files().is_empty());
+
+    *plan.lock().expect("the plan handle is the test's own") = None;
+    watcher.set_files(&one_file(&target)); // arm call 4: ordinary convergence
+    assert_eq!(watcher.watched_files(), set_of(&one_file(&target)));
+    assert!(watcher.unwatched_files().is_empty());
 }
 
 #[test]

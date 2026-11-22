@@ -14661,6 +14661,275 @@ consumption note, the sync_last_result starting seams, the D-138
 ARCHITECTURE.md rows). The cards are the tracking unit; this note
 only records their existence.
 
+### D-148 — T-260: the phantom map entry killed by a liveness attribute — `watched_files` counts only live watches, `unwatched_files` reports the gap — 2026-11-22
+
+Problem: D-139's own follow-up (its "Follow-up found while tracing the
+convergence"): a wanted directory that was converged and then deleted
+FOR GOOD keeps its map entry across passes — `set_files`' first loop
+keeps every still-wanted entry unconditionally, the re-arm refusal
+(notify's `PathNotFound` there) does not evict it, so
+`TargetWatcher::watched_files` claims a file whose watch cannot exist
+and `unwatched_files` under-reports. The same hole opens on the
+lost-watch-plus-limit shape (`IN_IGNORED` silently ended the watch,
+the watches limit refuses the re-add, the entry stays "watched"). The
+app layer inherits the lie: `file_watch.rs`'s full pass records
+`unwatched_files()` into `FileWatchState::unwatched_targets` — SYS-
+010's observable for the future warning line and notice.
+
+Readings recorded BEFORE coding (rule 1):
+
+- _The map lives in `eunomia-fs/src/watcher.rs`, not the card's named
+  `src-tauri/src/file_watch.rs`._ The card's own description — the
+  `watched_files` map, `set_files` convergence, `unwatched_files()`,
+  the SYS-010 refusal paths — names `TargetWatcher`'s state, which is
+  the fs crate's (the D-010 layer split; `file_watch.rs` only consumes
+  the two queries in `blocking_half`). The fix therefore edits
+  `watcher.rs` (plus docs); `file_watch.rs` needs no code change —
+  its call sites keep the same signatures. Recorded as a rule-10
+  deviation from the card's file attribution, not from its substance;
+  the window's frozen zones (`commands.rs`, `lib.rs`) are untouched.
+- _Liveness is per wanted-directory entry, decided by evidence._
+  LIVE means: the backend armed the directory's watch at the last
+  `set_files` pass (`watch` returned `Ok`), or the entry's previous
+  liveness stands because the re-arm's refusal is NOT evidence about
+  the watch's life (class `Other` — an I/O hiccup, a permissions
+  refusal: an existing kernel watch keeps delivering either way).
+  NOT LIVE means: never armed (a fresh refusal — unchanged since
+  D-137), or the re-arm was refused with a class that proves the
+  watch cannot exist — `Gone` (the directory is gone; the kernel
+  ended its watch with the silent `IN_IGNORED` at deletion) or
+  `Limit` (the kernel never refuses a genuinely live watch's re-arm
+  — it updates the existing mark without allocating, D-137's
+  round-2 verification against notify 8.2.2's `add_single_watch` —
+  so a limit refusal of a converged entry proves the watch was
+  LOST). This is exactly D-139's "the fix needs the watch's
+  liveness, not just the refusal class": the class alone cannot
+  separate the phantom shapes from genuinely live watches (an
+  `Other` refusal of a live watch must not kill it), and liveness
+  alone cannot read the refusal's meaning.
+- _The queries tell the truth in both directions._ `watched_files`
+  answers exactly the wanted files under a LIVE directory; every
+  other wanted file lands in `unwatched_files` — never-armed,
+  refused-gone and refused-limit alike (the under-report was the
+  phantom). The answer stays a path set: no consumer of a
+  class-carrying answer exists today (the recorded follow-ups'
+  warning line and notice read paths — D-137's ruling); the class
+  drives the internal evidence table, and inflating the API for a
+  hypothetical consumer would be the speculative shape D-139's
+  round 2 refused.
+- _Recovery is unchanged and flag-free._ Every pass re-arms every
+  wanted directory (D-137 P2-4/P3-6), so a directory that comes
+  back arms `Ok` and is live again on the very next `set_files`;
+  liveness is recomputed from the pass's own evidence, never a
+  sticky bit to clear.
+- _`snapshot()` and the column carrier see no change (D-144)._ The
+  verdicts are computed by READING the files (`blocking_half`
+  classifies every available project regardless of watch state),
+  never from `watched_files` — a phantom watch never produced a
+  verdict, so it cannot produce a phantom verdict; `external_changed`/
+  `file_deleted` semantics are untouched. Only the `unwatched`
+  recording becomes truthful.
+- _D-139's battery survives in intent, one pinned assertion flips._
+  The battery pinned "a converged entry must NOT be evicted on a
+  refused re-arm" as the SURVIVING half of the then-known bug ("A
+  behavior change this card does not carry" — D-139). This card is
+  the carrier: in the battery's second pass the converged
+  directory's re-arm is refused with the limit class, which per the
+  kernel rule above proves the watch lost — the honest answer moves
+  it from `watched_files` to `unwatched_files`. The code keeps the
+  entry in every case (verified by reading; as a TESTED pin this
+  holds only for the `Other` class — evicting on `Gone`/`Limit`
+  would be observationally identical through the queries, since
+  liveness already discounts the entry, and no test distinguishes
+  it; the retention with behavior is the carried-live `Other`
+  entry, pinned by the non-evidential test through
+  `is_live_watched_name`'s two halves), and the battery's other
+  halves (the mid-set fresh refusal, the lift, the re-arm log) are
+  unchanged in substance.
+- _The pump pins (D-146) and the D-144 carrier tests are untouched_
+  (`pump_event`, `refresh_pass`, `blocking_half` bodies unchanged).
+
+Solution: `WatchRefused` gains the class — `WatchRefusalKind`
+(`Gone` | `Limit` | `Other`) with a `kind()` accessor, `new(kind,
+reason)`. The production classification is TWO halves: the stat
+pre-check in `NotifyBackend::watch` establishes `Gone`
+platform-neutrally (`std::fs::metadata`: a missing path, or a path
+that is not a directory — one probe per directory per full pass;
+notify's backends disagree on how a missing path reaches the
+caller, so the error kind alone cannot carry it — see the round-1
+addendum's P1), and the kind mapping classifies the backend's own
+refusals (`PathNotFound` → `Gone`, `MaxFilesWatch` → `Limit`, the
+rest → `Other`; verified in the registry sources, notify 8.2.2
+`src/inotify.rs:451-457` — ENOSPC remapped to `MaxFilesWatch`, an
+io `NotFound` to `PathNotFound` — and the debouncer's synchronous
+passthrough, notify-debouncer-full 0.7.0 `src/lib.rs:600-608`). `TargetWatcher` gains `live:
+BTreeSet<PathBuf>` — the liveness half of the converged map, kept
+beside the shared `dirs` filter map deliberately: the event thread
+filters by NAMES only (a dead watch delivers nothing anyway, and a
+carried-live entry must keep delivering), so liveness stays on the
+caller's side with no lock at all. `set_files` re-arms as before
+and records the evidence: `Ok` → live; refused `Gone`/`Limit` →
+not live; refused `Other` → the carried liveness stands; a
+directory leaving the wanted set drops both its map entry (the
+existing `unwatch`) and its liveness. The converged `files` set is
+computed against the map AND liveness, so `watched_files` counts
+only live watches and `unwatched_files` — the unchanged
+wanted-minus-watched difference — now reports the phantom shapes.
+
+Tests: the battery in `crates/eunomia-fs/tests/watcher.rs` gains
+three tests and one honest flip. NEW, red against the pre-fix code
+(observed: both failed on `watched_files` still naming the phantom
+file): `a_wanted_directory_deleted_for_good_leaves_watched_files_
+and_reports_the_gap` (a REAL backend: converge, `remove_dir_all`,
+re-set — watched empties, the seam answers the file, and the
+directory's return re-arms) and `a_limit_refused_re_arm_of_a_
+converged_directory_leaves_watched_files_and_reports_the_gap`
+(the seam's `Limit` kind: the refused re-arm empties `watched_files`
+and fills the seam, a repeated pass answers identically, the lift
+converges). NEW, green-on-arrival by design and discriminating via
+mutation M2: `a_non_evidential_refused_re_arm_keeps_the_converged_
+watch_counted` (an `Other`-kind refusal of a converged re-arm keeps
+the watch counted — the genuinely-live-watch half, the reason the
+class exists). FLIPPED: the D-139 battery's second pass
+(`a_watch_limit_hit_mid_set_leaves_the_later_directories_unwatched`)
+— its "the already-converged directory survives its refused re-arm"
+assertion pinned the phantom as the surviving half of the then-known
+bug; this card carries the behavior change D-139 deferred, so the
+pass now asserts the honest answer (the whole set unwatched) plus a
+third pass pinning idempotence. NEW unit test in `watcher.rs`'s
+colocated suite: `notify_error_kinds_map_onto_the_refusal_evidence_
+classes` (PathNotFound→Gone, MaxFilesWatch→Limit, generic and io→
+Other, through notify's public `Error::new`). The fake gained the
+refusal class (`LimitBackend::refusing_from_with(kind, from)`,
+`refusing_from` = the `Limit` kind, so the existing battery's
+modeling is unchanged). Checks green by exit code: `cargo fmt
+--check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (the app crate's 518, including every
+watch-related ipc test, untouched and green — `pump_event`,
+`refresh_pass` and `blocking_half` bodies did not change).
+
+Mutation-verified, each red with the cargo exit code observed, then
+reverted to green: M1 the refusal stops clearing liveness → the
+three phantom tests red (the non-evidential one green — the
+discriminator); M2 the evidence table collapsed to "any refusal
+kills liveness" → ONLY the non-evidential test red (the
+genuinely-live-watch half has its own guard); M3 the files
+computation reading bare map membership instead of liveness → the
+three phantom tests red, the non-evidential one green.
+
+Honest boundaries: the fix is map-level; the app layer's phantom
+exposure was already partial — `blocking_half` probes availability
+first, so a project whose ROOT is gone leaves the wanted set before
+`set_files` and was honestly evicted even before this fix; the
+shapes the app could actually hold (the root alive, the watch dead:
+lost-watch-plus-limit) are now honest through the same recording
+(`note_unwatched` reads `unwatched_files()` after `set_files`).
+No ipc-level test drives the phantom: the fake backend cannot
+reach the app layer (`spawn_service` constructs its own watcher
+internally — D-146's P3-1 ruling), and a real limit cannot be
+produced on demand (D-139's premise); the watcher-level battery is
+therefore the card's end-to-end proof. The battery flip is a
+behavior change to a previously pinned answer, recorded above as
+this card's sanctioned substance. `unwatched_files` still answers
+a plain path set — a class-carrying answer has no consumer today
+(D-137's facade ruling); when the SYS-010 notice card wants the
+reason text, the `kind` is already on the refusal. The known
+timing-sensitivity of the fs suite's real-event tests (60 s
+deadlines under load) predates this change; one such test missed
+its deadline once during a loaded first-compile run here and passed
+on every subsequent run, in isolation and in the full workspace
+suite. The evidence table is deliberately BIASED against lying
+about a live watch, and the bias has residuals: an `Other` refusal
+of a LOST watch keeps it counted (a phantom entry can still hide
+behind a non-evidential refusal — say a permissions failure after a
+delete-recreate), and a `Gone` on a transient stat `NotFound` (a
+momentarily unresolvable mount) kills liveness the kernel mark may
+still hold (a brief phantom gap); both self-heal on the next pass's
+re-arm and were chosen over silently discounting a still-delivering
+watch — `Other` is not a liveness oracle.
+
+Round-1 review addendum (D-148, same task; report
+`.opencode/reviews/t260-round1.md`, deepseek-v4.1-flash — verdict
+approve with fixes: 1×P1, 1×P2, 4×P3; the round re-ran the gate
+chain green by exit code and independently reproduced mutations M2
+and M3 red in a throwaway copy), findings processed here — every
+source claim re-verified in the registry sources before taking:
+
+- P1-1 (taken): the gone-for-good fix was Linux/macOS-only.
+  `refusal_kind` mapped notify's `PathNotFound` to `Gone`, but that
+  kind is produced by the backends that reach the syscall — inotify
+  (remapping the kernel's ENOENT, `src/inotify.rs:451-457`) and
+  FSEvents (pre-checking with `path.exists()`, `src/fsevent.rs:
+372-375`); the WINDOWS backend refuses a missing path earlier and
+  generically (`src/windows.rs:557-564` — `Error::generic("Input
+watch path is neither a file nor a directory.")`, i.e.
+  `ErrorKind::Generic` → `Other`), so the deleted-for-good phantom
+  SURVIVED on Windows and the new ungated real-backend test would
+  have failed the `windows-latest` matrix leg (`ci.yml`'s
+  `cargo test --workspace`). Fixed with the reviewer's first option
+  (it fixes the feature, not just the gate): `NotifyBackend::watch`
+  pre-checks `std::fs::metadata` and answers `Gone` for a missing
+  path or a not-a-directory path (class-only reasons; any other
+  stat failure falls through to the backend's own arming, which
+  also covers the TOCTOU race); the kind mapping stays as the
+  fallback, and the new unit test
+  `the_production_backend_refuses_a_gone_directory_as_gone_on_
+every_platform` pins both gone shapes through the REAL
+  constructor. The pre-check also closes a Linux hole the round
+  surfaced in passing: inotify happily arms a watch on a FILE, so a
+  file standing where a watched directory was would have armed,
+  kept the entry converged, and phantom-counted the target — now it
+  is `Gone` everywhere.
+- P2-1 (taken): the module doc's testing-plan paragraph still said
+  "the already-converged directory keeps its convergence, a
+  repeated pass under the limit answers identically" — the flipped
+  battery asserts the opposite from the second pass on; and the
+  two "simply leaves/stays out of the converged set" sentences
+  were overbroad for the `Other` class's carried liveness. All
+  three reworded to the tested truth (rule 11).
+- P3-1 (taken): this entry's "the MAP-level pin stands literally"
+  overstated — eviction on `Gone`/`Limit` is observationally
+  identical through the queries and untested; the reading bullet
+  now states exactly what is code-verified and what is pinned (the
+  `Other` retention, by the non-evidential test).
+- P3-2 (taken): the honest boundaries now name the evidence
+  table's residual bias and its direction (the paragraph above).
+- P3-3 (taken): `Gone`'s doc claimed "gone or unreachable" — an
+  unreachable-but-present path is `Other`; the doc now states the
+  stat-based definition and moves "unreachable" to the `Other`
+  line.
+- P3-4 (taken): the citation ranges tightened (`inotify.rs:
+451-457`, debouncer `lib.rs:600-608`) and the Windows backend is
+  now cited where the platform boundary is recorded (the P1
+  paragraph above).
+
+Round-2 review addendum (D-148, same task; report
+`.opencode/reviews/t260-round2.md`, hy4-flash-free — verdict
+APPROVE, no P0/P1/P2/P3): a clean round. The reviewer re-based the
+diff scope onto the branch's real parent (`8453323` — the local
+`main` ref moved to `2b43fe5` mid-review with parallel work, which
+would have made a literal `main..HEAD` diff show foreign reverts;
+the commit itself carries exactly the five files), re-verified every
+platform fact in the installed sources (the public `Error.kind`
+field, the inotify remap, the Windows generic pre-syscall refusal,
+the FSEvents pre-check, the debouncer passthrough), traced the stat
+pre-check's four arms for any third kind of lie beyond the two
+recorded residuals (none found), confirmed the battery flip states
+exactly the implemented truth with D-139's surviving intents still
+pinned (lift, re-arm log, fresh-refusal honesty), re-checked the
+cross-file claims, the lock discipline (`live` never crosses the
+event-thread lock), and audited the tests clean — 33 added
+assertions, independent oracles (notify's own error vocabulary,
+real filesystem state), no evasion markers. Checks re-run green by
+exit code in the worktree (the fs suites, fmt, clippy). The review
+phase is complete after this round (no third round).
+
+The swapped-arguments P1 at `file_watch.rs`'s `extra_file_lines`
+call (D-145's round-1 finding, carded separately in the owner's
+INBOX) is byte-identical in this change: the file's diff is
+doc-only (the module-doc paragraph on refused re-arms), nowhere
+near the call site — no forced deviation to record.
+
 ### D-149 — T-264: the sync-run error mapper consolidated to one `db.rs` spelling — seven copies deleted, the deliberate non-copies ruled real — 2026-11-22
 
 Problem: D-132's follow-up card. The `SyncRunsError → AppError`

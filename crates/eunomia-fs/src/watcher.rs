@@ -36,13 +36,26 @@
 //! idempotent way in: it converges the live watches to exactly the
 //! wanted files (adds the new directories, drops the emptied ones,
 //! keeps the rest), however many times it runs and whatever the
-//! previous set was. A directory that CANNOT be watched — the root is
-//! gone, a dead drive, permissions — is not an error: the file simply
-//! leaves the converged set [`TargetWatcher::watched_files`]
+//! previous set was. A directory that CANNOT be watched — the root
+//! is gone, a dead drive, permissions — is not an error: the file
+//! simply leaves the converged set [`TargetWatcher::watched_files`]
 //! answers, and the next `set_files` retries it (an unavailable
-//! project has no watch, per SYS-007's removal rule; the availability
-//! gate itself is the caller's). Nothing panics and nothing is
-//! watched half-way: the map is the truth.
+//! project has no watch, per SYS-007's removal rule; the
+//! availability gate itself is the caller's) — with one deliberate
+//! exception: a refusal that is no evidence about the watch's life
+//! (class [`WatchRefusalKind::Other`]) leaves a converged entry's
+//! carried liveness standing. Nothing panics and nothing is
+//! watched half-way: the map is the truth — and the map has TWO
+//! halves, the names (the event filter) and each entry's LIVENESS
+//! (the reporting truth). The re-arm every pass performs is the
+//! liveness probe: an armed watch is live, a refusal of class
+//! [`WatchRefusalKind::Gone`] or [`Limit`] proves the watch cannot
+//! exist (the phantom shapes D-139 recorded — a directory deleted
+//! for good, a watch lost to a delete-recreate with the limit
+//! blocking the re-add — no longer count as watched and surface in
+//! [`TargetWatcher::unwatched_files`] instead), and a refusal of
+//! class [`WatchRefusalKind::Other`] is no evidence, the entry's
+//! last known liveness standing.
 //!
 //! # Events
 //!
@@ -62,7 +75,9 @@
 //! of the failure belongs to the app layer's facade. A REFUSED
 //! WATCH (an unwatchable root, the inotify watches limit) is a
 //! different, persistent fact: it never reaches the event stream —
-//! the file simply stays out of the converged set, and the caller
+//! the file stays out of the converged set (freshly refused, or —
+//! once the refusal's class proves the watch dead, the liveness
+//! rule above — refused on re-arm), and the caller
 //! reads the gap from [`TargetWatcher::unwatched_files`] instead
 //! (turning a refusal into an event would loop: `Backend` →
 //! re-check → `set_files` → `Backend`, with nothing new to say).
@@ -107,12 +122,22 @@
 //! The SYS-010 halves beyond that: the watch-limit battery runs
 //! through [`TargetWatcher::with_backend`] with a refusing backend
 //! — a limit hit mid-set leaves the later directories unwatched
-//! (the unwatched seam answers exactly them) while the
-//! already-converged directory keeps its convergence, a repeated
-//! pass under the limit answers identically, lifting the limit
-//! lets the very next `set_files` converge everything, and every
-//! pass re-arms every wanted directory (the refused ones included
-//! — the idempotent retry). The event-queue overflow half is
+//! (the unwatched seam answers exactly them) while the directories
+//! armed before the hit keep their convergence on that first pass;
+//! the NEXT pass's refused re-arm of such a directory is read as
+//! proof the watch was lost (the liveness rule above), so from
+//! there on the whole set answers honestly unwatched, identically
+//! on every repeated pass, until lifting the
+//! limit lets the very next `set_files` converge everything; and
+//! every pass re-arms every wanted directory (the refused ones
+//! included — the idempotent retry). The liveness battery (D-139's
+//! phantom-entry follow-up): a wanted directory deleted for good
+//! stops counting as watched and reports the gap until it returns
+//! (a real backend), a limit-refused re-arm of a converged
+//! directory does the same (the refusal proves the watch lost),
+//! while a refusal of class `Other` keeps a converged watch
+//! counted (no evidence, no overreach). The event-queue overflow
+//! half is
 //! pinned at the extracted `dispatch` by constructing the batches
 //! notify's public API allows (the overflow is a rescan-flag
 //! `Ok` batch — pin: one `Backend` per batch, ordinary events
@@ -169,6 +194,36 @@ impl fmt::Display for WatcherInitError {
 
 impl std::error::Error for WatcherInitError {}
 
+/// The class of a [`WatchRefused`]: what the refusal PROVES about the
+/// watch. This is the evidence [`TargetWatcher::set_files`] reads to
+/// keep its liveness honest (D-139's recorded follow-up: a converged
+/// entry whose re-arm is refused must stop counting as watched when —
+/// and only when — the refusal proves the watch cannot exist).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchRefusalKind {
+    /// The directory watch cannot exist because the path is not a
+    /// directory anymore: the production backend establishes this by
+    /// the STAT (a missing path, or a file standing where the
+    /// directory was) before it arms anything, because notify's
+    /// backends disagree on how a missing path reaches the caller
+    /// (the Windows backend refuses with a generic error — see
+    /// [`NotifyBackend::watch`]); inotify's `PathNotFound` maps here
+    /// too. Any watch the directory had cannot exist: the kernel
+    /// ends a deleted directory's watch with the silent `IN_IGNORED`.
+    Gone,
+    /// The watch-limit refusal (`fs.inotify.max_user_watches`,
+    /// SYS-010; notify's `MaxFilesWatch`). The kernel never refuses
+    /// the re-arm of a genuinely live watch — it updates the existing
+    /// mark without allocating — so a limit refusal of a converged
+    /// directory proves the watch was LOST.
+    Limit,
+    /// Any other refusal (an I/O error, an unreachable mount,
+    /// permissions): NOT evidence about the watch's life — an
+    /// existing kernel watch keeps delivering through one — so the
+    /// entry's last known liveness stands.
+    Other,
+}
+
 /// The refusal of one directory watch: the backend would not arm a
 /// watch on the directory — on Linux the WATCHES limit
 /// (`fs.inotify.max_user_watches`, surfaced by notify 8.2 as
@@ -176,20 +231,36 @@ impl std::error::Error for WatcherInitError {}
 /// unwatchable or vanished root. (The separate INSTANCES limit
 /// `EMFILE` never gets this far: `inotify_init` fails at watcher
 /// CONSTRUCTION, which is [`WatcherInitError`]'s no-watch-at-all
-/// degrade — adding a watch allocates no descriptor.) Carries a
-/// class-only diagnostic string, never file content. The watcher's
-/// response never branches on the reason: a refusal is a persistent
-/// fact about the directory, answered by the converged set and
+/// degrade — adding a watch allocates no descriptor.) Carries the
+/// refusal's [`WatchRefusalKind`] — the evidence class the
+/// convergence reads — and a class-only diagnostic string, never
+/// file content. The watcher's response never branches on the
+/// reason text: a refusal is a persistent fact about the directory,
+/// answered by the converged set and
 /// [`TargetWatcher::unwatched_files`], not an error and not an
 /// event (module docs).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WatchRefused(String);
+pub struct WatchRefused {
+    /// What the refusal proves about the watch (see
+    /// [`WatchRefusalKind`]).
+    kind: WatchRefusalKind,
+    /// The class-only diagnostic (an OS error's kind or code name),
+    /// never file content.
+    reason: String,
+}
 
 impl WatchRefused {
-    /// Wraps the backend's refusal reason — its class text (an OS
-    /// error's kind or code name), never file content.
-    pub fn new(reason: String) -> Self {
-        Self(reason)
+    /// Wraps the refusal's class and the backend's reason — its class
+    /// text (an OS error's kind or code name), never file content.
+    pub fn new(kind: WatchRefusalKind, reason: String) -> Self {
+        Self { kind, reason }
+    }
+
+    /// The refusal's evidence class: what this refusal proves about
+    /// the watch (see [`WatchRefusalKind`]).
+    #[must_use]
+    pub fn kind(&self) -> WatchRefusalKind {
+        self.kind
     }
 }
 
@@ -198,7 +269,7 @@ impl fmt::Display for WatchRefused {
         write!(
             f,
             "the file watcher backend refused the directory: {}",
-            self.0
+            self.reason
         )
     }
 }
@@ -227,7 +298,9 @@ pub trait WatchBackend {
     ///
     /// [`WatchRefused`] when the backend will not arm the watch —
     /// the watch limit, an unwatchable root, a dead volume. The
-    /// caller's response is the converged set, not the error.
+    /// refusal's [`WatchRefusalKind`] is the evidence the caller
+    /// reads for its liveness bookkeeping; the caller's response is
+    /// the converged set, not the error.
     fn watch(&mut self, dir: &Path) -> Result<(), WatchRefused>;
 
     /// Disarms the watch of `dir`. The caller treats the directory
@@ -273,13 +346,66 @@ impl NotifyBackend {
 
 impl WatchBackend for NotifyBackend {
     fn watch(&mut self, dir: &Path) -> Result<(), WatchRefused> {
+        // The gone-for-good fact is established by the STAT, not by
+        // the backend's refusal vocabulary: notify's backends
+        // disagree on how a missing path reaches the caller (inotify
+        // remaps the kernel's ENOENT to `PathNotFound` — 8.2.2
+        // `src/inotify.rs:451-457` — and FSEvents pre-checks with
+        // `path_not_found()` — `src/fsevent.rs:372-375` — but the
+        // Windows backend refuses with a GENERIC error before any
+        // syscall — `src/windows.rs:557-564`), so the error kind
+        // alone cannot carry the class. The stat is one metadata
+        // probe per directory per full pass, beside the watch
+        // syscall the pass already pays; any other stat failure is
+        // no evidence and falls through to the backend, whose own
+        // refusal (if any) classifies there — as does the TOCTOU
+        // race (the directory vanishing between the stat and the
+        // syscall).
+        match std::fs::metadata(dir) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_not_a_directory) => {
+                return Err(WatchRefused::new(
+                    WatchRefusalKind::Gone,
+                    "the path is not a directory".to_owned(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(WatchRefused::new(
+                    WatchRefusalKind::Gone,
+                    "the directory does not exist".to_owned(),
+                ));
+            }
+            // An unproven stat (permissions, a dying mount) says
+            // nothing: let the backend's arming decide.
+            Err(_unproven) => {}
+        }
         self.debouncer
             .watch(dir, RecursiveMode::NonRecursive)
-            .map_err(|error| WatchRefused(error.to_string()))
+            .map_err(|error| WatchRefused::new(refusal_kind(&error), error.to_string()))
     }
 
     fn unwatch(&mut self, dir: &Path) {
         let _ = self.debouncer.unwatch(dir);
+    }
+}
+
+/// Maps notify's platform-neutral error kind onto the refusal's
+/// evidence class ([`WatchRefusalKind`]) — the FALLBACK half of the
+/// production classification, reached when the stat pre-check in
+/// [`NotifyBackend::watch`] proved nothing and the backend's own
+/// arming refused: verified in the registry sources, notify 8.2.2
+/// `src/inotify.rs:451-457` — the watches limit's kernel `ENOSPC`
+/// is remapped to `MaxFilesWatch`, an io `NotFound` (the TOCTOU
+/// race) to `PathNotFound` — and the debouncer hands the watcher's
+/// synchronous `Result` through untouched (notify-debouncer-full
+/// 0.7.0 `src/lib.rs:600-608`). Everything else stays `Other`: an
+/// I/O or permissions refusal is not evidence about a watch's life.
+fn refusal_kind(error: &notify_debouncer_full::notify::Error) -> WatchRefusalKind {
+    use notify_debouncer_full::notify::ErrorKind;
+    match &error.kind {
+        ErrorKind::PathNotFound => WatchRefusalKind::Gone,
+        ErrorKind::MaxFilesWatch => WatchRefusalKind::Limit,
+        _ => WatchRefusalKind::Other,
     }
 }
 
@@ -313,9 +439,22 @@ pub struct TargetWatcher<B: WatchBackend = NotifyBackend> {
     /// The live watch map (module docs) — shared with the event
     /// closure, which filters by it.
     dirs: WatchedDirs,
+    /// The liveness half of the converged map: the wanted directories
+    /// whose watch the backend ARMED at the last `set_files` pass, or
+    /// whose last known liveness stands because a later re-arm
+    /// refusal carried no evidence (class [`WatchRefusalKind::Other`]
+    /// — D-139's phantom-entry follow-up). Kept beside the shared
+    /// `dirs` map, not inside it: the debouncer's event thread
+    /// filters by NAMES only (a dead watch delivers nothing anyway,
+    /// and a carried-live entry must keep delivering), so liveness
+    /// never crosses that lock — only `set_files` and the queries
+    /// touch it, all on the caller's side. Invariant: every live
+    /// directory is a key of the map.
+    live: BTreeSet<PathBuf>,
     /// The converged file set: every wanted file whose directory is
-    /// actually watched. This, not the last `set_files` input, is the
-    /// truth [`TargetWatcher::watched_files`] answers.
+    /// actually watched LIVE right now. This, not the last
+    /// `set_files` input and not bare map membership, is the truth
+    /// [`TargetWatcher::watched_files`] answers.
     files: BTreeSet<PathBuf>,
     /// The last `set_files` input verbatim — the "wanted" half of
     /// [`TargetWatcher::unwatched_files`]'s difference.
@@ -341,6 +480,7 @@ impl TargetWatcher<NotifyBackend> {
         Ok(Self {
             backend,
             dirs,
+            live: BTreeSet::new(),
             files: BTreeSet::new(),
             wanted: BTreeSet::new(),
         })
@@ -360,6 +500,7 @@ impl<B: WatchBackend> TargetWatcher<B> {
         Self {
             backend,
             dirs: Arc::new(Mutex::new(HashMap::new())),
+            live: BTreeSet::new(),
             files: BTreeSet::new(),
             wanted: BTreeSet::new(),
         }
@@ -378,16 +519,22 @@ impl<B: WatchBackend> TargetWatcher<B> {
     /// an error (SYS-007's removal rule; the retry is the next call) —
     /// and the gap stays OBSERVABLE through
     /// [`TargetWatcher::unwatched_files`], the seam SYS-010's notice
-    /// and log lines will read. A directory already in the map
-    /// STAYS converged even when its re-arm is refused — the map
-    /// keeps exactly the evidence it has (the shape where this
-    /// bites: the backend LOST the watch behind the caller's back
-    /// — a deleted-and-recreated directory's `IN_IGNORED` — and the
-    /// limit refuses the re-add; a genuinely LIVE watch's re-arm
-    /// cannot be refused by the watches limit at all, the kernel
-    /// updates the existing mark without allocating). The opposite
-    /// gap — a wanted directory deleted FOR GOOD keeps a phantom
-    /// map entry this way — is a recorded follow-up (D-139).
+    /// and log lines will read.
+    ///
+    /// The re-arm's outcome is EVIDENCE about the watch's life, read
+    /// per the refusal's [`WatchRefusalKind`] (the liveness half of
+    /// the map, D-139's phantom-entry follow-up): an armed watch is
+    /// live; a refused re-arm of class `Gone` or `Limit` PROVES the
+    /// watch cannot exist (the directory is gone, or — the kernel
+    /// never refuses a genuinely live watch's re-arm — the watch was
+    /// lost and the limit blocks the re-add), so the entry stops
+    /// counting as watched even though the map keeps its names (a
+    /// converged entry is never evicted: the names stay the event
+    /// filter's evidence); a refusal of class `Other` is no evidence
+    /// either way, and the entry's last known liveness stands. The
+    /// unconditional re-arm is therefore also the whole recovery: a
+    /// directory that comes back arms `Ok` on the very next pass,
+    /// with no flag to clear.
     pub fn set_files(&mut self, files: &[PathBuf]) {
         self.wanted = files.iter().cloned().collect();
         let wanted = wanted_dirs(files);
@@ -407,11 +554,12 @@ impl<B: WatchBackend> TargetWatcher<B> {
                 converged.insert(dir.clone(), names.clone());
             } else {
                 // Nothing of this directory is wanted anymore: the
-                // watch goes. A failure means the backend already
-                // dropped it (or the volume died) — either way the map
-                // forgets it, and the next set_files re-adds it
-                // cleanly.
+                // watch goes, and with it the directory's liveness. A
+                // failure means the backend already dropped it (or the
+                // volume died) — either way the map forgets it, and
+                // the next set_files re-adds it cleanly.
                 self.backend.unwatch(dir);
+                self.live.remove(dir);
             }
         }
         for (dir, names) in &wanted {
@@ -421,11 +569,22 @@ impl<B: WatchBackend> TargetWatcher<B> {
             // wanted directory is re-armed every time — idempotent for
             // a live watch, healing for a lost one, and the refused
             // one's retry too (the next pass arms it again).
-            if self.backend.watch(dir).is_ok() {
-                converged.insert(dir.clone(), names.clone());
+            match self.backend.watch(dir) {
+                Ok(()) => {
+                    converged.insert(dir.clone(), names.clone());
+                    self.live.insert(dir.clone());
+                }
+                Err(refused) => {
+                    // The refusal's class is the evidence: `Gone` and
+                    // `Limit` prove the watch cannot exist (a phantom
+                    // entry would lie — watched_files must not count
+                    // it), `Other` says nothing about the watch and
+                    // the carried liveness stands.
+                    if refused.kind() != WatchRefusalKind::Other {
+                        self.live.remove(dir);
+                    }
+                }
             }
-            // A watch that failed stays absent: the converged set
-            // answers what IS watched, never what was asked for.
         }
         {
             let mut dirs = self.dirs.lock().expect(LOCK_BROKEN);
@@ -435,15 +594,18 @@ impl<B: WatchBackend> TargetWatcher<B> {
             let dirs = self.dirs.lock().expect(LOCK_BROKEN);
             files
                 .iter()
-                .filter(|file| is_watched_name(&dirs, file))
+                .filter(|file| is_live_watched_name(&dirs, &self.live, file))
                 .cloned()
                 .collect()
         };
     }
 
     /// The converged set: exactly the files of the last
-    /// [`TargetWatcher::set_files`] whose parent directory is
-    /// actually watched right now. A BTreeSet for a stable,
+    /// [`TargetWatcher::set_files`] whose parent directory's watch is
+    /// LIVE right now — armed at the last pass, or carried through a
+    /// non-evidential refusal (the liveness half of the map; a
+    /// refused re-arm that proves the watch dead leaves the names in
+    /// the filter map but does not count). A BTreeSet for a stable,
     /// order-independent answer.
     #[must_use]
     pub fn watched_files(&self) -> BTreeSet<PathBuf> {
@@ -451,13 +613,19 @@ impl<B: WatchBackend> TargetWatcher<B> {
     }
 
     /// The wanted-but-unwatched set: the files of the last
-    /// [`TargetWatcher::set_files`] that have NO watch right now —
-    /// the SYS-010 seam. A non-empty answer means the backend refused
-    /// a root (an unwatchable folder, the inotify watch limit) and
-    /// those files' external edits are invisible until it changes;
-    /// the caller's documented responses — the warning line and the
-    /// non-blocking notice — read exactly this set. Deliberately NOT
-    /// a [`WatchEvent::Backend`] emission: a refused watch is a
+    /// [`TargetWatcher::set_files`] that have NO live watch right
+    /// now — the SYS-010 seam. A non-empty answer means the backend
+    /// refused a root (an unwatchable folder, the inotify watch
+    /// limit) or proved a converged watch dead by refusing its
+    /// re-arm (the directory gone for good, the watch lost to a
+    /// delete-recreate with the limit blocking the re-add) — the
+    /// phantom shapes D-139 recorded, honestly reported here since
+    /// the liveness fix — and those files' external edits are
+    /// invisible until the backend arms them again (the next
+    /// `set_files` retries unconditionally); the caller's documented
+    /// responses — the warning line and the non-blocking notice —
+    /// read exactly this set. Deliberately NOT a
+    /// [`WatchEvent::Backend`] emission: a refused watch is a
     /// persistent fact the next `set_files` re-evaluates, and turning
     /// it into an event would loop (`Backend` → full re-check →
     /// `set_files` → `Backend`) with nothing new to say.
@@ -555,6 +723,20 @@ fn is_watched_name(dirs: &HashMap<PathBuf, BTreeSet<OsString>>, path: &Path) -> 
     })
 }
 
+/// Whether `path` counts as converged-watched: its parent directory
+/// holds a map entry naming it AND that entry's watch is LIVE — the
+/// liveness half of the map decides the reports (a refused re-arm
+/// that proves the watch dead leaves the names in the filter map,
+/// where they are inert — a dead watch delivers nothing — but must
+/// not count as watched).
+fn is_live_watched_name(
+    dirs: &HashMap<PathBuf, BTreeSet<OsString>>,
+    live: &BTreeSet<PathBuf>,
+    path: &Path,
+) -> bool {
+    is_watched_name(dirs, path) && path.parent().is_some_and(|parent| live.contains(parent))
+}
+
 /// Maps one notify event onto the advisory deliveries for its paths:
 /// removals and rename-aways are [`WatchEvent::Removed`], creations,
 /// modifications and rename-intos are [`WatchEvent::Changed`],
@@ -611,10 +793,79 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::sync::mpsc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use notify_debouncer_full::DebouncedEvent;
     use notify_debouncer_full::notify::event::{Event, EventKind, Flag};
+    use notify_debouncer_full::notify::{Error as NotifyError, ErrorKind as NotifyErrorKind};
+
+    #[test]
+    fn notify_error_kinds_map_onto_the_refusal_evidence_classes() {
+        // The FALLBACK half of the production classification, pinned
+        // by value against notify's own kind vocabulary (verified in
+        // the registry sources, notify 8.2.2 `src/inotify.rs:451-
+        // 457`: the watches limit's kernel ENOSPC arrives remapped as
+        // `MaxFilesWatch`, an io `NotFound` — the TOCTOU race — as
+        // `PathNotFound`). Everything else is `Other`: not evidence
+        // about a watch's life.
+        assert_eq!(
+            refusal_kind(&NotifyError::new(NotifyErrorKind::PathNotFound)),
+            WatchRefusalKind::Gone
+        );
+        assert_eq!(
+            refusal_kind(&NotifyError::new(NotifyErrorKind::MaxFilesWatch)),
+            WatchRefusalKind::Limit
+        );
+        assert_eq!(
+            refusal_kind(&NotifyError::generic("an I/O failure")),
+            WatchRefusalKind::Other
+        );
+        assert_eq!(
+            refusal_kind(&NotifyError::io(std::io::Error::other("a dying drive"))),
+            WatchRefusalKind::Other
+        );
+    }
+
+    #[test]
+    fn the_production_backend_refuses_a_gone_directory_as_gone_on_every_platform() {
+        // The ROUND-1 P1 pin: notify's backends disagree on how a
+        // missing path reaches the caller — inotify remaps ENOENT to
+        // `PathNotFound`, but the Windows backend refuses with a
+        // GENERIC error before any syscall (notify 8.2.2
+        // `src/windows.rs:557-564`) — so the kind mapping alone
+        // cannot classify it and the production backend's stat
+        // pre-check owns the class. Both gone shapes through the
+        // REAL constructor: a path that does not exist, and a path
+        // that exists but is not a directory (on Linux a bare
+        // inotify watch on a FILE would arm — a phantom of another
+        // flavor; the pre-check refuses it as Gone everywhere).
+        let (sender, _receiver) = mpsc::channel();
+        let dirs: WatchedDirs = Arc::new(Mutex::new(HashMap::new()));
+        let mut backend = NotifyBackend::new(Duration::from_millis(10), dirs, sender)
+            .expect("constructing the debouncer must work");
+        let missing = std::env::temp_dir().join("eunomia-sync-watch-gone-test");
+        let _ = std::fs::remove_dir_all(&missing); // a previous run's debris, if any
+        let refused = backend
+            .watch(&missing)
+            .expect_err("a missing directory cannot be armed");
+        assert_eq!(
+            refused.kind(),
+            WatchRefusalKind::Gone,
+            "the missing directory is Gone whatever the platform backend"
+        );
+        let not_a_directory = std::env::temp_dir().join("eunomia-sync-watch-file-test.txt");
+        std::fs::write(&not_a_directory, "a file, not a directory")
+            .expect("writing the fixture must work");
+        let refused = backend
+            .watch(&not_a_directory)
+            .expect_err("a file cannot be armed as a directory watch");
+        assert_eq!(
+            refused.kind(),
+            WatchRefusalKind::Gone,
+            "a file standing where the directory was is Gone everywhere"
+        );
+        let _ = std::fs::remove_file(&not_a_directory);
+    }
 
     /// One event-stream error in notify's own shape. Which variant
     /// it is never reaches the mapping under test: the whole `Err`

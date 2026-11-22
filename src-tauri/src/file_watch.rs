@@ -75,7 +75,12 @@
 //! other SYS-010 half: not an event but a persistent fact, recorded
 //! per full pass as the wanted-but-unwatched set
 //! ([`FileWatchState::unwatched_targets`]) the future warning line
-//! and non-blocking notice read.
+//! and non-blocking notice read. A refused RE-ARM counts the same
+//! way (since the watcher's liveness fix, D-139's phantom-entry
+//! follow-up): a watch the backend proves dead — the directory gone
+//! for good, the watch lost with the limit blocking the re-add — is
+//! reported as unwatched, never kept as a phantom entry that
+//! `watched_files` would count.
 //!
 //! # The verdict (SYS-008, SYS-009)
 //!
