@@ -15412,3 +15412,175 @@ sweep; the §15 risk-row CI truth) and two owner-decision cards
 escalated per the escalation rule ("РЕШЕНИЕ: …" — the item-7 NUL
 question, p1; the D-071/D-072 restoration). The cards are the
 tracking unit; this note only records their existence.
+
+### D-152 — T-267: the watcher's swapped `extra_file_lines` arguments fixed red-first, and the fourth content-build copy joined onto the shared pass — 2026-11-22
+
+Problem: two halves on one card. (1) D-145's round-1 P1, pre-existing
+since D-137: `file_watch.rs`'s pass built the watcher's expected side
+with `extra_file_lines`'s two `ExtraFile` arguments swapped
+(local-then-project instead of the contract's project-then-local,
+§7.5's tie order) — a correctly synced scheme-A project with extras
+at differing positions read `ExternalChanged` forever, and nothing
+was red: the only extras test handed ready-made lines straight to
+`classify_target_file`, bypassing the facts→lines step, and every
+ipc fixture seeds the options off. (2) The same file carried the
+FOURTH partial copy of the content-build mechanics D-145 consolidated
+(`bodies_of`'s `group_assignments` + chunked-mini-snapshot arithmetic;
+frozen then as T-259's zone, reported as this card).
+
+The P1, red-first (the swap is the bug; the red run is the
+presence proof, no separate bug-presence test needed):
+
+- RED before any fix: the new ipc test
+  `a_correctly_synced_scheme_a_project_with_extras_at_different_positions_matches`
+  drives the FULL pass (the facts→lines step included) over a
+  scheme-A project seeded with `extra_local`@Start +
+  `extra_project`@End — §7.5's split case, so a swapped pair cannot
+  hide behind a shared position or a disabled option. The disk file
+  is what a sync leaves, spelled from the D-21 sentence LITERALS
+  with §7.5's placement (the local line opens the file, the project
+  line closes it) — independent of `extra_file_lines`, so the oracle
+  cannot share the call site's mistake; the stored hash is the real
+  `build_hash` over the managed text read back from the builder's
+  own output (the D-130 pin shape; note `build_hash`'s own argument
+  order is local-then-project, §6.2's column order — the pair of
+  same-type traps in one fixture). On the unfixed tree the test
+  failed at its first assertion (exit 101: the startup pass reported
+  the clean project as changed); after the two-token fix at the call
+  site (`fact.extra_project, fact.extra_local`) it passes (exit 0),
+  pinning silence on the wire AND the clean carrier read
+  (`snapshot()`, D-144's column source).
+- Every other caller audited against the signature
+  (`base_name, extra_project, extra_local`): production —
+  `content_build.rs`'s `build_one` spells it correctly (the new
+  `build_bodies` calls no line shaping at all — bodies only);
+  tests/benches — `extra_files`' own oracle
+  matrix, `target_file`'s doctest/suite, `mirror_pins`,
+  `content_build`'s two test callers
+  (`chunked_builds_equal_the_full_snapshot_builds` and the
+  `clean_pin` helper), `sync_phase3`'s `no_lines`, `file_watch`'s
+  unit helper and all
+  eight ipc call sites (all `(base, off, off)`) spell project-first
+  or both-off where order is moot. The swapped call was the only
+  one. The fix's comment now names the trap at the site (the
+  settings struct's field order is the REVERSE of the signature's
+  order — the same warning `extra_files`' doc carries).
+
+Rule-1 reading recorded before the migration (the seam question):
+the shared pass genuinely lacked a BODIES seam. Everything public in
+`content_build` produces `BuiltProject` (managed text, path, hash)
+or verdicts, but the watcher's ALG-033 verdict consumes the RAW §9.2
+body through the per-scheme builders (`classify_target_file`'s
+A/C half splices the lines itself via `build_content`; its B half
+assembles from the current file + body) — and that contract is the
+verdict battery's pinned shape, which this card deliberately does
+not churn (rewriting 15 battery calls to a managed-text signature
+would rebuild the oracle this migration is proven by). Core
+therefore gained `pub fn build_bodies(snapshot) -> Vec<(String,
+String)>` — the sequential whole-snapshot BODIES pass, the exact
+sibling of `build_projects` minus the wrapping (~20 lines, sharing
+`group_assignments`/`chunk_starts`/`scope_chunk` untouched; none of
+D-145's pinned internals changed).
+
+The migration map, fourth consumer (the same shape the other three
+followed — consumer-specific concern stays, mechanics joins core):
+
+- `file_watch.rs` DELETES the mirror whole: the local
+  `MINI_SNAPSHOT_PROJECTS` const, the local `group_assignments`, the
+  `step_by` chunk loop and the per-chunk mini-snapshot construction
+  (the `build_body` import went with it). `bodies_of` keeps ONLY the
+  consumer's own concern — scoping the snapshot to the wanted subset
+  (availability is this service's question): one filtered
+  `BuildSnapshot` (wanted projects in snapshot order, all items,
+  those projects' assignments) handed to core's `build_bodies`. The
+  empty-subset short-circuit stays (no item clone for an empty
+  world). `classify_target_file`, the verdict battery,
+  `blocking_half`'s shape and the `bodies_of` unit pin are
+  untouched.
+- Byte-identity proven twice, D-145's discipline: logically —
+  filtering projects and assignments by project id preserves each
+  project's assignment sequence (all `build_body` reads), and
+  core's `scope_chunk` collects a chunk's assignments in the same
+  project-major, index-ascending order the old mirror did.
+  Empirically — an uncommitted dump probe hashed `bodies_of` over
+  five boundary-crossing worlds (all-57 / evens-29 / boundary-tail
+  5 / one / empty; 57 = 25+25+7 with alternating variants and an
+  unassigned tail) before and after the migration: all five digests
+  identical (FNV-1a 64, hand-rolled in the probe — `sha2` is not a
+  dependency of the app crate and adding one is an owner ruling,
+  rule 9; the digest compares deterministic outputs of the same
+  input, where any drift flips it). The probe was deleted after the
+  proof.
+- Core's new seam carries its own equivalence pin
+  (`build_bodies_equal_the_full_snapshot_bodies`, 26 = full chunk +
+  1, oracle = per-project `build_body` over the FULL snapshot — the
+  same independent spelling the content equivalence test uses),
+  mutation-verified: dropping every chunk after the first fails it
+  red (exit 101), reverted green. The ipc extras test's red run is
+  its own mutation proof (the real bug was the mutation).
+
+Rule 11: the module doc's build sentence and `bodies_of`'s doc now
+attribute the chunked pass to `eunomia-core` (D-145's consolidation,
+joined in T-267) instead of "the dirty service's D-121 arithmetic,
+borrowed"; D-121's set-L REASONING citation stays (core's own docs
+own it). No other surface mentions the mirror (ARCHITECTURE.md's
+tree lists files, not internals; T-250's zone untouched, as are
+T-272's `eunomia-store/tests/**`).
+
+Checks green by exit code: `cargo fmt --check` 0, `cargo clippy
+--workspace --all-targets -- -D warnings` 0, `cargo test --workspace`
+0 (the app crate's 519 lib tests including the new pin; core's
+content_build suite 13).
+
+Honest boundaries: the red test covers scheme A only — B and C never
+take reading lines (ALG-030's "A only" gate lives in the builders),
+so the facts→lines step has no B/C variant to pin; their verdict
+semantics are unchanged and stay pinned by the existing battery. The
+dump probe's hash is not cryptographic (stated above); the identical
+five-world digests plus the logical equivalence argument are the
+proof, in D-145's shape. `build_bodies` is sequential like
+`build_projects` — if a future watcher pass wants pool parallelism,
+exposing the per-chunk half is its own card (the dirty service's
+precedent). The swapped-argument hazard itself remains structural
+(two same-type arguments; D-063 chose tests-over-types knowingly) —
+every caller is now either order-pinned or order-moot, which is the
+coverage D-063's note asked the callers to own.
+
+Follow-ups for the board: none new from this card (the extras-split
+pin closes D-145's carded P1; the shared-pass join closes its
+carded follow-up).
+
+Round-1 review addendum (D-152, same task; report
+`.opencode/reviews/t267-round1.md`, deepseek-v4.1-flash — verdict
+APPROVE, no P0/P1/P2): the round independently verified all seven
+focus points — the fix against the signature AND against what a
+sync writes (`managed_text` placing the project line at the project
+option's position and the local line at the local option's, with
+the seeded split's disk spelled out), the caller audit (confirmed:
+the fixed call was the only swapped one, production and tests),
+the byte-identity argument (including `BuildSnapshot::new`'s
+subset-closure reading of `snapshot.rs`'s constraints and the note
+that the one extra per-pass item clone is D-121-noise), grep
+cleanliness, the seam's justification and core's purely-additive
+diff, the tests' falsifiability (the ipc test fails visibly if
+`bodies_of` drops a wanted project — the snapshot equality, not a
+silent pass), and the frozen zones. Two P3 wording findings, both
+taken: this entry's audit sentence had named the new bodies test as
+an `extra_file_lines` caller (it calls none — the real test callers
+in `content_build` are the content-equivalence test and `clean_pin`;
+corrected above), and that test's fixture comment claimed "both
+halves of the missing-key branch land in the partial chunk" while
+the partial chunk holds exactly one project (reworded to where the
+cases actually land; the optional strengthening — assigning p25 —
+was declined: boundary variant scoping is owned by the pre-existing
+content-equivalence test, whose p25 IS assigned).
+
+Round-2 review addendum (D-152, same task; report
+`.opencode/reviews/t267-round2.md`, hy4-flash-free — verdict
+APPROVE, no findings): a fresh-eyes round that re-verified both
+round-1 fixes landed and discriminate, re-walked the position
+semantics through `ProjectFact`'s field origins and the store→core
+mapping (`build_snapshot.rs:238-239`), re-argued byte-identity from
+`body.rs`'s actual reads, confirmed grep-clean and the frozen zones
+(`git diff --check` exit 0), and audited the tests clean. The review
+phase is complete after this round (no third round).

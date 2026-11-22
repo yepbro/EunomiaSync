@@ -6337,6 +6337,42 @@ fn seed_watched_named_project(
     .expect("seeding a project through the repository must work")
 }
 
+/// The full-control extras seeder: a scheme-A `AGENTS.md` project
+/// whose extra-file options are parameters — every other seeder pins
+/// them off, and D-145's swapped-arguments pin must drive the pass's
+/// facts→lines step with both options enabled at different
+/// positions. Owned inputs — the executor's closure is `'static`.
+fn seed_watched_extras_project(
+    database: &crate::db::Db,
+    path: String,
+    path_key: &'static str,
+    extra_local: eunomia_store::settings::ExtraFile,
+    extra_project: eunomia_store::settings::ExtraFile,
+) -> String {
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::projects::create(
+            tx,
+            &eunomia_store::projects::NewProject {
+                path: &path,
+                path_key,
+                name: "Demo",
+                label: "DEM",
+                color: "red",
+                description: "",
+                added_via: eunomia_store::projects::AddedVia::Manual,
+                scheme: eunomia_store::settings::Scheme::A,
+                base_name: eunomia_store::settings::BaseName::AgentsMd,
+                extra_local,
+                extra_project,
+            },
+        )
+        .map(|project| project.id)
+        .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("seeding a project through the repository must work")
+}
+
 /// Seeds one active instruction with the given title/content and
 /// assigns it to the project — the title is a parameter because the
 /// library's titles are unique (DB-010) and a test may seed more
@@ -7461,6 +7497,119 @@ fn a_symlinked_target_is_watched_by_its_real_file() {
             }],
         },
         "the watch sits on the resolved name, not the link spelling"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_correctly_synced_scheme_a_project_with_extras_at_different_positions_matches() {
+    // D-145's round-1 P1, the pass-level pin D-063's note asks for at
+    // this call site: the watcher's expected side goes through the
+    // facts→lines step (`blocking_half`'s `extra_file_lines` call) —
+    // the one step the suite's other extras test bypasses by handing
+    // `classify_target_file` ready-made lines. The settings occupy
+    // BOTH positions (extra_local at Start, extra_project at End —
+    // §7.5's split case), so a swapped argument pair cannot hide
+    // behind a shared position or a disabled option. The file on
+    // disk is what a sync leaves, spelled from the D-21 sentence
+    // literals with §7.5's placement for THESE settings — the local
+    // line opens the file, the project line closes it — independent
+    // of `extra_file_lines` and of the call site under test. A
+    // correctly synced project must read clean; the swapped call
+    // builds the mirror image (the project line at Start, the local
+    // line at End) and reports ExternalChanged forever.
+    let (temp, app, commands) = file_watch_app();
+    let database = watch_database_of(&app);
+    let root = repo_dir(temp.path(), "extras");
+    let target = root.join("AGENTS.md");
+    let project_id = seed_watched_extras_project(
+        &database,
+        root.display().to_string(),
+        "/extras",
+        eunomia_store::settings::ExtraFile {
+            enabled: true,
+            position: eunomia_store::settings::Position::Start,
+        },
+        eunomia_store::settings::ExtraFile {
+            enabled: true,
+            position: eunomia_store::settings::Position::End,
+        },
+    );
+    seed_assigned_instruction(&database, project_id.clone(), "Style", "Be brief.");
+
+    // The oracle: the D-21 sentences hardcoded, the placement fixed
+    // by §7.5 over the seeded settings — never rebuilt through the
+    // function whose call site is under test.
+    const LOCAL_LINE: &str = "If AGENTS.local.md exists in the repository root, read it before starting work and follow its instructions.";
+    const PROJECT_LINE: &str = "If AGENTS.project.md exists in the repository root, read it before starting work and follow its instructions.";
+    let lines = eunomia_core::extra_files::ExtraFileLines {
+        start: vec![LOCAL_LINE.to_owned()],
+        end: vec![PROJECT_LINE.to_owned()],
+    };
+    let marker = eunomia_core::marker::creation_marker_line(
+        eunomia_core::marker::MarkerTime {
+            year: 2026,
+            month: 11,
+            day: 21,
+            hour: 9,
+            minute: 30,
+            second: 5,
+        },
+        None,
+        0,
+    );
+    let synced = eunomia_core::target_file::build_content(
+        eunomia_core::project::Scheme::A,
+        "Be brief.",
+        &lines,
+        &marker,
+    );
+    std::fs::write(&target, &synced).expect("the synced fixture must work");
+    // The managed text read back from the builder's own output (the
+    // D-130 pin shape) — the hash input for the sync simulation.
+    let managed = synced
+        .strip_suffix(&format!("\n\n{marker}\n"))
+        .expect("the builder's marker tail must be present");
+    let local_at_start = eunomia_core::project::ExtraFile {
+        enabled: true,
+        position: eunomia_core::project::ExtraFilePosition::Start,
+    };
+    let project_at_end = eunomia_core::project::ExtraFile {
+        enabled: true,
+        position: eunomia_core::project::ExtraFilePosition::End,
+    };
+    simulate_sync_hash(
+        &database,
+        project_id.clone(),
+        eunomia_core::hash::build_hash(
+            eunomia_core::project::Scheme::A,
+            &target,
+            local_at_start,
+            project_at_end,
+            managed,
+        ),
+    );
+
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    let events = listen_file_changed(&app);
+    wait_for_watch_passes(&app, 1);
+    assert!(
+        events.try_recv().is_err(),
+        "a correctly synced file with extras at different positions matches its build"
+    );
+    // The carrier agrees (D-144): the recorded verdict is clean, not
+    // a perpetual ExternalChanged.
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>().snapshot(),
+        vec![crate::file_watch::ProjectFileChange {
+            project_id,
+            external_changed: false,
+            file_deleted: false,
+        }],
+        "the §7.5 placement the watcher expects is the one the sync wrote"
     );
     // Windows teardown rule.
     drop(app);

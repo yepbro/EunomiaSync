@@ -390,6 +390,35 @@ pub fn compute_dirty_verdicts(
     verdicts
 }
 
+/// Builds every active project's §9.2 body from the snapshot, in
+/// `sort_order` — the sequential whole-snapshot bodies pass (the
+/// watch service's build step, T-267): the same chunked scoping as
+/// [`build_projects`] without the wrapping, because that consumer's
+/// ALG-033 verdict is computed from the raw body through the
+/// per-scheme builders (`build_content`/`assemble`), not from the
+/// managed text — its classify contract is pinned by its own
+/// battery, so this seam hands it exactly the body half. The
+/// scoping is body-equivalent to the full snapshot by the same
+/// argument as every pass here (the crossing-wires and equivalence
+/// tests below).
+#[must_use]
+pub fn build_bodies(snapshot: &BuildSnapshot) -> Vec<(String, String)> {
+    let grouped = group_assignments(snapshot);
+    let mut bodies: Vec<(String, String)> = Vec::with_capacity(snapshot.projects().len());
+    for start in chunk_starts(snapshot.projects().len()) {
+        let Some((projects, mini)) = scope_chunk(snapshot, &grouped, start) else {
+            // `start` is always a chunk boundary of the caller's loop.
+            return bodies;
+        };
+        for project in projects {
+            let body = build_body(&mini, &project.id)
+                .expect("the mini-snapshot holds every project of its chunk");
+            bodies.push((project.id.as_str().to_owned(), body));
+        }
+    }
+    bodies
+}
+
 #[cfg(test)]
 mod tests {
     //! The shared mechanics' own suite: the DB-021 verdict semantics
@@ -599,6 +628,66 @@ mod tests {
             chunked, expected,
             "every project's chunked bytes, paths and hashes"
         );
+        assert_eq!(chunked.len(), 26, "both chunks' projects are built");
+    }
+
+    /// The bodies seam's own equivalence pin: over the same
+    /// boundary-crossing shape (26 = one full chunk + one), the
+    /// chunked bodies pass must equal the independent full-snapshot
+    /// spelling — one `build_body` call per project over the whole
+    /// snapshot, the same oracle half the content equivalence test
+    /// uses, spelled without the chunk plumbing.
+    #[test]
+    fn build_bodies_equal_the_full_snapshot_bodies() {
+        let ids: Vec<String> = (0..26).map(|index| format!("p{index:02}")).collect();
+        let projects: Vec<SnapshotProject> = (0..26).map(|index| project(&ids[index])).collect();
+        let shared = LibraryItem::Instruction(Instruction {
+            id: ItemId::new("shared".to_owned()),
+            title: "Shared".to_owned(),
+            state: InstructionState::Active,
+            variants: vec![
+                Variant {
+                    id: VariantId::new("v-main".to_owned()),
+                    name: "Main".to_owned(),
+                    content: "Main body.".to_owned(),
+                },
+                Variant {
+                    id: VariantId::new("v-compact".to_owned()),
+                    name: "Compact".to_owned(),
+                    content: "Compact body.".to_owned(),
+                },
+            ],
+        });
+        // Alternating variants; the last five projects unassigned —
+        // the missing-key case appears in both chunks (p21–p24 in
+        // the full one, p25 in the partial; boundary variant scoping
+        // is owned by the content equivalence test above, whose
+        // p25 IS assigned).
+        let assignments: Vec<Assignment> = (0..21)
+            .map(|index| Assignment {
+                project_id: ProjectId::new(ids[index].clone()),
+                instruction_id: ItemId::new("shared".to_owned()),
+                variant_id: VariantId::new(if index % 2 == 0 {
+                    "v-compact".to_owned()
+                } else {
+                    "v-main".to_owned()
+                }),
+            })
+            .collect();
+        let full = snapshot(projects, vec![shared], assignments);
+        let chunked = build_bodies(&full);
+        let expected: Vec<(String, String)> = full
+            .projects()
+            .iter()
+            .map(|project| {
+                (
+                    project.id.as_str().to_owned(),
+                    build_body(&full, &project.id)
+                        .expect("the full snapshot holds every project it lists"),
+                )
+            })
+            .collect();
+        assert_eq!(chunked, expected, "every project's chunked body");
         assert_eq!(chunked.len(), 26, "both chunks' projects are built");
     }
 

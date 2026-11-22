@@ -87,7 +87,9 @@
 //! [`classify_target_file`] is the pure rule, per project:
 //!
 //! - The **build** is the project's §9.2 body over the T-100 snapshot
-//!   (chunked mini-snapshots, the dirty service's D-121 arithmetic);
+//!   (the shared chunked pass, `eunomia_core::content_build` over a
+//!   snapshot scoped to the wanted subset — D-145's consolidation,
+//!   joined by this service in T-267);
 //!   the comparison is ALG-033 (`compare::contents_match`) against
 //!   the build's markerless new side — spelled through the
 //!   production builders (`target_file::build_content` minus its
@@ -160,7 +162,6 @@ use tauri_specta::Event;
 use eunomia_core::assembly_b::assemble;
 use eunomia_core::assignment::Assignment;
 use eunomia_core::backup_name::target_file_name;
-use eunomia_core::body::build_body;
 use eunomia_core::compare::contents_match;
 use eunomia_core::extra_files::{ExtraFileLines, extra_file_lines};
 use eunomia_core::marker::{MarkerTime, creation_marker_line};
@@ -183,13 +184,6 @@ use crate::errors::AppError;
 /// the service sees it. A parameter of [`spawn_service`] only so the
 /// tests can run a short window; production passes this constant.
 pub(crate) const DEBOUNCE: Duration = Duration::from_millis(300);
-
-/// How many projects share one scoped mini-snapshot in
-/// [`bodies_of`] — D-121's chunking arithmetic, borrowed for the same
-/// §12.2 set-L reason (a per-project `build_body` rescans the whole
-/// assignment list; chunks of 25 keep both the rescan and the library
-/// clone in the flat middle).
-const MINI_SNAPSHOT_PROJECTS: usize = 25;
 
 /// The capacity of the command bus: room for a burst of debounced
 /// batches behind a running pass. The pump uses `try_send` — a drop
@@ -634,59 +628,38 @@ fn facts_of(snapshot: &BuildSnapshot, rows: &[Project]) -> Vec<ProjectFact> {
 }
 
 /// Builds the §9.2 bodies of the wanted projects over the snapshot,
-/// in snapshot order — chunked mini-snapshots of
-/// [`MINI_SNAPSHOT_PROJECTS`] (D-121's arithmetic and reasoning,
-/// output bodies instead of verdicts). Pure; CPU-heavy, so the pass
-/// runs it on the blocking pool.
+/// in snapshot order — the shared chunked pass
+/// (`eunomia_core::content_build::build_bodies`) over a snapshot
+/// scoped to the wanted subset: the same items, only those projects
+/// and their assignments (D-121's §12.2 set-L reasoning, owned by
+/// core since T-265/D-145). The scoping is body-equivalent to the
+/// full snapshot: filtering projects and assignments by project id
+/// preserves each project's assignment sequence, which is all
+/// `build_body` reads. Pure; CPU-heavy, so the pass runs it on the
+/// blocking pool.
 fn bodies_of(snapshot: &BuildSnapshot, wanted: &HashSet<&str>) -> Vec<(String, String)> {
-    let grouped = group_assignments(snapshot);
-    let scoped_projects: Vec<&SnapshotProject> = snapshot
+    let scoped_projects: Vec<SnapshotProject> = snapshot
         .projects()
         .iter()
         .filter(|project| wanted.contains(project.id.as_str()))
+        .cloned()
         .collect();
-    let mut bodies = Vec::with_capacity(scoped_projects.len());
-    for start in (0..scoped_projects.len()).step_by(MINI_SNAPSHOT_PROJECTS) {
-        let chunk =
-            &scoped_projects[start..(start + MINI_SNAPSHOT_PROJECTS).min(scoped_projects.len())];
-        let mut scoped_assignments: Vec<Assignment> = Vec::new();
-        for project in chunk {
-            if let Some(indices) = grouped.get(project.id.as_str()) {
-                scoped_assignments.extend(
-                    indices
-                        .iter()
-                        .map(|&index| snapshot.assignments()[index].clone()),
-                );
-            }
-        }
-        let mini = BuildSnapshot::new(
-            chunk.iter().map(|project| (*project).clone()).collect(),
-            snapshot.items().to_vec(),
-            scoped_assignments,
-        )
-        .expect("the full snapshot passed the same validation: a subset cannot fail it");
-        for project in chunk {
-            let body = build_body(&mini, &project.id)
-                .expect("the mini-snapshot holds every project of its chunk");
-            bodies.push((project.id.as_str().to_owned(), body));
-        }
+    if scoped_projects.is_empty() {
+        return Vec::new();
     }
-    bodies
-}
-
-/// Groups the snapshot's assignment row indices by project id — one
-/// pass over the assignments instead of a rescan per chunk (D-121's
-/// grouping, same shape).
-fn group_assignments(snapshot: &BuildSnapshot) -> HashMap<String, Vec<usize>> {
-    let mut grouped: HashMap<String, Vec<usize>> =
-        HashMap::with_capacity(snapshot.projects().len());
-    for (index, assignment) in snapshot.assignments().iter().enumerate() {
-        grouped
-            .entry(assignment.project_id.as_str().to_owned())
-            .or_default()
-            .push(index);
-    }
-    grouped
+    let scoped_assignments: Vec<Assignment> = snapshot
+        .assignments()
+        .iter()
+        .filter(|assignment| wanted.contains(assignment.project_id.as_str()))
+        .cloned()
+        .collect();
+    let scoped = BuildSnapshot::new(
+        scoped_projects,
+        snapshot.items().to_vec(),
+        scoped_assignments,
+    )
+    .expect("the full snapshot passed the same validation: a subset cannot fail it");
+    eunomia_core::content_build::build_bodies(&scoped)
 }
 
 // ---- the pass -------------------------------------------------------------
@@ -787,7 +760,11 @@ fn blocking_half(
         let Some(body) = bodies.get(fact.id.as_str()) else {
             continue;
         };
-        let lines = extra_file_lines(fact.base_name, fact.extra_local, fact.extra_project);
+        // Project-then-local — §7.5's tie order and the signature's
+        // argument order, the reverse of `ProjectWriteSettings`'s
+        // field order (`extra_local` is declared first; the two
+        // arguments share a type, so the order lives only here).
+        let lines = extra_file_lines(fact.base_name, fact.extra_project, fact.extra_local);
         let target = targets
             .get(fact.id.as_str())
             .expect("every classified fact has a resolved target");
