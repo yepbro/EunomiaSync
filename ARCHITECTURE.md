@@ -177,9 +177,24 @@ Rust commands are registered through `tauri-specta`:
    the effective uid through a pure `is_root` seam — `false` on every
    platform but Linux, where the spec scopes the warning), a
    non-database command that answers from compile-time constants and
-   managed state in any mode, recovery included.
-   Every further command name is fixed by §7.10 and belongs to its
-   own task.
+   managed state in any mode, recovery included — and the Sync
+   module's `sync_run` (T-118, DECISIONS.md D-138): the §9.4 pipeline
+   over the finished phase modules — phase 0's flag-guarded start (a
+   second start refuses with `E_SYNC_RUNNING`; the flag resets by
+   RAII on every exit), DB-032's availability recheck (after the
+   flag, before phase 1), phase 1's preflight, the D-25 empty-build
+   gate (the run row terminal `aborted`, the answer
+   `NeedsConfirmation` with the project ids, the UI's confirm
+   re-call a full new run), the one cancel check point before phase 2
+   (the live run's token is published through the managed
+   `SyncCancelSlot` (T-258, D-147) for the future `sync_cancel`
+   command; after phase 2 no stop exists), phases 2/3/4, the
+   never-fatal after-sync refresh and finish reports, and the summary
+   read back from the committed rows. A post-phase-0 `Err` whose run
+   row is still `running` gets that row a terminal `aborted` status
+   with the error's own §10 code, decided by the row's state inside
+   one transaction (D-138's wrapper). Every further command name is
+   fixed by §7.10 and belongs to its own task.
 3. On debug builds the specta `Builder` exports `src/bindings.ts`
    (`specta_typescript::Typescript`). The file is **committed** so the
    frontend type-checks and lints without a Rust toolchain; it is excluded
@@ -210,7 +225,11 @@ return it directly — the first registered fallible commands, with the
 §7.10 rejection envelope pinned by `ipc_tests.rs`. `errors_tests.rs`
 pins the registration and the exported literal set. DECISIONS.md D-034
 records the field design; the SQLite→registry classifier lives in
-`db.rs` (D-037).
+`db.rs` (D-037), and the store-to-wire mapping for the sync-run
+tables is that module's one `sync_runs_to_app_error` (T-264 — the
+seven per-module copies consolidated; the corrupt-cell arm stays
+class-only under SEC-008, and the `BackupRecordsCorrupt` sibling
+over the backups table keeps its own label on purpose).
 
 ## Plugins
 
@@ -517,9 +536,12 @@ cap, so the task that builds LOG-007 must read the overall time from
 `projects.last_synced_at`, not from the runs; and the schema's own
 comment on `action_log` still says "append-only" — the migration
 file is frozen (D-010/D-036), and since T-029 this retention cleanup
-is the one deliberate deleter. The startup wiring
-(open → daily copy → manage → retention spawn) is pinned by the
-extended `db_tests.rs` text pin.
+is the one deliberate deleter. The startup wiring (open → the §9.4
+interrupted-runs sweep → the DB-022 commit hook → daily copy →
+manage → retention spawn) is pinned by the two text pins — the
+extended `db_tests.rs` one for open → daily copy → manage →
+retention spawn, and the `ipc_tests.rs` pin added with the sweep
+(T-258) for open → the sweep → the commit hook → manage.
 
 **Recovery mode** (spec §10 `E_DB_CORRUPT` row, §7.10 command notes;
 DECISIONS.md D-049): when the startup open fails the quick_check gate,
