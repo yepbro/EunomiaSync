@@ -14000,6 +14000,260 @@ stateFileChanged registration; the bounded wait for mutation-time
 refresh). The cards are the tracking unit; this note only records
 their existence.
 
+### D-145 — T-265: the three content-build mirrors consolidated into eunomia-core (`managed_text` into `target_file`, the chunked pass into `content_build`), every consumer keeping its own pins — 2026-11-22
+
+Problem: D-130's recorded follow-up (joined by D-135's third copy):
+the content-build mechanics exist as THREE deliberate mirrors —
+`managed_text` (D-064's markerless seam) and the chunked
+mini-snapshot pass of 25 (D-121's set-L batching) in
+`src-tauri/src/dirty_recalc.rs` (D-121), `src-tauri/src/
+sync_phase0.rs` (D-130, born because `dirty_recalc.rs` was T-102's
+frozen zone), and `benches/eunomia-load` (D-135, behind pin tests
+with a source-scan tripwire). Each copy is independently pinned, but
+three spellings of the same bytes are three chances to drift; the
+structural fix was carded the moment `dirty_recalc.rs` unfroze.
+
+Two readings recorded BEFORE coding (rule 1):
+
+- _The site is `eunomia-core`, not a src-tauri helper._ The
+  mechanics are pure (a string join over core types; a
+  `BuildSnapshot` → `BuildSnapshot` scoping; per-project composition
+  of `build_body` + `extra_file_lines` + `managed_text` +
+  `target_file_name` + `build_hash` + `is_dirty` — every input a
+  core seam, no clock, no I/O, no runtime), and D-130's judgment was
+  already that the build IS pure core logic. Decisive structural
+  fact: the third consumer is `benches/eunomia-load`, which cannot
+  depend on the app crate — a src-tauri helper could consolidate
+  only two of the three mirrors, recreating the drift one level up.
+  A new workspace crate is out (rule 9; the card sanctions core or
+  a helper only). No new dependency enters any manifest: core, the
+  app, and the bench crate already sit on `eunomia-core`.
+- _The mechanical boundary._ What MOVES: `managed_text` →
+  `target_file.rs` as a public seam (total over all schemes: B takes
+  the body alone — `assembly_b`'s own "the managed block is the body
+  alone", which `build_content`'s private `managed_block` could
+  never express because it refuses B as a caller bug).
+  `build_content` now delegates its A/C join to it, so the join
+  exists ONCE inside core itself (the private `managed_block` is
+  deleted; its part helper `push_lines_part` survives, private
+  before and after, as `managed_text`'s builder). The chunked pass
+  → a new `content_build` module:
+  `MINI_SNAPSHOT_PROJECTS` (25), `StoredHashes`,
+  `AssignmentsByProject`, `group_assignments`, `BuiltProject` (the
+  four-field product `PreparedProject` always was: id, managed,
+  target_path, build_hash), `build_projects` (the sequential
+  whole-snapshot content pass), `compute_dirty_verdicts` (the
+  sequential verdict pass), and `chunk_verdicts` (the per-chunk
+  half). What STAYS consumer-specific: the DB-reading seams
+  (`Db::run` vs the bench's standalone `rusqlite` transaction), the
+  parallelism substrate (the app spreads chunks over
+  `spawn_blocking`, the bench over `std::thread::scope` — one
+  per-chunk entry call each), the `state://dirty` diff cache and
+  emit, the AppError mappers, phase 0's run-record composition
+  (`PreparedProject` becomes a type alias of `BuiltProject`;
+  phases 1–4 and their tests are untouched by shape), and the bench
+  crate's fixtures/reads/profile constants. `sync_phase1`'s
+  `splice_without_marker` (the ALG-031/B half) and `sync_phase3`'s
+  `whole_file` tail are NOT these mirrors (D-131/D-133's own
+  spellings, pinned against the real builders) and stay.
+
+The migration map, consumer by consumer:
+
+- `dirty_recalc.rs`: the six mirrored items (the const, the type,
+  `group_assignments`, `compute_dirty_verdicts`, `chunk_verdicts`,
+  `managed_text`) are deleted; `recalc_and_emit`'s parallel loop
+  now calls
+  `eunomia_core::content_build::{group_assignments, chunk_verdicts}`;
+  the verdict-semantics unit tests (DB-021
+  through the composition — never-synced both spellings, the
+  no-assignments exception, stored-matching/-differing, the extras
+  change, snapshot order, crossing-wires, the per-scheme clean
+  pins, the partial last chunk) MOVE to `content_build`'s own suite
+  — they verify the shared mechanics, not the service's wiring; the
+  service keeps its wiring pins (the diff semantics, the wire name,
+  the debounce literal, everything in `dirty_recalc_tests.rs`, the
+  set-L budget test whose sequential reference import moves).
+- `sync_phase0.rs`: the same six items deleted;
+  `build_projects` delegates to core's; `PreparedProject` = the
+  alias; the two managed-mirror inline tests are deleted (core's
+  suite owns the seam now) while the composition pins stay
+  (`sync_phase0_tests.rs`'s verbatim content/hash oracles, the
+  settings-coverage matrix, the 26-project chunk boundary — each
+  still able to fail if THIS module's wiring diverges); the module
+  docs' "deliberate mirror" paragraph is rewritten (rule 11).
+- `benches/eunomia-load`: the mirror half of the harness lib is
+  deleted (`managed_text`, the const, `group_assignments`, the
+  types, `prepare_project`, `scope_chunk`, both chunk fns,
+  `compute_verdicts_sequential`, `build_projects_sequential`,
+  `BuiltProject`); the benches and pin tests call core directly;
+  `compute_verdicts_parallel` stays (the bench-local
+  `std::thread::scope` substrate over core's `chunk_verdicts`) and
+  keeps its sequential-vs-parallel pin. The D-135 tripwire is
+  RELOCATED, not retired: it pinned the production chunk size by
+  source-scanning two files that no longer carry the constant; it
+  now pins
+  `eunomia_core::content_build::MINI_SNAPSHOT_PROJECTS == 25`
+  by value — the §12.2 budgets were measured at 25, and a core
+  change turns the harness red until the budgets are re-measured
+  (mutation-verified below). The managed-text pins in
+  `mirror_pins.rs` lose their `build_content`-equality half (core's
+  `build_content` now delegates to `managed_text`, so that
+  equality became a mirror of the implementation — rule 4) and pin
+  the D-21 sentence literals directly instead.
+
+A fourth partial copy exists and is OUT of this task's reach:
+`file_watch.rs` (D-137) borrowed the same `group_assignments` +
+chunked-mini-snapshot arithmetic for `bodies_of` (bodies of a
+wanted subset), and that file is T-259's frozen zone — untouched
+here, reported as a follow-up card for the first task allowed to
+edit it.
+
+No behavior change, proven twice. Logically: the byte-level oracles
+the old pins used (`build_content`'s spec-literal suite, the
+independent full-snapshot `build_body` spellings) are code this
+task did not touch, and the consumers' pins against them stayed
+green through the migration. Empirically: an uncommitted dump test
+hashed every built project's managed text over two generated
+fixture profiles (the 57-project boundary-crossing set and a
+zero-assignment set — 60 projects) before and after the migration;
+the sorted digest lists are identical (sha256 `be6dbd0c…`, both
+sides), and the probe was deleted after the proof.
+
+Mutation checks, all red-then-green: M-A the shared scoping leak
+(unscoped assignments into a chunk's mini-snapshot) failed
+`chunked_builds_equal_the_full_snapshot_builds` red — the mini's own
+validation refuses the foreign project's row, the same discriminator
+D-130/D-135 recorded; M-B the dirty wiring dropping the stored
+hashes at the seam failed three service pins (the sync-clears
+criterion, the hidden-instruction silence, the `projects_list`
+cache carrier); M-C phase 0 recording an empty fingerprint failed
+the verbatim content/hash oracle; M-D the core constant moved to 26
+failed ONLY the relocated tripwire (the five other bench pins
+stayed green — the tripwire is the chunk-size discriminator); M-E
+the bench's parallel substrate collecting chunks out of order
+failed the order pin.
+
+Testing: `eunomia-core` gained the shared mechanics' own suite —
+`target_file`'s two `managed_text` pins against the D-21/ALG-030
+literals (never against `build_content`, which now delegates the
+join — an equality pin would mirror the implementation) and
+`content_build`'s twelve (nine relocated from the dirty service's
+suite — the DB-021 verdict semantics, the per-scheme clean pins,
+the partial last chunk — plus three new: the full-snapshot
+equivalence with an independently spelled oracle, the grouping
+map's contract, the missing-key verdict). `dirty_recalc.rs` keeps its nine
+diff-semantics/wire-name/debounce unit tests (eleven verdict and
+mirror tests moved or retired with the mechanics) and all of
+`dirty_recalc_tests.rs` (the L test's sequential reference now
+imports core's `compute_dirty_verdicts`); `sync_phase0.rs` keeps
+its mapper/target-path tests (the two managed-mirror tests retired
+with the mirror — the seam is pinned where it lives) and all of
+`sync_phase0_tests.rs` untouched except one doc-comment's constant
+reference; `eunomia-load`'s `mirror_pins.rs` carries six pins
+(three managed-text equality pins retired as newly tautological,
+one D-21 splice pin added in their place; the `BuiltProject`
+oracles gained the `target_path` field) plus the profile unit
+test. `cargo fmt --check`, `cargo clippy --workspace --all-targets
+-- -D warnings` and `cargo test --workspace` all green (exit codes
+checked).
+
+Honest boundaries: the criterion budgets were NOT re-measured (the
+measured code path is unchanged — the harness now calls the very
+per-chunk function the old mirror implemented — and §12.2's
+reference-machine rerun stays the §15.5 gate D-135 left open); the
+consolidation deliberately does not touch `sync_phase1`'s
+`splice_without_marker` or `sync_phase3`'s `whole_file` tail
+(D-131/D-133's own spellings, pinned against the real builders) —
+if the owner wants those folded into core too, that is its own card
+with its own oracles; and `file_watch.rs`'s fourth partial copy
+(frozen zone) is the reported follow-up.
+
+Follow-ups for the board (the orchestrator cards them):
+`file_watch.rs`'s `bodies_of`/`group_assignments` join the shared
+pass when its window opens (T-259's file) — that same card carries
+the round-1 P1 below (the swapped `extra_file_lines` arguments);
+the ARCHITECTURE.md workspace tree remains stale beyond this task's
+rows (many landed modules are unlisted — predates this task,
+flagged for a docs card).
+
+Round-1 review addendum (D-145, same task; report
+`.opencode/reviews/t265-round1.md`, deepseek-v4.1-flash — no P0/P1
+introduced by the change): findings processed here —
+
+- P1 (pre-existing, NOT this diff's; verified independently before
+  routing): `file_watch.rs:779` builds the watcher's ALG-033
+  expected side with `extra_file_lines`'s two `ExtraFile` arguments
+  swapped — the contract is project-then-local (§7.5, the same
+  order every build caller uses), the watcher passes local-then-
+  project, so both the sentence and its Start/End position swap and
+  a correctly synced scheme-A file with extras at differing
+  positions reads `ExternalChanged` forever. Nothing turns red
+  today (the only extras test hands correctly ordered lines
+  straight to `classify_target_file`, bypassing the facts→lines
+  step; the facts fixture uses `off()`). The file is T-259's frozen
+  zone — untouched here; the finding joins the file_watch
+  follow-up card with the fix spelled (swap the arguments; add the
+  pass-level local@Start+project@End `Matches` test D-063's note
+  asks for at this call site).
+- P3 (taken): the D-145 sentence claiming `managed_block`/
+  `push_lines_part` were both deleted — only `managed_block` was;
+  corrected above.
+- P3 (taken): `chunk_projects` was public with no external consumer
+  and a doc crediting it as the parallel consumers' pool task (they
+  call `chunk_verdicts`) — now private with the doc corrected, and
+  both chunk seams document their preconditions (`start` a
+  `chunk_starts` boundary; `grouped` built from the same snapshot).
+  The suggested guard type owning `(snapshot, grouped)` was
+  declined as churn beyond the card (the preconditions are
+  documented and the equivalence pin catches misuse).
+- P3 (taken): the chunk-boundary arithmetic
+  `(0..len).step_by(MINI_SNAPSHOT_PROJECTS)` was still spelled per
+  substrate — a consumer loop drifting to another step would leave
+  the tripwire green. Core now exports `chunk_starts(project_count)`
+  and all four loops (core's two passes, the service's `spawn_blocking`
+  loop, the bench's scoped threads) iterate it: the boundary
+  arithmetic has one owner, and the tripwire's constant pin covers
+  it whole.
+- P3 (taken): the new D-21 splice pin's "exactly one empty line"
+  assertion accepted two empty lines (only the `starts_with`/
+  `ends_with("\n\n")` halves were checked); the "never `\n\n\n`"
+  halves are added.
+- P3 (taken): two prose drifts — phase 0's `build_projects` doc
+  hardcoded "25" (now a link to the constant), and this module-doc
+  layer attribution in `dirty_recalc.rs` (the service no longer
+  hashes/calls `is_dirty` itself; reworded to name the shared pass
+  as the owner of those steps).
+
+Round-2 review addendum (D-145, same task; report
+`.opencode/reviews/t265-round2.md`, hy4-flash-free — verdict
+APPROVE, no P0/P1/P2): the round verified with fresh eyes that the
+round-1 fixes landed and discriminate (`step_by` survives only in
+core and the frozen file_watch copy; all four live loops iterate
+`chunk_starts`, and the 26/57-project fixtures partition-check any
+step drift), re-walked the deleted bodies against core's semantics,
+and confirmed the pins, the frozen zones, core purity and the
+manifest silence. Two P3 hygiene findings, both taken here:
+
+- P3 (taken): a trailing space this entry's mutation paragraph
+  introduced at its own "failed the order pin." line — the only
+  `git diff --check` complaint; removed.
+- P3 (taken): the relocated scheme-A clean pin's comment claimed
+  "both reading lines on" while the fixture enables only
+  `.project.md` at Start — a wording error carried verbatim from
+  `dirty_recalc.rs` (D-121's round-1 fixture), not a coverage hole
+  (the reviewer verified the argument order is still fingerprinted
+  and the two-line join is pinned by `target_file`'s literal suite
+  and the bench's D-21 splice pin). The comment now states what the
+  fixture does.
+
+The review phase is complete after this round (no third round).
+
+Orchestrator addendum (merge, 2026-11-22): the follow-ups above are
+tracked — two cards in the board's INBOX ("Follow-up T-265 …" — the
+P1-class file_watch.rs swapped-arguments fix with the shared-pass
+join, and the stale ARCHITECTURE.md workspace tree). The cards are
+the tracking unit; this note only records their existence.
+
 ### D-146 — T-259: the pump's Backend→Refresh mapping pinned by tests (the app-layer `dispatch` precedent) and the module doc's overflow wording corrected — 2026-11-22
 
 Problem: T-259 closes two of D-139's recorded follow-ups, both
@@ -14138,6 +14392,7 @@ wordings this task surfaced are tracked — two cards in the board's
 INBOX ("Follow-up T-259: …" — the ipc_tests.rs:7132 comment and the
 crates/eunomia-fs/tests/watcher.rs:50-52 doc copy). The cards are the
 tracking unit; this note only records their existence.
+
 ### D-147 — T-258: the live run's cancel token published through a managed slot; the startup `interrupted` recovery T-122 never landed, landed here; and D-138's first-reader obligation pinned at a seam — 2026-11-22
 
 Problem: T-258 carries three halves out of D-138's follow-up list.

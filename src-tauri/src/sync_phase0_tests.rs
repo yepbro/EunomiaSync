@@ -662,12 +662,14 @@ fn scheme_c_claude_md_and_enabled_extras_build_over_their_own_shape() {
 #[test]
 fn the_chunk_boundary_never_crosses_projects_wires() {
     // The batching's own proof, at the content layer: 26 projects —
-    // one past [`sync_phase0::MINI_SNAPSHOT_PROJECTS`] — straddling
-    // the chunk boundary, odd projects on the `Main` variant, even
-    // on `Compact`. Every project's built text must follow ITS OWN
-    // assignment across the boundary; a scoping bug that leaks
-    // another chunk's assignment into a mini-snapshot either builds
-    // the wrong text or fails the mini's validation outright.
+    // one past the shared pass's chunk size
+    // (`eunomia_core::content_build::MINI_SNAPSHOT_PROJECTS`) —
+    // straddling the chunk boundary, odd projects on the `Main`
+    // variant, even on `Compact`. Every project's built text must
+    // follow ITS OWN assignment across the boundary; a scoping bug
+    // that leaks another chunk's assignment into a mini-snapshot
+    // either builds the wrong text or fails the mini's validation
+    // outright.
     let (_temp, app, _db_path) = phase0_app();
     let (instruction, main_variant) = seed_instruction(&app, "Shared", "Main body.");
     let compact_variant = seed_extra_variant(&app, &instruction, "Compact body.");

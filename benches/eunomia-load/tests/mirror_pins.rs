@@ -1,132 +1,100 @@
-//! The mirror pins: the harness's third spelling of D-064/D-121's
-//! mechanics cannot drift, because every mirrored half is checked
-//! against an oracle that does not run through this crate.
+//! The harness pins: the benchmark substrate cannot drift, because
+//! every measured half is checked against an oracle that does not run
+//! through this crate's plumbing.
 //!
-//! * [`managed_text`] is pinned against `build_content`'s real output
-//!   (the file minus its marker tail) for schemes A and C, and against
-//!   the body for scheme B — the same oracles `dirty_recalc.rs` and
-//!   `sync_phase0.rs` pin their own copies with (D-121/D-130).
 //! * The chunked mini-snapshot scoping is pinned against an
 //!   independent full-snapshot build on a boundary-crossing fixture:
 //!   every project's chunked bytes must equal the bytes
 //!   `build_body` produces over the whole snapshot (D-121's
-//!   body-equivalence, executable).
-//! * The parallel verdict pass is pinned against the sequential one
-//!   id-for-id, and both against DB-021's semantics (never-synced
-//!   dirty, synced-hash clean) on the same fixture.
+//!   body-equivalence, executable). The chunked pass itself now lives
+//!   in `eunomia_core::content_build` (T-265/D-145) — this pin runs
+//!   the shared pass and checks it from outside, exactly as before.
+//! * The parallel verdict pass (this crate's `std::thread::scope`
+//!   substrate) is pinned against core's sequential one id-for-id,
+//!   and both against DB-021's semantics (never-synced dirty,
+//!   synced-hash clean) on the same fixture.
+//! * The tripwire pins the shared chunk size by value: the §12.2
+//!   budgets were measured at 25, and a core change goes red here
+//!   until the budgets are re-measured.
+//!
+//! The managed-text mirror this suite once pinned against
+//! `build_content`'s output retired with the mirror (T-265/D-145):
+//! `managed_text` is now `eunomia_core::target_file`'s own public
+//! seam, `build_content` delegates its join to it, and an
+//! equality pin between the two would mirror the implementation
+//! (rule 4) — the seam is pinned where it lives, against the D-21
+//! and ALG-030 spec literals.
 
 use eunomia_core::body::build_body;
-use eunomia_core::extra_files::{ExtraFileLines, extra_file_lines};
-use eunomia_core::project::{BaseName, ExtraFile, ExtraFilePosition, Scheme};
-use eunomia_core::target_file::build_content;
-
-use eunomia_load::{
-    BuiltProject, LoadError, LoadFixture, StoredHashes, build_projects_sequential,
-    compute_verdicts_parallel, compute_verdicts_sequential, managed_text, read_snapshot,
-    read_snapshot_and_hashes,
+use eunomia_core::content_build::{
+    BuiltProject, MINI_SNAPSHOT_PROJECTS, StoredHashes, build_projects, compute_dirty_verdicts,
 };
+use eunomia_core::hash::build_hash;
+use eunomia_core::target_file::managed_text;
 use eunomia_store::data_sets::DataSetSpec;
 
-/// The house marker fixture (single line, DB-016's shape).
-const MARKER: &str = "<!-- Created by EunomiaSync 2026-11-17 14:03:22 Europe/Prague +01:00 -->";
+use eunomia_load::{
+    LoadError, LoadFixture, compute_verdicts_parallel, read_snapshot, read_snapshot_and_hashes,
+};
 
-/// A body without framing line breaks (`build_body`'s output shape,
-/// `build_content`'s input contract).
-const BODY: &str = "## Style\n\nBe brief.";
+/// The D-21 reading-line literals, spelled from the spec — the
+/// oracle for the managed-text seam the shared pass splices (the
+/// sentences' exact bytes, independent of any builder).
+const PROJECT_LINE: &str = "If AGENTS.project.md exists in the repository root, read it before starting work and follow its instructions.";
+const LOCAL_LINE: &str = "If AGENTS.local.md exists in the repository root, read it before starting work and follow its instructions.";
 
-/// The off extra-file option.
-fn off() -> ExtraFile {
-    ExtraFile {
-        enabled: false,
-        position: ExtraFilePosition::End,
+/// The reading lines enter the built managed text of an extras-on
+/// project: the generator's write-settings cycle (ordinals `i % 6 ==
+/// 0`: both options enabled, and `i % 3 == 0` makes those scheme A)
+/// produces projects whose built managed text is ALG-030's full
+/// splice — the `.local.md` sentence at start (the local option's
+/// generator-fixed position), the body, the `.project.md` sentence at
+/// end, exactly one empty line between neighbours. Spelled here from
+/// the D-21 literals, never from a builder: a harness or pass that
+/// dropped the reading lines (or joined them wrong) would measure a
+/// cheaper, wrong pass.
+#[test]
+fn extras_on_projects_carry_the_d21_reading_lines() {
+    let mut fixture = LoadFixture::create(&crossing_spec(), "eunomia-load-d21")
+        .expect("the crossing fixture builds");
+    let snapshot = read_snapshot(fixture.connection()).expect("the snapshot read succeeds");
+    let built = build_projects(&snapshot);
+    let with_lines: Vec<&BuiltProject> = built
+        .iter()
+        .filter(|project| {
+            project.managed.contains(PROJECT_LINE) && project.managed.contains(LOCAL_LINE)
+        })
+        .collect();
+    assert!(
+        !with_lines.is_empty(),
+        "the generator's settings cycle includes extras-on projects — \
+         at least one built project must carry both D-21 sentences"
+    );
+    for project in &with_lines {
+        assert!(
+            project.managed.starts_with(LOCAL_LINE),
+            "the local line's position is Start: it must lead the block — {:?}",
+            &project.managed[..LOCAL_LINE.len().min(project.managed.len())]
+        );
+        assert!(
+            project.managed.ends_with(PROJECT_LINE),
+            "the project line's position is End: it must close the block"
+        );
+        let middle = &project.managed[LOCAL_LINE.len()..project.managed.len() - PROJECT_LINE.len()];
+        assert!(
+            middle.starts_with("\n\n")
+                && !middle.starts_with("\n\n\n")
+                && middle.ends_with("\n\n")
+                && !middle.ends_with("\n\n\n"),
+            "exactly one empty line between each neighbouring part — \
+             never two, never none: {middle:?}"
+        );
+        assert!(
+            !middle[2..middle.len() - 2].is_empty(),
+            "the body part is non-empty (the crossing fixture assigns \
+             sixty instructions to every project)"
+        );
     }
-}
-
-/// Both reading lines enabled: `.project.md` at the start, `.local.md`
-/// at the end (§7.5's positions).
-fn both_lines() -> ExtraFileLines {
-    extra_file_lines(
-        BaseName::AgentsMd,
-        ExtraFile {
-            enabled: true,
-            position: ExtraFilePosition::Start,
-        },
-        ExtraFile {
-            enabled: true,
-            position: ExtraFilePosition::End,
-        },
-    )
-}
-
-/// No reading lines (both options off).
-fn no_lines() -> ExtraFileLines {
-    extra_file_lines(BaseName::AgentsMd, off(), off())
-}
-
-/// The empty-managed edge is spelled by the truth itself: an empty
-/// managed block makes the file the marker alone (ALG-030).
-#[test]
-fn managed_text_matches_build_content_for_scheme_a() {
-    let lines = both_lines();
-    let managed = managed_text(Scheme::A, BODY, &lines);
-    assert_eq!(
-        build_content(Scheme::A, BODY, &lines, MARKER),
-        format!("{managed}\n\n{MARKER}\n"),
-        "scheme A's real file is the mirror's managed text plus the \
-         marker tail"
-    );
-    // The reading lines splice around the body (ALG-030's "(A only)")
-    // — D-21's sentence with each file bound, the first at the start,
-    // the second at the end.
-    assert!(
-        managed.starts_with("If AGENTS.project.md exists in the repository root,"),
-        "the project file's reading line leads the managed block: {managed:?}"
-    );
-    assert!(
-        managed.ends_with(
-            "If AGENTS.local.md exists in the repository root, read it before \
-                           starting work and follow its instructions."
-        ),
-        "the local file's reading line closes the managed block: {managed:?}"
-    );
-    // An empty body leaves the lines alone as the managed block.
-    let lines_only = managed_text(Scheme::A, "", &lines);
-    assert_eq!(
-        build_content(Scheme::A, "", &lines, MARKER),
-        format!("{lines_only}\n\n{MARKER}\n")
-    );
-    // And the empty-managed edge: no lines, no body — the file is the
-    // marker alone, the mirror is the empty string.
-    assert_eq!(managed_text(Scheme::A, "", &no_lines()), "");
-    assert_eq!(
-        build_content(Scheme::A, "", &no_lines(), MARKER),
-        format!("{MARKER}\n")
-    );
-}
-
-/// Scheme C takes the body alone (ALG-030's gate): the real file
-/// ignores the reading lines, and so must the mirror.
-#[test]
-fn managed_text_matches_build_content_for_scheme_c() {
-    let lines = both_lines();
-    let managed = managed_text(Scheme::C, BODY, &lines);
-    assert_eq!(managed, BODY, "scheme C's managed block is the body alone");
-    assert_eq!(
-        build_content(Scheme::C, BODY, &lines, MARKER),
-        format!("{managed}\n\n{MARKER}\n")
-    );
-    assert_eq!(managed_text(Scheme::C, "", &no_lines()), "");
-}
-
-/// Scheme B is ALG-031's business — `build_content` refuses it by
-/// design, so the mirror's oracle is the documented rule itself
-/// (`assembly_b`'s "the managed block is the body alone"), the same
-/// pin `dirty_recalc.rs` keeps for its copy.
-#[test]
-fn managed_text_takes_the_body_alone_for_scheme_b() {
-    let lines = both_lines();
-    assert_eq!(managed_text(Scheme::B, BODY, &lines), BODY);
-    assert_eq!(managed_text(Scheme::B, "", &no_lines()), "");
 }
 
 /// A boundary-crossing profile: 57 projects make chunks of 25 + 25 + 7
@@ -146,8 +114,8 @@ fn crossing_spec() -> DataSetSpec {
 /// The chunked build must be body-equivalent to the independent
 /// full-snapshot spelling (D-121's construction, made falsifiable):
 /// for every project, `build_body` over the **whole** snapshot —
-/// through core's public API, never through this crate's chunk
-/// plumbing — produces the same managed text and hash the chunked pass
+/// through core's public API, never through the chunk plumbing —
+/// produces the same managed text and hash the chunked pass
 /// produced. A scoping leak (another chunk's assignments in, or this
 /// chunk's own dropped) breaks the equality.
 #[test]
@@ -155,10 +123,10 @@ fn chunked_builds_equal_the_full_snapshot_builds() {
     let mut fixture = LoadFixture::create(&crossing_spec(), "eunomia-load-pins")
         .expect("the crossing fixture builds");
     let snapshot = read_snapshot(fixture.connection()).expect("the snapshot read succeeds");
-    let chunked = build_projects_sequential(&snapshot);
+    let chunked = build_projects(&snapshot);
 
     // The oracle: each project rebuilt over the full snapshot, the
-    // same core seams the mirrors compose, spelled independently here.
+    // same core seams the pass composes, spelled independently here.
     let expected: Vec<BuiltProject> = snapshot
         .projects()
         .iter()
@@ -166,7 +134,7 @@ fn chunked_builds_equal_the_full_snapshot_builds() {
             let body = build_body(&snapshot, &project.id)
                 .expect("the full snapshot holds every project it lists");
             let settings = &project.settings;
-            let lines = extra_file_lines(
+            let lines = eunomia_core::extra_files::extra_file_lines(
                 settings.base_name,
                 settings.extra_project,
                 settings.extra_local,
@@ -178,7 +146,7 @@ fn chunked_builds_equal_the_full_snapshot_builds() {
                     settings.scheme,
                     settings.base_name,
                 ));
-            let hash = eunomia_core::hash::build_hash(
+            let hash = build_hash(
                 settings.scheme,
                 &target_path,
                 settings.extra_local,
@@ -188,6 +156,7 @@ fn chunked_builds_equal_the_full_snapshot_builds() {
             BuiltProject {
                 project_id: project.id.as_str().to_owned(),
                 managed,
+                target_path,
                 build_hash: hash,
             }
         })
@@ -195,7 +164,7 @@ fn chunked_builds_equal_the_full_snapshot_builds() {
 
     assert_eq!(
         chunked, expected,
-        "every project's chunked bytes and hashes"
+        "every project's chunked bytes, paths and hashes"
     );
     assert_eq!(chunked.len(), 57, "all three chunks' projects are built");
 }
@@ -251,7 +220,7 @@ fn read_snapshot_and_hashes_pins_the_stored_hash_map() -> Result<(), LoadError> 
 /// fixtures: a project with **no** assignments reads clean even when
 /// never synced and its managed text is non-empty (ordinal 0 is scheme
 /// A with both reading lines enabled, so its build carries text). A
-/// mirror that passed `has_assignments = true` unconditionally would
+/// pass that answered `has_assignments = true` unconditionally would
 /// fail here (round-1 review's P3-3).
 #[test]
 fn a_project_without_assignments_reads_clean() -> Result<(), LoadError> {
@@ -264,7 +233,7 @@ fn a_project_without_assignments_reads_clean() -> Result<(), LoadError> {
     };
     let mut fixture = LoadFixture::create(&zero_assignments, "eunomia-load-zero")?;
     let snapshot = read_snapshot(fixture.connection())?;
-    let built = build_projects_sequential(&snapshot);
+    let built = build_projects(&snapshot);
     assert!(
         built.iter().any(|project| !project.managed.is_empty()),
         "the fixture carries projects whose managed text is non-empty"
@@ -274,7 +243,7 @@ fn a_project_without_assignments_reads_clean() -> Result<(), LoadError> {
         .iter()
         .map(|project| (project.id.as_str().to_owned(), None))
         .collect();
-    let verdicts = compute_verdicts_sequential(&snapshot, &never_synced);
+    let verdicts = compute_dirty_verdicts(&snapshot, &never_synced);
     assert!(
         verdicts.iter().all(|&(_, dirty)| !dirty),
         "no assignments: every project reads clean despite the non-empty \
@@ -283,33 +252,28 @@ fn a_project_without_assignments_reads_clean() -> Result<(), LoadError> {
     Ok(())
 }
 
-/// The tripwire against the mirrors measuring a stale pass: the two
-/// production spellings still chunk at 25. `MINI_SNAPSHOT_PROJECTS`
-/// lives in frozen zones this crate cannot import, so the pin is a
-/// source scan (the `dirty_recalc_tests.rs` precedent) — a task that
-/// changes either production constant goes red here until this
-/// harness is re-mirrored. The structural fix is D-130's consolidation
-/// card, which this third copy joins (round-1 review's P3-7).
+/// The tripwire against measuring a stale pass: the shared chunk
+/// size is still 25. The constant lives in `eunomia-core` since
+/// T-265/D-145 (this crate's and the two src-tauri mirrors' own
+/// spellings dissolved into it), so the pin is by value: the §12.2
+/// budget rows were measured at 25, and a core change turns this
+/// harness's suite red until the budgets are re-measured on the new
+/// chunk size.
 #[test]
 fn the_production_chunk_size_is_still_twenty_five() {
-    for source in [
-        include_str!("../../../src-tauri/src/dirty_recalc.rs"),
-        include_str!("../../../src-tauri/src/sync_phase0.rs"),
-    ] {
-        assert!(
-            source.contains("const MINI_SNAPSHOT_PROJECTS: usize = 25;"),
-            "a production pass changed its chunk size: re-mirror the \
-             harness (D-130's consolidation card is the structural fix)"
-        );
-    }
+    assert_eq!(
+        MINI_SNAPSHOT_PROJECTS, 25,
+        "the shared pass changed its chunk size: re-measure the §12.2 \
+         budget rows before this harness reports them"
+    );
 }
 
-/// DB-021 through the mirrored pass, both directions, and the parallel
-/// spelling equal to the sequential one id-for-id (D-121's L-test
-/// pattern, on a small fixture): never-synced projects with
-/// assignments read dirty; the same pass over the just-built hashes
-/// (what a sync would have stored, DB-024) reads clean; the order is
-/// the snapshot's.
+/// DB-021 through the parallel substrate, both directions, and the
+/// parallel spelling equal to core's sequential one id-for-id
+/// (D-121's L-test pattern, on a small fixture): never-synced
+/// projects with assignments read dirty; the same pass over the
+/// just-built hashes (what a sync would have stored, DB-024) reads
+/// clean; the order is the snapshot's.
 #[test]
 fn verdicts_follow_the_stored_hashes_and_stay_in_order() -> Result<(), LoadError> {
     let mut fixture = LoadFixture::create(&crossing_spec(), "eunomia-load-verdicts")?;
@@ -320,7 +284,7 @@ fn verdicts_follow_the_stored_hashes_and_stay_in_order() -> Result<(), LoadError
         .map(|project| (project.id.as_str().to_owned(), None))
         .collect();
 
-    let sequential = compute_verdicts_sequential(&snapshot, &never_synced);
+    let sequential = compute_dirty_verdicts(&snapshot, &never_synced);
     let parallel = compute_verdicts_parallel(&snapshot, &never_synced);
     assert_eq!(
         parallel, sequential,
@@ -341,12 +305,12 @@ fn verdicts_follow_the_stored_hashes_and_stay_in_order() -> Result<(), LoadError
 
     // The synced half: stored = the current build hash (DB-024 after a
     // sync) — every verdict flips to clean.
-    let built = build_projects_sequential(&snapshot);
+    let built = build_projects(&snapshot);
     let synced: StoredHashes = built
         .into_iter()
         .map(|project| (project.project_id, Some(project.build_hash)))
         .collect();
-    let clean = compute_verdicts_sequential(&snapshot, &synced);
+    let clean = compute_dirty_verdicts(&snapshot, &synced);
     assert_eq!(
         clean,
         expected_ids

@@ -8,8 +8,9 @@
 //! mini-snapshot, ALG-030 managed text, DB-020 hash — and DB-021's
 //! `is_dirty` comparison, the chunks of 25 spread over parallel
 //! threads and collected in chunk order (the `spawn_blocking` shape,
-//! mirrored through `std::thread::scope`). No event is emitted, no
-//! cache is diffed: those are the pass's surroundings, not its cost.
+//! mirrored through `std::thread::scope` over the shared core pass's
+//! own per-chunk call). No event is emitted, no cache is diffed:
+//! those are the pass's surroundings, not its cost.
 //!
 //! The stored hashes stay `NULL` in the fixture — the honest startup
 //! pass, where every project with assignments reads dirty (D-121's L

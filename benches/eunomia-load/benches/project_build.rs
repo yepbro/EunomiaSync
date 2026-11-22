@@ -2,12 +2,13 @@
 //! items — no more than 20 ms".
 //!
 //! The measured iteration is the whole production slice of one
-//! project's build (the T-101/T-112 mechanics, mirrored in
-//! `eunomia_load`): one read transaction for the ALG-001 snapshot
-//! (SYS-005's shape), then the §9.2 body over the scoped chunk, the
-//! ALG-030 managed text, the §9.4 target path and the DB-020 hash.
-//! On the [`ONE_PROJECT_1000_ITEMS`] fixture that is exactly "build
-//! one project with 1000 items from the live database".
+//! project's build (the T-101/T-112 mechanics, the shared core pass
+//! of `eunomia_core::content_build`): one read transaction for the
+//! ALG-001 snapshot (SYS-005's shape), then the §9.2 body over the
+//! scoped chunk, the ALG-030 managed text, the §9.4 target path and
+//! the DB-020 hash. On the [`ONE_PROJECT_1000_ITEMS`] fixture that is
+//! exactly "build one project with 1000 items from the live
+//! database".
 //!
 //! The budget is read as §15.1's Load row pins it: a criterion report
 //! on the machine running `cargo bench` (the reference machine), not a
@@ -20,7 +21,8 @@ use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use eunomia_load::{LoadFixture, ONE_PROJECT_1000_ITEMS, build_projects_sequential, read_snapshot};
+use eunomia_core::content_build::build_projects;
+use eunomia_load::{LoadFixture, ONE_PROJECT_1000_ITEMS, read_snapshot};
 
 /// Criterion applies the measurement time per benchmark: 50 samples
 /// over 20 s each with a 1 s warm-up — roughly 30 s of wall clock for
@@ -37,7 +39,7 @@ fn build_one_project_1000_items(c: &mut Criterion) {
         b.iter(|| {
             let snapshot = read_snapshot(fixture.connection())
                 .expect("the snapshot read cannot fail on the bench fixture");
-            let built = build_projects_sequential(&snapshot);
+            let built = build_projects(&snapshot);
             assert_eq!(built.len(), 1, "the fixture holds one project");
             black_box(built)
         })

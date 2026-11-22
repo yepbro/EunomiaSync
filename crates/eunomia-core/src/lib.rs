@@ -33,6 +33,9 @@
 //!   applies to every snapshot text before it reaches a file
 //! - [`body`] — the ALG-020…022 assembly of a project's file body
 //!   from a snapshot (§9.2)
+//! - [`content_build`] — the chunked multi-project content pass over
+//!   one snapshot (§9.2 body + ALG-030 managed text + DB-020 hash per
+//!   project, DB-021 verdicts; the batching the §12.2 budget needs)
 //! - [`color_pick`] — the D-29 rule that assigns a new project the
 //!   least-used palette color, hash-tie-broken by project ID
 //! - [`heading_range`] — the ALG-060 branch range of a section
@@ -58,6 +61,7 @@ pub mod backup_name;
 pub mod body;
 pub mod color_pick;
 pub mod compare;
+pub mod content_build;
 pub mod dirty;
 pub mod extra_files;
 pub mod gaps;

@@ -27,6 +27,7 @@ crates/
     src/snapshot.rs        #   Immutable build snapshot, ALG-001 (working)
     src/normalize.rs       #   ALG-002 variant text normalization (working)
     src/body.rs            #   ALG-020…022 project body assembly (working)
+    src/content_build.rs   #   Chunked multi-project content pass over one snapshot (working)
     markdown               #   Markdown processing           (planned)
     diff                   #   Text diffing                  (planned)
     sync                   #   AGENTS.md sync engine         (planned)
@@ -42,7 +43,7 @@ crates/
     migrations/            #   Embedded SQL migration files
 benches/
   eunomia-load/           # §12.2 load benchmarks (criterion; local tool — CI runs its tests, never the benches)
-    src/lib.rs            #   Fixtures (TempRepos + data_sets) + the mirrored T-101/T-112 pass mechanics
+    src/lib.rs            #   Fixtures (TempRepos + data_sets) + the reads + the parallel bench substrate
     benches/              #   project_build, dirty_recalc (the two §12.2 budget rows)
 src-tauri/
   src/db.rs                # DB state + one-transaction executor   (working)

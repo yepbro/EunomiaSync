@@ -1021,7 +1021,8 @@ fn set_l_recalculation_answers_the_dirty_list_within_the_budget() {
         .map(|project| (project.id, project.last_synced_hash))
         .collect();
     let compute_start = Instant::now();
-    let precomputed = dirty_recalc::compute_dirty_verdicts(&snapshot, &stored_hashes);
+    let precomputed =
+        eunomia_core::content_build::compute_dirty_verdicts(&snapshot, &stored_hashes);
     let compute_elapsed = compute_start.elapsed();
     eprintln!(
         "set L phases: read {read_elapsed:?}, compute (sequential reference) \

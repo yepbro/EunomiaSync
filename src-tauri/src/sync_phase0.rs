@@ -71,26 +71,24 @@
 //! policy; nothing here can do better without breaking the executor's
 //! own contract.
 //!
-//! **The build mechanics are a deliberate mirror of `dirty_recalc`
-//! (D-121/D-065).** The dirty service computes the same per-project
-//! managed text and hash over the same snapshot; its `managed_text`
-//! and its chunked mini-snapshot batching are private, and that
-//! module is a frozen zone for this task (T-102's window), so this
-//! module carries its own spelling of both — pinned by the same
-//! oracles (`build_content`'s real output for schemes A and C, the
-//! body for B; the crossing-wires and hash pins live in
-//! `sync_phase0_tests.rs`), so the two spellings cannot drift from
-//! the truth even while they exist twice. Consolidating them behind
-//! one shared builder is a recorded follow-up for the first task
-//! allowed to touch `dirty_recalc.rs`.
+//! **The build mechanics are the shared core pass (T-265/D-145).**
+//! Step 3's per-project content — the §9.2 body, ALG-030's managed
+//! text around it, the §9.4 target path, the DB-020 hash — is
+//! [`eunomia_core::content_build::build_projects`]: the chunked
+//! mini-snapshot pass this module once mirrored from `dirty_recalc`
+//! (D-121/D-130) now lives once in `eunomia-core`, with its verdict
+//! semantics pinned by that crate's own suite. What stays here is the
+//! phase's composition: the transactions, the run record, the
+//! `PreparedProject` alias the later phases consume.
 //!
-//! **The set-L budget mirrors D-121 too.** `build_body` rescans the
-//! snapshot's assignment list per call; called naively per project,
-//! set L (500 × 100,000) is the measured ~725 ms quadratic. The
-//! chunked mini-snapshots (25 projects per chunk: the same items,
-//! only the chunk's assignments) hold the same flat-middle budget
-//! the dirty pass measured, and phase 0 — which builds every
-//! project's content at every sync start — inherits the constraint.
+//! **The set-L budget is the shared pass's.** `build_body` rescans
+//! the snapshot's assignment list per call; called naively per
+//! project, set L (500 × 100,000) is the measured ~725 ms quadratic.
+//! The chunked mini-snapshots of the shared pass (25 projects per
+//! chunk: the same items, only the chunk's assignments) hold the
+//! flat-middle budget the dirty pass measured (D-121), and phase 0 —
+//! which builds every project's content at every sync start —
+//! inherits the constraint through it.
 //!
 //! **Recovery mode** (no database, the T-024 state) is refused the
 //! honest way: step 1 still takes the flag (the state is managed in
@@ -104,16 +102,9 @@
 //! tested-today/consumed-later seam the flag (T-105) and the
 //! snapshot read (T-100) already keep.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-
 use tauri::{AppHandle, Runtime};
 
-use eunomia_core::backup_name::target_file_name;
-use eunomia_core::body::build_body;
-use eunomia_core::extra_files::{ExtraFileLines, extra_file_lines};
-use eunomia_core::hash::build_hash;
-use eunomia_core::project::Scheme;
+use eunomia_core::content_build::BuiltProject;
 use eunomia_core::snapshot::BuildSnapshot;
 use eunomia_store::build_snapshot::read as read_build_snapshot;
 use eunomia_store::sync_runs::{NewSyncRunProject, SyncRun, SyncRunsError};
@@ -125,31 +116,17 @@ use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use crate::sync_running::SyncGuard;
 
 /// One active project's phase-0 product: the content the pipeline
-/// will write, where, and under which fingerprint.
+/// will write, where, and under which fingerprint — the shared core
+/// pass's [`BuiltProject`] under the name this module's consumers
+/// (the later phases, the tests) grew up with (T-265/D-145: the
+/// struct this module once spelled itself dissolved into
+/// `eunomia-core`'s).
 ///
 /// The managed text is the markerless form (ALG-033's comparison
 /// basis, the DB-020 hash input): the marker is a per-run wall-clock
 /// line (ALG-032) phase 3 stamps once for all projects, so it
 /// deliberately does not exist yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PreparedProject {
-    /// The project row id (UUIDv7 TEXT, DB-002), from the snapshot.
-    pub(crate) project_id: String,
-    /// The markerless managed text (ALG-030's `managed`: scheme A's
-    /// reading lines spliced around the §9.2 body, B and C the body
-    /// alone).
-    pub(crate) managed: String,
-    /// The target file path — §9.4 phase 1 step 2's spelling:
-    /// `<root>/<base_name>` (A, B) or `<root>/<STEM>.project.md` (C).
-    /// Phase 1 resolves symlinks on it; the stored
-    /// `sync_run_projects.target_path` keeps this snapshot-derived
-    /// spelling.
-    pub(crate) target_path: PathBuf,
-    /// The DB-020 build hash of `managed` over this project's write
-    /// settings — the value DB-024 stores into
-    /// `projects.last_synced_hash` after `written`/`unchanged`.
-    pub(crate) build_hash: String,
-}
+pub(crate) type PreparedProject = BuiltProject;
 
 /// What phase 0 hands the pipeline: the flag lease, the run record,
 /// and the built content, in the snapshot's `sort_order`.
@@ -170,12 +147,6 @@ pub(crate) struct Phase0Outcome {
     /// Every active project's built content, in `sort_order`.
     pub(crate) projects: Vec<PreparedProject>,
 }
-
-/// How many projects share one scoped mini-snapshot in
-/// [`build_projects`] — the batching knob of D-121's set-L
-/// arithmetic, mirrored here (the flat middle its measurements
-/// found; see the module docs).
-const MINI_SNAPSHOT_PROJECTS: usize = 25;
 
 /// Runs §9.4 phase 0 end to end: take the flag, read the snapshot in
 /// one transaction, build every active project's content on the
@@ -263,22 +234,20 @@ pub(crate) async fn read_snapshot<R: Runtime>(
 }
 
 /// §9.4 phase 0's build half: every active project's content from the
-/// snapshot alone — pure (no clock, no I/O, no database), so the
-/// SYS-005 guarantee is structural: this function *cannot* observe an
-/// edit that committed after the snapshot's transaction, whatever
-/// connection committed it.
+/// snapshot alone — [`eunomia_core::content_build::build_projects`],
+/// the shared chunked pass (T-265/D-145), pure (no clock, no I/O, no
+/// database), so the SYS-005 guarantee is structural: this function
+/// *cannot* observe an edit that committed after the snapshot's
+/// transaction, whatever connection committed it.
 ///
 /// The projects come back in the snapshot's `sort_order` (the
 /// pipeline's processing order, §9.4 phase 1's "in order"), batched
-/// over scoped mini-snapshots of [`MINI_SNAPSHOT_PROJECTS`] projects
-/// (D-121's set-L arithmetic, mirrored — see the module docs).
+/// over scoped mini-snapshots of
+/// [`MINI_SNAPSHOT_PROJECTS`](eunomia_core::content_build::MINI_SNAPSHOT_PROJECTS)
+/// projects per chunk (D-121's set-L arithmetic — see the module
+/// docs).
 pub(crate) fn build_projects(snapshot: &BuildSnapshot) -> Vec<PreparedProject> {
-    let grouped = group_assignments(snapshot);
-    let mut prepared: Vec<PreparedProject> = Vec::with_capacity(snapshot.projects().len());
-    for start in (0..snapshot.projects().len()).step_by(MINI_SNAPSHOT_PROJECTS) {
-        prepared.extend(chunk_projects(snapshot, &grouped, start));
-    }
-    prepared
+    eunomia_core::content_build::build_projects(snapshot)
 }
 
 /// §9.4 phase 0's write half: the `running` run and its `not_started`
@@ -308,141 +277,6 @@ pub(crate) async fn record_run<R: Runtime>(
                 .map_err(sync_runs_to_app_error)
         })
         .await
-}
-
-/// The assignment half of the batching: row indices into the
-/// snapshot's assignment list, grouped by project id — one pass over
-/// the assignments instead of a rescan per chunk (D-121's map,
-/// mirrored verbatim).
-type AssignmentsByProject = HashMap<String, Vec<usize>>;
-
-/// Groups the snapshot's assignment row indices by project id
-/// (D-121's `group_assignments`, mirrored).
-fn group_assignments(snapshot: &BuildSnapshot) -> AssignmentsByProject {
-    let mut grouped: AssignmentsByProject = HashMap::with_capacity(snapshot.projects().len());
-    for (index, assignment) in snapshot.assignments().iter().enumerate() {
-        grouped
-            .entry(assignment.project_id.as_str().to_owned())
-            .or_default()
-            .push(index);
-    }
-    grouped
-}
-
-/// Builds the projects of chunk `start..` (up to
-/// [`MINI_SNAPSHOT_PROJECTS`] of them): a fresh scoped mini-snapshot
-/// of the chunk, then the §9.2 body, the ALG-030 managed text, the
-/// §9.4 target path and the DB-020 hash per project, in chunk
-/// (=`sort_order`) order (D-121's `chunk_verdicts`, mirrored with the
-/// content as the product instead of the verdict).
-fn chunk_projects(
-    snapshot: &BuildSnapshot,
-    grouped: &AssignmentsByProject,
-    start: usize,
-) -> Vec<PreparedProject> {
-    // The last chunk may be shorter — clamp the range end, or `get`
-    // would answer None and silently drop the chunk's projects.
-    let end = (start + MINI_SNAPSHOT_PROJECTS).min(snapshot.projects().len());
-    let Some(projects) = snapshot.projects().get(start..end) else {
-        // `start` is always a chunk boundary of the sequential loop.
-        return Vec::new();
-    };
-    // This chunk's assignments, scoped once from the grouped indices.
-    let mut scoped: Vec<eunomia_core::assignment::Assignment> = Vec::new();
-    for project in projects {
-        if let Some(indices) = grouped.get(project.id.as_str()) {
-            scoped.extend(
-                indices
-                    .iter()
-                    .map(|&index| snapshot.assignments()[index].clone()),
-            );
-        }
-    }
-    let mini = BuildSnapshot::new(projects.to_vec(), snapshot.items().to_vec(), scoped).expect(
-        "the full snapshot passed the same validation: a subset of its \
-         assignments and projects over the same items cannot fail it",
-    );
-    projects
-        .iter()
-        .map(|project| {
-            // The mini holds this chunk's projects — `build_body`'s
-            // None is a broken invariant of this composition, the
-            // reasoned-panic posture (D-061), never a silent default.
-            let body = build_body(&mini, &project.id)
-                .expect("the mini-snapshot holds every project of its chunk");
-            let settings = &project.settings;
-            // D-064's seam (the `dirty_recalc::managed_text` mirror —
-            // see the module docs): the assembled managed block,
-            // marker excluded, scheme A's reading lines included. The
-            // argument order is project-then-local — §7.5's tie
-            // order, the reverse of the settings struct's field
-            // order.
-            let lines = extra_file_lines(
-                settings.base_name,
-                settings.extra_project,
-                settings.extra_local,
-            );
-            let managed = managed_text(settings.scheme, &body, &lines);
-            // The DB-020 target path: §9.4 phase 1 step 2's spelling
-            // through the one public file-name owner.
-            let target_path = project
-                .root
-                .join(target_file_name(settings.scheme, settings.base_name));
-            let build_hash = build_hash(
-                settings.scheme,
-                &target_path,
-                settings.extra_local,
-                settings.extra_project,
-                &managed,
-            );
-            PreparedProject {
-                project_id: project.id.as_str().to_owned(),
-                managed,
-                build_hash,
-                target_path,
-            }
-        })
-        .collect()
-}
-
-/// The markerless managed text of one project — D-064's seam, the
-/// deliberate byte-exact mirror of `target_file`'s private
-/// `managed_block` (D-065) and of `dirty_recalc::managed_text`
-/// (D-121, a frozen zone for this task): ALG-030's parts joined with
-/// one empty line between neighbours, scheme A splicing the reading
-/// lines around the body, schemes B and C taking the body alone.
-/// Pinned against `build_content`'s real output (the file minus its
-/// marker tail) for A and C, and against the body for B, so neither
-/// mirror can drift from the truth.
-fn managed_text(scheme: Scheme, body: &str, lines: &ExtraFileLines) -> String {
-    /// One reading-lines position as a single owned block: a
-    /// position's lines are ONE part (adjacent lines joined with
-    /// single breaks), and only neighbouring parts get the empty line
-    /// — the same two-level split `managed_block` performs.
-    fn lines_part(block: &[String]) -> Option<String> {
-        (!block.is_empty()).then(|| block.join("\n"))
-    }
-
-    let mut parts: Vec<String> = Vec::with_capacity(3);
-    match scheme {
-        Scheme::A => {
-            if let Some(start) = lines_part(&lines.start) {
-                parts.push(start);
-            }
-            if !body.is_empty() {
-                parts.push(body.to_owned());
-            }
-            if let Some(end) = lines_part(&lines.end) {
-                parts.push(end);
-            }
-        }
-        Scheme::B | Scheme::C => {
-            if !body.is_empty() {
-                parts.push(body.to_owned());
-            }
-        }
-    }
-    parts.join("\n\n")
 }
 
 /// The TEXT spelling of a built target path for the
@@ -513,82 +347,19 @@ fn sync_fallback(kind: &str, message: &str) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    //! The pure halves — the managed-text mirror against the real
-    //! builders, and the wire mapper's arms. The database and
-    //! flag behavior (the card's criterion included) lives in
+    //! The module's own pure halves — the wire mapper's arms and the
+    //! target-path TEXT spelling. The managed-text seam moved to
+    //! `eunomia_core::target_file`'s suite when this module's mirror
+    //! dissolved (T-265/D-145); the phase behavior (the card's
+    //! criterion, the flag, the records, the chunk boundary) lives in
     //! `sync_phase0_tests.rs`, which owns its mock-app harness.
 
-    use eunomia_core::project::{BaseName, ExtraFile, ExtraFilePosition};
-    use eunomia_core::target_file::build_content;
+    use std::path::PathBuf;
 
-    use super::*;
+    use crate::errors::ErrorCode;
+    use eunomia_store::sync_runs::SyncRunsError;
 
-    /// The no-lines value of a project with both options disabled.
-    fn no_lines() -> ExtraFileLines {
-        extra_file_lines(
-            BaseName::AgentsMd,
-            ExtraFile {
-                enabled: false,
-                position: ExtraFilePosition::End,
-            },
-            ExtraFile {
-                enabled: false,
-                position: ExtraFilePosition::End,
-            },
-        )
-    }
-
-    /// The D-21 reading lines for the AGENTS stem, both positions on.
-    fn both_lines() -> ExtraFileLines {
-        extra_file_lines(
-            BaseName::AgentsMd,
-            ExtraFile {
-                enabled: true,
-                position: ExtraFilePosition::Start,
-            },
-            ExtraFile {
-                enabled: true,
-                position: ExtraFilePosition::End,
-            },
-        )
-    }
-
-    const MARKER: &str = "<!-- Created by EunomiaSync 2026-11-17 14:03:22 Europe/Prague +01:00 -->";
-
-    /// The mirror's proof shape for the whole-file schemes:
-    /// `build_content`'s real output must be exactly the mirror's
-    /// string with the marker tail attached — drift in the join fails
-    /// against the real builder (the D-065 pin, mirrored from
-    /// `dirty_recalc` so the two spellings are pinned independently).
-    #[test]
-    fn the_managed_mirror_is_byte_exact_for_schemes_a_and_c() {
-        for (scheme, lines, body) in [
-            (Scheme::A, both_lines(), "Be brief."),
-            (Scheme::A, both_lines(), ""),
-            (Scheme::A, no_lines(), "Be brief."),
-            (Scheme::C, both_lines(), "Be brief."),
-            (Scheme::C, both_lines(), ""),
-        ] {
-            let content = build_content(scheme, body, &lines, MARKER);
-            let managed = managed_text(scheme, body, &lines);
-            let expected = if managed.is_empty() {
-                format!("{MARKER}\n")
-            } else {
-                format!("{managed}\n\n{MARKER}\n")
-            };
-            assert_eq!(content, expected, "scheme={scheme:?} body={body:?}");
-        }
-    }
-
-    #[test]
-    fn the_managed_mirror_takes_the_body_alone_for_scheme_b() {
-        // B has no whole-file builder to pin against
-        // (`build_content` panics on B by design, D-065); the managed
-        // block is the body alone (ALG-030's "(A only)" gate).
-        let lines = both_lines();
-        assert_eq!(managed_text(Scheme::B, "Body.", &lines), "Body.");
-        assert_eq!(managed_text(Scheme::B, "", &lines), "");
-    }
+    use super::{sync_runs_to_app_error, target_path_text};
 
     /// The wire mapper's arms: SQLite through the shared classifier,
     /// the corrupt cell class-only (the stored value never enters the

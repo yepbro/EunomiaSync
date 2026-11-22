@@ -2,6 +2,15 @@
 //! full-overwrite schemes A and C (spec §9.3, ALG-030; decisions
 //! D-20, D-22; OUT-C-001…004).
 //!
+//! Two seams live here. [`managed_text`] is the **markerless**
+//! managed block of ALG-030 — the hash seam of D-064 (DB-020 hashes
+//! it, DB-024 stores it) and the input every splice and comparison
+//! reads — total over all three schemes (scheme B's managed block
+//! is the body alone, `assembly_b`'s own rule). [`build_content`]
+//! is the whole file for the full-overwrite schemes: the same
+//! managed block plus the marker tail, refusing scheme B as a
+//! caller bug because ALG-031 builds no whole file.
+//!
 //! [`build_content`] is the last pure step of a build: it joins the
 //! three pieces earlier tasks own — the §9.2 body
 //! ([`body::build_body`](crate::body::build_body)), the scheme-A
@@ -194,7 +203,21 @@ pub fn build_content(
         "the body must arrive without framing line breaks — build_body shapes it so"
     );
 
-    let managed = managed_block(scheme, body, extra_lines);
+    let managed = match scheme {
+        Scheme::A | Scheme::C => managed_text(scheme, body, extra_lines),
+        // The exhaustive match is on purpose: the scheme decides the
+        // parts (ALG-030's "(A only)" gate — scheme A splices the
+        // reading-line parts around the body, scheme C takes the body
+        // alone), scheme B is ALG-031's business, and a scheme
+        // variant added to [`Scheme`](crate::project::Scheme) later
+        // must be decided HERE, at compile time, not silently folded
+        // into scheme C's shape. The arm carries the documented
+        // caller-bug panic of [`build_content`]'s `# Panics`
+        // contract.
+        Scheme::B => panic!(
+            "scheme B builds no whole file — ALG-031 splices the managed block into the existing marked file"
+        ),
+    };
     if managed.is_empty() {
         format!("{marker_line}\n")
     } else {
@@ -202,19 +225,38 @@ pub fn build_content(
     }
 }
 
-/// The managed block of ALG-030: the existing parts of the scheme,
-/// joined with one empty line between neighbours, before the marker
-/// tail is attached.
+/// The markerless managed text of one project — D-064's hash seam
+/// ("the assembled managed, marker excluded"), and the single
+/// spelling of ALG-030's join (T-265/D-145): the existing parts of
+/// the scheme joined with one empty line between neighbours, scheme
+/// A splicing the reading lines around the body, schemes B and C
+/// taking the body alone.
 ///
-/// The `match` is exhaustive on purpose: the scheme decides the parts
-/// (ALG-030's "(A only)" gate — scheme A splices the reading-line
-/// parts around the body, scheme C takes the body alone), scheme B is
-/// ALG-031's business, and a scheme variant added to
-/// [`Scheme`](crate::project::Scheme) later must be decided HERE, at
-/// compile time, not silently folded into scheme C's shape. The
-/// scheme-B arm carries the documented caller-bug panic of
-/// [`build_content`]'s `# Panics` contract.
-fn managed_block(scheme: Scheme, body: &str, extra_lines: &ExtraFileLines) -> String {
+/// Total over all three schemes, unlike [`build_content`]: the hash
+/// seam (DB-020/DB-024) and ALG-033's comparison need the markerless
+/// block of a scheme-B project too, and its managed block "is the
+/// body alone" (`assembly_b`'s own docs — the lines ALG-031 splices
+/// between the markers); a whole-file builder for B does not exist,
+/// so the B arm here is that rule, not a file shape.
+///
+/// One reading-lines position is ONE part: a position's lines stay
+/// adjacent lines of a single block (`.project.md` before
+/// `.local.md`, §7.5), and only neighbouring parts get the empty
+/// line. A part that does not exist (no lines at the position, an
+/// empty body) leaves no trace — in particular an empty body never
+/// leaves an empty block between the start and end lines, and a
+/// scheme with no existing parts gets the empty string ("the file
+/// has only the marker", ALG-030). The input text is never touched:
+/// the body arrives ALG-002-normalized from
+/// [`build_body`](crate::body::build_body), the reading lines are
+/// the D-21 sentences, and only `\n` separators are added.
+///
+/// Byte-exact for schemes A and C with what [`build_content`]
+/// writes before its marker tail (that function delegates its join
+/// here); pinned against the D-21/ALG-030 spec literals by this
+/// module's suite, independently of the delegation.
+#[must_use]
+pub fn managed_text(scheme: Scheme, body: &str, extra_lines: &ExtraFileLines) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(3);
     match scheme {
         Scheme::A => {
@@ -224,14 +266,11 @@ fn managed_block(scheme: Scheme, body: &str, extra_lines: &ExtraFileLines) -> St
             }
             push_lines_part(&mut parts, &extra_lines.end);
         }
-        Scheme::C => {
+        Scheme::B | Scheme::C => {
             if !body.is_empty() {
                 parts.push(body.to_owned());
             }
         }
-        Scheme::B => panic!(
-            "scheme B builds no whole file — ALG-031 splices the managed block into the existing marked file"
-        ),
     }
     parts.join(BLANK_LINE)
 }
@@ -382,6 +421,59 @@ mod tests {
             file(Scheme::A, body, &lines(&[PROJECT_LINE], &[LOCAL_LINE])),
             format!("{PROJECT_LINE}\n\n{body}\n\n{LOCAL_LINE}\n\n{MARKER}\n")
         );
+    }
+
+    // ---- the markerless seam (`managed_text`, D-064) -------------------
+    //
+    // Pinned against the D-21/ALG-030 literals directly, NOT against
+    // `build_content`: the whole-file builder delegates its join to
+    // this function, so an equality pin would mirror the
+    // implementation (rule 4). The literal expectations below are
+    // spelled by hand from the spec sentences.
+
+    #[test]
+    fn managed_text_splices_the_reading_lines_around_the_body_for_a() {
+        // ALG-030's full scheme-A shape: start part, body part, end
+        // part — one empty line between neighbours, no marker.
+        let split = lines(&[PROJECT_LINE], &[LOCAL_LINE]);
+        assert_eq!(
+            managed_text(Scheme::A, "Body text.", &split),
+            format!("{PROJECT_LINE}\n\nBody text.\n\n{LOCAL_LINE}")
+        );
+        // An empty body leaves no empty block: the lines become
+        // neighbours.
+        assert_eq!(
+            managed_text(Scheme::A, "", &split),
+            format!("{PROJECT_LINE}\n\n{LOCAL_LINE}")
+        );
+        // One position's lines are ONE part (adjacent lines, §7.5).
+        let both_start = lines(&[PROJECT_LINE, LOCAL_LINE], &[]);
+        assert_eq!(
+            managed_text(Scheme::A, "Body text.", &both_start),
+            format!("{PROJECT_LINE}\n{LOCAL_LINE}\n\nBody text.")
+        );
+        // No parts at all: the empty string.
+        assert_eq!(managed_text(Scheme::A, "", &none_enabled()), "");
+    }
+
+    #[test]
+    fn managed_text_takes_the_body_alone_for_b_and_c() {
+        // Scheme C: ALG-030's "(A only)" gate — enabled lines are
+        // ignored. Scheme B: `assembly_b`'s documented rule ("the
+        // managed block is the body alone") — the splice consumes
+        // this block; there is no whole-file builder to ask.
+        let enabled = fully_enabled();
+        assert!(!enabled.is_empty(), "the fixture carries lines");
+        assert_eq!(
+            managed_text(Scheme::C, "Body text.", &enabled),
+            "Body text."
+        );
+        assert_eq!(
+            managed_text(Scheme::B, "Body text.", &enabled),
+            "Body text."
+        );
+        assert_eq!(managed_text(Scheme::C, "", &enabled), "");
+        assert_eq!(managed_text(Scheme::B, "", &enabled), "");
     }
 
     // ---- the empty body ------------------------------------------------
