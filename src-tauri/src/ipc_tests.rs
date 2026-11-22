@@ -6729,17 +6729,38 @@ fn an_unavailable_project_is_unwatched_until_its_folder_returns() {
     tauri::async_runtime::block_on(crate::availability::recheck_and_emit(app.handle()))
         .expect("the second availability recheck must succeed");
     wait_for_watch_passes(&app, 3);
+    // The pass counter can reach the awaited number a hair before the
+    // listener delivers the emit onto the channel (the macos-15-intel
+    // CI legs, run 45009611489): wait for the report conditionally —
+    // this file's canonical post-pass pattern — instead of an
+    // instantaneous recv.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut reported: Vec<crate::file_watch::ProjectFileChange> = Vec::new();
+    while reported.is_empty() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match events.recv_timeout(remaining) {
+            Ok(event) => reported.extend(
+                event
+                    .changes
+                    .into_iter()
+                    .filter(|change| change.external_changed || change.file_deleted),
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the event listener died mid-test")
+            }
+        }
+    }
     assert_eq!(
-        events
-            .try_recv()
-            .expect("the returned folder's junk file must be reported"),
-        crate::file_watch::FileChangedEvent {
-            changes: vec![crate::file_watch::ProjectFileChange {
-                project_id,
-                external_changed: true,
-                file_deleted: false,
-            }],
-        },
+        reported,
+        vec![crate::file_watch::ProjectFileChange {
+            project_id,
+            external_changed: true,
+            file_deleted: false,
+        }],
         "the full pass re-reads every available project — the junk \
          file is caught even though no watch event fired for it"
     );
