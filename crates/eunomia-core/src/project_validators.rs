@@ -13,7 +13,7 @@
 //! | --------- | ------------------------------------------------ | ---------------------------------------------- | ----------------------------------------- |
 //! | Name      | 1–100 characters after trimming spaces           | `length(trim(name)) BETWEEN 1 AND 100`         | the TRIMMED name                          |
 //! | Label     | 1–6 visible characters, case is kept             | `length(label) BETWEEN 1 AND 6`                | the label, unchanged                      |
-//! | Description | up to 1000 characters                          | `length(description) <= 1000`                  | the description, unchanged                |
+//! | Description | up to 1000 characters, NUL silently stripped   | `length(description) <= 1000`                  | the description, NUL stripped             |
 //! | Color     | a value from the palette                         | none — `color TEXT NOT NULL` only              | the [`Color`]                             |
 //! | File name | a value from the list                            | `base_name IN ('AGENTS.md','CLAUDE.md')`       | the [`BaseName`]                          |
 //!
@@ -140,12 +140,22 @@
 //! modal shows the field error for the user to edit; both
 //! counterexamples are pinned as the contract's recorded edge.
 //!
-//! # The description: verbatim
+//! # The description: NUL stripped, then measured
 //!
 //! "Up to 1000 characters" with no trim mentioned and no trim in the
-//! CHECK: [`validate_description`] measures the raw length and
-//! returns the input unchanged. Empty is legal — the column's default
-//! is `''` (§6.2) — and newlines are prose here, not layout damage.
+//! CHECK: [`validate_description`] keeps the edges and trims nothing.
+//! The one transformation is the SILENT NUL strip — the owner's
+//! ruling that closed D-151 item 7 (2026-11-22): every `U+0000` is
+//! removed from the value to persist, and the length is measured
+//! AFTER the strip, so the ≤1000 limit governs the STORED
+//! description (1001 characters including one NUL save as 1000).
+//! The strip never rejects: a description is inert prose for the
+//! stored row, and an invisible byte is not user intent — the exact
+//! contrast with the names above, where the same byte is an outright
+//! rejection (D-126: a name is file-name and file-content material).
+//! Empty after the strip is the same legal empty description as
+//! before (the column's default is `''`, §6.2), and newlines are
+//! prose here, not layout damage.
 //!
 //! # The color and the file name: closed lists
 //!
@@ -266,10 +276,13 @@ pub enum ProjectFieldError {
         /// The offending character.
         character: char,
     },
-    /// The description is longer than 1000 characters.
+    /// The description is longer than 1000 characters after the
+    /// silent NUL strip — the measured value is the one that would be
+    /// stored.
     #[error("project description is {length} characters; the limit is 1000")]
     DescriptionTooLong {
-        /// The length that exceeded the limit.
+        /// The post-strip length that exceeded the limit — the stored
+        /// truth, not the typed one.
         length: usize,
     },
     /// The color is not one of the 12 palette colors (DB-040) — the
@@ -418,10 +431,27 @@ pub fn default_label(name: &str) -> String {
 /// Validate a project description (§6.9: "up to 1000 characters";
 /// PRJ-008's editable description field).
 ///
-/// Verbatim: the raw length is measured and the input is returned
-/// unchanged — the row names no trim and the schema CHECK has none.
-/// Empty is legal (the column defaults to `''`, §6.2); newlines are
-/// prose.
+/// The one transformation is the SILENT NUL strip — the owner's
+/// ruling that closed D-151 item 7 (2026-11-22): every `U+0000` is
+/// removed before anything is measured or returned. A description
+/// never fails validation for a NUL, and a description stored
+/// through this validator never contains one; the contrast with
+/// [`validate_name`], where the same
+/// byte is the outright [`ProjectFieldError::NameNul`] rejection
+/// (D-126), is deliberate — a name is file-name and file-content
+/// material, a description is inert prose for the stored row.
+///
+/// The length is measured AFTER the strip, so the ≤1000 limit
+/// governs the value to persist: 1001 characters including one NUL
+/// validate as 1000, and [`ProjectFieldError::DescriptionTooLong`]'s
+/// length is the post-strip count. Everything else is verbatim — no
+/// trim (the row names none), edges and newlines kept; empty is
+/// legal (the column defaults to `''`, §6.2), including empty after
+/// the strip.
+///
+/// Returns the sanitized string — the value to persist
+/// ([`validate_name`]'s trim precedent); a NUL-free input comes back
+/// byte-for-byte unchanged.
 ///
 /// # Examples
 ///
@@ -429,18 +459,32 @@ pub fn default_label(name: &str) -> String {
 /// use eunomia_core::project_validators::validate_description;
 ///
 /// assert_eq!(validate_description("").unwrap(), "");
+/// assert_eq!(validate_description("a\0b").unwrap(), "ab"); // silent strip
+/// assert_eq!(validate_description("\0\0").unwrap(), ""); // empty is legal
 /// assert_eq!(
 ///     validate_description(&"x".repeat(1000)).unwrap(),
 ///     "x".repeat(1000)
 /// );
 /// assert!(validate_description(&"x".repeat(1001)).is_err());
+/// // 1001 characters including one NUL store as 1000 — legal.
+/// assert_eq!(
+///     validate_description(&format!("{}\0", "x".repeat(1000))).unwrap(),
+///     "x".repeat(1000)
+/// );
 /// ```
-pub fn validate_description(description: &str) -> Result<&str, ProjectFieldError> {
-    let length = description.chars().count();
+pub fn validate_description(description: &str) -> Result<String, ProjectFieldError> {
+    // The silent-sanitization ruling that closed D-151 item 7: strip,
+    // then measure — the limit governs the stored truth. `replace`
+    // over a char pattern is one linear pass, the only transformation
+    // this field gets (no trim, no case work); the owned return is
+    // the value to persist, so a NUL-free input pays one copy and
+    // comes back byte-for-byte.
+    let sanitized = description.replace('\0', "");
+    let length = sanitized.chars().count();
     if length > 1000 {
         Err(ProjectFieldError::DescriptionTooLong { length })
     } else {
-        Ok(description)
+        Ok(sanitized)
     }
 }
 
@@ -1015,7 +1059,7 @@ mod tests {
         assert_eq!(validate_label(&label).unwrap(), "EUNOMI");
     }
 
-    // ---- description: 0 / 1000 / 1001, verbatim ---------------------------
+    // ---- description: NUL stripped, 0 / 1000 / 1001 ----------------------
 
     #[test]
     fn description_boundaries_empty_through_1000() {
@@ -1041,10 +1085,106 @@ mod tests {
     }
 
     #[test]
-    fn description_is_verbatim_with_no_trim() {
-        // The row names no trim and the CHECK has none: edges stay.
+    fn description_strips_nul_silently_at_any_position() {
+        // The owner's ruling that closed D-151 item 7 (2026-11-22):
+        // the description SANITIZES — every `U+0000` is silently
+        // removed from the value to persist — it never rejects (the
+        // contrast with the names, D-126, pinned below). NUL is an
+        // invisible byte the user cannot see typing: the visible
+        // intent survives it whole, wherever it sits and however
+        // many there are.
+        assert_eq!(validate_description("\0").unwrap(), "");
+        assert_eq!(validate_description("\0\0\0").unwrap(), "");
+        assert_eq!(validate_description("a\0b").unwrap(), "ab");
+        assert_eq!(validate_description("\0lead").unwrap(), "lead");
+        assert_eq!(validate_description("trail\0").unwrap(), "trail");
+        assert_eq!(validate_description("a\0b\0c").unwrap(), "abc");
+        // A NUL between multi-byte characters keeps both sides
+        // intact — the cut is byte-safe inside UTF-8 by construction
+        // (`replace` works on scalar values).
+        assert_eq!(validate_description("проект\0sync").unwrap(), "проектsync");
+        // The strip is NUL-ONLY: every other control character is
+        // legal description content (newlines are prose, §6.9
+        // reserves no control rule for descriptions; D-075's
+        // visibility rules govern LABELS, not descriptions) and
+        // passes through unchanged.
+        assert_eq!(validate_description("a\u{7}b").unwrap(), "a\u{7}b");
+        assert_eq!(validate_description("\u{1B}[0m").unwrap(), "\u{1B}[0m");
+    }
+
+    #[test]
+    fn description_length_measures_the_stored_truth_after_the_strip() {
+        // Strip FIRST, then count: the ≤1000 limit governs what lands
+        // in the column, not what was typed — the schema CHECK sees
+        // the STORED description, so the validator measures the same
+        // value. (The PRJ-008 modal's `0 / 1000` counter must count
+        // the sanitized value when it lands, T-279 — a plain
+        // typed-length counter would show 1001/1000 for an input this
+        // rule accepts.)
+        // 1001 clean characters still do not fit.
+        assert_eq!(
+            validate_description(&"x".repeat(1001)).unwrap_err(),
+            ProjectFieldError::DescriptionTooLong { length: 1001 }
+        );
+        // 1001 typed with one trailing NUL → 1000 stored: legal.
+        let trailing = format!("{}\0", "x".repeat(1000));
+        assert_eq!(validate_description(&trailing).unwrap(), "x".repeat(1000));
+        // 1002 typed with one NUL → 1001 stored: rejected AS 1001 —
+        // the error's length is the post-strip count, so the message
+        // talks about the description that would be stored.
+        let over = format!("{}\0y", "x".repeat(1000));
+        assert_eq!(
+            validate_description(&over).unwrap_err(),
+            ProjectFieldError::DescriptionTooLong { length: 1001 }
+        );
+        // NUL-first — the SQLite trap D-126 recorded for names:
+        // `length()` counts only up to the first `U+0000`, so the
+        // store's own CHECK would measure "\0" + 1000 characters as
+        // 0. The validator's count is the honest one: 1000 stored,
+        // legal.
+        let nul_first = format!("\0{}", "x".repeat(1000));
+        assert_eq!(validate_description(&nul_first).unwrap(), "x".repeat(1000));
+        // Several NULs shrink proportionally: 1001 typed, 998 stored.
+        let several = format!("{}\0\0\0", "x".repeat(998));
+        assert_eq!(validate_description(&several).unwrap(), "x".repeat(998));
+    }
+
+    #[test]
+    fn description_clean_input_round_trips_byte_for_byte() {
+        // The idempotence pin (sanitize-then-save rerun on clean
+        // input is a no-op): a NUL-free description comes back
+        // exactly as typed — multi-byte characters, newlines,
+        // whitespace edges, a mid-string control character, and the
+        // boundary length all byte-for-byte.
+        let clean = "  Проект синхронизации — line 1\nline 2 é 🙂\t\u{7}";
+        assert_eq!(validate_description(clean).unwrap(), clean);
+        let thousand = "x".repeat(999) + "\n";
+        assert_eq!(validate_description(&thousand).unwrap(), thousand);
+        assert_eq!(validate_description("").unwrap(), "");
+    }
+
+    #[test]
+    fn description_keeps_its_edges_and_whitespace_no_trim() {
+        // The row names no trim and the CHECK has none: the edges
+        // stay (the NUL strip is the ONLY transformation — the tests
+        // above own that half).
         assert_eq!(validate_description("  padded  ").unwrap(), "  padded  ");
         assert_eq!(validate_description("\n\n").unwrap(), "\n\n");
+    }
+
+    #[test]
+    fn names_reject_what_descriptions_strip() {
+        // The two policies coexist by ruling: the SAME NUL-bearing
+        // input is an outright rejection as a NAME (D-126 — a name is
+        // file-name and file-content material) and a silent
+        // sanitization as a DESCRIPTION (the D-151 item-7 closure —
+        // inert prose for the stored row). One test, both verdicts,
+        // so neither half can drift back into the other's policy.
+        assert_eq!(
+            validate_name("a\0b").unwrap_err(),
+            ProjectFieldError::NameNul { index: 1 }
+        );
+        assert_eq!(validate_description("a\0b").unwrap(), "ab");
     }
 
     #[test]

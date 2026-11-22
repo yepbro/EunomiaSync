@@ -247,7 +247,11 @@ export const commands = {
 	 *     (`validate_name`) and the label to DB-042's derivation of it
 	 *     (`default_label`, then `validate_label` — the recorded edge
 	 *     where a control-character prefix derives an unstorable label is
-	 *     an `E_VALIDATION` naming the field, not a panic).
+	 *     an `E_VALIDATION` naming the field, not a panic). The
+	 *     description enters as the empty constant (the add flow collects
+	 *     none, §7.1) through `validate_description` — the D-151 NUL
+	 *     addendum's save boundary: the stored value is validator-passed
+	 *     by construction, the silent `U+0000` strip included.
 	 *  4. **One transaction** (D-037, D-051, §6.9 "the whole operation
 	 *     runs in one transaction"): the DB-015 duplicate check
 	 *     (`find_by_path_key`, either state — active answers the

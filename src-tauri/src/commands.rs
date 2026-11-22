@@ -2717,7 +2717,11 @@ pub(crate) struct ExistingProject {
 ///    (`validate_name`) and the label to DB-042's derivation of it
 ///    (`default_label`, then `validate_label` — the recorded edge
 ///    where a control-character prefix derives an unstorable label is
-///    an `E_VALIDATION` naming the field, not a panic).
+///    an `E_VALIDATION` naming the field, not a panic). The
+///    description enters as the empty constant (the add flow collects
+///    none, §7.1) through `validate_description` — the D-151 NUL
+///    addendum's save boundary: the stored value is validator-passed
+///    by construction, the silent `U+0000` strip included.
 /// 4. **One transaction** (D-037, D-051, §6.9 "the whole operation
 ///    runs in one transaction"): the DB-015 duplicate check
 ///    (`find_by_path_key`, either state — active answers the
@@ -2821,6 +2825,17 @@ async fn project_add_manual_impl<R: Runtime>(
     let label = eunomia_core::project_validators::validate_label(&label_default)
         .map_err(|source| rejected_field("label", &label_default, &source.to_string()))?
         .to_owned();
+    // The description crosses the same save boundary even though the
+    // add flow collects none (§7.1): the value stored today is the
+    // constant empty string — the PRJ-008 modal's edit path lands
+    // with `project_update` (T-279) — routed through the validator so
+    // every description THIS COMMAND stores is validator-passed by
+    // construction (the store itself does not enforce it — store-level
+    // writers must route through the validator, the D-151 NUL
+    // addendum's seam): the silent `U+0000` strip included (a NUL
+    // never reaches the column; the save never rejects one either).
+    let description = eunomia_core::project_validators::validate_description("")
+        .map_err(|source| rejected_field("description", "", &source.to_string()))?;
 
     // The D-086 addendum seam: find_git_root's canonicalization
     // already refused a non-UTF-8 root, so the stored path TEXT and
@@ -2899,7 +2914,7 @@ async fn project_add_manual_impl<R: Runtime>(
                 name: &name,
                 label: &label,
                 color: color.as_str(),
-                description: "",
+                description: &description,
                 added_via: eunomia_store::projects::AddedVia::Manual,
                 scheme,
                 base_name,

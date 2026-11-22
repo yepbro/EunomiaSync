@@ -5048,7 +5048,9 @@ allow-list (D-017) and waits for a consumer that needs it.
 
 Description: verbatim ≤ 1000 — no trim (the row names none, the
 CHECK has none), empty legal (the column defaults to `''`), and the
-input returned unchanged.
+input returned unchanged. (Superseded on the "unchanged" half,
+2026-11-22: a silent `NUL` strip now runs first — the NUL addendum
+under D-151, T-286; the no-trim and empty-legal halves stand.)
 
 Color: the palette literal must match exactly, case-sensitive like
 every schema literal. The §6.2 column is `color TEXT NOT NULL` with
@@ -10941,7 +10943,9 @@ rules that predate T-252).
 Deliberately NOT extended — the two text fields that are not names:
 the project DESCRIPTION still carries no NUL rule (open question for a
 follow-up card: a NUL there is inert for the target file but hits the
-same stored-length arithmetic), and the variant text was already
+same stored-length arithmetic — closed 2026-11-22 by the owner's
+sanitize ruling, recorded as the NUL addendum under D-151, T-286),
+and the variant text was already
 covered. The extra-file names are fixed literals (`<STEM>.local.md`,
 `<STEM>.project.md`), not user input — nothing to validate. No
 migration or backfill is needed because no write path could ever have
@@ -15559,7 +15563,8 @@ Solution, per item of the card:
   it, or leave it as is? D-126 deliberately left the description
   without a NUL rule; nothing in this package changes that. The answer
   lands in a future owner-ruled entry, not here; the orchestrator
-  escalates.
+  escalates. (Closed 2026-11-22 — the owner ruled sanitize, not
+  forbid: the NUL addendum below under D-151, T-286.)
 - _Items 8–12 — verified present (T-266/D-150), no edits._ The
   ARCHITECTURE.md workspace tree carries all the rows the card names:
   `sync_phase0`…`sync_phase4` in the src-tauri tree, `sync_runs` and
@@ -15614,6 +15619,140 @@ entries. This header's "burned" is corrected to "dropped" — the
 accurate word for what T-250 encountered, not a claim that the
 numbers were never written. D-151 item 2's "no current entry records
 the ruling" is superseded: D-072 records it again.
+
+NUL addendum (T-286, 2026-11-22): item 7 is closed by the owner's
+ruling (board card «РЕШЕНИЕ: NUL в описании», closed 2026-11-22) —
+sanitization, not rejection. A `NUL` (`U+0000`) in the project
+DESCRIPTION is silently stripped at the save boundary; the save never
+answers `E_VALIDATION` for it. The contrast with the names (D-126)
+is deliberate and untouched: a name is file-name and file-content
+material (`base_name` derives file names, the heading title is
+written verbatim into the target file), so there `NUL` is rejected
+outright; a description is inert prose for the stored row, and the
+invisible byte is not user intent. The readings this task picked,
+recorded before the code:
+
+- _The strip lives in the validator layer_, inside
+  `validate_description`
+  (crates/eunomia-core/src/project_validators.rs) — not in a command.
+  The function now returns the SANITIZED string, the value to persist
+  (`validate_name`'s trim precedent: a validator's return is what the
+  store keeps), so every future caller — `project_update` (T-279,
+  whose card already carries the note), the PRJ-008 modal save, any
+  store-level writer — inherits the strip by calling the validator it
+  already has to call. `project_add_manual`'s save path routes its
+  description through the validator too (the constant `""` today: no
+  user description enters at add time — the add flow collects none,
+  §7.1), so every COMMAND save boundary passes the validator by
+  construction. The store does NOT enforce the strip — D-126's
+  posture verbatim: the gate is the validator, not the CHECKs, so a
+  store-level writer that bypasses the commands (the `data_sets`
+  fixture generator today, with NUL-free literals; the future
+  `update` callers) must route the description through
+  `validate_description` itself. Round-1 review's P2: the first
+  draft claimed "every stored description passed the validator" —
+  true only of the command paths, and now said so.
+- _Length measures the stored truth_: strip first, then count. The
+  ≤1000 limit governs what lands in the column, so 1001 characters
+  including one `NUL` save as 1000 (legal), and a 1002-character
+  input with one `NUL` is rejected as 1001 — `DescriptionTooLong`'s
+  length field reports the post-strip count, so the message talks
+  about the description that would be stored, not the one typed.
+- _Empty after the strip is legal_ — `"\0\0"` saves as `''`, the same
+  legal empty description §6.9's row (no minimum) and §6.2's column
+  default already define. The label rules (D-042/D-075) govern
+  labels; descriptions keep newlines and every other character.
+- _The strip is silent_: no journal entry, no warning, no log line —
+  the added row's `project.added` entry is unchanged (it never
+  carried the description). The name's rejection stays loud
+  (`NameNul`, `E_VALIDATION`): the two policies coexist by ruling.
+- _Spec §6.9 grows one sentence_ under the name-`NUL` line (the
+  T-250 item-6 pattern): the description is the exception — `NUL` is
+  stripped before the length is checked, the visible text kept.
+  Without it the row would under-describe the stored truth: a
+  spec-alone implementer would store the `NUL` and diverge (the very
+  `length()` arithmetic break D-126 recorded).
+
+What landed (same addendum, T-286): the strip inside
+`validate_description` (the signature is now `Result<String, _>` —
+the sanitized string is the value to persist, `validate_name`'s
+owned-return shape; no other caller existed, so nothing else moved),
+the `project_add_manual` boundary wiring above, the §6.9 sentence,
+and the tests. Red first: against the unchanged validator,
+`description_strips_nul_silently_at_any_position` and
+`description_length_measures_the_stored_truth_after_the_strip` fail
+on the missing strip; the store round-trip pin compiles against the
+old signature too and goes red at its first assertion — the
+validator hands back the NUL-bearing string — so it is a runtime
+pin, not a compile-time contract (round-1 review's P3: the first
+draft claimed a compile failure that deref coercion at the struct
+field in fact permits).
+Mutations, both verified red: the strip disabled (`to_owned` instead
+of `replace`) fails those two core tests and the store round-trip
+`a_nul_bearing_description_stores_clean_through_the_validator_boundary`
+(the schema CHECK cannot catch a NUL — SQLite's `length()` stops at
+the first one, so the validator is the gate); the measure order
+swapped (the typed length counted instead of the stored one) fails
+exactly the stored-truth boundary test. The clean-input pin
+(`description_clean_input_round_trips_byte_for_byte`) and the
+coexistence pin (`names_reject_what_descriptions_strip` — D-126's
+`NameNul` rejection beside the strip, one input, both verdicts) round
+out the set. Honest boundary: the card's end-to-end phrasing — "add a
+project with a NUL-laden description through `project_add_manual`
+over IPC" — presumes a description parameter the command does not
+have (§7.1's add flow collects none; the description is edited in
+PRJ-008's modal, whose `project_update` lands with T-279). The NUL
+end-to-end therefore runs at the widest seam that exists today: the
+validator unit tests and the validator→store→read-back composition
+(the store suite's real migrated database, census included); the
+IPC-level NUL description test becomes possible when T-279 lands —
+that card already carries the note. Checks: `cargo fmt --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` green by exit code (the first full-suite run
+had one unreproduced `eunomia-sync --lib` failure whose name the
+executor's own output filter lost; two subsequent full runs and a
+third crate-only run all green — 535/535 — and the diff's only
+src-tauri delta is the deterministic constant-through-validator call,
+so a timing-sensitive test elsewhere is the likelier cause; recorded,
+not dropped), `prettier --check` green on the two touched Markdown
+files.
+
+Round-1 review addendum (D-151's NUL addendum, same task; report in
+`.opencode/reviews/t286-round1.md`, owner-local): deepseek-v4.1-flash,
+request-changes — one P2 and five P3s, all fixed, none refused. The
+P2: the addendum and the validator doc claimed a store-wide invariant
+("every stored description passed the validator" / "the stored
+description never contains one") the store does not enforce — the
+`data_sets` fixture generator writes descriptions straight to
+`projects::create` (NUL-free literals today, but the process claim
+was false); both claims now say COMMAND paths by construction and
+name store-level writers as the ones that must route through the
+validator (D-126's own gate-not-CHECK posture). The P3s: the false
+"could not even compile" red-first claim (the store pin compiles
+against the old signature — deref coercion at the struct field — and
+fails at its first assertion; now said so), the store test's comment
+naming the read-back as the failing assertion when the first
+assertion fails before it, the unverified PRJ-008 counter assumption
+in a test comment (now: the schema CHECK sees the stored value; the
+modal counter must count the sanitized value — T-279), the spec
+sentence's "an invisible byte" reading as all controls (now "that
+invisible byte"), and closure pointers added to D-126's deliberately
+NOT-extended paragraph and D-075's description line (both still said
+the question was open / the value returned unchanged).
+
+Round-2 review addendum (D-151's NUL addendum, same task; report in
+`.opencode/reviews/t286-round2.md`, owner-local): hy4-flash-free,
+request-changes — one P2 and two P3s, all fixed, none refused. The
+P2: item 7's own bullet still read "OPEN — recorded, not decided"
+while this addendum closes it — the one closure pointer round 1's P3
+class should have caught first; the bullet now carries the closure
+note inline (the historical wording kept). The P3s: a leftover copy
+of the round-1 P2's absolute claim in `project_add_manual_impl`'s
+inline comment ("every stored description … by construction" — now
+"every description THIS COMMAND stores", with the store-not-enforcing
+seam named), and the overlong doc line the round-1 fix left behind
+(rewrapped). Round 2's own walk re-verified the mutations, the
+boundary census, the silence policy, and that no test was weakened.
 
 ### D-153 — T-076: the `scan_start`/`scan_cancel` commands and the throttled `scan://progress` event — 2026-11-22
 

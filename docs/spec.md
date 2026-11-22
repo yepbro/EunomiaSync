@@ -430,6 +430,8 @@ Changing `default.*` does not affect existing projects (DEF-005).
 
 A name field also rejects `NUL` — project name, instruction name, variant name, heading name — an extension stricter than the rows above, which ban it only in variant text.
 
+The description is the exception: a `NUL` in it is silently stripped before the length is checked — the user's visible text is kept, that invisible byte is not.
+
 Validation errors are shown at the field or in a general message. An entity is never saved partly: the whole operation runs in one transaction.
 
 ## 7. Functional Requirements

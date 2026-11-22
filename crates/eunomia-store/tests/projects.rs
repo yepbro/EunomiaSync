@@ -228,6 +228,52 @@ fn get_returns_none_for_an_unknown_id() {
     assert_eq!(get(&conn, "no-such-id").expect("get should succeed"), None);
 }
 
+// ---- The description save boundary (D-151's NUL addendum) ------------------------
+
+#[test]
+fn a_nul_bearing_description_stores_clean_through_the_validator_boundary() {
+    // The §6.9 field rules belong to eunomia-core (the suite's own
+    // note above); this pin is the COMPOSITION the save boundary
+    // uses: what `validate_description` returns — the owner-ruled
+    // silent `NUL` strip that closed D-151 item 7 (2026-11-22) — is
+    // what reaches the column, and it reads back clean. Mutated the
+    // other way (no strip), the FIRST assertion below fails — the
+    // validator hands back the NUL-bearing string — and were such a
+    // value handed on, the schema CHECK could not refuse it (SQLite's
+    // `length()` stops at the first `U+0000`, the same arithmetic
+    // break D-126 recorded): the gate is the validator, not the
+    // CHECK.
+    let (conn, _dir) = projects_db("description-nul-strip");
+    let sanitized =
+        eunomia_core::project_validators::validate_description("mid\0dle \0 and edges\0")
+            .expect("a NUL-bearing description sanitizes, it never rejects");
+    assert_eq!(sanitized, "middle  and edges");
+
+    let created = create(
+        &conn,
+        &NewProject {
+            description: &sanitized,
+            ..sample(1)
+        },
+    )
+    .expect("create should succeed");
+    assert_eq!(created.description, "middle  and edges");
+
+    // The stored truth, reread through the same mapping every read
+    // uses — no NUL survives to it.
+    let reread = get(&conn, &created.id)
+        .expect("get should succeed")
+        .expect("the created row should exist");
+    assert_eq!(reread.description, "middle  and edges");
+    assert!(!reread.description.contains('\0'));
+
+    // The census: exactly one row, the sanitized description stored,
+    // nothing else written around it.
+    let rows = list(&conn, ListScope::All).expect("list should succeed");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].description, "middle  and edges");
+}
+
 // ---- path_key uniqueness: the schema's actual scope (DB-015) -------------------
 
 #[test]
