@@ -211,7 +211,7 @@ not created by the layout — it is the config task's job (spec 5.8,
 SYS-011), which only needs the directory to exist first. Logs live in
 `logs/` inside the data directory on every OS: on macOS the Tauri
 `app_log_dir()` default (`~/Library/Logs/…`) is deliberately not used,
-and the logging module (`src-tauri/src/logging.rs`) points the appender
+and the logging module (`src-tauri/src/logging.rs`) points its writer
 at `<data dir>/logs/` explicitly; a `config_tests.rs` absence pin
 (comments stripped, live code only) makes a future `app_log_dir()`
 wiring fail a test instead of passing silently (see the Logging section).
@@ -238,7 +238,9 @@ exist under the §5.5 path — Linux
 `%LOCALAPPDATA%\pro.yepbro.eunomiasync\` — that a second launch adds
 nothing and changes nothing, and that the first launch creates
 `logs/eunomiasync.<date>.log` inside the data directory (see the
-Logging section). On Linux and macOS also confirm the SEC-007 modes
+Logging section — since T-255 a chatty day continues into
+`eunomiasync.<date>.2.log` parts at 10 MB each, at most five log files
+in total). On Linux and macOS also confirm the SEC-007 modes
 with `stat`: `backups/` and `db-backups/` at `0700`, and — while the
 app is running, so the sidecars exist — `db/eunomiasync.sqlite3`, its
 `-wal`/`-shm` siblings and the day's `db-backups/daily-*.sqlite3` at
@@ -632,20 +634,33 @@ behavior is unit-tested in
 
 ## Logging
 
-The app writes one `tracing` file log per day — `tracing` +
-`tracing-appender` (`Rotation::DAILY`, non-blocking writer) +
-`tracing-subscriber`'s fmt layer, wired in `src-tauri/src/logging.rs`
-(spec §5.3; see DECISIONS.md for the dependency entry). The file lands
+The app writes its `tracing` file log — `tracing` +
+`tracing-subscriber`'s fmt layer over a custom writer of
+`src-tauri/src/logging.rs` on `tracing-appender`'s non-blocking worker
+thread — wired in `logging.rs` (spec §5.3; see DECISIONS.md for the
+dependency entry). The file lands
 in `<data dir>/logs/eunomiasync.<UTC-date>.log` on every OS (spec §5.5;
 the `app_log_dir()` default is deliberately not used — see the Data
-directory section). At most **five** dated files are kept (T-253, owner
-ruling 2026-11-21): the appender's `max_log_files` cap prunes the
-oldest beyond it when the appender is built and at every rotation. The
-ruling's per-file 10 MB half is honestly not enforced —
-tracing-appender 0.2.5 has no size-based rotation, and a custom
-size-rotating writer would break the §5.5-pinned file name (see the
-DECISIONS.md T-253 entry); the cap bounds the days of history instead.
-The maximum level comes from `config.toml`'s
+directory section). Rotation is two-triggered (owner ruling
+2026-11-21, "5 files × 10 MB ≈ 50 MB max"; T-253 shipped the count
+half, T-255 the size half): a new UTC day starts a new file, and a
+file that can hold no more than 10 MB rolls into a same-day part
+(`eunomiasync.<date>.2.log`, `.3.log`, … — the first file of a day
+keeps the exact §5.5 name; the ruling is unsatisfiable without
+same-day files, and the §5.5 structure block lists primary shapes
+only, the T-024 `pre-recovery-*` precedent — see the DECISIONS.md
+T-255 entry). The ruling needed an own writer because
+`tracing-appender` 0.2.5 rotates on time only and offers no way to
+force a mid-day file switch; the writer also runs the retention:
+before every rotation (and at every startup — to five when today's
+file already exists, to four when it is about to be created) it
+prunes the oldest
+files beyond **five**, ordering by the (date, part) stamps parsed from
+the file names — never mtime — and never touching a file whose name is
+not its own canonical grammar. Restarts are idempotent: today's
+highest existing part is continued at its true length, and a part
+already at the cap rolls on its first write. The maximum level comes
+from `config.toml`'s
 `log_level` (SYS-012), applied by initializing the subscriber _after_
 the config is loaded (SYS-011) — `app.state::<AppConfig>()` is the seam
 that hands the level over (D-029). The writer guard is kept alive as
@@ -662,9 +677,20 @@ event naming the failing path. Both subscribers are built with
 fallback is an `eprintln!` of its own, which panics on an unusable
 stderr (a Windows GUI release build has none) — and the workspace's
 `panic = "abort"` would turn that into a process abort; a log line that
-cannot be written is dropped instead. This is deliberately weaker than
-the layout/config abort policy (D-027/D-028): those guard data the app
-cannot run without.
+cannot be written is dropped instead. The same policy governs the
+writer's rotation mid-run: a prune that cannot read or delete, or a
+next part file that cannot be opened, is reported once through the
+facade and then ignored — the writer keeps writing into the current
+file (the 10 MB cap is exceeded, never the launch) and retries every
+following write, so a healed disk heals the log. This is deliberately
+weaker than the layout/config abort policy (D-027/D-028): those guard
+data the app cannot run without. Taking the rolling appender out of
+the path (T-255) also retired its `eprintln!`-on-failure sites — the
+Windows GUI abort exposure D-129 flagged; the crate's one remaining
+`eprintln!` (the worker's final flush at guard-drop shutdown) is
+unreachable in the app, which never drops the guard, and
+`src-tauri`'s own production code is kept `eprintln!`-free by a clippy
+gate (`#![deny(clippy::print_stderr)]` in `lib.rs` and `main.rs`).
 
 SEC-008 is enforced structurally: every tracing event of the app is
 constructed in `logging.rs` from typed parameters (paths, operation
@@ -683,12 +709,21 @@ the pin already covers `crates/**` and will force that decision.
 Honest testing boundaries: the midnight rollover and the global
 subscriber install are not unit-testable (the date cannot be moved in a
 test; the global default is process-wide and the suite runs in
-parallel) — the dated file name, the per-level filtering and the
-SEC-008 payload are (driven through a real subscriber over `tempfile`
-roots, asserted by reading the real log file back); the rollover, the
-rotation-time half of the `max_log_files` pruning (the startup half,
-which runs when the appender is built, is tested) and the file
-location on each OS rest on the manual smoke run.
+parallel) — the dated file name, the per-level filtering, the SEC-008
+payload, the size-rotation arithmetic (a small-cap seam over the same
+production path, plus a real-constants pin that writes past 10 MB and
+asserts the parts), the restart idempotency, the prune verdict and the
+degradation policy are (driven through a real subscriber over
+`tempfile` roots and directly through the writer, asserted by reading
+the real files back); the rollover itself, the production path of the
+rotation-degradation warn (it fires on the worker thread, where the
+tests' thread-local subscriber does not exist) and the file
+location on each OS rest on the manual smoke run — a Windows GUI
+smoke should confirm: a normal session logs into
+`logs/eunomiasync.<date>.log` and rolls into `.2.log` parts past 10 MB
+with at most five files total; a read-only `logs/` directory starts
+the app in the stderr degradation without aborting; a locked log file
+does not crash the prune.
 
 ## Watcher
 

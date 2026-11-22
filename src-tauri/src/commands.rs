@@ -4292,6 +4292,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::print_stderr)] // the root-skip notice below prints deliberately
     fn the_availability_reasons_carry_the_d084_verdict_classes() {
         // The wire spellings of the D-084 verdicts: every arm of
         // `availability_of` mapped from a real fixture, so a
@@ -4334,6 +4335,10 @@ mod tests {
             fs::create_dir_all(&locked).expect("the locked fixture must be creatable");
             let untestable = fs::metadata(&locked).is_ok_and(|metadata| metadata.uid() == 0);
             if untestable {
+                // A skip-notice: test-only stderr printing (the crate's
+                // `deny(clippy::print_stderr)` covers production code;
+                // the allow sits on the test fn below for the same
+                // reason).
                 eprintln!(
                     "skipping the not_readable arm: running as root — mode \
                      bits are not enforced, the precondition cannot be set up"

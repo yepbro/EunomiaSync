@@ -5,6 +5,13 @@
 //! generated file is committed so the frontend can be type-checked
 //! without a Rust toolchain.
 
+// No `eprintln!`/`eprint!` in this crate's production code (T-255, the
+// structural encoding of the D-032/D-129 Windows analysis: a GUI
+// release build has no stderr, and the `eprintln!` panic under
+// `panic = "abort"` would abort the process). Test code prints
+// skip-notices deliberately and allows the lint locally.
+#![deny(clippy::print_stderr)]
+
 use specta_typescript::Typescript;
 use tauri::Manager;
 use tauri_specta::{Builder, collect_commands, collect_events};

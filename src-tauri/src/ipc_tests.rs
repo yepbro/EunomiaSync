@@ -163,6 +163,7 @@
 //! SEC-003: during a sync even a validly-picked path meets
 //! `E_SYNC_RUNNING`). The take-once/RAII/panic/parallel-race halves
 //! of the seam itself live in `sync_running.rs`'s own suite.
+#![allow(clippy::print_stderr)] // test skip-notices and benchmark timings print deliberately
 
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};

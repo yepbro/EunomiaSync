@@ -10991,6 +10991,13 @@ same crate already `eprintln!`s on the pre-existing daily-rotation
 path, so this adds no new class of exposure, recorded here so the
 Windows smoke run knows to look.
 
+Addendum (2026-11-22, T-255/D-143): the deferred 10 MB half is now
+enforced — by the app's own writer, which also takes the rolling
+appender (and with it every `eprintln!` site named above) out of the
+path. The decision, the name-scheme reading and the tests live in
+D-143; this entry's rotation/name claims stand as the T-253 state
+they described.
+
 ### D-130 — T-112: sync phase 0 as two transactions around a pure build — the flag-guarded start, the `running`/`not_started` record, and the SYS-005 criterion pinned at the composition level — 2026-11-21
 
 Problem: T-112 turns §9.4 phase 0 into code: take `sync_running`
@@ -13456,3 +13463,245 @@ triage, titled "Follow-up T-256: …" (dangling D-141 references;
 retention-window plan pin; pre-migration copies retention; the
 version-agnostic index inventory; alternative index shapes). The
 cards are the tracking unit; this note only records their existence.
+
+### D-143 — T-255: the file log's size half — a custom daily+10 MB writer with same-day parts; the Windows eprintln exposure retired — 2026-11-22
+
+Problem: the owner's 2026-11-21 ruling "ротация 5 файлов × 10 МБ
+(≈50 МБ максимум)" was half-enforced (D-129/T-253: the count half via
+the crate's `max_log_files`, the per-file 10 MB honestly not), and the
+card sanctioned either a custom writer or a post-rotation size check,
+leaving four decisions to this task: which of the two options can
+actually enforce the cap; whether the §5.5-pinned
+`logs/eunomiasync.<date>.log` name scheme admits in-day size-rolled
+files at all (Rule 1); what the writer's own prune orders by and
+protects; and whether `prune_old_logs`' `eprintln!` can abort a
+Windows GUI build (the D-032/D-129 analysis, this task's second half).
+
+Solution, four decisions:
+
+- _Custom writer — the post-rotation check cannot enforce anything._
+  Verified in the vendored tracing-appender 0.2.5 sources: `Rotation`
+  is time-based only — `RotationKind` is
+  Minutely/Hourly/Daily/**Weekly**/Never (`rolling.rs:490-497`, consts
+  `:499-509`; the T-253 card brief and D-129 said
+  "NEVER/MINUTELY/HOURLY/DAILY only", missing WEEKLY — no material
+  difference, recorded here as the correction); the appender decides
+  rotation solely from the wall clock inside its private write path
+  (`rolling.rs:226-241`; `should_rollover` `rolling.rs:758-770`), the
+  file handle is a private `RwLock<File>`, and the builder surface
+  (`builder.rs:9-15`, `:298-300`) exposes no force-roll. Renaming the
+  open file out from under the appender is no substitute: it keeps
+  writing into its open handle and reopens by its own date name on its
+  own clock, and rename-while-open semantics vary by Windows version
+  and filesystem (std's default share mode _does_ permit the rename —
+  `OpenOptionsExt::share_mode` documents
+  `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` as the
+  default, and D-099 had to strip the flag to manufacture a sharing
+  violation — but the vacated name's reuse while the handle lives is
+  no promise std makes), so the trick is neither supported nor
+  portable. A retroactive trim at startup bounds nothing while the
+  app runs — a chatty day grows unbounded between midnights,
+  exactly what the ruling bounds. So the size half required owning the
+  file: `CappedDailyWriter` in `logging.rs`, moved onto
+  `tracing-appender`'s `non_blocking` worker thread (the crate's
+  remaining role; no new dependency — Rule 9 untouched, the
+  `Cargo.toml` comment updated).
+- _Name-scheme reading (Rule 1, resolved before implementation): the
+  first file of each UTC day carries the exact §5.5 name; same-day
+  size-rolled parts insert `.<N>` (N ≥ 2, decimal, no leading zeros)
+  before `.log`._ This is an interpretation, not a contradiction: the
+  ruling is unsatisfiable without same-day files (a single chatty day
+  passes 10 MB mid-day), the task card itself sanctions the custom
+  writer that produces them, and the §5.5 structure block lists
+  primary shapes only — T-024's `pre-recovery-*` files (D-049) are the
+  in-repo precedent of a task adding a name variant recorded in
+  DECISIONS.md without a spec conflict. Rejected readings: a uniform
+  `.<N>` on every file (would break the literal spec name every day)
+  and truncating the day file at 10 MB (destroys lines, and still
+  needs writer-level enforcement). The cap now counts same-day parts
+  like any other file — a chatty day can spend all five slots on
+  itself, which is exactly the ruling's "5 файлов × 10 МБ" model.
+- _Rotation and prune semantics._ Two triggers: the UTC day change
+  (jiff `Timestamp::now()` → UTC civil date → `YYYY-MM-DD`; D-032's
+  untestable-midnight boundary unchanged) and size — rotate when
+  `current_len > 0 && current_len + incoming > cap`, so a write
+  landing exactly at the cap stays (a part reaches the cap precisely,
+  the next write rolls) and a lone line larger than the whole cap
+  lands alone in its part (anything else would spin empty parts);
+  `MAX_LOG_FILE_BYTES = 10 MiB`, and no file exceeds it but that one
+  lone-line case. The writer's own prune runs at construction and
+  before every rotation: keep the newest `max_files − 1` (the crate's
+  own `max_log_files` semantics, `builder.rs:192-198`), ordering by
+  the (date, part) stamps **parsed from the names** — never mtime, the
+  D-129 age-from-name rule — and a name outside the canonical grammar
+  is never deleted (`parse_log_file_name`: hand-checked dashed shape +
+  jiff calendar validation; the hand check exists because jiff's
+  `Date` parser also admits the basic `YYYYMMDD` form — a real gap the
+  grammar test caught before review). During a rotation the prune
+  protects the file being replaced (its handle is still open; Windows
+  cannot remove an open file, and the protection keeps the outcome
+  identical across platforms — the next prune, handle closed,
+  converges) and the target; protection wins over age so the count
+  still lands on the cap (pinned by a test). Idempotency
+  (make-operations-idempotent): construction opens today's _highest
+  existing part_ at its true length and appends — a rerun continues,
+  a part left by an interrupted rotation is finished rather than
+  restarted, gaps in part numbers are never refilled, and a part
+  already at the cap rolls on its first write. The construction prune
+  mirrors the keep-`n`-then-create reasoning only when a file is about
+  to be created: a day with no file yet prunes to `max_files − 1` so
+  the new file lands the total at the cap, while a restart over
+  today's existing file prunes to `max_files` — a directory already at
+  the cap loses nothing to a mere restart (the round-1 review's P2-2;
+  the crate's own construction prune dipped below the cap there, and
+  its builder docs admit it — the writer does not).
+- _Degradation, and the Windows `eprintln!` half._ A rotation-time
+  prune or open failure is reported **once** through the facade
+  (`log_rotation_failed`: step code + path + OS error — the SEC-008
+  vocabulary), then retried silently on every following write while
+  the writer keeps writing into the current file: the cap is exceeded,
+  never the launch, and a healed disk heals the log (D-032's
+  writer-error policy applied to rotation). Reporting once per
+  degradation episode — the gate re-arms on the next successful
+  rotation, so a later, different failure gets its own line — rather
+  than per line, keeps a persistent failure from storming the pipeline
+  it is failing; the report is an _attempt_ (it rides the same lossy
+  channel as every line, and a full queue drops it — the honest
+  boundary of diagnosing a pipeline through itself). Routing the
+  report through the subscriber is
+  deadlock-safe because `non_blocking` is lossy by default
+  (`try_send`, `non_blocking.rs:228-233` default builder / `:238-243`
+  write arm) and the worker drops writer errors silently
+  (`worker.rs:81-83`). A
+  construction-time prune failure stays silent (no subscriber exists
+  yet to report through); a construction open failure remains the
+  `LogInitError` → stderr degradation path (the source type is now
+  `io::Error`; the display shape and the failing-path test are
+  unchanged). The `eprintln!` enumeration: before this task the
+  rolling appender's prune/refresh sites (`rolling.rs:704-707`,
+  `:718-724`, `:741-746`) were reachable since T-253 enabled
+  `max_log_files` — under D-032's Windows-GUI analysis (no stderr →
+  `eprintln!` panics → `panic = "abort"` aborts the process) that was
+  the exposure D-129 flagged; after it, those sites are unreachable
+  (no `RollingFileAppender` in the path), and the crate's one
+  remaining `eprintln!` (the worker's final flush at guard-drop
+  shutdown, `worker.rs:86-88`) cannot fire in the app — tauri exits
+  via `std::process::exit`, which skips the guard's drop (D-032's own
+  boundary) — and `File::flush` is an `io` no-op besides. Structurally
+  encoded (encode-lessons-in-structure):
+  `#![deny(clippy::print_stderr)]` in `lib.rs` and `main.rs` keeps the
+  app crate's production
+  code `eprintln!`-free; the pre-existing test
+  skip-notices (`ipc_tests.rs`, `sync_phase2_tests.rs`,
+  `dirty_recalc_tests.rs`, one `commands.rs` test fn) allow the lint
+  locally. Compile-level proof available here: the whole suite,
+  writer tests included, runs on the `windows-latest` CI leg
+  (`ci.yml:65`) — the writer is std-only file mechanics
+  (`OpenOptions` append/create, `read_dir`, `remove_file`,
+  `metadata`), so the leg proves the portability of every call it
+  compiles and runs. What automation cannot prove goes to the manual
+  smoke list (no smoke-checklist file exists in the repo; this entry
+  and ARCHITECTURE.md's Logging section carry the steps): (1) a
+  Windows GUI session logs into `logs/eunomiasync.<date>.log` and
+  rolls into `.2.log` parts past 10 MB with at most five files total;
+  (2) a read-only `logs/` starts the app in the stderr degradation
+  without aborting; (3) a locked log file does not crash the prune.
+
+Tests: the decision logic is pure and table-tested (name building
+against the spec literal; the grammar's accept/reject table incl. a
+real leap day, impossible dates, the basic `YYYYMMDD` form, `.1.log`
+and leading-zero parts; the boundary arithmetic incl. the exact-cap
+case; the prune plan incl. the numeric `.10`-vs-`.2` ordering, the
+protection tie-break and dedup), the IO seam is behavior-tested (a
+real-constants end-to-end pin that writes past 10 MB through the
+production seam and asserts the parts — written first and run RED
+against the unchanged T-253 code, then green; a small-cap twin over
+the same seam; direct-drive restart idempotency — continue the tail
+part, roll only past the cap — and restart-over-a-full-day; parts
+counting toward the five-file cap; the blocked-rotation degradation:
+every line survives in the current file, exactly one warn, no part
+file created). T-253's two cap tests pass — the construction prune
+keeps their count expectations (seven seeds → five files), now
+tightened by the round-1 review to pin the deterministic survivors by
+name and to seed foreign names (`notes.txt`, `.log.bak`, a
+leading-zero part, a basic-format date) that must survive untouched.
+Mutation checks ran red→green: the boundary comparison flipped
+(caught by the arithmetic table); newest-first pruning (caught by the
+plan table and the parts-count behavior test); the parser admitting
+`.1.log` (caught by the grammar table); dropping lines on a degraded
+rotation (caught by the blocked-rotation test — the first mutation
+attempt mis-modeled the degraded state and was re-modeled before it
+counted); disabling the once-gate (caught by the warn-count
+assertion).
+
+Honest boundaries: the midnight crossing still rides the real clock
+(D-032's boundary, unchanged — the dated name proves the wiring); a
+backwards clock step mid-run makes `next_write_target` append into the
+older date's file (log-only, self-correcting on the next write — the
+date comparison is by stamp, not direction); the production path of
+the degradation warn fires on the `non_blocking` worker thread, where
+the tests' thread-local `with_default` subscriber does not exist — the
+degradation suite drives the writer directly on the test thread, so
+only the global-install production path carries the line untested;
+and the three Windows smoke items above. Docs
+updated in the same change (Rule 11): the `logging.rs` module docs,
+ARCHITECTURE.md's Logging and Data-directory sections, the
+`Cargo.toml` comment on `tracing-appender`; D-032/D-129 stand as
+history — the addendum below points here. Follow-up material: when a
+future `tracing-appender` ships size-based rotation, the custom writer
+can retire onto it (a conscious swap task, not a drive-by); and the
+`print_stderr` gate covers `src-tauri`'s two crate roots — extending
+it workspace-wide (`[workspace.lints]`, plus `print_stdout` for the
+same hazard class) is a small task of its own, kept out of this one
+by the frozen `crates/eunomia-store` manifest.
+
+Review round 1 (deepseek-v4.1-flash, report
+`.opencode/reviews/t255-round1.md`, VERDICT: findings — 2 × P2,
+8 × P3, no P0/P1; the test audit found nothing weakened and verified
+all five mutation checks bite): **P2-1 accepted** — the entry's and
+the module docs' rename justification inverted a platform fact (std's
+default share mode _includes_ FILE_SHARE_DELETE; D-099 strips it to
+manufacture violations); both texts now carry the corrected reasoning
+(the appender cannot be redirected; rename-while-open is not a
+supported primitive), recorded above. **P2-2 accepted** — the
+construction prune deleted one file even when no replacement was
+created; the keep-`n`-then-create reasoning now applies only when
+today's file is new, a restart at a full cap deletes nothing (pinned
+by `a_restart_at_a_full_cap_deletes_nothing`), and the three
+affected doc claims became true. **P3-1/P3-2 accepted** — stale
+appender-era doc/test comments reworded (and the 7-seed test
+tightened to the now-deterministic survivors); the `non_blocking`
+citation now names `:228-233`/`:238-243`. **P3-3 partially accepted**
+— the `print_stderr` deny now covers `main.rs` too; extending it to
+the workspace crates is recorded as follow-up material (the store
+manifest is frozen). **P3-4 accepted** — the report gate re-arms on a
+successful rotation, and the lossy-channel "attempt, not guarantee"
+caveat is documented. **P3-5 accepted** — the per-write clock read is
+now an allocation-free epoch-day comparison (the stamp is reformatted
+only on a day change; `day` and the stamp come from one `Timestamp`
+read, so they cannot straddle a midnight). **P3-6 accepted as a doc
+note** — a failed construction scan defaults to part 1 (an
+unlistable-but-openable directory); documented in `new`, cap still
+holds from the opened file's true length. **P3-7 accepted** — the
+small-cap behavior test bounds the part count, so it alone catches a
+rotate-on-every-write mutation. **P3-8 accepted** — foreign names are
+now seeded end-to-end in the 7-seed test. The reviewer's non-finding
+question (UTC-midnight straddling a test's `today_stamp()` — a
+microsecond window per run) is the accepted D-032 clock-boundary
+class; no action. Round 2 (hy4-flash-free, report
+`.opencode/reviews/t255-round2.md`, VERDICT: clean — no P0/P1/P2)
+re-audited the round-1 fixes, the oracles, the facade pin, the
+idempotency paths, the single-thread contract and the count algebra,
+and offered two P3 hardening items, both accepted: the size ledger
+resyncs from the file's metadata after a partial-write failure (a
+failed `write_all` could leave `len` undercounting by the bytes that
+did land), and the "gaps never refilled" idempotency claim got its
+dedicated test (`a_restart_never_refills_a_gap_in_part_numbers`:
+parts 1 and 3 seeded, part 2 must not be recreated).
+
+Orchestrator addendum (merge, 2026-11-22): the follow-ups above are
+tracked — three cards created in the board's INBOX for owner triage,
+titled "Follow-up T-255: …" (the workspace-wide print_stderr/
+print_stdout gate; the CappedDailyWriter retirement when upstream
+ships size rotation; the three Windows GUI smoke items). The cards
+are the tracking unit; this note only records their existence.

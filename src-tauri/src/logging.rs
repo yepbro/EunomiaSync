@@ -1,19 +1,50 @@
-//! File logging with daily rotation (spec §5.3, §5.5, §7.7; SYS-011…013,
-//! SEC-008).
+//! File logging with daily + 10 MB rotation (spec §5.3, §5.5, §7.7;
+//! SYS-011…013, SEC-008; the 2026-11-21 owner ruling "5 files ×
+//! 10 MB" — D-129/T-253 shipped the count half, T-255 the size half).
 //!
-//! The app writes one trace log per day into the data directory's `logs/`
+//! The app writes its trace log into the data directory's `logs/`
 //! subfolder — `logs/eunomiasync.<date>.log`, where `<date>` is the UTC
-//! `YYYY-MM-DD` stamp of the write — via `tracing` +
-//! `tracing-appender`'s `RollingFileAppender` (`Rotation::DAILY`, filename
-//! prefix `eunomiasync`, suffix `log`, at most [`MAX_LOG_FILES`] dated
-//! files kept: the appender prunes the oldest beyond the cap when it is
-//! built and at every rotation — T-253's count half; the
-//! [`MAX_LOG_FILES`] docs record why the ruling's per-file 10 MB half
-//! is honestly not enforced. The appender is pointed at
+//! `YYYY-MM-DD` stamp of the write — via `tracing` + a custom writer of
+//! this module, [`CappedDailyWriter`], moved onto a dedicated thread by
+//! `tracing_appender::non_blocking`. The writer rotates when the UTC
+//! day changes **and** when the current file can hold no more than the
+//! ruling's 10 MB ([`MAX_LOG_FILE_BYTES`]); at most [`MAX_LOG_FILES`]
+//! files survive — the writer's own prune runs when it is built and
+//! before every rotation, deleting the oldest beyond the cap. The
+//! first file of a day carries the exact §5.5 name; a day whose volume
+//! passes 10 MB continues into same-day parts
+//! `eunomiasync.<date>.2.log`, `.3.log`, … — T-255's recorded reading
+//! of the ruling against the §5.5 name scheme (see the DECISIONS.md
+//! T-255 entry): the ruling is unsatisfiable without same-day files,
+//! and the §5.5 structure block lists primary shapes only (the
+//! `pre-recovery-*` precedent, T-024/D-049). The writer is pointed at
 //! `<data dir>/logs/` explicitly: Tauri's `app_log_dir()` would move the
 //! logs to `~/Library/Logs/…` on macOS, away from the spec §5.5 layout —
 //! a `config_tests.rs` absence pin keeps that API out of the codebase so
 //! the regression cannot pass silently.
+//!
+//! Why a custom writer (the card's sanctioned choice over a
+//! post-rotation size check): `tracing-appender` 0.2.5 has no
+//! size-based rotation — its `Rotation` is time-based only
+//! (Minutely/Hourly/Daily/Weekly/Never, `rolling.rs:490-509`) — and the
+//! rolling appender decides rotation solely from the wall clock inside
+//! its private write path (`rolling.rs:226-241`; `should_rollover`,
+//! `rolling.rs:758-770`), with no public API to force a mid-day file
+//! switch; its builder surface is rotation/prefix/suffix/symlink/
+//! max-files and nothing else (`builder.rs:9-15`). Renaming the open
+//! file out from under it is no substitute either: the appender keeps
+//! writing into its open handle and reopens by its own date name on
+//! its own clock, and rename-while-open semantics vary by Windows
+//! version and filesystem (std's default share mode permits the
+//! rename, but the vacated name's reuse while the handle lives is not
+//! a promise std makes) — the trick is neither supported nor portable.
+//! The size half therefore required owning the
+//! file; the crate's remaining role is the `non_blocking` worker
+//! thread, which this module keeps verbatim — and taking the rolling
+//! appender out of the path also retires its `eprintln!`-on-failure
+//! sites (`rolling.rs:704-707`, `:718-724`, `:741-746`), the Windows
+//! GUI abort exposure D-129 flagged (see the failure-policy paragraph
+//! below for the one `eprintln!` left in the crate).
 //!
 //! Ordering (SYS-011): the config is read **before** logging is set up,
 //! and [`init`] applies the `log_level` it finds (`info` by default,
@@ -56,6 +87,36 @@
 //! abort inside `setup`). Writer errors are therefore dropped silently:
 //! a log line that cannot be written is lost, never fatal.
 //!
+//! The same policy governs the writer's own rotation mid-run: a prune
+//! that cannot read or delete, or a next part file that cannot be
+//! opened, is reported **once** through the facade
+//! ([`log_rotation_failed`]) and then ignored — the writer keeps
+//! writing into the current file (the 10 MB cap is exceeded, never the
+//! launch) and every following write retries the rotation, so a healed
+//! disk heals the log. Reporting once per degradation episode — the
+//! gate re-arms on the next successful rotation — rather than per
+//! line, is what keeps a persistently broken rotation from turning
+//! into a warn storm through the very pipeline it is failing; and the
+//! report is an *attempt*: it rides the same lossy channel as every
+//! log line, and a full queue drops it (the honest boundary of
+//! diagnosing a pipeline through itself). The report is safe to route
+//! through the subscriber because `non_blocking`'s channel is lossy by
+//! default (`try_send`, never blocking — `non_blocking.rs:228-233`
+//! for the default builder, `:238-243` for the write arm) and the
+//! worker thread drops writer errors silently (`worker.rs:81-83`), so
+//! the writer can never deadlock on its own diagnostics. A
+//! construction-time prune failure stays fully silent: no subscriber
+//! exists yet to report through, and housekeeping must not stop the
+//! log. The one `eprintln!` left reachable in the vendored crate is
+//! the worker's final-flush failure at guard-drop shutdown
+//! (`worker.rs:86-88`) — the app never performs that shutdown (tao
+//! exits via `std::process::exit`, skipping destructors; see the
+//! guard paragraph below), and `src-tauri`'s own sources are kept
+//! `eprintln!`-free in production code by a clippy gate
+//! (`#![deny(clippy::print_stderr)]` in `lib.rs` and `main.rs`), the
+//! structural encoding of the
+//! D-032/D-129 Windows analysis.
+//!
 //! # SEC-008: events are constructed here, and only here
 //!
 //! SEC-008 (P0): *instruction text and file content never go into logs;
@@ -92,51 +153,65 @@
 //! builds (file name and folder, per-level filtering, the SEC-008
 //! payload contract) is unit-tested below over `tempfile` roots by
 //! driving real events through the subscriber and reading the real log
-//! file back. Three facts are consciously outside what a unit test can
-//! prove: the midnight rollover (a date change mid-run) is
-//! `tracing-appender`'s own `Rotation::DAILY` contract — the dated file
-//! name proves the rotation wiring, the crossing itself rests on the
-//! crate plus the manual smoke run; the rotation-time half of the
-//! `max_log_files` pruning rides that same untestable clock (the
-//! startup half, which runs when the appender is built, is tested); and
-//! the global-install path ([`tracing::subscriber::set_global_default`])
-//! is process-global, so installing it inside the parallel test suite is
+//! file back. The rotation's decision logic (the size check, the file
+//! naming, the prune verdict) is extracted into pure functions tested
+//! directly, with only the thin IO seam riding the real clock. Facts
+//! consciously outside what a unit test can prove: the midnight
+//! rollover (a date change mid-run) — the dated file name proves the
+//! rotation wiring, the crossing itself rests on the clock plus the
+//! manual smoke run; a tracing event emitted from *inside* the writer
+//! (the [`log_rotation_failed`] degradation line) — it is produced on
+//! the `non_blocking` worker thread, where the tests' thread-local
+//! `with_default` subscriber does not exist, so the degradation suite
+//! drives the writer directly on the test thread instead, and only the
+//! production global-install path carries the line; and the global
+//! install itself ([`tracing::subscriber::set_global_default`]) is
+//! process-global, so installing it inside the parallel test suite is
 //! not observable there; the `setup` wiring is pinned textually in
 //! `config_tests.rs` instead.
 
 use std::fmt;
+use std::fs::{self, File};
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use tracing::Subscriber;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
 use crate::config::LogLevel;
 use crate::errors::AppError;
 
 /// The log file name before the date stamp (spec §5.5:
 /// `logs/eunomiasync.<date>.log`). The suffix is [`LOG_FILE_SUFFIX`];
-/// `tracing-appender` joins them as `<prefix>.<date>.<suffix>`.
+/// the module's own [`log_file_name`] joins them as
+/// `<prefix>.<date>.<suffix>` (part 1) and `<prefix>.<date>.<part>.
+/// <suffix>` (same-day parts).
 const LOG_FILE_PREFIX: &str = "eunomiasync";
 
 /// The log file name extension (spec §5.5).
 const LOG_FILE_SUFFIX: &str = "log";
 
-/// The maximum number of dated log files kept (T-253, owner ruling
-/// 2026-11-21): the appender's own `max_log_files` cap — when the
-/// appender is built (every startup) and at every rotation it removes
-/// the oldest files beyond this many (verified in the vendored
-/// tracing-appender 0.2.5 sources: the builder method is
-/// `rolling/builder.rs:235`, the prune runs at `Inner::new` and in
-/// `refresh_writer`). Honest boundary, recorded in the DECISIONS.md
-/// T-253 entry: the ruling's ideal was 5 files × 10 MB, but
-/// tracing-appender 0.2.5 has no size-based rotation (`Rotation` is
-/// NEVER/MINUTELY/HOURLY/DAILY only — `rolling.rs:501-509`), and a
-/// custom size-rotating writer would break the §5.5-pinned
-/// `eunomiasync.<date>.log` name scheme D-032 recorded. The count half
-/// is enforced; the per-file size half is not — one chatty day can
-/// exceed 10 MB, and the cap bounds the *days* of history instead.
+/// The maximum number of log files kept (T-253, owner ruling
+/// 2026-11-21; T-255 completed the ruling's other half): the writer's
+/// own prune — run when the writer is built (every startup) and before
+/// every rotation — deletes the oldest beyond this many, ordering by
+/// the (date, part) stamps parsed from the file names, never mtime
+/// (the D-129 retention rule: a name whose age cannot be established
+/// is not ours to judge, so foreign files are never deleted). The
+/// cap counts same-day parts like any other file: a chatty day can
+/// spend all five slots on itself — exactly the ruling's "5 файлов ×
+/// 10 МБ (≈50 МБ максимум)" model, with [`MAX_LOG_FILE_BYTES`]
+/// bounding each file.
 const MAX_LOG_FILES: usize = 5;
+
+/// The per-file size cap (T-255, the ruling's other half): when the
+/// current file can hold no more than this many bytes, the next write
+/// rolls into a new same-day part. A write that lands exactly at the
+/// cap stays (the file reaches it precisely; the write *after* that
+/// rolls), so no file exceeds the cap — except a single line that is
+/// oversized on its own, which lands alone in its part and rolls the
+/// next write (the alternative would be a loop of empty parts).
+const MAX_LOG_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Why [`init`] could not build the file log: the path it could not
 /// create or open, plus the OS cause. Kept as data (like
@@ -146,10 +221,10 @@ const MAX_LOG_FILES: usize = 5;
 /// module docs.
 #[derive(Debug)]
 pub(crate) struct LogInitError {
-    /// The `logs/` directory the appender was pointed at.
+    /// The `logs/` directory the writer was pointed at.
     path: PathBuf,
-    /// The underlying `tracing-appender` initialization failure.
-    source: tracing_appender::rolling::InitError,
+    /// The underlying file-open failure.
+    source: io::Error,
 }
 
 impl fmt::Display for LogInitError {
@@ -190,32 +265,474 @@ pub(crate) enum Logger {
     Stderr,
 }
 
-/// Builds the daily-rotating file subscriber for `logs_dir` at `level` —
-/// the testable seam behind [`init`]. The returned guard must outlive
-/// every event the subscriber formats (see [`Logger`]).
+/// Builds the daily+size-rotating file subscriber for `logs_dir` at
+/// `level` — the testable seam behind [`init`]. The returned guard must
+/// outlive every event the subscriber formats (see [`Logger`]).
 ///
 /// # Errors
 ///
-/// Fails with [`LogInitError`] when the appender cannot be created — the
-/// directory cannot be made or the file cannot be opened. Callers
+/// Fails with [`LogInitError`] when today's log file cannot be opened —
+/// the directory cannot be read or the file cannot be created. Callers
 /// degrade (module docs); they never abort the launch over it.
 fn build_file_subscriber(
     logs_dir: &Path,
     level: LogLevel,
 ) -> Result<(impl Subscriber + Send + Sync + 'static, WorkerGuard), LogInitError> {
-    let appender = RollingFileAppender::builder()
-        .rotation(Rotation::DAILY)
-        .filename_prefix(LOG_FILE_PREFIX)
-        .filename_suffix(LOG_FILE_SUFFIX)
-        .max_log_files(MAX_LOG_FILES)
-        .build(logs_dir)
-        .map_err(|source| LogInitError {
-            path: logs_dir.to_path_buf(),
-            source,
+    build_file_subscriber_capped(logs_dir, level, MAX_LOG_FILES, MAX_LOG_FILE_BYTES)
+}
+
+/// The parameterized seam behind [`build_file_subscriber`]: the
+/// production constants enter there and only there, and the behavior
+/// suite drives this function with small caps — the `fmt_subscriber`
+/// precedent, so the tests exercise the production path rather than a
+/// lookalike.
+fn build_file_subscriber_capped(
+    logs_dir: &Path,
+    level: LogLevel,
+    max_files: usize,
+    max_log_file_bytes: u64,
+) -> Result<(impl Subscriber + Send + Sync + 'static, WorkerGuard), LogInitError> {
+    let appender =
+        CappedDailyWriter::new(logs_dir, max_files, max_log_file_bytes).map_err(|source| {
+            LogInitError {
+                path: logs_dir.to_path_buf(),
+                source,
+            }
         })?;
     let (writer, guard) = tracing_appender::non_blocking(appender);
     let subscriber = fmt_subscriber(writer, level);
     Ok((subscriber, guard))
+}
+
+// ---- The rotation writer (T-255) --------------------------------------------
+//
+// Pure decision units first (name grammar, size check, prune verdict —
+// tested directly below), then the thin IO seam that rides the real
+// clock (`today_utc_string` is its only clock read).
+
+/// The rotation key of one log file: the UTC `YYYY-MM-DD` stamp its
+/// name carries and the 1-based same-day part number. Part 1 is the
+/// unsuffixed spec §5.5 name; parts ≥ 2 are the same-day size-rolled
+/// files (see the module docs for the recorded reading). The derived
+/// ordering is chronological for canonical keys: fixed-width dates
+/// compare lexicographically, the part numerically.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct FileKey {
+    date: String,
+    part: u32,
+}
+
+/// The file name of one part: the exact §5.5 shape for part 1, the
+/// ruling's same-day part shape (`.<part>` before the suffix) for
+/// parts ≥ 2.
+fn log_file_name(key: &FileKey) -> String {
+    if key.part == 1 {
+        format!("{LOG_FILE_PREFIX}.{}.{LOG_FILE_SUFFIX}", key.date)
+    } else {
+        format!(
+            "{LOG_FILE_PREFIX}.{}.{}.{LOG_FILE_SUFFIX}",
+            key.date, key.part
+        )
+    }
+}
+
+/// The inverse of [`log_file_name`], and the grammar the prune trusts.
+/// Accepts only canonical names — the spec-shaped part 1 and parts ≥ 2
+/// in decimal without leading zeros, the date a real calendar date in
+/// the exact zero-padded `YYYY-MM-DD` shape (the dashes and padding
+/// are checked by hand because jiff's parser also admits the basic
+/// `YYYYMMDD` form, which is not our naming; jiff then rejects a
+/// hand-made `2026-02-30`). Anything else — foreign names, backups,
+/// `.1.log`, leading-zero parts — is not ours and is never deleted
+/// (the D-129 rule: a file whose age cannot be established has no age
+/// to judge).
+fn parse_log_file_name(name: &str) -> Option<FileKey> {
+    let rest = name
+        .strip_prefix(LOG_FILE_PREFIX)?
+        .strip_prefix('.')?
+        .strip_suffix(LOG_FILE_SUFFIX)?
+        .strip_suffix('.')?;
+    let (date, part) = match rest.rsplit_once('.') {
+        None => (rest, 1),
+        Some((date, digits)) => {
+            if digits.is_empty() {
+                return None;
+            }
+            let leading = digits.as_bytes()[0];
+            let canonical = leading != b'0'
+                && !(digits.len() == 1 && leading == b'1')
+                && digits.bytes().all(|b| b.is_ascii_digit());
+            if !canonical {
+                return None;
+            }
+            (date, digits.parse::<u32>().ok()?)
+        }
+    };
+    let bytes = date.as_bytes();
+    let shaped = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| b.is_ascii_digit() || ((i == 4 || i == 7) && *b == b'-'));
+    if !shaped {
+        return None;
+    }
+    date.parse::<jiff::civil::Date>().ok()?;
+    Some(FileKey {
+        date: date.to_owned(),
+        part,
+    })
+}
+
+/// Which file the next `incoming` bytes belong in: the current one, the
+/// first file of `now_date` when the UTC day changed, or the next
+/// same-day part when the current file is past holding anything more.
+/// The decision is pure — the size half's arithmetic is testable
+/// without a clock or a disk.
+///
+/// Boundary semantics (pinned by tests): a write that would land
+/// exactly at the cap stays (a part reaches the cap precisely; the
+/// write *after* it rolls); a write larger than the whole cap on an
+/// empty file also stays, landing alone in its part — anything else
+/// would spin empty parts forever; the date change wins over size.
+fn next_write_target(
+    current: &FileKey,
+    current_len: u64,
+    now_date: &str,
+    incoming: usize,
+    cap: u64,
+) -> FileKey {
+    if now_date != current.date {
+        FileKey {
+            date: now_date.to_owned(),
+            part: 1,
+        }
+    } else if current_len > 0 && current_len.saturating_add(incoming as u64) > cap {
+        // A part number at `u32::MAX` cannot exist in practice (each
+        // part holds at least one line); degrade to the current file
+        // rather than panic regardless.
+        match current.part.checked_add(1) {
+            Some(part) => FileKey {
+                date: current.date.clone(),
+                part,
+            },
+            None => current.clone(),
+        }
+    } else {
+        current.clone()
+    }
+}
+
+/// Which of `keys` a prune may delete so at most `keep` remain: the
+/// oldest by (date, part), never a protected key. Keys only ever come
+/// from [`parse_log_file_name`], so a foreign file cannot appear here
+/// at all. `keep` is the post-prune target *before* the file about to
+/// be opened is created — the same semantics as the crate's
+/// `max_log_files` (its builder docs: keep `n - 1`, then create).
+fn prune_plan(keys: &[FileKey], keep: usize, protected: &[FileKey]) -> Vec<FileKey> {
+    let mut sorted = keys.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    let excess = sorted.len().saturating_sub(keep);
+    sorted
+        .into_iter()
+        .filter(|key| !protected.contains(key))
+        .take(excess)
+        .collect()
+}
+
+/// Every parseable log file in `dir` with its key. Linear in the
+/// directory's size (the prune runs per rotation, and the cap itself
+/// bounds the count of ours; foreign files are skipped, not judged).
+fn scan_log_files(dir: &Path) -> io::Result<Vec<(FileKey, PathBuf)>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if let Some(key) = parse_log_file_name(name) {
+            files.push((key, entry.path()));
+        }
+    }
+    Ok(files)
+}
+
+/// Today's UTC date as the canonical `YYYY-MM-DD` stamp — the rotation
+/// seam's only read of the real clock (D-032's precedent: the midnight
+/// crossing itself is the clock-plus-smoke boundary; the stamp's shape
+/// and calendar truth are jiff's).
+fn today_utc_string() -> String {
+    jiff::Timestamp::now()
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .date()
+        .to_string()
+}
+
+/// Today's UTC epoch day — the allocation-free half of the clock seam:
+/// the writer compares this per write and reformats the stamp only when
+/// the day changed. Exact by construction: unix seconds floor to UTC
+/// epoch days, which map one-to-one onto civil dates (`div_euclid` so
+/// pre-1970 timestamps, should a clock ever produce one, still floor).
+fn today_epoch_day() -> i64 {
+    jiff::Timestamp::now().as_second().div_euclid(86_400)
+}
+
+/// The custom writer behind the file log (T-255): the size half of the
+/// owner's "5 files × 10 MB" ruling, succeeding T-253's count half.
+/// Owns one open file; before every batch it decides — purely, via
+/// [`next_write_target`] — whether the bytes belong in the current
+/// file, the next same-day part, or the first file of a new UTC day,
+/// and rotates by pruning ([`prune_plan`], keep `max_files - 1`) and
+/// opening the target.
+///
+/// Single-threaded by construction: `non_blocking` moves the writer to
+/// its worker thread and every `write` happens there (the degradation
+/// suite drives it directly instead), so the state needs no locks.
+///
+/// Idempotent across restarts (the make-operations-idempotent rule):
+/// construction opens *today's highest existing part* and continues at
+/// its true length, so a rerun appends, a part left by an interrupted
+/// rotation is finished rather than restarted, gaps in part numbers
+/// are never refilled, and a part already at the cap rolls on its
+/// first write.
+struct CappedDailyWriter {
+    /// The `logs/` directory every rotation works in.
+    directory: PathBuf,
+    /// The ruling's count half — see [`MAX_LOG_FILES`].
+    max_files: usize,
+    /// The ruling's size half — see [`MAX_LOG_FILE_BYTES`].
+    cap: u64,
+    /// The currently open file; every write lands here.
+    file: File,
+    /// The open file's key.
+    key: FileKey,
+    /// The cached UTC date stamp the rotation decides against —
+    /// refreshed only when [`Self::day`] changes, so the per-write
+    /// clock check is one division and no allocation.
+    today: String,
+    /// The UTC epoch day of [`Self::today`] (derived from the same
+    /// stamp at construction, so the two cannot straddle a midnight).
+    day: i64,
+    /// Bytes already in the current file — the size half's accounting,
+    /// initialized from the file's length at open so a restart
+    /// continues a part at its true size.
+    len: u64,
+    /// Whether a rotation failure has been reported in the current
+    /// degradation episode (one line per episode — a persistently
+    /// broken rotation must not turn into a warn storm through the
+    /// pipeline it is failing; a successful rotation re-arms the gate).
+    rotation_reported: bool,
+}
+
+impl CappedDailyWriter {
+    /// Creates the writer over `directory`, then opens today's highest
+    /// existing part. The construction prune mirrors the
+    /// keep-`n`-then-create reasoning only when a file is about to be
+    /// created: a day with no file yet prunes to `max_files - 1` so the
+    /// new file lands the total at the cap, while a restart over
+    /// today's existing file prunes to `max_files` — a directory
+    /// already at the cap loses nothing to a mere restart (the
+    /// round-1 review's P2-2). If the directory scan fails, the
+    /// today-part defaults to 1: an exotic state (the directory is
+    /// openable but not listable) where the writer may continue part 1
+    /// out of chronological order — the cap still holds from each
+    /// opened file's true length, and the next rotation converges. A
+    /// construction-time prune failure is silent (no subscriber exists
+    /// yet to report through, and housekeeping must not stop the log);
+    /// only an unopenable file fails construction — that is the
+    /// [`LogInitError`] path the caller degrades on.
+    fn new(directory: &Path, max_files: usize, cap: u64) -> io::Result<Self> {
+        let date = today_utc_string();
+        let scan = scan_log_files(directory).unwrap_or_default();
+        let today_exists = scan.iter().any(|(key, _)| key.date == date);
+        let today_part = scan
+            .iter()
+            .map(|(key, _)| key)
+            .filter(|key| key.date == date)
+            .map(|key| key.part)
+            .max()
+            .unwrap_or(1);
+        let key = FileKey {
+            date,
+            part: today_part,
+        };
+        let keep = if today_exists {
+            max_files
+        } else {
+            max_files.saturating_sub(1)
+        };
+        Self::prune(directory, keep, std::slice::from_ref(&key), &mut false);
+        let (file, len) = Self::open(directory, &key)?;
+        // One clock read feeds both the stamp and its epoch day — the
+        // pair cannot straddle a midnight (a straddling `day` would
+        // suppress the first day-change check until the next day).
+        // If midnight strikes between the scan's stamp and this read,
+        // the writer opens the old day's part and the first write's
+        // date comparison rotates it — still correct.
+        let now = jiff::Timestamp::now();
+        let today = now
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date()
+            .to_string();
+        let day = now.as_second().div_euclid(86_400);
+        Ok(Self {
+            directory: directory.to_path_buf(),
+            max_files,
+            cap,
+            file,
+            key,
+            today,
+            day,
+            len,
+            rotation_reported: false,
+        })
+    }
+
+    /// Opens `key`'s file for append, creating it (and the directory —
+    /// the crate's own `create_writer` behavior, kept so a missing
+    /// `logs/` recovers instead of degrading; in the app the layout
+    /// step has already made it), and reports its current length — a
+    /// part left by an interrupted rotation is continued, not
+    /// restarted.
+    fn open(directory: &Path, key: &FileKey) -> io::Result<(File, u64)> {
+        let path = directory.join(log_file_name(key));
+        let open = || fs::OpenOptions::new().append(true).create(true).open(&path);
+        let file = open().or_else(|error| {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|_| error)?;
+            }
+            open()
+        })?;
+        let len = file.metadata()?.len();
+        Ok((file, len))
+    }
+
+    /// Deletes the oldest parseable log files beyond `keep`, protecting
+    /// `protected` — during a rotation that is the file being replaced
+    /// (its handle is still open) and the file about to be opened.
+    /// Protecting the open file makes the outcome identical everywhere:
+    /// where an open file cannot be removed the deletion would merely
+    /// fail, and where it can (POSIX unlink, Windows' share-delete) the
+    /// log would keep writing into an unlinked, nameless file — the
+    /// next prune, with the handle closed, converges instead. Failures
+    /// are reported once per degradation episode through the facade,
+    /// then ignored: housekeeping must never stop the log (D-032's
+    /// policy).
+    fn prune(directory: &Path, keep: usize, protected: &[FileKey], reported: &mut bool) {
+        let files = match scan_log_files(directory) {
+            Ok(files) => files,
+            Err(error) => {
+                Self::report_rotation_failure(reported, RotationStep::Prune, directory, &error);
+                return;
+            }
+        };
+        let keys: Vec<FileKey> = files.iter().map(|(key, _)| key.clone()).collect();
+        for key in prune_plan(&keys, keep, protected) {
+            let Some((_, path)) = files.iter().find(|(candidate, _)| candidate == &key) else {
+                continue;
+            };
+            if let Err(error) = fs::remove_file(path) {
+                Self::report_rotation_failure(reported, RotationStep::Prune, path, &error);
+            }
+        }
+    }
+
+    /// Applies [`next_write_target`] (with the cached [`Self::today`]
+    /// stamp as the clock input): on a target change, prunes and opens
+    /// the new file; on failure, reports once per degradation episode
+    /// and keeps writing to the current file — the cap is exceeded,
+    /// never the launch — and every following write retries the
+    /// rotation, so a healed disk heals the log. A successful rotation
+    /// resets the report gate: the next *new* failure in the same
+    /// process gets its own line (a failing rotation never succeeds,
+    /// so this cannot re-enable a storm).
+    fn rotate_if_due(&mut self, incoming: usize) {
+        let target = next_write_target(&self.key, self.len, &self.today, incoming, self.cap);
+        if target == self.key {
+            return;
+        }
+        Self::prune(
+            &self.directory,
+            self.max_files.saturating_sub(1),
+            &[self.key.clone(), target.clone()],
+            &mut self.rotation_reported,
+        );
+        match Self::open(&self.directory, &target) {
+            Ok((file, len)) => {
+                // A raw `File` writes through to the OS unbuffered, so
+                // replacing the handle loses nothing already handed to
+                // the system; the flush is belt-and-braces.
+                let _ = self.file.flush();
+                self.file = file;
+                self.len = len;
+                self.key = target;
+                self.rotation_reported = false;
+            }
+            Err(error) => {
+                let path = self.directory.join(log_file_name(&target));
+                Self::report_rotation_failure(
+                    &mut self.rotation_reported,
+                    RotationStep::Open,
+                    &path,
+                    &error,
+                );
+            }
+        }
+    }
+
+    /// The once-per-episode gate for [`log_rotation_failed`] (reset by
+    /// a successful rotation — see [`rotate_if_due`]). The report is an
+    /// *attempt*: it rides the same lossy channel as every log line,
+    /// and a full queue drops it — the honest boundary of diagnosing a
+    /// pipeline through itself.
+    fn report_rotation_failure(
+        reported: &mut bool,
+        step: RotationStep,
+        path: &Path,
+        error: &io::Error,
+    ) {
+        if *reported {
+            return;
+        }
+        *reported = true;
+        log_rotation_failed(step, path, error);
+    }
+}
+
+impl io::Write for CappedDailyWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // The cheap epoch-day check first; the stamp (and its
+        // allocation) is refreshed only on a day change.
+        let day = today_epoch_day();
+        if day != self.day {
+            self.day = day;
+            self.today = today_utc_string();
+        }
+        self.rotate_if_due(buf.len());
+        if let Err(error) = self.file.write_all(buf) {
+            // A partial write (some bytes landed, then the disk
+            // refused) would leave the size ledger undercounting —
+            // resync from the file so the next rotation decision sees
+            // the file's true length (the round-2 review's P3).
+            if let Ok(len) = self.file.metadata().map(|metadata| metadata.len()) {
+                self.len = len;
+            }
+            return Err(error);
+        }
+        self.len += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
 }
 
 /// The fmt subscriber both sinks share: the given `writer`, the level
@@ -1241,6 +1758,50 @@ impl RestoreStep {
     }
 }
 
+/// The steps of the rotation writer's file switch (T-255), for
+/// [`log_rotation_failed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RotationStep {
+    /// The retention prune could not read the directory or remove an
+    /// aged file.
+    Prune,
+    /// The next part file could not be opened.
+    Open,
+}
+
+impl RotationStep {
+    /// The word the log line carries (`step=…`).
+    fn as_str(self) -> &'static str {
+        match self {
+            RotationStep::Prune => "prune",
+            RotationStep::Open => "open",
+        }
+    }
+}
+
+/// The file log's own rotation degraded (T-255): the prune could not
+/// read or delete, or the next part file could not be opened. `warn`,
+/// emitted at most once per degradation episode — the writer keeps
+/// writing into the current file (the 10 MB cap is exceeded, never the
+/// launch) and retries the rotation on every following write, and a
+/// successful rotation re-arms the gate — so the line marks the
+/// degradation, not every refusal; a healed disk produces no second
+/// line, the healed rotation speaks for itself. The payload is
+/// the step code, the path and the OS error — paths and codes, the
+/// SEC-008 vocabulary; no content exists at this seam to keep out.
+/// Private to this module: the writer is the only producer, and the
+/// event fires on `non_blocking`'s worker thread (see the module docs
+/// for the testing boundary that follows from that).
+fn log_rotation_failed(step: RotationStep, path: &Path, error: &io::Error) {
+    tracing::warn!(
+        target: "eunomia::log",
+        step = step.as_str(),
+        path = %path.display(),
+        error = %error,
+        "the file log could not rotate; writing continues into the current file"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     //! Behavior tests of the subscriber seam: a real subscriber is built
@@ -2004,8 +2565,9 @@ mod tests {
     fn an_uncreatable_logs_dir_fails_and_names_the_path() {
         // Arrange: the would-be logs directory sits under a regular
         // file, so no directory or file can be created beneath it — a
-        // portable stand-in for permission failures (the appender also
-        // creates the directory itself, so this covers that arm too).
+        // portable stand-in for permission failures (the writer's open
+        // also tries to create the directory itself, as the crate's
+        // appender did, so this covers that arm too).
         let temp = tempfile::tempdir().expect("failed to create a temp directory");
         let blocker = temp.path().join("blocker");
         fs::write(&blocker, b"not a directory").expect("writing a temp file must work");
@@ -2750,13 +3312,17 @@ mod tests {
 
     #[test]
     fn building_the_appender_prunes_dated_logs_beyond_five_files() {
-        // The startup half of the max_log_files cap (T-253): the prune
-        // runs when the appender is built, so a directory holding seven
-        // dated files must come down to the cap before today's file is
-        // appended to. Which of the equally-old seeds survive is the
-        // appender's own tie-breaking (it orders by creation time with a
-        // filename-date fallback); the count and the live file are the
-        // deterministic facts, and the count is the criterion.
+        // The startup half of the count cap (T-253): the prune runs
+        // when the writer is built, so a directory holding seven dated
+        // files must come down to the cap before today's file is
+        // appended to. The prune orders by the parsed (date, part)
+        // stamps — fully deterministic, unlike the crate's
+        // creation-time tie-breaking — so the survivors are pinned by
+        // name: the four newest seeds plus today's live file. The
+        // foreign seeds (a note, a `.bak`, a leading-zero part, the
+        // basic-format date) are not the writer's grammar and must
+        // survive untouched (D-129's rule: a file whose age cannot be
+        // established has no age to judge).
         let (temp, root) = logs_dir();
         for day in 1..=7 {
             fs::write(
@@ -2764,6 +3330,15 @@ mod tests {
                 b"an old day's log",
             )
             .expect("seeding an old dated log must work");
+        }
+        let foreign = [
+            root.join("notes.txt"),
+            root.join("eunomiasync.2026-11-22.log.bak"),
+            root.join("eunomiasync.2026-11-22.01.log"),
+            root.join("eunomiasync.20261122.log"),
+        ];
+        for path in &foreign {
+            fs::write(path, b"a foreign file").expect("seeding a foreign file must work");
         }
 
         let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
@@ -2779,6 +3354,25 @@ mod tests {
             5,
             "seven seeded files plus today's must leave exactly five dated files"
         );
+        let names: Vec<String> = files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            names.contains(&"eunomiasync.2020-01-04.log".to_owned())
+                && names.contains(&"eunomiasync.2020-01-07.log".to_owned())
+                && !names.contains(&"eunomiasync.2020-01-01.log".to_owned()),
+            "the newest four seeds survive, the oldest three go — the prune is \
+             deterministic by name stamp, got: {names:?}"
+        );
+        for path in &foreign {
+            assert_eq!(
+                fs::read_to_string(path).expect("the foreign file must survive untouched"),
+                "a foreign file",
+                "a foreign name is never the prune's to judge: {}",
+                path.display()
+            );
+        }
         let live = files
             .iter()
             .find(|path| {
@@ -2794,6 +3388,659 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("eunomiasync.")),
             "the live file keeps the §5.5 name shape"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn a_restart_at_a_full_cap_deletes_nothing() {
+        // The round-1 review's P2-2 edge: a restart over a directory
+        // already at the cap whose newest file is today's creates no
+        // replacement file, so the construction prune must not delete
+        // one either — the "keep n, then create" reasoning applies only
+        // when a file is about to be created.
+        let (temp, root) = logs_dir();
+        let today = today_stamp();
+        for day in 1..=4 {
+            fs::write(
+                root.join(format!("eunomiasync.2020-01-0{day}.log")),
+                b"an old day's log",
+            )
+            .expect("seeding an old dated log must work");
+        }
+        fs::write(
+            root.join(format!("eunomiasync.{today}.log")),
+            "today's existing tail",
+        )
+        .expect("seeding today's part must work");
+
+        let mut writer = CappedDailyWriter::new(&root, MAX_LOG_FILES, 100)
+            .expect("the writer must build over the full directory");
+        writer
+            .write_all(b"a line that still fits\n")
+            .expect("the write must land");
+        writer.flush().expect("flush must work");
+
+        let names: Vec<String> = part_files(&root)
+            .into_iter()
+            .map(|(_, _, path)| path.file_name().unwrap().to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            names.len(),
+            5,
+            "a restart over a full cap keeps all five files, got: {names:?}"
+        );
+        for day in 1..=4 {
+            assert!(
+                names.contains(&format!("eunomiasync.2020-01-0{day}.log")),
+                "no old day is deleted by a mere restart"
+            );
+        }
+        let tail = fs::read_to_string(root.join(format!("eunomiasync.{today}.log")))
+            .expect("today's part must be readable");
+        assert!(
+            tail.contains("today's existing tail") && tail.contains("a line that still fits"),
+            "the restart continues today's part in order, got: {tail:?}"
+        );
+        drop(temp);
+    }
+
+    /// The log files of `dir` split by part, matched **by hand** — an
+    /// oracle independent of the production name code: the §5.5 shape
+    /// `eunomiasync.<YYYY-MM-DD>.log` (part 1) and the same-day part
+    /// shape `eunomiasync.<YYYY-MM-DD>.<N>.log` where `N` is ≥ 2 in
+    /// decimal without leading zeros. Anything else in the directory is
+    /// not a part and stays invisible to this helper.
+    fn part_files(dir: &Path) -> Vec<(String, Option<u32>, PathBuf)> {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(dir).expect("the logs directory must be readable") {
+            let path = entry.expect("every logs entry must be readable").path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(rest) = name
+                .strip_prefix("eunomiasync.")
+                .and_then(|rest| rest.strip_suffix(".log"))
+            else {
+                continue;
+            };
+            // `<date>` alone is part 1; `<date>.<N>` (N ≥ 2, no leading
+            // zeros) is a same-day part — matched by hand so the oracle
+            // stays independent of the production name code.
+            let (date, part) = match rest.rsplit_once('.') {
+                None => (rest, None),
+                Some((date, digits)) => {
+                    let canonical = !digits.starts_with('0')
+                        && digits != "1"
+                        && digits.bytes().all(|b| b.is_ascii_digit());
+                    if !canonical {
+                        continue;
+                    }
+                    let Ok(part) = digits.parse::<u32>() else {
+                        continue;
+                    };
+                    (date, Some(part))
+                }
+            };
+            let bytes = date.as_bytes();
+            let shaped = bytes.len() == 10
+                && bytes[4] == b'-'
+                && bytes[7] == b'-'
+                && bytes
+                    .iter()
+                    .enumerate()
+                    .all(|(i, b)| b.is_ascii_digit() || ((i == 4 || i == 7) && *b == b'-'));
+            if !shaped {
+                continue;
+            }
+            files.push((date.to_owned(), part, path));
+        }
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn writing_past_ten_megabytes_rolls_into_a_same_day_part() {
+        // The owner ruling's per-file half (T-255, D-129: "5 файлов ×
+        // 10 МБ"): one UTC day whose volume passes 10 MB must roll into
+        // a second file named `eunomiasync.<date>.2.log`, and no file
+        // of the day may exceed the 10 MB cap (beyond a single line
+        // that is oversized on its own). Driven end to end through the
+        // production seam with the real constants — the small-cap
+        // suite covers the arithmetic; this one pins that the shipped
+        // cap is the ruling's ten megabytes. The 10 MB literal comes
+        // from the ruling, not from the code's constant, so a drifted
+        // constant fails here.
+        const RULING_CAP: u64 = 10 * 1024 * 1024;
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+
+        // ~1 KiB per event message; 10 MiB + 64 events of headroom
+        // crosses the cap with margin for the fmt layer's own bytes.
+        let line = "0123456789abcdef".repeat(64);
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..(10 * 1024 + 64) {
+                tracing::info!("{line}");
+            }
+        });
+        drop(guard);
+
+        let parts = part_files(&root);
+        let dates: Vec<&str> = parts.iter().map(|(date, _, _)| date.as_str()).collect();
+        assert!(
+            dates.len() >= 2 && dates.iter().all(|date| *date == dates[0]),
+            "a day past 10 MB must roll into same-day parts of one date, \
+             found: {parts:?}"
+        );
+        let first = fs::metadata(&parts[0].2).expect("part 1 must exist").len();
+        assert!(
+            first <= RULING_CAP,
+            "part 1 must not exceed the 10 MB cap (got {} bytes)",
+            first
+        );
+        assert!(
+            first >= RULING_CAP - 1024 * 1024,
+            "part 1 must have filled to near the cap before rolling \
+             (got {first} bytes) — an early split means the cap is not \
+             the ruling's ten megabytes"
+        );
+        for (_, _, path) in &parts {
+            let size = fs::metadata(path).expect("every part must exist").len();
+            assert!(
+                size <= RULING_CAP,
+                "no part may exceed the 10 MB cap: {path:?} is {size} bytes"
+            );
+        }
+        drop(temp);
+    }
+
+    /// Today's UTC stamp, computed test-side straight from jiff — the
+    /// independent calendar oracle for seeding and asserting on
+    /// today-named files.
+    fn today_stamp() -> String {
+        jiff::Timestamp::now()
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date()
+            .to_string()
+    }
+
+    /// A [`FileKey`] built from a literal — the pure suites' input.
+    fn key(date: &str, part: u32) -> FileKey {
+        FileKey {
+            date: date.to_owned(),
+            part,
+        }
+    }
+
+    #[test]
+    fn file_names_follow_the_spec_shape_and_the_part_scheme() {
+        // Part 1 is the spec §5.5 literal — pinned as a literal, so a
+        // mutated prefix/suffix or date placement fails here; parts ≥ 2
+        // are the T-255 same-day scheme (the ruling's reading, D-entry).
+        assert_eq!(
+            log_file_name(&key("2026-11-22", 1)),
+            "eunomiasync.2026-11-22.log"
+        );
+        assert_eq!(
+            log_file_name(&key("2026-11-22", 2)),
+            "eunomiasync.2026-11-22.2.log"
+        );
+        assert_eq!(
+            log_file_name(&key("2026-11-22", 10)),
+            "eunomiasync.2026-11-22.10.log"
+        );
+    }
+
+    #[test]
+    fn name_parsing_accepts_only_the_canonical_grammar() {
+        // The prune trusts exactly this grammar (D-129's rule: a name
+        // whose age cannot be established is never deleted), so the
+        // accept/reject table is the safety net of the whole retention.
+        let accepted = [
+            ("eunomiasync.2026-11-22.log", key("2026-11-22", 1)),
+            ("eunomiasync.2024-02-29.log", key("2024-02-29", 1)), // a real leap day
+            ("eunomiasync.2026-11-22.2.log", key("2026-11-22", 2)),
+            ("eunomiasync.2026-11-22.10.log", key("2026-11-22", 10)),
+        ];
+        for (name, expected) in accepted {
+            assert_eq!(parse_log_file_name(name), Some(expected), "{name}");
+        }
+        let rejected = [
+            // Impossible calendar dates.
+            "eunomiasync.2026-02-30.log",
+            "eunomiasync.2026-13-01.log",
+            // Non-canonical shapes.
+            "eunomiasync.2026-11-2.log",    // unpadded day
+            "eunomiasync.2026-1-22.log",    // unpadded month
+            "eunomiasync.20261122.log",     // no dashes
+            "eunomiasync.2026-11-22.1.log", // part 1 is the unsuffixed name
+            "eunomiasync.2026-11-22.02.log",
+            "eunomiasync.2026-11-22.0.log",
+            "eunomiasync.2026-11-22.2g.log",
+            "eunomiasync.2026-11-22..log",
+            "eunomiasync.2026-11-22.log.bak",
+            "eunomiasync.2026-11-22.txt",
+            "eunomiasync..log",
+            "app.2026-11-22.log",
+            "2026-11-22.log",
+        ];
+        for name in rejected {
+            assert_eq!(
+                parse_log_file_name(name),
+                None,
+                "`{name}` is not a canonical log file name"
+            );
+        }
+    }
+
+    #[test]
+    fn the_size_decision_boundary_is_exact() {
+        // The ruling's arithmetic, driven as a table over the pure
+        // decision: a write landing exactly at the cap stays (the file
+        // reaches it precisely; the NEXT write rolls), a lone
+        // oversized write on an empty file stays (no empty-part spin),
+        // and the date change wins over size.
+        let current = key("2026-11-22", 3);
+        let cases = [
+            // (current_len, incoming, now_date) → expected target
+            (0_u64, 10_usize, "2026-11-22", key("2026-11-22", 3)), // fresh file, fits
+            (10, 10, "2026-11-22", key("2026-11-22", 3)),          // fits
+            (90, 10, "2026-11-22", key("2026-11-22", 3)),          // lands exactly at the cap
+            (91, 10, "2026-11-22", key("2026-11-22", 4)),          // would pass the cap
+            (100, 1, "2026-11-22", key("2026-11-22", 4)), // at the cap: the next write rolls
+            (0, 1_000, "2026-11-22", key("2026-11-22", 3)), // lone oversized line
+            (50, 1_000, "2026-11-22", key("2026-11-22", 4)), // rotate first, land alone there
+            (10, 10, "2026-11-23", key("2026-11-23", 1)), // the day changed
+            (100, 10, "2026-11-23", key("2026-11-23", 1)), // and it wins over size
+        ];
+        for (current_len, incoming, now_date, expected) in cases {
+            assert_eq!(
+                next_write_target(&current, current_len, now_date, incoming, 100),
+                expected,
+                "len={current_len} incoming={incoming} now={now_date}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_prune_plan_keeps_the_newest_and_the_protected() {
+        // The count half's verdict as a table: oldest beyond `keep` go,
+        // protected keys never do, and same-day parts order numerically
+        // (`.10` is newer than `.9`, not lexicographically older).
+        let d1 = key("2020-01-01", 1);
+        let p1 = key("2020-01-02", 1);
+        let p2 = key("2020-01-02", 2);
+        let p9 = key("2020-01-02", 9);
+        let p10 = key("2020-01-02", 10);
+        assert_eq!(
+            prune_plan(&[d1.clone(), p1.clone(), p9.clone()], 2, &[]),
+            vec![d1.clone()],
+            "the oldest beyond the keep count goes"
+        );
+        assert_eq!(
+            prune_plan(
+                &[d1.clone(), p1.clone(), p2.clone(), p9.clone(), p10.clone()],
+                3,
+                &[]
+            ),
+            vec![d1.clone(), p1.clone()],
+            "parts order numerically: .2 is older than .10, so d1 and \
+             part 1 go — a lexicographic sort would pick .10 instead"
+        );
+        assert_eq!(
+            prune_plan(
+                &[d1.clone(), p1.clone(), p9.clone()],
+                2,
+                std::slice::from_ref(&d1)
+            ),
+            vec![p1.clone()],
+            "protection wins over age: the protected oldest stays and the \
+             oldest *deletable* goes, so the count still lands on `keep` — \
+             the realistic shape is the open file being protected while \
+             being the newest, this pins the tie-break under clock skew"
+        );
+        assert_eq!(
+            prune_plan(&[d1.clone(), p1.clone()], 1, &[d1.clone(), p1.clone()]),
+            Vec::<FileKey>::new(),
+            "nothing deletable: the next prune converges instead"
+        );
+        assert_eq!(
+            prune_plan(&[p1.clone(), p2.clone()], 5, &[]),
+            Vec::<FileKey>::new(),
+            "below the keep count nothing is deleted"
+        );
+        assert_eq!(
+            prune_plan(&[p1.clone(), p1.clone(), p2.clone()], 2, &[]),
+            Vec::<FileKey>::new(),
+            "a duplicated key is the same file: two unique files against \
+             keep 2 delete nothing (counting duplicates would phantom-delete)"
+        );
+    }
+
+    #[test]
+    fn a_chatty_day_through_the_subscriber_rolls_within_a_small_cap() {
+        // The small-cap twin of the ten-megabyte pin: the same
+        // production seam with a tiny cap, so the roll arithmetic runs
+        // many times in one test. What any reader of the directory
+        // sees: same-day parts of one date, no part above the cap, the
+        // earliest line in part 1 and the latest in the last part.
+        let cap = 4_000u64;
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) =
+            build_file_subscriber_capped(&root, LogLevel::Info, MAX_LOG_FILES, cap)
+                .expect("building the subscriber must work");
+
+        tracing::subscriber::with_default(subscriber, || {
+            for i in 0..120 {
+                tracing::info!("roll probe {i:04} {}", "-".repeat(64));
+            }
+        });
+        drop(guard);
+
+        let parts = part_files(&root);
+        assert!(
+            parts.len() >= 2,
+            "120 events past a 4 KB cap must roll into parts, found: {parts:?}"
+        );
+        assert!(
+            parts.len() <= 10,
+            "a 4 KB cap over ~130-byte lines yields a handful of parts — a \
+             writer that rotated on every write would produce ~120 (found {})",
+            parts.len()
+        );
+        assert!(
+            parts
+                .iter()
+                .all(|(_, _, path)| fs::metadata(path).expect("part must exist").len() <= cap),
+            "no part may exceed the cap, found: {parts:?}"
+        );
+        assert!(
+            parts.iter().all(|(date, _, _)| *date == parts[0].0),
+            "all parts of one run belong to one date, found: {parts:?}"
+        );
+        let first = fs::read_to_string(&parts[0].2).expect("part 1 must be readable");
+        let last =
+            fs::read_to_string(&parts[parts.len() - 1].2).expect("the last part must be readable");
+        assert!(
+            first.contains("roll probe 0000") && !first.contains("roll probe 0119"),
+            "part 1 carries the day's earliest lines, got: {} bytes",
+            first.len()
+        );
+        assert!(
+            last.contains("roll probe 0119"),
+            "the last part carries the latest lines"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn a_restart_continues_todays_highest_part() {
+        // Idempotency across restarts (the make-operations-idempotent
+        // rule): a second writer over the same directory appends to
+        // today's highest part at its true length — no new file below
+        // the cap, no data loss — and rolls only after continuing past
+        // the cap. Driven directly through `io::Write` for exact byte
+        // accounting.
+        let (temp, root) = logs_dir();
+        let cap = 100u64;
+        {
+            let mut writer = CappedDailyWriter::new(&root, MAX_LOG_FILES, cap)
+                .expect("the first writer must build");
+            for i in 0..25 {
+                writer
+                    .write_all(format!("run-1-{i:03}\n").as_bytes())
+                    .expect("the first run's writes must land");
+            }
+            writer.flush().expect("flush must work");
+        }
+        let sizes_after_run1: Vec<u64> = part_files(&root)
+            .iter()
+            .map(|(_, _, path)| fs::metadata(path).unwrap().len())
+            .collect();
+        assert_eq!(
+            sizes_after_run1,
+            vec![100, 100, 50],
+            "25 ten-byte lines at a 100-byte cap: two full parts and a \
+             50-byte tail, found: {sizes_after_run1:?}"
+        );
+
+        let mut writer = CappedDailyWriter::new(&root, MAX_LOG_FILES, cap)
+            .expect("the second writer must build over the same directory");
+        writer
+            .write_all(b"run-2-000\n")
+            .expect("the restart's write must land");
+        writer.flush().expect("flush must work");
+        let parts = part_files(&root);
+        assert_eq!(
+            parts.len(),
+            3,
+            "one line below the cap continues the tail part — no new file, \
+             found: {parts:?}"
+        );
+        let tail = fs::read_to_string(&parts[2].2).expect("the tail part must be readable");
+        assert!(
+            tail.contains("run-1-024\nrun-2-000\n"),
+            "the restart appends after the first run's last line, got: {tail:?}"
+        );
+
+        // Continuing past the cap rolls — the restarted writer obeys
+        // the same arithmetic from the part's true length.
+        for i in 1..6 {
+            writer
+                .write_all(format!("run-2-{i:03}\n").as_bytes())
+                .expect("the second run's writes must land");
+        }
+        writer.flush().expect("flush must work");
+        let parts = part_files(&root);
+        assert_eq!(
+            parts.len(),
+            4,
+            "crossing the cap after the restart rolls into the next part, \
+             found: {parts:?}"
+        );
+        let last = fs::read_to_string(&parts[3].2).expect("the new part must be readable");
+        assert!(
+            last.contains("run-2-005"),
+            "the post-cap lines land in the new part, got: {last:?}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn a_restart_over_a_full_day_rolls_on_its_first_write() {
+        // The crash-recovery edge of the same idempotency: a previous
+        // run left today's part exactly at the cap (or an interrupted
+        // rotation left it full), and the restart must not append past
+        // the cap — the first write rolls into the next part and the
+        // full part is left byte-identical.
+        let (temp, root) = logs_dir();
+        let today = today_stamp();
+        let full = root.join(format!("eunomiasync.{today}.log"));
+        fs::write(&full, "x".repeat(100)).expect("seeding a full part must work");
+
+        let mut writer = CappedDailyWriter::new(&root, MAX_LOG_FILES, 100)
+            .expect("the writer must build over the full part");
+        writer
+            .write_all(b"the first line after the restart\n")
+            .expect("the write must land");
+        writer.flush().expect("flush must work");
+
+        assert_eq!(
+            fs::metadata(&full)
+                .expect("the full part must survive")
+                .len(),
+            100,
+            "a part already at the cap is never appended past it"
+        );
+        assert_eq!(
+            fs::read_to_string(&full).expect("the full part must be readable"),
+            "x".repeat(100),
+            "and its content is untouched"
+        );
+        let second = root.join(format!("eunomiasync.{today}.2.log"));
+        assert!(
+            fs::read_to_string(&second)
+                .expect("part 2 must exist")
+                .contains("the first line after the restart"),
+            "the restart's first line lands in the next part"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn parts_count_toward_the_five_file_cap() {
+        // The count half over the writer's own rotation (T-253's seed
+        // pattern, now with a same-day part in the set): four old dated
+        // files plus today's full part is the five-file status quo; the
+        // rotation that opens part 2 prunes the oldest day first and
+        // lands the directory back at exactly five files.
+        let (temp, root) = logs_dir();
+        let today = today_stamp();
+        for day in 1..=4 {
+            fs::write(
+                root.join(format!("eunomiasync.2020-01-0{day}.log")),
+                b"an old day's log",
+            )
+            .expect("seeding an old dated log must work");
+        }
+        fs::write(
+            root.join(format!("eunomiasync.{today}.log")),
+            "x".repeat(100),
+        )
+        .expect("seeding today's full part must work");
+
+        let mut writer = CappedDailyWriter::new(&root, MAX_LOG_FILES, 100)
+            .expect("the writer must build over the seeded directory");
+        writer
+            .write_all(b"the line that tips the day over the cap\n")
+            .expect("the write must land");
+        writer.flush().expect("flush must work");
+
+        let mut names: Vec<String> = part_files(&root)
+            .into_iter()
+            .map(|(_, _, path)| path.file_name().unwrap().to_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "eunomiasync.2020-01-02.log".to_owned(),
+                "eunomiasync.2020-01-03.log".to_owned(),
+                "eunomiasync.2020-01-04.log".to_owned(),
+                format!("eunomiasync.{today}.2.log"),
+                format!("eunomiasync.{today}.log"),
+            ],
+            "the oldest day goes, the four newest plus the new part stay — \
+             exactly five files (lexicographic name order: `.2.log` sorts \
+             before the part-1 name)"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn a_blocked_rotation_degrades_reports_once_and_loses_no_lines() {
+        // The never-fatal half (D-032's policy applied to rotation): a
+        // next part file that cannot be opened — here a directory sits
+        // on its name, the portable stand-in for a refused create —
+        // must not lose the line, abort, or stop the log: the writer
+        // keeps writing into the current file (past the cap — the
+        // honest overrun), reports the degradation exactly once through
+        // the facade, and retries silently afterwards. The warn is
+        // observed through a real subscriber over the same directory
+        // (the writer under test is driven directly, so its facade
+        // event fires on this thread — see the module docs for the
+        // worker-thread boundary of the production path).
+        let (temp, root) = logs_dir();
+        let today = today_stamp();
+        let blocked = root.join(format!("eunomiasync.{today}.2.log"));
+        fs::create_dir(&blocked).expect("blocking the part-2 name must work");
+
+        // The observing subscriber: the production seam with a 1 MB cap
+        // so it never rotates itself and its own lines stay in part 1.
+        let (subscriber, guard) =
+            build_file_subscriber_capped(&root, LogLevel::Info, MAX_LOG_FILES, 1024 * 1024)
+                .expect("building the observing subscriber must work");
+
+        let mut writer =
+            CappedDailyWriter::new(&root, MAX_LOG_FILES, 100).expect("the writer must build");
+        tracing::subscriber::with_default(subscriber, || {
+            for i in 0..40 {
+                writer
+                    .write_all(format!("blocked-rotation-{i:03}\n").as_bytes())
+                    .expect("every line must land even past the blocked rotation");
+            }
+            writer.flush().expect("flush must work");
+        });
+        drop(guard);
+
+        // The directory is still a directory — no part-2 file was
+        // created — and every driven line survived in part 1.
+        assert!(
+            blocked.is_dir(),
+            "the blocked name must still be the blocker, not a log file"
+        );
+        let part1 = root.join(format!("eunomiasync.{today}.log"));
+        let content = fs::read_to_string(&part1).expect("part 1 must be readable");
+        assert!(
+            content.contains("blocked-rotation-000\n")
+                && content.contains("blocked-rotation-039\n"),
+            "every line past the blocked rotation lands in the current file, \
+             got {} bytes",
+            content.len()
+        );
+        assert!(
+            fs::metadata(&part1).unwrap().len() > 100,
+            "the honest overrun: the current file passes the cap rather than \
+             losing lines"
+        );
+        // The degradation is reported exactly once — the facade warn
+        // landed through the observing subscriber into the same file.
+        assert_eq!(
+            content.matches("the file log could not rotate").count(),
+            1,
+            "one warn per process, no storm — got: {content:?}"
+        );
+        assert!(
+            content.contains("step=\"open\""),
+            "the warn names the failed step, got: {content:?}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn a_restart_never_refills_a_gap_in_part_numbers() {
+        // The "gaps never refilled" half of the idempotency rule (the
+        // round-2 review's coverage ask): with today's parts 1 and 3
+        // on disk and part 2 missing (a manual deletion or a crash
+        // window), the writer must continue at the highest part — a
+        // first-free-slot writer would recreate part 2 and write
+        // today's newest lines into a name that sorts *before* part 3.
+        let (temp, root) = logs_dir();
+        let today = today_stamp();
+        fs::write(root.join(format!("eunomiasync.{today}.log")), b"part one").expect("seed 1");
+        fs::write(
+            root.join(format!("eunomiasync.{today}.3.log")),
+            b"part three",
+        )
+        .expect("seed 3");
+
+        let mut writer = CappedDailyWriter::new(&root, MAX_LOG_FILES, 100)
+            .expect("the writer must build over the gapped directory");
+        writer
+            .write_all(b"the newest line\n")
+            .expect("the write must land");
+        writer.flush().expect("flush must work");
+
+        assert_eq!(
+            fs::read_to_string(root.join(format!("eunomiasync.{today}.3.log")))
+                .expect("part 3 must be readable"),
+            "part threethe newest line\n",
+            "the writer continues the highest part in place"
+        );
+        assert!(
+            !root.join(format!("eunomiasync.{today}.2.log")).exists(),
+            "the gap is never refilled — no part 2 is created"
         );
         drop(temp);
     }

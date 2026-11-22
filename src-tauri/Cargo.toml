@@ -99,8 +99,11 @@ ammonia = "4"
 # fmt layer that formats events for the appender writer — `fmt` only, no
 # default features: no ANSI escapes in log files, no `env-filter` (the
 # level comes from config.toml, SYS-012, not from RUST_LOG).
-# `tracing-appender` provides the daily-rotating file writer
-# (logs/eunomiasync.<date>.log, spec §5.5).
+# `tracing-appender` provides the non_blocking writer thread the file
+# log rides on (T-255: the daily+10 MB rotation itself is the app's own
+# writer in logging.rs — the ruling's "5 × 10 MB" needed a size cap the
+# crate's time-based rotation cannot express; logs/eunomiasync.<date>.log
+# and its same-day parts, spec §5.5 + the DECISIONS.md T-255 entry).
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 tracing-appender = "0.2"

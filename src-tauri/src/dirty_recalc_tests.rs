@@ -40,6 +40,7 @@
 //! within §12.2's budget (measured and printed in the T-136 style,
 //! with a generous regression tripwire instead of the reference
 //! machine's 500 ms — CI runners vary).
+#![allow(clippy::print_stderr)] // test skip-notices and benchmark timings print deliberately
 
 use std::path::Path;
 use std::time::{Duration, Instant};

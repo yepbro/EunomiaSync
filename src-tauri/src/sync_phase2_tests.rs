@@ -41,6 +41,7 @@
 //!   creation case), an `unchanged` project and a `skipped` project
 //!   get no copy, no record and no folder — and a run with NOTHING to
 //!   back up performs no copy at all and continues.
+#![allow(clippy::print_stderr)] // test skip-notices and benchmark timings print deliberately
 
 use std::fs;
 use std::path::{Path, PathBuf};
