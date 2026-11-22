@@ -123,6 +123,18 @@ pub(crate) mod sync_phase2;
 // Phase0Outcome (D-123).
 pub(crate) mod sync_phase3;
 
+// The sync pipeline's phase 4 — the finish (spec §9.4 phase 4,
+// §7.6's BKP-003 through the store retention service, §7.7's run
+// journal, MAIN-027; T-117): the `unchanged` stamps, the backup
+// retention sweep, the counted success/partial/failed verdict with
+// `finished_at` (MAIN-027's derived last-success time), the D-051
+// journal entries — all in ONE transaction — and the after-commit
+// `state://dirty` recalculation (D-121's seam). Retention and
+// journal refusals are reported, never the verdict's; the flag lease
+// stays with the caller's Phase0Outcome (its RAII drop is §9.4
+// phase 4 step 5's reset, D-123/T-118's to own).
+pub(crate) mod sync_phase4;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -577,6 +589,9 @@ mod sync_phase2_tests;
 
 #[cfg(test)]
 mod sync_phase3_tests;
+
+#[cfg(test)]
+mod sync_phase4_tests;
 
 #[cfg(test)]
 mod tests {

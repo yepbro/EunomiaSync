@@ -31,6 +31,14 @@
 //!   error columns cleared and the fingerprints intact — a bulk
 //!   sweep whose zero-row answer is `Ok(0)`, not the per-project
 //!   writers' refusal;
+//! * phase 4's finisher (T-117): `finish_run` counts the rows,
+//!   derives §9.4's verdict, writes the counters and `finished_at`,
+//!   and clears/sets the error columns by its own rule — `success`
+//!   (all `written`/`unchanged`, including the empty run with its
+//!   message), `partial` (a mix), `failed` (nobody) — while
+//!   MAIN-027's derived read (`last_success_finished_at`) moves on
+//!   `success` only, and an unsettled row or a finished run is the
+//!   typed refusal, never a verdict over half a run;
 //! * the corrupt-cell policy (D-039): a `status` cell tampered
 //!   outside the CHECK vocabulary surfaces as the typed `Member`
 //!   refusal at the read, never as a guess.
@@ -43,8 +51,8 @@ use eunomia_store::settings::{BaseName, ExtraFile, Position, Scheme};
 use eunomia_store::storage::{open_db, run_migrations};
 use eunomia_store::sync_runs::{
     NewSyncRunProject, SyncRunProjectStatus, SyncRunStatus, SyncRunsError, abort_run,
-    create_running, get, list_projects, mark_project_failed, mark_project_skipped,
-    mark_project_unchanged, mark_project_written, reset_projects_not_started,
+    create_running, finish_run, get, last_success_finished_at, list_projects, mark_project_failed,
+    mark_project_skipped, mark_project_unchanged, mark_project_written, reset_projects_not_started,
 };
 use rusqlite::Connection;
 
@@ -795,4 +803,334 @@ fn reset_projects_not_started_answers_zero_where_nothing_matches() {
         .expect("the run must persist");
     assert_eq!(row.status, SyncRunStatus::Running);
     assert_eq!(row.finished_at, None);
+}
+
+// ---- phase 4's finisher (T-117) --------------------------------------
+
+/// The caller's finish timestamp for these tests — an explicit DB-002
+/// literal (the `STARTED_AT` oracle shape), pinned verbatim in the
+/// row exactly the way the start time is.
+const FINISHED_AT: &str = "2026-11-21T12:30:00.000Z";
+
+#[test]
+fn finish_run_counts_success_and_moves_the_last_success_time() {
+    // §9.4 phase 4 step 3's success arm: every row `written` or
+    // `unchanged` (one of each here) → `success`, the counted
+    // counters, `finished_at` verbatim, no error code, no details —
+    // and step 4 (MAIN-027): the derived last-success time IS this
+    // run's `finished_at`, because the verdict and the stamp are one
+    // UPDATE.
+    let (conn, _guard) = runs_db("finish-success");
+    let written = seed_project(&conn, 1);
+    let unchanged = seed_project(&conn, 2);
+    let run = create_running(
+        &conn,
+        STARTED_AT,
+        &[run_project(&written, 1), run_project(&unchanged, 2)],
+    )
+    .expect("creating the run should work");
+    mark_project_written(&conn, &run.id, &written).expect("the write verdict should work");
+    mark_project_unchanged(&conn, &run.id, &unchanged).expect("the match verdict should work");
+    // Stale outcome cells planted by direct SQL (free TEXT columns;
+    // no writer produces them on a `running` row, so the planting is
+    // the only route): the finish must clear both — a non-empty
+    // success claims no error code and no details.
+    conn.execute(
+        "UPDATE sync_runs SET error_code = 'E_DISK_FULL', details = 'stale abort text' \
+         WHERE id = ?1",
+        [&run.id],
+    )
+    .expect("planting the stale outcome cells should work");
+
+    let finished = finish_run(&conn, &run.id, FINISHED_AT).expect("finishing the run should work");
+
+    assert_eq!(finished.status, SyncRunStatus::Success);
+    assert_eq!(finished.finished_at.as_deref(), Some(FINISHED_AT));
+    assert_eq!(finished.projects_total, 2);
+    assert_eq!(finished.projects_written, 1);
+    assert_eq!(finished.projects_unchanged, 1);
+    assert_eq!(finished.projects_skipped, 0);
+    assert_eq!(finished.projects_failed, 0);
+    assert_eq!(finished.error_code, None);
+    assert_eq!(finished.details, None);
+    assert_eq!(
+        last_success_finished_at(&conn)
+            .expect("the MAIN-027 read should work")
+            .as_deref(),
+        Some(FINISHED_AT),
+        "a success run's finished_at is the overall last-success time"
+    );
+}
+
+#[test]
+fn finish_run_counts_partial_and_failed_by_the_spec_rule() {
+    // §9.4 phase 4 step 3's other two arms over one database: a mix
+    // of `skipped`/`failed` and `written`/`unchanged` is `partial`;
+    // nobody written or unchanged is `failed`. Neither moves
+    // MAIN-027's answer (step 4's "For `partial`, the overall time is
+    // not updated" — the failed arm is the same sentence read over no
+    // success at all).
+    let (conn, _guard) = runs_db("finish-partial-failed");
+    let skipped = seed_project(&conn, 1);
+    let written = seed_project(&conn, 2);
+    let failed = seed_project(&conn, 3);
+    let other_skipped = seed_project(&conn, 4);
+
+    // The partial run: one skipped, one written, one failed.
+    let partial = create_running(
+        &conn,
+        STARTED_AT,
+        &[
+            run_project(&skipped, 1),
+            run_project(&written, 2),
+            run_project(&failed, 3),
+        ],
+    )
+    .expect("creating the partial run should work");
+    mark_project_skipped(
+        &conn,
+        &partial.id,
+        &skipped,
+        "E_PROJECT_UNAVAILABLE",
+        "folder is gone",
+    )
+    .expect("the skip verdict should work");
+    mark_project_written(&conn, &partial.id, &written).expect("the write verdict should work");
+    mark_project_failed(
+        &conn,
+        &partial.id,
+        &failed,
+        "E_FILE_LOCKED",
+        "held by another process",
+    )
+    .expect("the failure verdict should work");
+    let finished =
+        finish_run(&conn, &partial.id, FINISHED_AT).expect("finishing the partial run should work");
+    assert_eq!(finished.status, SyncRunStatus::Partial);
+    assert_eq!(finished.projects_written, 1);
+    assert_eq!(finished.projects_unchanged, 0);
+    assert_eq!(finished.projects_skipped, 1);
+    assert_eq!(finished.projects_failed, 1);
+    assert_eq!(finished.error_code, None);
+    assert_eq!(finished.details, None);
+    assert_eq!(
+        last_success_finished_at(&conn).expect("the MAIN-027 read should work"),
+        None,
+        "no success run exists — the overall time stays unknown"
+    );
+
+    // The failed run: skipped and failed only, nobody good.
+    let failed_run = create_running(
+        &conn,
+        STARTED_AT,
+        &[run_project(&skipped, 1), run_project(&other_skipped, 4)],
+    )
+    .expect("creating the failed run should work");
+    mark_project_skipped(
+        &conn,
+        &failed_run.id,
+        &skipped,
+        "E_PROJECT_UNAVAILABLE",
+        "folder is gone",
+    )
+    .expect("the skip verdict should work");
+    mark_project_failed(
+        &conn,
+        &failed_run.id,
+        &other_skipped,
+        "E_WRITE_FAILED",
+        "the write refused",
+    )
+    .expect("the failure verdict should work");
+    let finished = finish_run(&conn, &failed_run.id, FINISHED_AT)
+        .expect("finishing the failed run should work");
+    assert_eq!(finished.status, SyncRunStatus::Failed);
+    assert_eq!(finished.projects_skipped, 1);
+    assert_eq!(finished.projects_failed, 1);
+    assert_eq!(finished.details, None);
+    assert_eq!(
+        last_success_finished_at(&conn).expect("the MAIN-027 read should work"),
+        None,
+        "still no success run — a failed finish moves nothing"
+    );
+
+    // The success that finally lands is the answer from then on, and
+    // a later partial does not displace it (MAIN-027's pin).
+    let success_run = create_running(&conn, STARTED_AT, &[run_project(&written, 2)])
+        .expect("creating the success run should work");
+    mark_project_written(&conn, &success_run.id, &written).expect("the write verdict should work");
+    const SUCCESS_AT: &str = "2026-11-21T13:00:00.000Z";
+    finish_run(&conn, &success_run.id, SUCCESS_AT).expect("finishing the success run should work");
+    let later_partial = create_running(
+        &conn,
+        STARTED_AT,
+        &[run_project(&written, 2), run_project(&skipped, 1)],
+    )
+    .expect("creating the later partial run should work");
+    mark_project_written(&conn, &later_partial.id, &written)
+        .expect("the write verdict should work");
+    mark_project_skipped(
+        &conn,
+        &later_partial.id,
+        &skipped,
+        "E_PROJECT_UNAVAILABLE",
+        "folder is gone",
+    )
+    .expect("the skip verdict should work");
+    finish_run(&conn, &later_partial.id, FINISHED_AT)
+        .expect("finishing the later partial run should work");
+    assert_eq!(
+        last_success_finished_at(&conn)
+            .expect("the MAIN-027 read should work")
+            .as_deref(),
+        Some(SUCCESS_AT),
+        "a partial after the success does not move the overall time"
+    );
+}
+
+#[test]
+fn finish_run_succeeds_the_empty_run_with_the_message() {
+    // §9.4 phase 4 step 3's empty case: a run over zero active
+    // projects is `success` — every (zero) rows are `written` or
+    // `unchanged` — with the message in `details`, and MAIN-027 takes
+    // its `finished_at` like any success.
+    let (conn, _guard) = runs_db("finish-empty");
+    let run = create_running(&conn, STARTED_AT, &[]).expect("the empty run should create");
+
+    let finished =
+        finish_run(&conn, &run.id, FINISHED_AT).expect("finishing the empty run should work");
+
+    assert_eq!(finished.status, SyncRunStatus::Success);
+    assert_eq!(finished.finished_at.as_deref(), Some(FINISHED_AT));
+    assert_eq!(finished.projects_total, 0);
+    assert_eq!(finished.projects_written, 0);
+    assert_eq!(finished.projects_unchanged, 0);
+    assert_eq!(finished.projects_skipped, 0);
+    assert_eq!(finished.projects_failed, 0);
+    assert_eq!(
+        finished.details.as_deref(),
+        Some("no active projects to synchronize"),
+        "the §9.4 message is the row's details cell"
+    );
+    assert_eq!(
+        last_success_finished_at(&conn)
+            .expect("the MAIN-027 read should work")
+            .as_deref(),
+        Some(FINISHED_AT),
+        "the empty success is a success for the overall time too"
+    );
+}
+
+#[test]
+fn finish_run_refuses_an_unsettled_row_and_a_finished_run() {
+    // The two refusals: a row still `not_started` names a broken
+    // phase chain (phases 1–3 own every transition), and the verdict
+    // must not be written over half a run — the run row stays
+    // `running`, the crash-recovery rule's case. And the finisher is
+    // scoped to `running`: finishing twice, an unknown id, or a run
+    // the abort already settled is the module's typed zero-row
+    // refusal, never a history rewrite.
+    let (conn, _guard) = runs_db("finish-refusals");
+    let settled = seed_project(&conn, 1);
+    let unsettled = seed_project(&conn, 2);
+    let run = create_running(
+        &conn,
+        STARTED_AT,
+        &[run_project(&settled, 1), run_project(&unsettled, 2)],
+    )
+    .expect("creating the run should work");
+    mark_project_written(&conn, &run.id, &settled).expect("the write verdict should work");
+
+    assert!(
+        matches!(
+            finish_run(&conn, &run.id, FINISHED_AT),
+            Err(SyncRunsError::Sql(_))
+        ),
+        "an unsettled row must refuse the verdict"
+    );
+    let row = get(&conn, &run.id)
+        .expect("reading the run should work")
+        .expect("the run must persist");
+    assert_eq!(row.status, SyncRunStatus::Running, "the run stays running");
+    assert_eq!(row.finished_at, None);
+
+    // Settle the row and finish once — then every re-finish refuses.
+    mark_project_failed(&conn, &run.id, &unsettled, "E_WRITE_FAILED", "late refusal")
+        .expect("the late failure verdict should work");
+    finish_run(&conn, &run.id, FINISHED_AT).expect("finishing the run should work");
+    for outcome in [
+        finish_run(&conn, &run.id, FINISHED_AT),
+        finish_run(&conn, "no-such-run", FINISHED_AT),
+    ] {
+        assert!(
+            matches!(outcome, Err(SyncRunsError::Sql(_))),
+            "a finished or unknown run must refuse, not rewrite"
+        );
+    }
+    // An aborted run refuses too: the abort owns that row's verdict.
+    let aborted = create_running(&conn, STARTED_AT, &[run_project(&settled, 1)])
+        .expect("creating the aborting run should work");
+    abort_run(
+        &conn,
+        &aborted.id,
+        FINISHED_AT,
+        "E_DISK_FULL",
+        "free 0 bytes",
+    )
+    .expect("the abort should work");
+    assert!(
+        matches!(
+            finish_run(&conn, &aborted.id, FINISHED_AT),
+            Err(SyncRunsError::Sql(_))
+        ),
+        "a finish over an aborted run must refuse"
+    );
+}
+
+#[test]
+fn last_success_finished_at_answers_the_newest_success_by_the_run_order() {
+    // The derived read's own ordering pin: two successes answer by
+    // `started_at DESC, id DESC` (the D-054 runs order), not by
+    // finished_at and not by insertion — a success that STARTED
+    // later is "the last run with the success status" even when its
+    // finish stamp is the earlier string. A fresh database answers
+    // `None` (the pre-first-sync state).
+    let (conn, _guard) = runs_db("last-success");
+    assert_eq!(
+        last_success_finished_at(&conn).expect("the read should work"),
+        None,
+        "no runs at all — no last-success time"
+    );
+
+    let project = seed_project(&conn, 1);
+    // The earlier-starting success, finished LATER: its finished_at
+    // string is the greater one, so a finished_at-ordered read would
+    // pick it — the pin's discriminator.
+    let earlier = create_running(
+        &conn,
+        "2026-11-21T11:00:00.000Z",
+        &[run_project(&project, 1)],
+    )
+    .expect("the earlier run should create");
+    mark_project_written(&conn, &earlier.id, &project).expect("the verdict should work");
+    finish_run(&conn, &earlier.id, "2026-11-21T12:59:00.000Z")
+        .expect("finishing the earlier run should work");
+    // The later-starting success.
+    let later = create_running(
+        &conn,
+        "2026-11-21T12:00:00.000Z",
+        &[run_project(&project, 1)],
+    )
+    .expect("the later run should create");
+    mark_project_written(&conn, &later.id, &project).expect("the verdict should work");
+    finish_run(&conn, &later.id, "2026-11-21T12:30:00.000Z")
+        .expect("finishing the later run should work");
+
+    assert_eq!(
+        last_success_finished_at(&conn)
+            .expect("the read should work")
+            .as_deref(),
+        Some("2026-11-21T12:30:00.000Z"),
+        "the newest START is the last success, whatever the finish stamps say"
+    );
 }

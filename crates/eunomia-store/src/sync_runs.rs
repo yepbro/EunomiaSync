@@ -13,12 +13,14 @@
 //! preflight's per-project verdicts and the `E_DISK_FULL` abort),
 //! phase 2's abort reset (`reset_projects_not_started`: §9.4 phase 2
 //! step 2's "`not_started` except `skipped`"), phase 3's write
-//! verdicts (`mark_project_written`, `mark_project_failed`), plus the
-//! reads the later phases and the history UI will consume. The
-//! remaining transitions — phase 4's counters and
-//! success/partial/failed verdicts, the startup `interrupted`
-//! recovery — belong to the phase tasks that cause them, exactly the
-//! way `projects.rs` hands `last_synced_at`/`last_synced_hash` to
+//! verdicts (`mark_project_written`, `mark_project_failed`), phase
+//! 4's finisher (`finish_run`: the counted verdict, the counters and
+//! `finished_at` — and with it MAIN-027's derived last-success time,
+//! [`last_success_finished_at`]), plus the reads the later phases
+//! and the history UI will consume. The one remaining transition —
+//! the startup `interrupted` recovery — belongs to the startup task
+//! that causes it, exactly the way `projects.rs` hands
+//! `last_synced_at`/`last_synced_hash` to
 //! `record_last_synced` and the sync tasks that call it (OUT-020): a
 //! repository owns the shape of a row,
 //! the pipeline owns when the world is ready to claim it.
@@ -84,13 +86,14 @@ use crate::values::new_id;
 /// lifecycle of one run from its start to its final verdict.
 ///
 /// Phase 0 writes exactly [`SyncRunStatus::Running`]; the final
-/// members are §9.4 phase 4's verdicts (`success`/`partial`/`failed`)
-/// plus the two mid-pipeline aborts (`aborted`, the phase-2 backup
-/// stop) and the crash-recovery verdict (`interrupted`, written at
-/// startup over a `running` row whose process died). The store
-/// carries the whole vocabulary so the future phase writers and the
-/// history reads share one owner; nothing here transitions a status
-/// itself.
+/// members are §9.4 phase 4's verdicts (`success`/`partial`/`failed`,
+/// written by [`finish_run`]) plus the two mid-pipeline aborts
+/// (`aborted`, the phase-2 backup stop) and the crash-recovery
+/// verdict (`interrupted`, written at startup over a `running` row
+/// whose process died). The store carries the whole vocabulary so
+/// every phase writer and the history reads share one owner; the
+/// transitions stay phase-owned (each writer is scoped to its source
+/// state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SyncRunStatus {
     /// The run has started and not finished (phase 0's own value).
@@ -797,6 +800,177 @@ pub fn mark_project_failed(
         rusqlite::params![run_id, project_id, error_code, error_message],
     )?;
     row_was_there(changed)
+}
+
+/// §9.4 phase 4 step 3's message for the empty run: "If there are no
+/// active projects, the run ends as `success` with a message." The
+/// row's free-text `details` cell is the message's one home — the
+/// journal's [`Details`](crate::action_log::Details) vocabulary is
+/// closed and carries no message member (D-051), so the Activity
+/// window's run entry stays code-shaped and the message is read here,
+/// off the run row (the `abort_run` details shape, spelled for the
+/// empty success).
+const EMPTY_RUN_DETAILS: &str = "no active projects to synchronize";
+
+/// Phase 4's finisher (§9.4 phase 4 step 3): counts the run's
+/// per-project rows by status, derives the §9.4 verdict, and moves
+/// the run row `running → success|partial|failed` with the caller's
+/// finish timestamp, the four per-status counters, `error_code`
+/// cleared (no §10 code names a phase-4 outcome; the per-project rows
+/// carry their own) and `details` set only for the empty run (the
+/// message above). Returns the finished row through the same mapping
+/// every read uses.
+///
+/// The verdict rule is §9.4's own, over the counted rows:
+/// `success` when every row is `written` or `unchanged` (an empty run
+/// — zero rows — is the all-of-them case, so it lands here too, with
+/// the message); `failed` when no row is (there is at least one row,
+/// all `skipped`/`failed`); `partial` in between (at least one
+/// `skipped`/`failed` and at least one `written`/`unchanged`). A row
+/// still in `not_started` matches none of the three honestly — every
+/// phase that owns a transition has run by phase 4 — so it is the
+/// typed refusal below (a broken chain is a caller bug, never a
+/// verdict to guess around).
+///
+/// `finished_at` is the **caller's** timestamp (the
+/// [`create_running`]/`abort_run` contract: the app layer captures the
+/// moment, the column names it) and must be the DB-002 UTC shape.
+/// Scoped to the `running` source state — finishing a run twice, or a
+/// run that aborted, is the wrong-state refusal below, never a
+/// history rewrite.
+///
+/// Joins the caller's transaction like every writer here (D-037/D-051);
+/// the phase-4 production shape applies it in ONE `Db::run`
+/// transaction together with the unchanged stamps, the BKP-003
+/// retention sweep and the journal entries, so the finished run and
+/// everything its summary claims commit or vanish as one set.
+///
+/// # Errors
+///
+/// Returns [`SyncRunsError::Member`] when a counted `status` cell is
+/// outside the CHECK vocabulary (D-039), and [`SyncRunsError::Sql`]
+/// when a statement fails, when the run has a `not_started` row (the
+/// unsettled-chain refusal; the carrier is the module's zero-row
+/// family, the miss named in its `Display`), or when no `running` row
+/// matches — an unknown id or an already-finished run (the
+/// [`mark_project_skipped`] ruling).
+pub fn finish_run(
+    conn: &Connection,
+    run_id: &str,
+    finished_at: &str,
+) -> Result<SyncRun, SyncRunsError> {
+    // The counted truth: §9.4's verdict reads the per-project rows,
+    // not the caller's memory of them — one GROUP BY is the whole
+    // counting rule, and the same counts become the row's counters.
+    let mut written = 0;
+    let mut unchanged = 0;
+    let mut skipped = 0;
+    let mut failed = 0;
+    let mut not_started = 0;
+    {
+        let mut statement = conn.prepare(
+            "SELECT status, COUNT(*) FROM sync_run_projects \
+             WHERE sync_run_id = ?1 GROUP BY status",
+        )?;
+        let rows = statement
+            .query_map([run_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (status, count) in rows {
+            match SyncRunProjectStatus::from_member(&status)? {
+                SyncRunProjectStatus::Written => written = count,
+                SyncRunProjectStatus::Unchanged => unchanged = count,
+                SyncRunProjectStatus::Skipped => skipped = count,
+                SyncRunProjectStatus::Failed => failed = count,
+                SyncRunProjectStatus::NotStarted => not_started = count,
+            }
+        }
+    }
+    if not_started > 0 {
+        // Phase 4 with an unsettled row: phases 1–3 own every
+        // transition, so the chain that reached here is broken — the
+        // refusal keeps the run row `running` (the crash-recovery
+        // rule's case) instead of writing a verdict over half a run.
+        return Err(SyncRunsError::Sql(rusqlite::Error::QueryReturnedNoRows));
+    }
+    let total = written + unchanged + skipped + failed;
+    let good = written + unchanged;
+    let (verdict, details) = if good == total {
+        // The empty run (total == 0) is the all-good case with the
+        // §9.4 message; a non-empty all-good run claims no details.
+        let details = if total == 0 {
+            Some(EMPTY_RUN_DETAILS)
+        } else {
+            None
+        };
+        (SyncRunStatus::Success, details)
+    } else if good == 0 {
+        (SyncRunStatus::Failed, None)
+    } else {
+        (SyncRunStatus::Partial, None)
+    };
+
+    let changed = conn.execute(
+        "UPDATE sync_runs \
+         SET status = ?2, finished_at = ?3, projects_written = ?4, \
+             projects_unchanged = ?5, projects_skipped = ?6, \
+             projects_failed = ?7, error_code = NULL, details = ?8 \
+         WHERE id = ?1 AND status = 'running'",
+        rusqlite::params![
+            run_id,
+            verdict.as_str(),
+            finished_at,
+            written,
+            unchanged,
+            skipped,
+            failed,
+            details,
+        ],
+    )?;
+    if changed == 0 {
+        return Err(SyncRunsError::Sql(rusqlite::Error::QueryReturnedNoRows));
+    }
+    // Unreachable while the UPDATE above matched (one connection,
+    // D-037 — no concurrent delete exists); the reasoned-panic
+    // posture over that proof, the `create_running` shape.
+    Ok(get(conn, run_id)?.expect("the row just finished must be readable"))
+}
+
+/// MAIN-027's overall time of the last successful sync (§9.4 phase 4
+/// step 4, LOG-007): the `finished_at` of the newest run with the
+/// `success` status — a **derived** fact, not a stored one. The spec
+/// names no column or table for it ("the `finished_at` of the last
+/// run with the `success` status"), so [`finish_run`] writing
+/// `finished_at` together with the `success` verdict in one UPDATE is
+/// the whole update mechanism and this read is its single owner: a
+/// `partial` or `failed` run never moves it (§9.4: "For `partial`,
+/// the overall time is not updated"), and the UI's "Last attempt:
+/// partial" reading is this answer plus the run row it came past.
+///
+/// Newest by `started_at DESC, id DESC` — the D-054 ordering of the
+/// runs table (same-millisecond starts resolve by UUIDv7 creation
+/// order, D-031), so two successes answer deterministically.
+///
+/// # Errors
+///
+/// Returns [`SyncRunsError::Sql`] when the query fails. `Ok(None)`
+/// answers a database with no `success` run yet (the pre-first-sync
+/// state) — and, read literally, a `success` row whose `finished_at`
+/// cell is NULL, a shape no writer of this module can produce: both
+/// are "no last-success time known".
+pub fn last_success_finished_at(conn: &Connection) -> Result<Option<String>, SyncRunsError> {
+    let found = conn.query_row(
+        "SELECT finished_at FROM sync_runs WHERE status = 'success' \
+         ORDER BY started_at DESC, id DESC LIMIT 1",
+        [],
+        |row| row.get::<_, Option<String>>(0),
+    );
+    match found {
+        Ok(finished_at) => Ok(finished_at),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(SyncRunsError::Sql(err)),
+    }
 }
 
 /// The zero-rows-changed refusal shared by the per-project writers: an

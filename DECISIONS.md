@@ -12101,3 +12101,261 @@ frozen enum) and re-ran the suites. Findings fixed here —
   must not buy it a write), rows/files/stamps untouched. Mutation M5
   verified red (the pre-pass disabled → project 1 written, then the
   reasoned-panic `expect` fires), green after revert.
+
+### D-134 — T-117: sync phase 4 (the finish) over Phase3Outcome — the counted verdict and MAIN-027 derived, retention and journal inside the one finish transaction, and their refusals never fail the run — 2026-11-21
+
+Problem: T-117 turns §9.4 phase 4 into code: stamp the `unchanged`
+projects (step 1), apply BKP-003's retention (step 2), write the
+counted `success`/`partial`/`failed` verdict with `finished_at`
+(step 3, the empty run "success with a message"), update MAIN-027's
+overall last-success time (step 4), reset `sync_running` and send
+`state://dirty` (step 5), and journal the run (§7.7 LOG-001…004).
+Five points were open: where MAIN-027's time lives (the spec names no
+column); whether retention/journal failures fail the run; what the
+journal's closed vocabularies say about a `partial` run; which
+instant stamps the `unchanged` projects; and how the phase relates to
+the flag whose reset is step 5's first word.
+
+Solution: `eunomia_store::sync_runs::finish_run` +
+`last_success_finished_at` + `src-tauri/src/sync_phase4.rs` (the
+phase), with `lib.rs` mod blocks (the D-130 anchor).
+
+- _MAIN-027 is derived, not stored._ §9.4 phase 4 step 4's own words
+  ("the `finished_at` of the last run with the `success` status")
+  name a query, not a cell: `finish_run` writes verdict and
+  `finished_at` in ONE UPDATE, so that write IS the update mechanism,
+  a `partial`/`failed` finish moves nothing, and
+  `last_success_finished_at` (`ORDER BY started_at DESC, id DESC` —
+  the D-054 runs order) is the single read. LOG-007's "overall"
+  sentence and §9.4's "the UI shows Last attempt: partial" both
+  consume it; no `settings` row, no second column.
+- _`finish_run` counts, the phase remembers nothing._ The verdict is
+  derived from a GROUP BY over the run's `sync_run_projects` rows —
+  `success` iff written+unchanged == total (the EMPTY run is the
+  all-of-them case and carries §9.4's message in the row's free-text
+  `details`, the one home the schema offers; the journal's
+  `Details` is closed and message-less, D-051); `failed` iff
+  written+unchanged == 0; else `partial`. A `not_started` row at
+  finish time matches no arm honestly — phases 1–3 own every
+  transition — so it is the typed `Sql` refusal (the module's
+  zero-row carrier), the run stays `running`, and the startup
+  `interrupted` recovery owns the corpse. Scoped to
+  `status = 'running'`: re-finishing, an aborted run, an unknown id
+  refuse (the `mark_project_skipped` ruling). `error_code` is
+  cleared: no §10 code names a phase-4 outcome, and the per-project
+  rows carry their own.
+- _One transaction, then one seam._ Steps 1–3, the retention sweep
+  and the journal inserts ride ONE `Db::run` write transaction (the
+  phase's rows read → unchanged stamps through
+  `projects::record_last_synced` with the row's own frozen DB-020
+  fingerprint, D-130/D-133's form → `backup_retention::apply` with
+  `keep` read in the same transaction, the D-054 precedent →
+  `finish_run` → the D-051 entries), so a finished run and everything
+  its summary claims commit or vanish as one set. Only AFTER the
+  commit does the injected `dirty` seam run (production closes it
+  over `dirty_recalc::recalc_and_emit` — D-121's after-sync point;
+  the recalculation must observe the committed stamps); a refused
+  pass is reported in the outcome, at-least-once to the next trigger.
+- _Retention and journal refusals never fail the run_ (BKP-003,
+  §7.7): retention is housekeeping "after the run finishes", not a
+  verdict step — D-122 already reports filesystem failures instead of
+  raising them, and this phase extends the posture to the service's
+  own refusals (a refused mark → `StorageError::Sql`, an unreadable
+  `backup.retention` cell): the reason lands in
+  `RetentionReport::failures`, the verdict commits, the next run
+  converges (the already-removed files stay removed; `ok` records
+  retry). The journal is the same sentence: a refused insert costs
+  the Activity window its entry, not the sync its verdict
+  (`JournalReport::failures`). Both reports are the outcome's facts
+  for T-118's log lines — never `Err`. What IS `Err`: store failures
+  of the read/stamp/finish and the broken-chain invariants
+  (`Phase4RowUnsettled`, `Phase4FingerprintMissing` — the phase-3
+  family, class-only), every one leaving the run `running`.
+- _The unchanged stamps are the written form._ §9.4 phase 4 step 1
+  says "updated" without an instant of its own; the ruling: the
+  run's one finish instant (the injected `now`, DB-002 — phase 3's
+  twin) and the row's frozen fingerprint, exactly the rule phase 3
+  stamped the `written` projects under, so both verdicts of one run
+  agree on what "synced" means. `updated_at` stays untouched (a
+  stamp is not an edit, D-133).
+- _The journal dictionary._ D-051's two sync members: one
+  `sync.run_finished` (entity `sync_run`) and one
+  `sync.project_result` per project. The closed vocabularies force
+  one ruling each: a `partial` run is the warn/skipped chip (the run
+  completed deliberately short of full success — the precise
+  outcomes live in the per-project entries; there is no "partial"
+  `result` member and inventing one is a D-051 change, not a phase
+  choice), `failed` is error/error, `success` info/ok; per project,
+  written/unchanged → ok (a written project carries its target path
+  in `Details::File`, LOG-001…004's file-write rule), skipped →
+  warn/skipped with the §10 code, failed → error/error with the code
+  and the refused path. All entries are `Visibility::User`; each
+  successful insert is mirrored once through `logging::action_logged`
+  (D-051's call-once rule — its own facade tests own the mirror
+  policy).
+- _The flag is not the phase's._ §9.4 phase 4 step 5's "Reset
+  `sync_running`" is the RAII drop of the `SyncGuard` inside the
+  caller's `Phase0Outcome` (D-123): phases hold it BY holding that
+  outcome, and the `sync_run` command (T-118) releases it by dropping
+  it — documented in the phase's module docs, not re-implemented.
+  The phase needs `Phase3Outcome` only for the run id: every fact it
+  writes derives from the run's committed rows (D-130's
+  read-the-fingerprint posture, carried to the whole finish).
+
+Tests: store — 5 in `tests/sync_runs.rs` (success with counters +
+MAIN-027 moved, over stale planted outcome cells the finish must
+clear; partial and failed over one database with the
+partial-after-success MAIN-027 pin; the empty run's message;
+the unsettled-row/re-finish/aborted-run refusals with the row left
+`running`; the derived read's `started_at DESC, id DESC` ordering
+against a later-started/earlier-finished discriminator). src-tauri —
+6 unit in `sync_phase4.rs` (the two journal shape tables, the
+details table incl. the non-§10-code and missing-path degradations,
+the DB-002 stamp twin, the class-only refusals, the liveness probe
+over a real connection) + 11 in
+`sync_phase4_tests.rs` over the full real chain (phases 0–3 driven
+for real, mock harness): the success path (unchanged stamp == the
+written form — the run's instant, the row's own fingerprint,
+fingerprints of DIFFERENT builds asserted apart; counted success;
+MAIN-027; the 3-entry dictionary; dirty seam exactly once, reading
+the COMMITTED verdict; nothing
+swallowed), retention applied inside the finish (one real copy from
+phase 2 + two older planted through the record writer over real
+files, keep=2 → the oldest leaves the disk, `pruned` record, verdict
+untouched), the retention FILESYSTEM refusal (a directory squatting
+on the `.bak` name: reported, record keeps `ok`, verdict `success`),
+the retention SERVICE refusal (a trigger ABORTing the pruned-record
+UPDATE: `apply → Err(Sql)` swallowed into the report, verdict
+`success`, the D-122 delete-first residue pinned — the file left the
+disk before the mark refused), the unreadable `backup.retention`
+cell (out-of-range plant: the limit is not applied, the class-only
+report names the setting, verdict `success`), the partial run over
+TWO real runs (the second loses a project to a deleted folder and
+re-stamps its unchanged project at the second instant; MAIN-027
+keeps the first success; the partial journal chips), the failed run
+(both writes refused through phase 3's seam; nobody stamped; MAIN-027
+unknown), the empty run (message, one journal entry, dirty seam
+still runs), the unsettled row (SQL-planted `not_started`:
+class-only `Phase4RowUnsettled`, run `running`, nothing journaled),
+and the missing fingerprint (SQL-planted NULL `build_hash` on an
+unchanged row: `Phase4FingerprintMissing`, nothing stamped — the
+phase-3 family's mirror), and the second finish (a finished run and
+an aborted run both refuse `Phase4RunNotRunning` with the first
+verdict and journal verbatim). Mutation check: M1 verdict arms swapped →
+the partial/failed store test red; M2 unchanged stamps skipped →
+both stamp tests red; M3 the keep value bypassed → both retention
+tests red; M4 MAIN-027 ordered by `finished_at` → the ordering pin
+red; M5 the per-project journal INSERTs skipped → the three tests
+asserting non-empty journals red (the empty run's summary entry
+comes from the unmutated summary insert); M6 the dirty seam moved
+before the transaction → the five seam-observing pins red (the seam
+reads `running`/`None` before the commit); M7 the step-A run-state
+check widened to accept success/aborted → the second-finish test
+red. All green after revert.
+Untested by injection (recorded): the journal insert's own `Err`
+arm's REPORT SHAPE — the liveness half is pinned by the probe's unit
+test, the swallow line's text is code-reviewed; a genuine FATAL
+SQLite class (I/O, full disk, OOM, interrupt) landing AT a swallow
+point and yielding `Phase4TransactionLost` has no injection seam in
+this harness (the managed `Db` owns the connection; the classes
+cannot be aimed at one statement), so that integration leg rests on
+the unit-pinned predicate and code review; the empty-run
+message's text has no spec literal to oracle (§9.4 says only "with a
+message") — the constant is the single owner and a wording change is
+a conscious edit here.
+
+Follow-ups for the board (the orchestrator cards them): the
+ARCHITECTURE.md row for `sync_phase4` (outside this task's allowed
+list, the D-132/D-133 precedent); T-118's log lines consume
+`RetentionReport`/`JournalReport`/`DirtyReport`.
+
+Round-1 review addendum (D-134, same task; report
+`.opencode/reviews/t117-round1.md`, deepseek-v4.1-flash — no P0/P1;
+3×P2, 9×P3): findings processed here —
+
+- P2-1 (taken): a swallowed SQLite FATAL class (I/O, full disk, OOM,
+  interrupt) performs an implicit rollback — the connection silently
+  returns to autocommit, and continuing past it would let the verdict
+  and journal commit individually behind a failed final `COMMIT` (a
+  run finished behind an `Err` the caller reads as a failure). Every
+  swallow point now probes the transaction's liveness
+  (`is_autocommit` — the executor's `BEGIN` turned it off, so `true`
+  names a lost transaction) and refuses with the class-only
+  `Phase4TransactionLost` while the rollback still covers everything
+  the phase wrote; the probe's both branches are unit-pinned over a
+  real connection, and the statement-class trigger-ABORT test proves
+  the swallow posture survives the check.
+- P2-2 (taken): the dirty seam's "after the commit" ordering is now
+  OBSERVED, not just counted — the injected seam reads the run row
+  through its own transaction and the tests assert it saw the
+  committed verdict and `finished_at` (mutation M6: the seam moved
+  before the transaction reads `running`/`None` → five pins red).
+- P2-3 (taken): the two untested swallow branches got their tests —
+  the service refusal (a `RAISE(ABORT)` trigger on the pruned-record
+  UPDATE) and the unreadable `backup.retention` cell (an out-of-range
+  plant, D-039's error-instead-of-default); both pin verdict
+  `success` + the report line, the first also pins D-122's
+  delete-first residue (the file gone, the record `ok`).
+- P3-1/P3-2 (taken): the test-count and M5-red-count errors in this
+  entry corrected (5 store tests; M5 mutated the per-project insert);
+  `finish_run`'s clearing of `error_code`/`details` is now
+  falsifiable (stale cells planted on the running row).
+- P3-3 (taken, recorded): MAIN-027's derived read answers over a
+  pruned table — `action_log::cleanup` keeps the newest 500 runs
+  regardless of status, so a newest `success` older than 500
+  consecutive non-success runs would read as "never synced". The
+  window is implausible (a permanently-failing project set produces
+  `failed` runs forever); recorded here as the derived ruling's
+  concrete cost. Exempting the newest success from the prune would
+  be a `cleanup` change (a board card if it ever matters).
+- P3-4 (taken): step A now reads the run row and refuses
+  `Phase4RunNotRunning` BEFORE any stamp or prune — a second finish
+  of one run no longer prunes files the store's later zero-row
+  refusal would strand (the module docs' residue sentence covers the
+  remaining crash window).
+- P3-5 (declined): typed `SyncRunsError` members for the store's two
+  zero-row refusals — the phase pre-checks both facts with its own
+  class-only refusals (and P3-4's step-A check now covers the
+  double-call), so the store carrier stays the module's documented
+  `Sql(QueryReturnedNoRows)` shape; widening the error enum for
+  callers that do not exist is a follow-up for the first task that
+  needs the distinction on the wire.
+- P3-6 (taken): `sync.project_result` entries now carry
+  `entity = (project, id)` beside the entry's own `project_id`
+  column — the house convention (`project.added`'s shape).
+- P3-7 (taken): the module docs now say the stamps share the FORM
+  (DB-002 instant, frozen fingerprint), not the value — the written
+  carry the write instant, the unchanged the finish instant, each its
+  own §9.4 step.
+- P3-8 (taken): the `Phase4FingerprintMissing` mirror test added
+  (NULL `build_hash` on an unchanged row).
+- P3-9 (taken, recorded): the retention sweep's filesystem work (with
+  its §9.5 hold-retries) runs inside the one finish transaction and
+  therefore under the app's single connection mutex — a bounded hold
+  the module docs now name, with D-122's convergence keeping a
+  partially-removed set honest.
+
+Round-2 review addendum (D-134, same task; report
+`.opencode/reviews/t117-round2.md`, hy4-flash-free — no P0/P1/P2;
+3×P3): findings processed here —
+
+- R2-P3-1 (taken): the step-A `Phase4RunNotRunning` check gained its
+  behavior test — a second finish of a finished run and a finish
+  over an aborted run both refuse class-only, the first verdict and
+  the journal stay verbatim (mutation M7: the check widened to
+  accept success/aborted → the test red, green after revert; the
+  suite is now 11 behavior tests).
+- R2-P3-2 (taken): the fingerprint test's comment no longer claims
+  the phase-3 stamp is rolled back — phase 3 commits it in its own
+  short transaction; a phase-4 refusal does not touch it.
+- R2-P3-3 (taken): the "untested by injection" list now names the
+  FATAL-class-at-a-swallow-point leg (no injection seam aims I/O /
+  full-disk / OOM / interrupt classes at one statement through the
+  managed `Db`).
+- The round also verified (no change needed): the liveness probe's
+  placement covers every swallow point with no false-positive on a
+  fresh transaction; a swallowed BUSY-class error is safe by the
+  composition's own retry (the next write fails busy, `Db::run`
+  replays the whole closure, D-122's convergence re-marks the
+  already-removed files); step A adds no TOCTOU (`finish_run`'s
+  UPDATE re-checks `status='running'`).
