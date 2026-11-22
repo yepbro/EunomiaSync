@@ -11836,6 +11836,26 @@ frozen enum) and re-ran the suites. Findings fixed here —
   verified red (the pre-pass disabled → project 1 written, then the
   reasoned-panic `expect` fires), green after revert.
 
+T-263 addendum (2026-11-22): the doc-line follow-up above has landed —
+`marker_clock.rs`'s `now_marker_clock` docstring no longer muses the
+capture "belongs" at phase 0. It now names §9.4's phase 3 (the write)
+as ALG-032's "start of the write phase", records why nothing earlier
+can capture (phase 0 builds the content but takes no marker; the
+preflight cannot know the line), and states the shipped call contract
+instead of the pre-T-116 one: the write phase's `FnOnce` clock seam
+captures at most once (a run with nothing to write captures nothing
+at all), then formats one marker line every project's assembly
+receives. Two same-file test comments still framing the ask as
+"once per file" were reworded to that contract (round-1 review,
+P3). Round 2 reflowed a "rather than" line split its round-1 fix
+had left (P3) and declined, as true type-property statements outside
+the card's scope, the optional alignment of the module/struct
+illustrations (P3, low confidence). Docs-only; the docstring's
+doctests are untouched and green. One out-of-scope stale doc the
+round-1 review surfaced is carded for the board ("Follow-up T-263:
+docs/spec.md §5.2 — the eunomia-core dependency row missing jiff",
+INBOX; D-104 had left it for the orchestrator).
+
 ### D-134 — T-117: sync phase 4 (the finish) over Phase3Outcome — the counted verdict and MAIN-027 derived, retention and journal inside the one finish transaction, and their refusals never fail the run — 2026-11-21
 
 Problem: T-117 turns §9.4 phase 4 into code: stamp the `unchanged`

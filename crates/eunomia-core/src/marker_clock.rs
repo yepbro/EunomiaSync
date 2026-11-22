@@ -204,17 +204,21 @@ impl MarkerClock {
 
 /// Captures the marker clock for one run: the current instant in the
 /// system time zone (ALG-032's "taken once per run, at the start of
-/// the write phase" — §9.4 words the same moment as Phase 0, where
-/// the content of all projects is built; the capture belongs there,
-/// before the per-project content, so every file of the run stamps
-/// one observation).
+/// the write phase"). That start is §9.4's phase 3, the write — not
+/// phase 0, which builds the content of all projects but takes no
+/// marker, and not the preflight, which cannot know the line
+/// (D-133): the capture belongs there, before the write phase's
+/// first write, so every file of the run stamps one observation.
 ///
-/// The run calls this exactly once and hands the returned
-/// [`MarkerClock`] to every project's build; the files of the run then
-/// carry one marker, byte for byte. When the system zone cannot be
-/// detected, jiff's `Etc/Unknown` stand-in keeps this infallible and
-/// nameless, so the marker degrades to D-23's `UTC+00:00` form rather
-/// than failing the run over a stamp. The same degradation — not a
+/// The write phase asks for this capture at most once (its clock
+/// seam is `FnOnce`, and a run with nothing to write captures
+/// nothing at all), then formats one marker line from the returned
+/// [`MarkerClock`] and hands the same line to every project's
+/// assembly; the files of the run carry one marker, byte for byte.
+/// When the system zone cannot be detected, jiff's `Etc/Unknown`
+/// stand-in keeps this infallible and nameless, so the marker
+/// degrades to D-23's `UTC+00:00` form rather than failing the run
+/// over a stamp. The same degradation — not a
 /// panic — applies when a `TZ` POSIX rule names an offset beyond the
 /// marker's own `±24:00` domain (the only environment that can; see
 /// [`capture_run_clock`]).
@@ -499,14 +503,16 @@ mod tests {
         // of its own), the files of a run could diverge while an
         // identity-only loop stayed green. (The across-a-real-run
         // oracle — many files, one capture — belongs to the
-        // write-phase consumer that asks this clock once per file.)
+        // write-phase consumer that captures once and hands every
+        // file the one line.)
         let named = MarkerClock::from_instant(
             instant("2026-11-17T13:03:22Z"),
             TimeZone::get("Europe/Prague").expect("Europe/Prague is in the tzdb"),
         );
         let first = named.marker_line();
-        // every "file" of the run asks the same capture: same answer,
-        // through a clone too — the shape the write phase passes on.
+        // every ask of the same capture: same answer, through a
+        // clone too — the write phase captures once, then hands the
+        // one formatted line to every file.
         assert_eq!(named.marker_line(), first);
         assert_eq!(named.clone().marker_line(), first);
 
