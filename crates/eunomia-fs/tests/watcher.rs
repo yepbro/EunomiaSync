@@ -11,13 +11,21 @@
 //! silence. Every test asserts on the events AS DELIVERED — the
 //! classification (Changed/Removed) is this module's contract; what
 //! the events mean for project state is the app service's concern.
+//!
+//! The SYS-010 watch limit (T-103) has its own battery below: no
+//! fixture can make a healthy EXISTING directory refuse a watch on
+//! demand (the kernel refuses only once
+//! `fs.inotify.max_user_watches` is genuinely exhausted), so those
+//! tests run the real convergence against an injected backend with
+//! a controlled refusal — the `WatchBackend` seam, D-137's P3-7.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eunomia_fs::watcher::{TargetWatcher, WatchEvent};
+use eunomia_fs::watcher::{TargetWatcher, WatchBackend, WatchEvent, WatchRefused};
 
 /// The test debounce: short enough to keep the suite quick, a real
 /// window the backend actually debounces inside.
@@ -429,4 +437,214 @@ fn a_recreated_directory_is_re_armed_by_the_next_set() {
     expect_event(&receiver, DELIVERY_DEADLINE, |event| {
         *event == WatchEvent::Changed(target.clone())
     });
+}
+
+// ---- the SYS-010 watch limit (the injected backend) --------------------
+
+/// The shared plan: refuse `watch` from a 1-based call number on
+/// (`None` = the lifted limit, arm everything).
+type LimitPlan = Arc<Mutex<Option<usize>>>;
+
+/// The shared re-arm log: every arm call's directory, in call order.
+type WatchLog = Arc<Mutex<Vec<PathBuf>>>;
+
+/// The injected backend of the watch-limit battery (the
+/// `WatchBackend` seam, D-137's P3-7): every arm call is logged in
+/// order, and from a chosen 1-based call number on, arming is
+/// REFUSED — the `fs.inotify.max_user_watches` shape, where the
+/// kernel refuses an EXISTING healthy directory and no fixture can.
+/// The plan is shared with the test so the limit can be lifted with
+/// the watcher already built; a refusal is persistent until the plan
+/// says otherwise, which is what a kernel limit does.
+struct LimitBackend {
+    /// The shared plan (see [`LimitPlan`]).
+    limit_from: LimitPlan,
+    /// The shared re-arm log (see [`WatchLog`]) — what the
+    /// convergence battery asserts on.
+    watch_calls: WatchLog,
+}
+
+impl LimitBackend {
+    /// The backend refusing from the `refuse_from`-th arm call on,
+    /// plus the handles the test keeps (the plan to lift, the log
+    /// to read).
+    fn refusing_from(refuse_from: usize) -> (Self, LimitPlan, WatchLog) {
+        let limit_from: LimitPlan = Arc::new(Mutex::new(Some(refuse_from)));
+        let watch_calls: WatchLog = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                limit_from: Arc::clone(&limit_from),
+                watch_calls: Arc::clone(&watch_calls),
+            },
+            limit_from,
+            watch_calls,
+        )
+    }
+}
+
+impl WatchBackend for LimitBackend {
+    fn watch(&mut self, dir: &Path) -> Result<(), WatchRefused> {
+        let call_number = {
+            let mut log = self
+                .watch_calls
+                .lock()
+                .expect("only the watcher calls this backend");
+            log.push(dir.to_path_buf());
+            log.len()
+        };
+        let limit = self
+            .limit_from
+            .lock()
+            .expect("only the watcher calls this backend");
+        if limit.is_some_and(|from| call_number >= from) {
+            // The reason names the class, never a raw OS errno: the
+            // production refusal arrives as notify's MaxFilesWatch
+            // (Linux maps the watches limit's ENOSPC to it; the
+            // instances limit's EMFILE stays a plain I/O error), and
+            // the convergence under test never branches on the
+            // reason — a platform-neutral test states no errno
+            // (D-111).
+            Err(WatchRefused::new(
+                "the synthetic inotify watch limit (SYS-010)".to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn unwatch(&mut self, _dir: &Path) {
+        // The battery never removes a directory from the set; the
+        // disarm half of the convergence is the real backend's
+        // tests' concern above.
+    }
+}
+
+#[test]
+fn a_watch_limit_hit_mid_set_leaves_the_later_directories_unwatched() {
+    // SYS-010's refused-watch half at its least reachable point:
+    // the limit refuses an EXISTING healthy directory mid-set (beta
+    // onward; the wanted map's BTreeMap order is alpha, beta,
+    // gamma). The honest degrade: the later directories are
+    // unwatched — exactly them, through the seam — while the
+    // already-converged directory STAYS converged: its re-arm is
+    // refused too, and the map keeps the evidence it has. (A
+    // genuinely LIVE watch's re-arm cannot be refused by the
+    // watches limit — the kernel updates the existing mark without
+    // allocating — so the refused re-arm of a converged directory
+    // stands for the lost-watch-plus-limit shape: the backend lost
+    // the watch behind the caller's back and the limit blocks the
+    // re-add.) The same set again answers identically — idempotent
+    // under the limit.
+    let temp = tempfile::tempdir().expect("creating a temp directory must work");
+    let (_alpha_dir, alpha) = target_under(&temp, "alpha");
+    let (_beta_dir, beta) = target_under(&temp, "beta");
+    let (_gamma_dir, gamma) = target_under(&temp, "gamma");
+    let all = vec![alpha.clone(), beta.clone(), gamma.clone()];
+    let (backend, _limit_from, _watch_calls) = LimitBackend::refusing_from(2);
+    let mut watcher = TargetWatcher::with_backend(backend);
+
+    watcher.set_files(&all);
+    assert_eq!(
+        watcher.watched_files(),
+        set_of(std::slice::from_ref(&alpha)),
+        "the directories before the limit hit keep their watches"
+    );
+    assert_eq!(
+        watcher.unwatched_files(),
+        set_of(&[beta.clone(), gamma.clone()]),
+        "the seam answers exactly the refused directories' files"
+    );
+
+    watcher.set_files(&all);
+    assert_eq!(
+        watcher.watched_files(),
+        set_of(std::slice::from_ref(&alpha)),
+        "the already-converged directory survives its refused re-arm"
+    );
+    assert_eq!(
+        watcher.unwatched_files(),
+        set_of(&[beta.clone(), gamma.clone()]),
+        "the same set under the same limit answers identically"
+    );
+}
+
+#[test]
+fn lifting_the_watch_limit_converges_the_refused_directories_on_the_next_set() {
+    // The retry the seam promises, with no flag and no error
+    // bookkeeping: the re-arm is unconditional, so the first
+    // set_files after the limit lifts simply succeeds — the whole
+    // set converges and the seam empties.
+    let temp = tempfile::tempdir().expect("creating a temp directory must work");
+    let (_alpha_dir, alpha) = target_under(&temp, "alpha");
+    let (_beta_dir, beta) = target_under(&temp, "beta");
+    let (_gamma_dir, gamma) = target_under(&temp, "gamma");
+    let all = vec![alpha.clone(), beta.clone(), gamma.clone()];
+    let (backend, limit_from, _watch_calls) = LimitBackend::refusing_from(2);
+    let mut watcher = TargetWatcher::with_backend(backend);
+
+    watcher.set_files(&all);
+    assert_eq!(
+        watcher.unwatched_files(),
+        set_of(&[beta.clone(), gamma.clone()])
+    );
+
+    *limit_from
+        .lock()
+        .expect("the plan handle is the test's own") = None;
+    watcher.set_files(&all);
+    assert_eq!(watcher.watched_files(), set_of(&all));
+    assert!(
+        watcher.unwatched_files().is_empty(),
+        "a converged set has no gap to report: {:#?}",
+        watcher.unwatched_files()
+    );
+}
+
+#[test]
+fn every_pass_re_arms_every_wanted_directory_refused_or_not() {
+    // The convergence's unconditional re-arm — the documented rule
+    // that heals a kernel-lost watch — pinned through the injected
+    // backend's log: every set_files pass arms every wanted
+    // directory, the refused ones included (that IS the idempotent
+    // retry the seam's recovery rides on), in the wanted map's
+    // order. A convergence that trusted "already in the map" would
+    // log the first pass only.
+    let temp = tempfile::tempdir().expect("creating a temp directory must work");
+    let (alpha_dir, alpha) = target_under(&temp, "alpha");
+    let (beta_dir, beta) = target_under(&temp, "beta");
+    let (gamma_dir, gamma) = target_under(&temp, "gamma");
+    let all = vec![alpha, beta, gamma];
+    let (backend, _limit_from, watch_calls) = LimitBackend::refusing_from(2);
+    let mut watcher = TargetWatcher::with_backend(backend);
+
+    watcher.set_files(&all);
+    watcher.set_files(&all);
+    let logged = watch_calls
+        .lock()
+        .expect("the log handle is the test's own")
+        .clone();
+    assert_eq!(
+        logged,
+        vec![
+            alpha_dir.clone(),
+            beta_dir.clone(),
+            gamma_dir.clone(),
+            alpha_dir,
+            beta_dir,
+            gamma_dir,
+        ],
+        "two passes each arm every wanted directory, refused ones included"
+    );
+}
+
+/// A written target file under a freshly created `<name>`
+/// subdirectory of `temp`, with the directory's path alongside —
+/// the fixture keeps the refused directories REAL (the limit
+/// refuses healthy directories; a missing-root refusal is a
+/// different, already-tested tolerance).
+fn target_under(temp: &tempfile::TempDir, name: &str) -> (PathBuf, PathBuf) {
+    let dir = temp.path().join(name);
+    let target = dir.join("AGENTS.md");
+    write(&target, "fixture");
+    (dir, target)
 }

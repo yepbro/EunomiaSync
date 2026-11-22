@@ -12795,3 +12795,209 @@ Round-2 review addendum (D-137, same task; report
   collision shown unreachable through the `path_key` UNIQUE
   constraint plus the root-containment refusal) and audited the
   tests clean: counts match, oracles independent, no evasion.
+
+### D-139 — The SYS-010 watch limit made testable: the WatchBackend seam, the mid-set refusal battery, and the extracted dispatch for the overflow half — 2026-11-21
+
+Problem: T-103 proves the watcher's SYS-010 halves. The overflow
+half was BELIEVED wired since T-102 (an event-stream `Err` batch →
+one `Backend` event → the consumer's full re-check), and the
+refused-watch half (a watch the backend will not arm → the file
+leaves the converged set, visible through `unwatched_files()`) is
+wired and even tested — but only through a MISSING root. Two facts
+stayed unprovable: the inotify limit refuses an EXISTING healthy
+directory mid-set (some watches already live, the rest refused),
+and no fixture can exhaust `fs.inotify.max_user_watches` on demand.
+D-137 recorded exactly this gap as its follow-up (7) (round-1 P3-7:
+"the fault-injection feature does not reach notify's stream today"
+— and the armed-fault discipline is thread-local, while notify's
+events arrive on notify's own thread). Round 1 of this task's
+review then showed the belief itself was half wrong (the addendum
+below): inotify's queue overflow never reaches the `Err` arm.
+
+Solution, two seams in `watcher.rs` (the atomic.rs precedent: a
+callable seam whose production value is the real thing and whose
+test value is a fake — `free_space`'s shape, not a cfg-gated fault
+point):
+
+- _`WatchBackend` (the arming seam)._ The two calls `set_files`
+  makes — arm/disarm one non-recursive directory watch — moved
+  behind a public trait with a class-only `WatchRefused` error
+  (mirrors `WatcherInitError`; the convergence never branches on
+  the reason, so the type carries a diagnostic string and nothing
+  else). Production `NotifyBackend` wraps the same debouncer;
+  `TargetWatcher` became generic with `NotifyBackend` as the
+  default, so `TargetWatcher::new`'s signature is unchanged (the
+  frozen app layer compiles untouched) and `with_backend` is the
+  tests' way in. The fake (`LimitBackend`, tests/watcher.rs)
+  refuses arming from a chosen call number on — persistent until
+  the test lifts the plan, exactly a kernel limit — and logs every
+  arm call. The battery: a mid-set hit leaves the later
+  directories unwatched (exactly them, through the seam) while the
+  already-converged directory KEEPS its convergence — the map's
+  evidence rule (a genuinely LIVE watch's re-arm cannot be refused
+  by the watches limit at all, the kernel updates the existing
+  mark without allocating; the refused re-arm of a converged
+  directory stands for the lost-watch-plus-limit shape — see the
+  round-1 addendum's P3-2); a repeated pass under the limit
+  answers identically; lifting the
+  limit lets the very next `set_files` converge everything (the
+  re-arm is unconditional, so the retry needs no flag); and the
+  call log pins that every pass re-arms every wanted directory,
+  refused ones included (the idempotent retry). Mutation-verified:
+  ignoring the refusal (arming regardless) fails the three limit
+  tests; trusting "already in the map" (skipping the re-arm) fails
+  the log pin and T-102's re-created-directory test.
+- _The extracted `dispatch` (the overflow half)._ The debouncer
+  callback's body became a private function the callback forwards
+  into, so the mapping is drivable without notify's event thread.
+  The overflow arrives INSIDE an `Ok` batch as notify's rescan
+  flag (round-1 P1-1, below) and the `Err` batch is the rarer
+  stream-read failure — both deliver exactly ONE `Backend` event
+  per batch (SYS-010's response is one full re-check; two-signal
+  batches pin it), a mixed batch still delivers its ordinary
+  events, and a dead consumer drops the delivery instead of
+  panicking the event thread. The overflow's full re-check itself
+  is the app layer's (`file_watch.rs` maps `Backend` to a full
+  `Refresh`; frozen this window, and NOT covered by any test there
+  — the pump is an inline loop; recorded follow-up below).
+
+Two platform facts verified in the vendored sources (notify 8.2.2,
+`src/inotify.rs:212-214`, `:449-453`, `:385-391`, `:565`; corrected
+by the round-1 addendum below): the card's "errno EMFILE" names the
+INSTANCES limit, which fails the watcher at CONSTRUCTION
+(`inotify_init` allocates the descriptor — `WatcherInitError`'s
+no-watch-at-all degrade; adding a watch allocates no descriptor and
+cannot fail with EMFILE) — the WATCHES limit is the per-directory
+refusal, surfaced as `ENOSPC`, which notify remaps to
+`ErrorKind::MaxFilesWatch`. Watch-add refusals are synchronous
+`watch()` `Result`s, never stream events for our non-recursive
+watches (the recursive re-add path that forwards `MaxFilesWatch`
+into the stream is unreachable here). The behavior is
+refusal-agnostic either way, so the tests inject a class-only
+synthetic refusal and no raw errno (D-111). The watch-limit
+refusal is deliberately NOT a `Backend` event — the D-137 P2-4
+loop ruling stands; with the fake backend the watcher holds no
+sink at all, which is the structural form of that pin.
+
+Follow-up found while tracing the convergence (for the board, not
+this task): a wanted directory that was converged and then
+DELETED-for-good keeps its map entry across passes — the re-arm
+refusal (PathNotFound there) does not evict a kept entry, so
+`watched_files` claims a file whose watch cannot exist and
+`unwatched_files` under-reports. The same hole opens on the
+lost-watch-plus-limit shape (IN_IGNORED ends the watch, the limit
+refuses the re-add, the entry stays "watched"), so evicting on
+refusal REASON alone cannot fix both halves without evicting
+genuinely live watches — the fix needs the watch's liveness, not
+just the refusal class, and therefore a `WatchRefused` that
+carries more than today's display string. A behavior change this
+card does not carry; the limit tests here pin the surviving half —
+a converged entry must NOT be evicted on a refused re-arm.
+
+Testing: 5 unit tests in `watcher.rs`'s new colocated `mod tests`
+(the crate's first in this module — atomic.rs's colocated pattern;
+the Err batch, the rescan-flag overflow batch, the mixed batch, and
+the dead consumer) + 3 integration tests in `tests/watcher.rs`;
+full workspace green
+(fmt, clippy `-D warnings`, `cargo test --workspace`, frontend
+format, cross `cargo check` for x86_64-pc-windows-msvc and
+aarch64-apple-darwin).
+
+Round-1 review addendum (D-139, same task; report
+`.opencode/reviews/t103-round1.md`, deepseek-v4.1-flash — verdict
+approve-with-fixes: 1×P1, 2×P2, 3×P3), every source claim re-
+verified against the vendored crates before taking:
+
+- P1-1 (taken): the overflow's documented arrival was BACKWARDS.
+  inotify delivers `IN_Q_OVERFLOW` as an `Ok` event —
+  `EventKind::Other` + `Flag::Rescan`, no paths (notify 8.2.2
+  `inotify.rs:212-214`) — and the debouncer expires it inside the
+  ordinary `Ok` batch (debouncer-full 0.7 `lib.rs:282-284`,
+  `:219-227`); the `Err` arm is the rarer stream-read failure.
+  `classify_event` maps the pathless event to nothing, so T-102's
+  code silently dropped the overflow — exactly SYS-010's "does not
+  lose the state silently" violation. Fixed in `dispatch`'s `Ok`
+  arm: a `need_rescan()` event sets a batch-level flag, ordinary
+  deliveries proceed, and ONE `Backend` follows them; pinned by
+  constructible batches (the overflow, the mixed batch with an
+  ordinary Changed delivery, the two-signal batch) — the original
+  "notify's stream cannot be forced deterministically" rationale
+  was wrong, `DebouncedEvent` is publicly constructible. Every doc
+  this task owns was corrected; the FROZEN consumer doc still
+  states the old premise (`file_watch.rs:61-62` calls `Backend`
+  "an event-stream error, SYS-010's overflow case") — recorded as
+  a follow-up below for the owning `src-tauri` task.
+- P2-1 (taken): EMFILE (instances limit) never reaches
+  `WatchBackend::watch` — it fails `inotify_init` at watcher
+  CONSTRUCTION (`inotify.rs:565`), i.e. `WatcherInitError`'s
+  no-watch-at-all degrade; `inotify_add_watch` allocates no
+  descriptor and cannot EMFILE. Docs and this entry now state the
+  split (watches limit = per-directory refusal; instances limit =
+  construction failure).
+- P2-2 (taken as wording + follow-up): the claim that the app
+  layer's `Backend` → full-`Refresh` mapping is "covered by its
+  own tests there" was false — nothing in `src-tauri` exercises
+  the pump's `Backend` arm. Corrected here; a pump test (or
+  extracting the event→command mapping into a testable function)
+  is recorded for the board as a follow-up on the frozen file,
+  with extra weight now that `Backend` carries the overflow.
+- P3-1 (recorded, not taken): `WatchRefused` carries a display
+  string only; the phantom-entry follow-up needs the refusal class
+  and the watch's liveness. No consumer exists today, so adding a
+  kind enum now would be speculative API (the facade reads paths,
+  D-137's ruling); the follow-up card includes the type change.
+- P3-2 (taken as docs): the limit tests' "live watch survives a
+  refused re-arm" wording overstated the aetiology — a genuinely
+  live watch's re-arm cannot be refused by the watches limit (the
+  kernel updates the existing mark without allocating); the
+  refused re-arm of a CONVERGED directory stands for the
+  lost-watch-plus-limit shape. Comments in the test and
+  `set_files` now say exactly that; the kept-entry rule itself is
+  pre-existing T-102 behavior (verified by the reviewer) and
+  stays.
+- P3-3 (taken): the mixed rescan-plus-ordinary batch pin — the
+  overflow must not displace its batch's own deliveries — landed
+  as `an_overflow_batch_still_delivers_its_ordinary_events`.
+
+Follow-ups for the board (orchestrator to file; found by this
+task's reviews, none trackable in this task's frozen files):
+
+- The app-layer `Backend` → full-`Refresh` pump mapping
+  (`src-tauri/src/file_watch.rs:946-955`) has NO test — extract the
+  event→command mapping into a testable function or pin the pump
+  inline (round-1 P2-2).
+- The frozen consumer doc `src-tauri/src/file_watch.rs:61-62`
+  still calls `WatchEvent::Backend` "an event-stream error,
+  SYS-010's overflow case" — the old premise; reword to the
+  lost-events signal (an overflow rescan batch OR a stream error
+  batch) when the owning task next touches the file (round-2
+  P3-1).
+- The phantom-map-entry gap above (deleted-for-good and
+  lost-watch-plus-limit shapes; needs watch liveness, not just the
+  refusal reason, and a `WatchRefused` that carries a class) —
+  this entry's own finding.
+
+Round-2 review addendum (D-139, same task; report
+`.opencode/reviews/t103-round2.md`, hy4-flash-free — verdict
+approve: no P0/P1/P2; 2×P3), findings processed here:
+
+- R2-P3-1 (taken): D-139's round-1 wording "all docs corrected"
+  overstated — the frozen `file_watch.rs:61-62` still carries the
+  old "event-stream error = the overflow" premise. The addendum
+  above now qualifies it, and the follow-up list records the
+  rewording for the owning task (the file is frozen this window).
+- R2-P3-2 (taken): the dead-consumer no-panic test drove only the
+  `Err` arm, leaving the NEW overflow `Backend` send (and the
+  ordinary send) unpinned for the drop-not-panic contract —
+  mutation-verified by the reviewer (an expect() there kept the
+  whole suite green). The test now drives one dead consumer through
+  ALL THREE send sites (ordinary delivery, overflow Backend,
+  stream-error Backend); re-verified here by the same mutation →
+  red at the rescan send.
+- The round independently re-derived the P1-1 fix (batch-level
+  bool, `continue`, one Backend after ordinary deliveries, `Err`
+  arm untouched, lock discipline), endorsed the P3-1 deferral (no
+  refusal-kind enum: no consumer today, the facade reads paths),
+  and audited the tests clean: oracles exact and independent, no
+  evasion, the single no-panic test acceptable with its documented
+  falsifiability.
