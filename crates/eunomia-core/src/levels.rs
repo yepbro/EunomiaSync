@@ -70,9 +70,7 @@
 //! contract fixes only the `AppError` carrier), which belongs to
 //! the Tauri command layer (`AppError`/`ErrorCode`, D-034) — core
 //! knows neither. Following the D-062 (`E_MARKERS_INVALID`) and
-//! D-071 (`TargetInsideMovedRange`) precedents (the D-071 entry was
-//! dropped from DECISIONS.md by a later docs commit — D-151), this
-//! module rejects
+//! D-071 (`TargetInsideMovedRange`) precedents, this module rejects
 //! with its own [`LevelError`]; `LevelOutOfRange` and
 //! `BranchLevelOutOfRange` are the core twins of the future
 //! command-layer `E_VALIDATION` mapping, and that mapping is a task
@@ -82,8 +80,7 @@
 //!
 //! Pure functions over `&[LibraryItem]`, in the style the crate
 //! settled on for [`heading_range`](crate::heading_range) and
-//! [`reorder`](crate::reorder) (D-070, D-071 — the dropped D-071
-//! entry, D-151): the input is never
+//! [`reorder`](crate::reorder) (D-070, D-071): the input is never
 //! touched — both operations return a NEW `Vec` holding the same
 //! items with new levels on the affected headings. The shift
 //! resolves the ALG-060 branch inside via
@@ -267,8 +264,7 @@ pub enum LevelError {
     /// return. The two index forms of this module surface only
     /// `IndexOutOfBounds` and `NotAHeading` (via `heading_branch`);
     /// `HeadingNotFound` waits for a by-id form, should the command
-    /// layer ever add one (D-070/D-071 set that precedent; the D-071
-    /// entry was dropped from DECISIONS.md — D-151).
+    /// layer ever add one (D-070/D-071 set that precedent).
     #[error(transparent)]
     Branch(#[from] HeadingBranchError),
 }
@@ -1180,8 +1176,7 @@ mod tests {
 /// The properties below pin the case budget (256) and the RNG seed
 /// (the task's number — only its fixedness matters), the run policy
 /// `body`, `heading_range` and `reorder` property tests use (D-053,
-/// D-070, D-071 — the dropped D-071 entry, D-151), so every run
-/// explores the same trees and a green
+/// D-070, D-071), so every run explores the same trees and a green
 /// run cannot flake. Any failure is persisted by proptest into
 /// `crates/eunomia-core/proptest-regressions/levels.txt` and replayed
 /// on every later run; a committed regressions file, if one ever

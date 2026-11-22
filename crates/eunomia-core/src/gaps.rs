@@ -10,8 +10,7 @@
 //!
 //! The task card names "ALG-063" for this; §9.7 ends at ALG-062, and
 //! no ALG-063 exists — the canon is the LIB-032 row above (recorded
-//! in DECISIONS.md D-073). The dropped D-072 entry (removed from
-//! DECISIONS.md by a later docs commit — D-151) settled the split this
+//! in DECISIONS.md D-073). D-072 already settled the split this
 //! module inherits: the skip is LEGAL (level skips are not
 //! validation — nothing here rejects anything) and the icon is the
 //! UI's marker; core's job is to supply the facts the icon needs.
@@ -144,8 +143,7 @@ use crate::library::{HeadingLevel, LibraryItem};
 /// The icon's row is the later heading (`to_index` — the one that
 /// arrives too deep); `from_index` names its parent under the ALG-060
 /// geometry so a tooltip can cite both. What the icon looks like is
-/// the UI's to decide (the dropped D-072 ruling, D-151: the icon is
-/// a marker, not a
+/// the UI's to decide (D-072: the icon is a marker, not a
 /// validation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeadingLevelGap {
@@ -205,8 +203,7 @@ impl HeadingLevelGap {
 /// skips, the first heading of the list has no pair, and nothing
 /// follows the last one. Skips are legal input — this function
 /// REJECTS nothing; it is the fact supplier for the LIB-032 warning
-/// icon, which is UI, not validation (the dropped D-072 ruling,
-/// D-151).
+/// icon, which is UI, not validation (D-072).
 ///
 /// Pure: the input slice is never touched, and the answer is a fresh
 /// `Vec` in collection order — gaps are reported where they sit, the
@@ -743,8 +740,7 @@ mod tests {
 /// The properties below pin the case budget (256) and the RNG seed
 /// (the task's number — only its fixedness matters), the run policy
 /// `body`, `heading_range`, `reorder`, `levels` and `gaps` property
-/// tests use (D-053, D-070, D-073; the dropped D-071/D-072 entries,
-/// D-151), so every run
+/// tests use (D-053, D-070, D-071, D-072, D-073), so every run
 /// explores the
 /// same trees and a green run cannot flake. Any failure is persisted
 /// by proptest into

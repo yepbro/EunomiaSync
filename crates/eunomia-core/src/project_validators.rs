@@ -160,9 +160,8 @@
 //!
 //! Every failure is a typed [`ProjectFieldError`] variant naming the
 //! field and the broken rule — never a string — so the command layer
-//! can map any of them to `E_VALIDATION` (§8; the D-062 precedent
-//! of typed errors at core boundaries — D-071/D-072 joined the group
-//! and were dropped from DECISIONS.md, D-151).
+//! can map any of them to `E_VALIDATION` (§8; the D-062/D-071/D-072
+//! precedent of typed errors at core boundaries).
 //!
 //! # Examples
 //!

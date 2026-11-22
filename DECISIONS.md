@@ -4662,6 +4662,204 @@ D-053/D-062: lib.rs's `//!` module list and ARCHITECTURE.md gain no
 `heading_range` entry — the T-045 brief capped the lib.rs change at
 one `pub mod heading_range;` line while neighbors work in the crate.
 
+### D-071 — The ALG-061 move as a pure cut-insert-renumber over original-list indices — 2026-11-19
+
+Problem: T-046 transcribes ALG-061 ("A move runs in one transaction:
+cut the range, insert it at the target position, renumber `position`
+from 1. Moving one instruction is a special case of a one-item
+range") into eunomia-core, on top of T-045's `heading_range` (D-070).
+Four points the spec fixes only in prose needed an explicit reading:
+what the "target position" names; whether the range's own boundaries
+count as "inside itself" (ALG-060/LIB-034 ban only the inside); where
+DB-005's renumbering lives in types that deliberately carry no
+`position` number (D-042); and how the task's "rejected with
+E_VALIDATION" wording reaches a crate that knows neither `AppError`
+nor the §7.10 registry.
+
+Solution: module `reorder`
+(`crates/eunomia-core/src/reorder.rs`), pure functions over
+`&[LibraryItem]` returning a NEW order (crate style, D-070) — never
+mutation:
+
+- `move_range(items, range, target)` is the ALG-061 primitive over
+  ANY non-empty range (ALG-061's one-instruction move is `i..i+1`,
+  §7.3 "Single instructions can be moved between sections");
+  `move_branch(items, heading_index, target)` and
+  `move_branch_by_id(items, &ItemId, target)` resolve the ALG-060
+  branch inside via `heading_range`/`heading_branch_by_id`, so a
+  caller cannot pass a range that disagrees with the tree.
+- The target is an index into the list BEFORE the move, `0..=len`:
+  every item outside the range that sits before `target` stays before
+  the landed range. It is NOT an index into the post-cut remainder —
+  original-list indexing is what makes "inside its own range"
+  expressible at all (an interior target names a gap between the
+  range's own items), turning D-070's foresight into the plain check
+  `start < target < end`. Under remainder indexing the cut items
+  would not exist to gap apart and the guard would have no input.
+- The boundaries `target == range.start` and `target == range.end`
+  are the range's current place, not its inside: valid moves that
+  change nothing (the same order returns, "renumbered" trivially).
+  Only a strictly interior target is rejected. This fixes the
+  T-046 brief's open question (first/last branch onto itself = no-op).
+- Renumbering (DB-005 "position starting from 1, with no gaps …
+  renumbers the affected range in one transaction"): the returned
+  collection IS the numbering — index `i` is position `i + 1`,
+  `1..=len` by construction; core never mints the number (D-042's
+  no-drift rule). The "one transaction" is the store layer's move
+  command: hand over a slice in library order, write the returned
+  order back as positions in a single transaction (writing only
+  changed rows is that command's latitude — the invariant is over
+  the whole list).
+- `ReorderError` (thiserror, D-062 precedent): `InvalidRange`
+  (empty/past-the-end), `TargetOutOfBounds` (target must be
+  `0..=len`), `TargetInsideMovedRange` (the ALG-060/LIB-034
+  rejection), `Branch(HeadingBranchError)` (transparent). Precedence:
+  range → target bounds → interior, and the branch resolves before
+  the target is looked at (no branch, no range to check against).
+- E_VALIDATION boundary: the registry belongs to src-tauri's
+  `AppError`/`ErrorCode` (D-034); `TargetInsideMovedRange` is the
+  core twin the command layer will map to `E_VALIDATION` — that
+  mapping is a future command-layer task, exactly as D-062 left
+  `E_MARKERS_INVALID`.
+- `Range<usize>` has no `Display`; the interior-target message uses
+  `{range:?}`, which prints `0..4` identically.
+
+lib.rs gains `pub mod reorder;` plus `//!` bullets for `reorder` AND
+`heading_range` — the doc-list entry D-070 left open; T-046's window
+is alone in the crate, so the conflict risk that justified the cap is
+absent. The list still lacks entries for `assembly_b`, `compare`,
+`dirty`, `extra_files`, `hash`, `marker`, `markers`, `target_file`
+(and ARCHITECTURE.md its module map entries): an open item for the
+next task that owns those zones or a docs pass.
+
+Tests: the DoD as unit tests — branch moves down/up/across several
+branches and INTO another branch's section (legal: only the own
+inside is banned) all keep the nested order and answer with a full
+permutation (a `HashMap` multiset check = DB-005's "no gaps, no
+duplicates" over the implied numbering); every interior target of a
+fat branch and of a nested branch is rejected (beginning/middle/end);
+one-item ranges have no inside and move to every target; both
+boundaries of every branch are no-ops; first branch to 0 and last to
+`len` are identity; empty list rejects every range/branch form;
+single-item list; error precedence and pinned messages; the by-id
+form equals the index form and rejects unknown/instruction ids; and
+the T-045 integration — a real `heading_branch` range moves to the
+end and to the top, arrives whole (recomputed by
+`heading_branch_by_id`), and moves back to the exact original order.
+One proptest (256 cases, fixed seed 46 — D-053/D-070 run policy)
+sweeps every heading's branch × every target of random trees (plus
+every one-item range × target): interior targets are rejected, every
+other move is a permutation, the range lands whole and in order, the
+untouched items keep their relative order, and exactly the items the
+target leaves before it precede the landed range.
+
+### D-072 — The ALG-062 level operations: point-wise change, whole-branch ±1 shift, and the roundtrip asymmetry — 2026-11-19
+
+Problem: T-047 turns ALG-062 ("Shift branch level ±1" changes the
+levels of all headings in the branch if all new levels stay within
+2–6; otherwise the operation is rejected with `E_VALIDATION`) and
+the LIB-032 "Change level" command into eunomia-core code, on top of
+T-045's `heading_range` (D-070). Five points the prose left open:
+whether "Change level" fires any accompanying effect (a rebuild? a
+reorder?); what `new_level` is, given that `HeadingLevel` (D-042)
+already closes 2–6 and would make the DoD's boundary rejections
+untestable; whether the shift's delta is any integer or exactly ±1;
+what all-or-nothing means in a pure function; and what the roundtrip
+after a shift is.
+
+Solution: module `levels`
+(`crates/eunomia-core/src/levels.rs`), pure functions over
+`&[LibraryItem]` returning a NEW `Vec` (crate style, D-070/D-071) —
+never mutation:
+
+- `change_heading_level(items, index, new_level: u8)` is the
+  LIB-032 "Change level", POINT-WISE by design: "Levels are not
+  recalculated automatically" is the sentence the command answers,
+  so the level is the whole effect — the heading keeps its id, title
+  and place (nothing reorders, DB-005/D-042), instructions keep
+  everything, and the section geometry is whatever the NEXT
+  `heading_branch` call computes from the new levels (core holds no
+  cached shape). Level skips pass unchecked (LIB-032: "allowed and
+  marked with a warning icon" — the icon is UI, not validation).
+  `new_level` is a `u8`, not a `HeadingLevel`, precisely so the
+  §6.9/DoD boundary rejections (1 and 7) are representable and
+  tested; the closed type is constructed inside via `try_from`.
+- `shift_branch_level(items, index, delta: i8)` is ALG-062: the
+  branch resolves inside via `heading_branch` (a caller cannot shift
+  a set that disagrees with the tree), every HEADING in the range
+  moves one level, the range's instructions ride along untouched.
+  `delta` is exactly `-1` or `+1` — the closed set the spec's
+  command names and the UI offers; anything else is rejected as
+  caller arithmetic error (`InvalidDelta`), never clamped.
+- All-or-nothing (the `E_VALIDATION` row's "The whole operation
+  rejected", in the spirit of §6.9 over a structure operation): the
+  validation walks every heading of the branch BEFORE any level is
+  written; a rejection returns `Err` and the pure input cannot have
+  moved. The offender reported is the FIRST in collection order —
+  deterministic. Geometry hands the boundaries their shape: a
+  heading strictly inside a branch is always deeper than its root
+  (ALG-060), so the floor rejection (−1 hitting an H2) can only name
+  the ROOT, while the ceiling rejection (+1 hitting an H6) can name
+  any heading of the branch — pinned as a test.
+- E_VALIDATION boundary: the registry belongs to src-tauri
+  (`AppError`/`ErrorCode`, D-034); `LevelOutOfRange` and
+  `BranchLevelOutOfRange` are the core twins the command layer will
+  map to `E_VALIDATION` — the D-062 (`E_MARKERS_INVALID`) and D-071
+  (`TargetInsideMovedRange`) precedent, mapping left to the future
+  command task.
+- `LevelError` (thiserror): `IndexOutOfBounds`, `NotAHeading` (the
+  change checks its own operand), `LevelOutOfRange`,
+  `InvalidDelta`, `BranchLevelOutOfRange` (the variant carries
+  `index`, `delta`, `offender`, `offender_level`),
+  `Branch(HeadingBranchError)` (transparent).
+  Precedence: the operand/branch resolves first, then the delta,
+  then the levels (D-071's "no branch, no range" rule). The
+  operand-error split is an API decision, not an accident: the
+  change has no branch to resolve, so it checks its own index and
+  kind; the shift delegates to `heading_branch` and wraps. By-id
+  forms are deliberately NOT here — the brief names two
+  index-addressed operations, and the `*_by_id` twins (D-070/D-071
+  precedent) belong to the command-layer task that actually holds
+  the ids; until then `Branch(HeadingNotFound)` is unreachable and
+  documented as waiting.
+
+The roundtrip asymmetry (found by the property test, minimal case
+two sibling H4s): −1-then-+1 is NOT an identity in general — a
+shallower root owns a WIDER branch (the H4 that closed the H4 root
+does not close the H3 it becomes), so the +1 covers the widened
+range and shifts headings the −1 never touched. +1-then-−1 IS always
+the identity — the DoD's roundtrip — because deepening never widens:
+every heading inside the branch deepens with the root and keeps
+not-closing. Both directions are pinned as named tests, and the
+property asserts the roundtrip for +1 only.
+
+lib.rs gains `pub mod levels;` plus a `//!` bullet (the D-071 doc
+list keeps its remaining open items — `assembly_b`, `compare`,
+`dirty`, `extra_files`, `hash`, `marker`, `markers`, `target_file`
+and the ARCHITECTURE.md module map — for a task that owns those
+zones).
+
+Tests: the DoD as unit tests — the 2–6 boundaries for BOTH
+operations (change to 0/1 and 7/8/100/255 rejected, floor and
+ceiling values themselves legal; shift −1 on an H2 root and +1 on a
+nested H6 rejected WHOLE, with a fresh-clone re-derivation of the
+same rejection proving the input never moved); the full 5×5 grid of
+successful change levels (skips included); shift ±1 of a branch, of
+a nested branch alone inside its parent, of a multi-level H3+H4+H5
+branch, and of a lone heading; only-the-branch-touched checks (ids,
+titles, hidden states byte-for-byte); the +1→−1 roundtrip over every
+branch of the tree plus the widening counter-test for the mirror
+pair; error precedence (operand → kind → level; branch → delta →
+levels) and pinned messages; the T-045 integration — the shift walks
+exactly the range `heading_branch` computes, and the recomputed
+branch of the same heading holds the same items one level deeper;
+and change-then-shift composition. Three proptest properties (256
+cases, fixed seed 47 — the D-053/D-070/D-071 run policy) sweep every
+heading × every level (point-wise change, bounds) and every heading
+× both deltas over random trees (whole-shift, guard with first
+offender, untouched outsiders, +1 roundtrip), plus every non-±1
+delta rejected.
+
 ### D-073 — The LIB-032 heading-level skips: adjacent-heading pairs, one report per edge — 2026-11-19
 
 Problem: T-048 asks core to find the heading-level skips the UI marks
@@ -4669,11 +4867,8 @@ with the LIB-032 warning icon. The card names "ALG-063 (§9.7)", but
 §9.7 ends at ALG-062 and no ALG-063 exists in docs/spec.md — the
 rule's canon is the §7.3 acceptance row LIB-032/034/MAIN-018,019:
 "Skipping a level (for example, `##` then `####`) is allowed and
-marked with a warning icon" (the same sentence the D-072 entry cited
-for "the icon is UI, not validation" — the entry was written by its
-task and later dropped from this file by the parallel T-241 docs
-commit, `ee15a9b`; the ruling survives in that commit's history and
-in this quotation). Left open: whether a skip reads
+marked with a warning icon" (the same sentence D-072 cites for "the
+icon is UI, not validation"). Left open: whether a skip reads
 branches or adjacent headings, what one report covers when several
 levels are skipped at once, and which facts the DTO carries.
 
@@ -4699,10 +4894,7 @@ report per offending edge however many levels it skips (H2 → H5 is
 one skip, not two). Not skips: closes and siblings (level L or
 higher closes, ALG-060), the first heading (no pair), the end of
 the list (no pair), instruction-only and empty lists. The function
-rejects nothing — skips are legal input (the LIB-032 row quoted above;
-the D-072 entry recording that reading was dropped from this file by
-the T-241 docs commit — D-151); it supplies
-facts.
+rejects nothing — skips are legal input (D-072); it supplies facts.
 
 The DTO is the minimal fact a warning icon needs: `from_index` (the
 parent), `to_index` (the row the icon marks — the heading that
@@ -4734,9 +4926,8 @@ where the adjacent and parent-edge readings split (`H2, H5, H4` and
 `H2, H4, H4`: the closing/sibling heading under a gap is NOT
 re-reported) and `expected_level` saturating for a hand-built
 degenerate pair. Four proptest properties (256 cases, fixed
-seed 48 — the D-053/D-070 run policy (the D-071/D-072 entries joined
-the group and were dropped from this file by the T-241 docs commit —
-D-151), which this entry joins): the reports equal the independently recomputed too-deep
+seed 48 — the D-053/D-070/D-071/D-072 run policy, which this entry
+joins): the reports equal the independently recomputed too-deep
 adjacent-heading pairs; every report is a real parent edge; interleaved
 instructions change only the indices; determinism.
 
@@ -4881,9 +5072,7 @@ character }` — the index counts code points, the module's unit —
 `DescriptionTooLong { length }`, `UnknownColor
 { value }`, `UnknownFileName { value }`) — never a string — so the
 command layer can map any of them to `E_VALIDATION` (§8) on the
-D-062 precedent of typed errors at core boundaries (the D-071/D-072
-entries joined that precedent's group and were dropped from this file
-by the T-241 docs commit — D-151).
+D-062/D-071/D-072 precedent of typed errors at core boundaries.
 
 Tests: the DoD as boundary pins — name 0-after-trim (empty, spaces,
 Unicode whitespace mixes) / 1 / 100 / 101, trim-before-count (100
@@ -15250,7 +15439,7 @@ module-doc staleness; the paths.rs planned-responsibility header).
 The cards are the tracking unit; this note only records their
 existence.
 
-### D-151 — T-250: the docs-pass package — the stale-claim census closed against the current code, the burned D-071/D-072 references re-anchored, the D-033/D-066/D-081 gaps annotated, NFR-004…006 defined, and REL-001 brought to the CI fact — 2026-11-22
+### D-151 — T-250: the docs-pass package — the stale-claim census closed against the current code, the dropped D-071/D-072 references re-anchored, the D-033/D-066/D-081 gaps annotated, NFR-004…006 defined, and REL-001 brought to the CI fact — 2026-11-22
 
 Problem: the 2026-11-21 DECISIONS audit
 (`.opencode/audits/decisions-open-items-2026-11-21.md`, owner-local)
@@ -15412,6 +15601,19 @@ sweep; the §15 risk-row CI truth) and two owner-decision cards
 escalated per the escalation rule ("РЕШЕНИЕ: …" — the item-7 NUL
 question, p1; the D-071/D-072 restoration). The cards are the
 tracking unit; this note only records their existence.
+
+Restoration addendum (T-287, 2026-11-22): the owner ruled restore
+(card "РЕШЕНИЕ: D-071/D-072", closed) — the drop history above ends
+here. Both entries are restored into this file verbatim from
+`ee15a9b^` (only formatting adapted to the current file's shape), and
+this package's re-anchoring is undone: the four D-073/D-075 citations
+are returned to the original numbers, and the core-file drop notes
+(`gaps.rs`, `levels.rs`, `library_validators.rs`,
+`project_validators.rs`) are replaced by plain citations of the live
+entries. This header's "burned" is corrected to "dropped" — the
+accurate word for what T-250 encountered, not a claim that the
+numbers were never written. D-151 item 2's "no current entry records
+the ruling" is superseded: D-072 records it again.
 
 ### D-152 — T-267: the watcher's swapped `extra_file_lines` arguments fixed red-first, and the fourth content-build copy joined onto the shared pass — 2026-11-22
 
