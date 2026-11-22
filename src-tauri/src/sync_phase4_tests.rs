@@ -189,7 +189,8 @@ fn seed_repo_project(
     let repo = repos.join(format!("repo-{n}"));
     fs::create_dir(&repo).expect("the repository folder must be creatable");
     fs::create_dir(repo.join(".git")).expect("the .git directory must be creatable");
-    let canonical = fs::canonicalize(&repo).expect("canonicalizing the fresh repo must work");
+    let canonical =
+        eunomia_fs::paths::canonicalize(&repo).expect("canonicalizing the fresh repo must work");
     let path = Box::leak(canonical.to_string_lossy().into_owned().into_boxed_str());
     let id = tauri::async_runtime::block_on(database_of(app).run(move |tx| {
         eunomia_store::projects::create(

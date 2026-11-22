@@ -183,7 +183,8 @@ fn seed_repo_project(
     let repo = repos.join(format!("repo-{n}"));
     fs::create_dir(&repo).expect("the repository folder must be creatable");
     fs::create_dir(repo.join(".git")).expect("the .git directory must be creatable");
-    let canonical = fs::canonicalize(&repo).expect("canonicalizing the fresh repo must work");
+    let canonical =
+        eunomia_fs::paths::canonicalize(&repo).expect("canonicalizing the fresh repo must work");
     let path = Box::leak(canonical.to_string_lossy().into_owned().into_boxed_str());
     let id = tauri::async_runtime::block_on(database_of(app).run(move |tx| {
         eunomia_store::projects::create(
@@ -669,8 +670,8 @@ fn a_failed_write_marks_the_row_and_the_run_continues() {
 
     // The injection: the FIRST write call answers with the typed
     // replace-refusal (os 13, EACCES) — §10's E_WRITE_FAILED row.
-    let first_resolved =
-        fs::canonicalize(&first_target).expect("the fixture target must canonicalize");
+    let first_resolved = eunomia_fs::paths::canonicalize(&first_target)
+        .expect("the fixture target must canonicalize");
     let injection = injected_write(
         1,
         eunomia_fs::atomic::AtomicWriteError::WriteFailed(eunomia_fs::atomic::WriteFailed {
@@ -791,7 +792,8 @@ fn a_verify_mismatch_fails_the_project_with_e_verify_failed() {
     let injection = injected_write(
         1,
         eunomia_fs::atomic::AtomicWriteError::VerifyFailed(eunomia_fs::atomic::VerifyFailed {
-            path: fs::canonicalize(&target).expect("the fixture target must canonicalize"),
+            path: eunomia_fs::paths::canonicalize(&target)
+                .expect("the fixture target must canonicalize"),
             expected_sha256_hex: "0".repeat(64),
             mismatch: eunomia_fs::atomic::VerifyMismatch::Digest {
                 actual_sha256_hex: "f".repeat(64),

@@ -151,7 +151,8 @@ fn seed_repo_project(
     fs::create_dir(repo.join(".git")).expect("the .git directory must be creatable");
     // The canonical form (macOS temp fixtures live behind /var): what
     // the availability probe and the target resolution contract on.
-    let canonical = fs::canonicalize(&repo).expect("canonicalizing the fresh repo must work");
+    let canonical =
+        eunomia_fs::paths::canonicalize(&repo).expect("canonicalizing the fresh repo must work");
     let path = Box::leak(canonical.to_string_lossy().into_owned().into_boxed_str());
     let id = tauri::async_runtime::block_on(database_of(app).run(move |tx| {
         eunomia_store::projects::create(
@@ -1149,12 +1150,22 @@ fn a_missing_ac_target_is_the_creation_case_and_scheme_c_gets_its_name() {
     let PreflightVerdict::Ready(a) = verdict_of(&outcome, &creation) else {
         panic!("the missing A target must be ready");
     };
-    assert_eq!(a.resolved_path, creation_repo.join("AGENTS.md"));
+    assert_eq!(
+        a.resolved_path,
+        eunomia_fs::paths::canonicalize(&creation_repo)
+            .expect("the repo must canonicalize")
+            .join("AGENTS.md")
+    );
     assert_eq!(a.existing_size, None);
     let PreflightVerdict::Ready(c) = verdict_of(&outcome, &scheme_c) else {
         panic!("the missing C target must be ready");
     };
-    assert_eq!(c.resolved_path, scheme_c_repo.join("CLAUDE.project.md"));
+    assert_eq!(
+        c.resolved_path,
+        eunomia_fs::paths::canonicalize(&scheme_c_repo)
+            .expect("the repo must canonicalize")
+            .join("CLAUDE.project.md")
+    );
     assert_eq!(c.resolved_name, "CLAUDE.project.md");
     // Neither file came into existence (preflight changes nothing).
     assert!(!creation_repo.join("AGENTS.md").exists());

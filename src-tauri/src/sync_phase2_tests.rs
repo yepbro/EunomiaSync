@@ -226,7 +226,8 @@ fn seed_repo_project(
     let repo = repos.join(format!("repo-{n}"));
     fs::create_dir(&repo).expect("the repository folder must be creatable");
     fs::create_dir(repo.join(".git")).expect("the .git directory must be creatable");
-    let canonical = fs::canonicalize(&repo).expect("canonicalizing the fresh repo must work");
+    let canonical =
+        eunomia_fs::paths::canonicalize(&repo).expect("canonicalizing the fresh repo must work");
     let path = Box::leak(canonical.to_string_lossy().into_owned().into_boxed_str());
     let id = tauri::async_runtime::block_on(database_of(app).run(move |tx| {
         eunomia_store::projects::create(
@@ -491,8 +492,8 @@ fn ready_projects_with_files_get_verified_copies_and_ok_records() {
     // FIPS-oracle digest and size, the run's one created_at stamp.
     let records = records_of(&app, &phase1.run_id);
     assert_eq!(records.len(), 2, "one record per copy");
-    let first_source =
-        fs::canonicalize(&first_target).expect("the fixture target must canonicalize");
+    let first_source = eunomia_fs::paths::canonicalize(&first_target)
+        .expect("the fixture target must canonicalize");
     assert_eq!(records[0].project_id, first);
     assert_eq!(
         records[0].source_path,
@@ -544,7 +545,8 @@ fn a_source_matching_the_last_copy_dedups_into_the_existing_record() {
     seed_assigned_instruction(&app, &project, "Be brief.");
     let target = repo.join("AGENTS.md");
     fs::write(&target, b"abc").expect("writing the fixture must work");
-    let resolved = fs::canonicalize(&target).expect("the fixture target must canonicalize");
+    let resolved =
+        eunomia_fs::paths::canonicalize(&target).expect("the fixture target must canonicalize");
     let source_path = resolved
         .to_str()
         .expect("the canonical path is UTF-8")
@@ -808,8 +810,8 @@ fn a_copy_error_aborts_the_run_sweeps_the_copies_and_resets_the_rows() {
 
     // The injection: the SECOND eligible copy (the failing project's)
     // answers with the typed write-path error (T-F1's shape).
-    let failing_source =
-        fs::canonicalize(&failing_target).expect("the fixture target must canonicalize");
+    let failing_source = eunomia_fs::paths::canonicalize(&failing_target)
+        .expect("the fixture target must canonicalize");
     let injection = injected_backup(
         2,
         BackupError::CopyFailed {
@@ -1243,7 +1245,8 @@ fn a_vanished_recorded_copy_does_not_dedup() {
     seed_assigned_instruction(&app, &project, "Be brief.");
     let target = repo.join("AGENTS.md");
     fs::write(&target, b"abc").expect("writing the fixture must work");
-    let resolved = fs::canonicalize(&target).expect("the fixture target must canonicalize");
+    let resolved =
+        eunomia_fs::paths::canonicalize(&target).expect("the fixture target must canonicalize");
     let source_path = resolved.to_str().expect("the canonical path is UTF-8");
     let earlier_path = backup_relative_path(
         &ProjectId::new(project.clone()),
@@ -1461,7 +1464,8 @@ fn a_copy_vanishing_inside_the_hash_window_is_made_fresh() {
     seed_assigned_instruction(&app, &project, "Be brief.");
     let target = repo.join("AGENTS.md");
     fs::write(&target, b"abc").expect("writing the fixture must work");
-    let resolved = fs::canonicalize(&target).expect("the fixture target must canonicalize");
+    let resolved =
+        eunomia_fs::paths::canonicalize(&target).expect("the fixture target must canonicalize");
     let source_path = resolved.to_str().expect("the canonical path is UTF-8");
     let earlier_path = backup_relative_path(
         &ProjectId::new(project.clone()),

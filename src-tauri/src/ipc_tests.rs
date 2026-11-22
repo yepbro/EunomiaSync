@@ -7114,7 +7114,8 @@ fn sync_repo_project(
     let repo = repos.join(format!("repo-{n}"));
     std::fs::create_dir(&repo).expect("the repository folder must be creatable");
     std::fs::create_dir(repo.join(".git")).expect("the .git directory must be creatable");
-    let canonical = std::fs::canonicalize(&repo).expect("canonicalizing the fresh repo must work");
+    let canonical =
+        eunomia_fs::paths::canonicalize(&repo).expect("canonicalizing the fresh repo must work");
     let path = Box::leak(canonical.to_string_lossy().into_owned().into_boxed_str());
     let id = tauri::async_runtime::block_on(sync_database_of(app).run(move |tx| {
         eunomia_store::projects::create(
@@ -7737,7 +7738,12 @@ fn sync_run_completes_over_the_real_phases_and_serves_the_summary() {
     );
     assert_eq!(
         summary.projects[0].target_path.as_deref(),
-        Some(alpha_target.to_str().expect("the path is UTF-8")),
+        Some(
+            eunomia_fs::paths::canonicalize(&alpha_target)
+                .expect("the path is UTF-8 canonical")
+                .to_str()
+                .expect("the canonical path is UTF-8")
+        ),
     );
     // The byte-exact files: ALG-030 around the run's one marker.
     let written = std::fs::read_to_string(&alpha_target).expect("the file must be readable");
@@ -7819,7 +7825,12 @@ fn a_failing_backup_aborts_the_run_with_the_typed_envelope() {
     );
     assert_eq!(
         error.params.get("path").map(String::as_str),
-        Some(target.to_str().expect("the path is UTF-8")),
+        Some(
+            eunomia_fs::paths::canonicalize(&target)
+                .expect("the path is UTF-8 canonical")
+                .to_str()
+                .expect("the canonical path is UTF-8")
+        ),
         "BKP-005's path field (the resolved source)"
     );
     let details = error.details.expect("the envelope carries the details");
