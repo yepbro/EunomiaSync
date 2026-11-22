@@ -38,6 +38,8 @@
 //! cross-target checks (the D-099 precedent) and runs on the CI
 //! Windows leg.
 
+#![allow(clippy::print_stderr)] // test skip-notices and benchmark timings print deliberately
+
 mod common;
 
 use std::fs;

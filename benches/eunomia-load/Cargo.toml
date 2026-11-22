@@ -6,6 +6,11 @@ description = "Load benchmarks for EunomiaSync (spec 12.2, criterion): building 
 license.workspace = true
 publish = false
 
+[lints]
+# The workspace-wide clippy gate ([workspace.lints.clippy] in the root
+# Cargo.toml): no eprintln!/println! in production code.
+workspace = true
+
 [dependencies]
 # The build mechanics under measurement (spec 9.2 body, ALG-030 managed
 # text, DB-020 hash, DB-021 predicate, ALG-001 snapshot types) — the same

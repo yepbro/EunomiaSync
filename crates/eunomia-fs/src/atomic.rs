@@ -1293,6 +1293,8 @@ impl std::error::Error for AtomicWriteError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::print_stderr)] // test skip-notices and benchmark timings print deliberately
+
     use std::error::Error as _;
     use std::fs;
     use std::path::{Path, PathBuf};

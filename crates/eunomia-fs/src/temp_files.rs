@@ -473,6 +473,8 @@ pub fn remove_stale_tmp_files(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::print_stderr)] // test skip-notices and benchmark timings print deliberately
+
     use super::*;
     use std::error::Error as _;
     use std::time::Duration;

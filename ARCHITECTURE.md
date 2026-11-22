@@ -768,9 +768,11 @@ data the app cannot run without. Taking the rolling appender out of
 the path (T-255) also retired its `eprintln!`-on-failure sites — the
 Windows GUI abort exposure D-129 flagged; the crate's one remaining
 `eprintln!` (the worker's final flush at guard-drop shutdown) is
-unreachable in the app, which never drops the guard, and
-`src-tauri`'s own production code is kept `eprintln!`-free by a clippy
-gate (`#![deny(clippy::print_stderr)]` in `lib.rs` and `main.rs`).
+unreachable in the app, which never drops the guard, and every
+workspace crate's production code is kept `eprintln!`-free by the
+workspace-level clippy gate (`[workspace.lints.clippy]`
+`print_stderr`/`print_stdout` in the root `Cargo.toml`, inherited by
+each member manifest).
 
 SEC-008 is enforced structurally: every tracing event of the app is
 constructed in `logging.rs` from typed parameters (paths, operation

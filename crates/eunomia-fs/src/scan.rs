@@ -690,6 +690,8 @@ fn walk_thread_count() -> usize {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::print_stderr)] // test skip-notices and benchmark timings print deliberately
+
     use super::*;
     use std::collections::HashSet;
 

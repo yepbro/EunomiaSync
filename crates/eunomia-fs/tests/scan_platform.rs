@@ -27,6 +27,8 @@
 //! macOS groups compile on the other targets through the cross-target
 //! checks (the D-099 precedent) and run on their CI matrix legs.
 
+#![allow(clippy::print_stderr)] // test skip-notices and benchmark timings print deliberately
+
 mod common;
 
 use std::fs;

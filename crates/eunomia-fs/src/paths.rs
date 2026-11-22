@@ -1617,6 +1617,8 @@ impl std::error::Error for TargetPathError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::print_stderr)] // test skip-notices and benchmark timings print deliberately
+
     use super::*;
     use std::error::Error as _;
     use tempfile::TempDir;

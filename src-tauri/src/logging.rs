@@ -111,10 +111,11 @@
 //! the worker's final-flush failure at guard-drop shutdown
 //! (`worker.rs:86-88`) — the app never performs that shutdown (tao
 //! exits via `std::process::exit`, skipping destructors; see the
-//! guard paragraph below), and `src-tauri`'s own sources are kept
-//! `eprintln!`-free in production code by a clippy gate
-//! (`#![deny(clippy::print_stderr)]` in `lib.rs` and `main.rs`), the
-//! structural encoding of the
+//! guard paragraph below), and the whole workspace's own sources are
+//! kept `eprintln!`-free in production code by the workspace-level
+//! clippy gate (`[workspace.lints.clippy]` `print_stderr`/
+//! `print_stdout` in the root `Cargo.toml`, inherited by every member
+//! through `[lints] workspace = true`), the structural encoding of the
 //! D-032/D-129 Windows analysis.
 //!
 //! # SEC-008: events are constructed here, and only here

@@ -810,6 +810,8 @@ impl std::error::Error for BackupError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::print_stderr)] // test skip-notices and benchmark timings print deliberately
+
     use std::error::Error as _;
     use std::path::Component;
 

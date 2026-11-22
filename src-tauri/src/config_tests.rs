@@ -1626,3 +1626,184 @@ fn build_script_wires_the_windows_manifest() {
          ACL manifest (D-024)"
     );
 }
+
+#[test]
+fn every_workspace_member_inherits_the_lint_gate() {
+    // Arrange: the root manifest declares the print_stderr/print_stdout
+    // deny pair and the member list; each member manifest must opt in
+    // through `[lints] workspace = true` (T-275, the D-143 follow-up).
+    // Reading the CURRENT member list from the root manifest is the
+    // point: cargo's inheritance is opt-in per manifest, so a future
+    // crate added to the workspace without the stanza would silently
+    // escape the gate — this pin turns that red (review round 1, P3-3).
+    let root_manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../Cargo.toml");
+    let root_text =
+        std::fs::read_to_string(&root_manifest).expect("the root manifest must be readable");
+    let root: toml::Value = toml::from_str(&root_text).expect("the root manifest must parse");
+
+    // Act & Assert, part 1: the workspace-level gate itself must stay —
+    // both lints, both deny (the structural encoding of the D-032/D-129
+    // Windows analysis: a GUI release build has no stderr, and an
+    // `eprintln!` panic under `panic = "abort"` aborts the process).
+    let clippy_lints = root
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("clippy"))
+        .expect("the root manifest must define [workspace.lints.clippy]");
+    for lint in ["print_stderr", "print_stdout"] {
+        assert_eq!(
+            clippy_lints.get(lint).and_then(|level| level.as_str()),
+            Some("deny"),
+            "`{lint}` must stay `deny` in [workspace.lints.clippy]: the \
+             workspace-wide gate (D-143, T-275) keeps production code \
+             free of `eprintln!`/`println!` — logs go through the \
+             logging facade only"
+        );
+    }
+
+    // Act & Assert, part 2: every member the root lists must inherit.
+    // The floor keeps the loop non-vacuous (a parse accident or a
+    // silently shrunken member list must not read as compliance).
+    let members = root
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(|members| members.as_array())
+        .expect("the root manifest must list its workspace members");
+    assert!(
+        members.len() >= 5,
+        "the member list read from the root manifest must cover the \
+         whole workspace (five members as of T-275), not a parse \
+         accident"
+    );
+    let member_dir = |path: &str| -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(path)
+    };
+    let mut parsed: Vec<(&str, toml::Value)> = Vec::new();
+    for member in members {
+        let path = member
+            .as_str()
+            .expect("every workspace member must be a path string");
+        let manifest_path = member_dir(path).join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|error| {
+            panic!("reading `{}` must work: {error}", manifest_path.display())
+        });
+        let manifest: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|error| panic!("`{}` must parse: {error}", manifest_path.display()));
+        assert_eq!(
+            manifest
+                .get("lints")
+                .and_then(|lints| lints.get("workspace"))
+                .and_then(|workspace| workspace.as_bool()),
+            Some(true),
+            "`{path}` must inherit the workspace lints (`[lints] workspace \
+             = true` in its Cargo.toml): the print_stderr/print_stdout \
+             deny is workspace-wide, and a member without the stanza \
+             would silently escape the gate (D-143, T-275)"
+        );
+        parsed.push((path, manifest));
+    }
+
+    // Act & Assert, part 3: cargo auto-adds every path dependency that
+    // lies inside the workspace root as an implicit member — such a
+    // crate never appears in the `members` array, so the explicit-list
+    // loop above cannot see it and it, too, must carry the stanza
+    // (round-2 review, P3-3). The dependency tables of every parsed
+    // manifest — direct, dev, build, and each `target.'cfg'` arm — are
+    // walked; dep targets outside the root (none exist today) and the
+    // workspace root itself are not auto-members.
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()
+        .expect("the workspace root must canonicalize");
+    let mut implicit_members: Vec<std::path::PathBuf> = Vec::new();
+    for (member_path, manifest) in &parsed {
+        let member_dir = member_dir(member_path);
+        for deps in dependency_tables(manifest) {
+            collect_root_path_deps(deps, &member_dir, &workspace_root, &mut implicit_members);
+        }
+    }
+    let explicit: Vec<std::path::PathBuf> = parsed
+        .iter()
+        .map(|(path, _)| member_dir(path).canonicalize().expect("member dirs exist"))
+        .collect();
+    for member in implicit_members
+        .iter()
+        .filter(|path| !explicit.contains(path))
+    {
+        let manifest_path = member.join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|error| {
+            panic!("reading `{}` must work: {error}", manifest_path.display())
+        });
+        let manifest: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|error| panic!("`{}` must parse: {error}", manifest_path.display()));
+        assert_eq!(
+            manifest
+                .get("lints")
+                .and_then(|lints| lints.get("workspace"))
+                .and_then(|workspace| workspace.as_bool()),
+            Some(true),
+            "`{}` is an implicit workspace member (a path dependency \
+             inside the workspace root, cargo's auto-membership rule) \
+             and must inherit the workspace lints (`[lints] workspace = \
+             true` in its Cargo.toml): without the stanza it silently \
+             escapes the print_stderr/print_stdout gate (D-143, T-275; \
+             round-2 review P3-3)",
+            manifest_path.display()
+        );
+    }
+}
+
+/// The dependency tables of one manifest: the direct, dev and build
+/// sets, plus the same three under every `target.'cfg'` arm.
+fn dependency_tables(manifest: &toml::Value) -> Vec<&toml::Table> {
+    const DEP_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+    let mut tables = Vec::new();
+    for name in DEP_TABLES {
+        if let Some(deps) = manifest.get(name).and_then(|deps| deps.as_table()) {
+            tables.push(deps);
+        }
+    }
+    if let Some(targets) = manifest
+        .get("target")
+        .and_then(|targets| targets.as_table())
+    {
+        for platform in targets.values() {
+            for name in DEP_TABLES {
+                if let Some(deps) = platform.get(name).and_then(|deps| deps.as_table()) {
+                    tables.push(deps);
+                }
+            }
+        }
+    }
+    tables
+}
+
+/// Collects every path dependency of `deps` that resolves strictly
+/// inside `workspace_root` (cargo's implicit-membership rule) into
+/// `found`. Canonicalized, deduplicated by the caller's filter.
+fn collect_root_path_deps(
+    deps: &toml::Table,
+    member_dir: &std::path::Path,
+    workspace_root: &std::path::Path,
+    found: &mut Vec<std::path::PathBuf>,
+) {
+    for (name, spec) in deps {
+        let Some(path) = spec.get("path").and_then(|path| path.as_str()) else {
+            continue;
+        };
+        let resolved = member_dir
+            .join(path)
+            .canonicalize()
+            .unwrap_or_else(|error| {
+                panic!(
+                    "the path dependency `{name}` (`{path}`) must resolve: \
+                     {error}"
+                )
+            });
+        if resolved != workspace_root && resolved.starts_with(workspace_root) {
+            found.push(resolved);
+        }
+    }
+}

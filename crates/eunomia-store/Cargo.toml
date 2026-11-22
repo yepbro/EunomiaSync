@@ -6,6 +6,11 @@ description = "Database layer for EunomiaSync: SQLite storage and embedded SQL m
 license.workspace = true
 publish = false
 
+[lints]
+# The workspace-wide clippy gate ([workspace.lints.clippy] in the root
+# Cargo.toml): no eprintln!/println! in production code.
+workspace = true
+
 [dependencies]
 # rusqlite version must stay aligned with rusqlite_migration's own rusqlite
 # requirement (^0.41), otherwise two libsqlite3-sys copies (links = "sqlite3")

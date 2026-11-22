@@ -13,6 +13,24 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
 
+# No `eprintln!`/`eprint!`/`println!`/`print!` anywhere in the
+# workspace's production code — logs go through the tracing facade
+# (logging.rs). The structural encoding of the D-032/D-129 Windows
+# analysis: a GUI release build has no stderr, and an `eprintln!` panic
+# under `panic = "abort"` aborts the process. Every member inherits the
+# gate through `[lints] workspace = true` (the
+# `every_workspace_member_inherits_the_lint_gate` pin in config_tests.rs
+# keeps a future member from silently skipping the opt-in); test code
+# that prints deliberately (skip-notices, benchmark timings) allows the
+# lint locally (D-143; extended workspace-wide by T-275). Boundary:
+# build scripts compile under plain rustc even in `cargo clippy`, where
+# tool lints of inactive tools are ignored — the gate cannot fire inside
+# them, benignly, since a build script's `println!("cargo:...")` is its
+# protocol.
+[workspace.lints.clippy]
+print_stderr = "deny"
+print_stdout = "deny"
+
 [profile.release]
 codegen-units = 1
 lto = true

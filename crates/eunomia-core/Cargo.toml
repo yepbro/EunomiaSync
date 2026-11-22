@@ -6,6 +6,11 @@ description = "Core library for EunomiaSync: domain types, markdown, diff, sync,
 license.workspace = true
 publish = false
 
+[lints]
+# The workspace-wide clippy gate ([workspace.lints.clippy] in the root
+# Cargo.toml): no eprintln!/println! in production code.
+workspace = true
+
 [dependencies]
 # Dependency allow-list pinned by the spec (docs/spec.md 5.2): core stays
 # pure logic with no I/O — database code lives in `eunomia-store`. `serde`

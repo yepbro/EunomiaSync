@@ -31,6 +31,8 @@
 //! existing. The real `.git` folders behind such roots are
 //! `eunomia_fs::temp_repos`' own suite's subject.
 
+#![allow(clippy::print_stderr)] // test skip-notices and benchmark timings print deliberately
+
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 

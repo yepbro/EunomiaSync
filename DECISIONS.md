@@ -13997,6 +13997,99 @@ print_stdout gate; the CappedDailyWriter retirement when upstream
 ships size rotation; the three Windows GUI smoke items). The cards
 are the tracking unit; this note only records their existence.
 
+Addendum (2026-11-22, T-275 — this entry's round-1 P3-3 follow-up,
+completing it): the print_stderr/print_stdout gate moved from
+per-file attributes to the workspace level. What moved where: the
+root `Cargo.toml` gained `[workspace.lints.clippy]` with
+`print_stderr = "deny"` and `print_stdout = "deny"` — the rationale
+comment lives there once, including the boundaries (the `print!`
+family is covered by the stdout half; build scripts compile under
+plain rustc even in `cargo clippy`, where tool lints of inactive
+tools are ignored, and a build script's `println!("cargo:...")` is
+its protocol, so that gap is benign); the per-file
+`#![deny(clippy::print_stderr)]` and its rationale comment are
+removed from `src-tauri/src/lib.rs` and `main.rs`; every workspace
+member — `crates/eunomia-core`, `crates/eunomia-fs`,
+`crates/eunomia-store`, `src-tauri`, `benches/eunomia-load` —
+inherits through `[lints] workspace = true`. The gate bites in every
+crate, proven by mutation: a throwaway `eprintln!` in
+`crates/eunomia-core/src/lib.rs` turned `cargo clippy -p
+eunomia-core --all-targets -- -D warnings` red (exit 101, `note:
+requested on the command line with -D clippy::print-stderr` — the
+denial rides the workspace lints, not any per-file attribute), then
+reverted to byte-identical. The newly gated test prints got the
+house pattern's local allows (the comment "test skip-notices and
+benchmark timings print deliberately"): module-level inside the six
+eunomia-fs `#[cfg(test)] mod tests` blocks (paths, scan,
+write_access, atomic, temp_files, backup — 24 `eprintln!` root-skip
+notices), file-level in the integration suites
+`crates/eunomia-fs/tests/scan_platform.rs` and
+`tests/atomic_platform.rs` (one root-skip notice each) and
+`crates/eunomia-store/tests/data_sets.rs` (one set-L generation
+timing print). Allow inventory after the move — what still prints,
+where, under which allow: the nine sites above plus the
+pre-existing src-tauri allows (file-level in
+`src-tauri/src/{ipc,sync_phase2,dirty_recalc}_tests.rs`, fn-level at
+`src-tauri/src/commands.rs:4648`; that file is a frozen zone this
+window, and its "the crate's deny covers production code" comment
+stays truthful in substance under the wider gate — the production
+code is still covered, now by inheritance — though its backticked
+attribute reference is literally stale (the deny no longer lives in
+the crate's roots); refreshing that one comment line is reported as
+a follow-up for the window that opens `commands.rs`). No `println!`
+exists in workspace code outside the build script's `cargo:`
+directives, which sit outside the gate's reach (the boundary above);
+the stdout half needed no allows. The opt-in
+inheritance drift is pinned structurally: `config_tests.rs` gained
+`every_workspace_member_inherits_the_lint_gate` (parses the root
+manifest with the existing `toml` dependency, asserts both lints are
+exactly `deny`, walks the current `members` list asserting each
+manifest's `[lints] workspace = true`; mutation-verified red in both
+directions — a stripped member stanza, a root lint weakened to
+"warn" — then green). Toolchain: `rust-toolchain.toml` pins
+`channel = "stable"`, resolving to cargo/rustc 1.99.1 on the dev
+machine; `[workspace.lints]` is stable since Cargo 1.74. Docs
+updated in the same change (Rule 11): the `logging.rs` module docs
+and ARCHITECTURE.md's Logging section now point at the workspace
+gate; this entry's text above keeps describing the per-file
+placement as history. Checks: `cargo fmt --check`,
+`cargo clippy --workspace --all-targets -- -D warnings` and
+`cargo test --workspace` all green by exit code — the clippy run is
+the gate's own proof; the test run reports 34 result blocks, the
+pin being the +1.
+Review round 1 (deepseek-v4.1-flash, report
+`.opencode/reviews/t275-round1.md`, VERDICT: APPROVE — 3 × P3):
+P3-1 "no DECISIONS entry" resolved by this addendum (the card
+prescribes the addendum form for this task); P3-2 accepted (the
+comment boundaries above); P3-3 accepted as the pin test.
+Review round 2 (hy4-flash-free, report
+`.opencode/reviews/t275-round2.md`, VERDICT: APPROVE — 3 × P3,
+re-verified independently: own full green check chain, the member
+coverage, the allow inventory, the round-1 fixes): P3-1 (the
+implicit-member gap) accepted as the pin's part 3 — it walks every
+parsed manifest's dependency tables (direct/dev/build plus each
+`target.'cfg'` arm) and requires the stanza from path dependencies
+resolving strictly inside the workspace root, cargo's
+auto-membership rule; mutation-verified with a throwaway path-dep
+crate without the stanza (red with the implicit-member message,
+then removed). P3-2 accepted as the comment-staleness note and the
+follow-up above. P3-3 accepted (the two precision fixes). Honest
+boundary, recorded as an incident: one full-suite run between the
+fix-ups and the greens exited 101 on a test failure whose identity
+was lost to the executor's own output pipeline (a `grep -c` consumed
+the log — a run-hygiene error, admitted); the pin test was not the
+failure (wrong position in the suite order, and it passed both
+greens and both mutation-reds), two consecutive full-suite greens
+followed on the identical tree under lighter load (~6.7 Gi swap was
+in use during the red run). The corrective practice: tee the full
+log to a file before filtering, so the exit code always points at an
+inspectable record.
+
+Orchestrator addendum (merge, 2026-11-22): the follow-up above is
+tracked — one card in the board INBOX ("Follow-up T-275: the stale
+deny(print_stderr) reference in commands.rs:4691-4694"). The card is
+the tracking unit; this note only records its existence.
+
 ### D-144 — T-257: the watcher refresh wired into `project_add_manual` and the `projects_list` column carrier — D-137's follow-ups 2 and 5 closed — 2026-11-22
 
 Problem: D-137 recorded two follow-ups this card closes. (2) the

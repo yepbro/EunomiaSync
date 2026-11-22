@@ -6,6 +6,11 @@ description = "File-system layer for EunomiaSync: repository scan, path normaliz
 license.workspace = true
 publish = false
 
+[lints]
+# The workspace-wide clippy gate ([workspace.lints.clippy] in the root
+# Cargo.toml): no eprintln!/println! in production code.
+workspace = true
+
 [features]
 default = []
 # Fault injection for tests (spec 15.1's "failure points in `fs`",
