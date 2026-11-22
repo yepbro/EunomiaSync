@@ -935,6 +935,14 @@ mod tests {
         (id.to_owned(), dirty)
     }
 
+    #[test]
+    fn the_debounce_window_is_the_spec_literal() {
+        // DB-022 pins 150 ms; the burst test runs with a widened
+        // window (CI 44999287190), so the production value needs its
+        // own pin (review finding P2-2).
+        assert_eq!(super::DEBOUNCE, Duration::from_millis(150));
+    }
+
     fn change(id: &str, dirty: bool) -> ProjectDirtyChange {
         ProjectDirtyChange {
             project_id: id.to_owned(),
@@ -942,10 +950,6 @@ mod tests {
         }
     }
 
-    /// The hash of the plain `Be brief.` body over the fixture
-    /// project's target path — the value a sync would store for that
-    /// build (DB-024), spelled directly through the public core seam,
-    /// never through the code under test.
     /// The DB-020 target of the `id` fixture, built the way the pass
     /// builds it (`root.join(file)`): on Windows the join spells `\`,
     /// so a hardcoded `/repos/p1/AGENTS.md` literal diverges from the
@@ -955,6 +959,10 @@ mod tests {
         Path::new("/repos").join(id).join(file)
     }
 
+    /// The hash of the plain `Be brief.` body over the fixture
+    /// project's target path — the value a sync would store for that
+    /// build (DB-024), spelled directly through the public core seam,
+    /// never through the code under test.
     fn synced_hash_of_plain_body() -> String {
         build_hash(
             Scheme::A,

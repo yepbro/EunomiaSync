@@ -9006,279 +9006,6 @@ its P2 (the extra-hint shape must reject unknown fields like
 `extra_file_from_json`, not silently drop them) and P3 (integer
 `limit`/`offset`) were applied before the final amend.
 
-### D-111 — Platform-true facts in tests: OS error codes and canonical path expectations — 2026-11-21
-
-Problem: two Windows-only CI failures in a row (runs 44864444674,
-44865217431), both invisible on the Linux dev machine and both in
-test expectations, not production code. (1) The T-069 fault-injection
-test injected `io::Error::from_raw_os_error(28)` ungated: on Unix 28
-is ENOSPC (std maps it to `ErrorKind::StorageFull`), on Windows it is
-`ERROR_OUT_OF_PAPER` — so the production `StorageFull` classification
-was right to refuse `DiskFull` and the test failed. (2) Four T-074
-IPC tests built expected paths with `std::fs::canonicalize`, which
-prepends the `\\?\` verbatim prefix on Windows, while every command
-returns the DB-030 canonical form (dunce, no prefix); the first run's
-leg aborted at (1) before reaching them, masking (2) for one round.
-
-Solution — two rules for every test that states a platform fact:
-
-- A raw OS error is a platform statement. When a test injects or
-  asserts one, it must either gate by platform (`#[cfg(unix)]` /
-  `#[cfg(windows)]` with the platform's code — ENOSPC 28 vs
-  `ERROR_DISK_FULL` 112, both `StorageFull` in std) or use
-  `io::Error::new(ErrorKind::…)` when only the kind matters.
-- A canonical-path expectation is built with
-  `eunomia_fs::paths::canonicalize` (the DB-030 form the commands
-  return), never `std::fs::canonicalize` — the two diverge by the
-  verbatim prefix on Windows and are identical on Unix, which is
-  exactly why Linux runs cannot catch it.
-
-Service commits 799163f (T-069) and 430bf22 (T-074) carry the fixes;
-subagent briefs for tasks with IPC/fs tests quote these two rules.
-
-### D-109 — The §12.2 data set generator: repository-driven fill in one transaction, determinism defined over a stabilized view, and the two-crate split (store fill / fs temp Git roots) — 2026-11-20
-
-Problem: T-136 needs the M and L benchmark databases of spec §12.2
-(M: 50 projects, 200 instructions; L: 500 projects, 1,000
-instructions, 100 headings, 3 variants per instruction, 100,000
-assignments — the confirmed upper-limit scenario) plus the temporary
-Git folders the future sync benchmarks will write into, produced
-deterministically for T-137+. Open questions: where the generator
-lives (the store cannot create folders, the fs crate cannot write
-rows, and no new crate/dependency edge is allowed); what
-determinism can even mean when the repositories own the id and
-timestamp columns (UUIDv7 `new_id`, wall-clock `now_utc` — D-031);
-how the L assignments spread; and what "generate again into the same
-database" means.
-
-Solution: two modules, one per crate, composed by the benchmark
-consumer.
-
-- **Store side — `eunomia_store::data_sets`.** `DataSetSpec`
-  (projects / headings / instructions / variants-per-instruction /
-  assignments-per-project) with the consts `M` and `L` carrying
-  §12.2's exact numbers (M: 50/0/200/1/40 → 2,000 assignments; L:
-  500/100/1000/3/200 → 100,000). `generate(&mut Connection, &spec,
-&[ProjectRoot])` fills an **empty** database through the
-  repositories' own create methods only — `projects::create`,
-  `create_item`, `create_variant`, `assign` — inside one transaction
-  it owns: the standalone-connection seam for benchmarks and
-  fixtures, which is why it takes `&mut Connection` and cannot be
-  composed under `Db::run` (D-037's executor composition stays the
-  app layer's). Integrity is the repositories' guarantee, not a
-  generator re-implementation: dense `position`/`sort_order` come
-  from the append semantics, DB-010 from the constructive
-  main-variant rules, D-02 from `assign`. Typed refusals before the
-  first write: `NotEmpty`, `NotEnoughRoots`,
-  `AssignmentsPerProjectTooHigh`, `InstructionsRequired`,
-  `VariantsRequired`; repository/transaction failures roll the whole
-  run back (empty database → a retry converges: the idempotency
-  semantics are "fresh fixture or rejection", not merge — pinned by
-  a duplicate-path-key rollback test).
-- **Determinism = the stabilized view.** No RNG exists to seed —
-  every value is a pure function of the profile counts and the row
-  ordinal. The contract is defined over what the generator cannot
-  control stripped away: `stabilized(conn, base)` reads the ALG-001
-  collections back through the repositories with ids mapped to
-  creation ordinals, timestamps dropped, and the base prefix
-  stripped **by component count** (components split on `/` and `\`,
-  empties ignored) from both `path` and `path_key`. Component
-  counting — not text-prefix matching — is what makes the rule
-  platform-true: DB-030's keying re-spells separators, NFC and case
-  (folded keys on Windows/macOS) but never changes component
-  structure, so one count strips both columns everywhere (round-1
-  review's P1: a single text prefix silently never matches a folded
-  `path_key`). Two runs with the same profile and equally named
-  roots produce **equal stabilized views** while their raw ids
-  differ — pinned as the falsifiable determinism test, with folded
-  key spellings in the fixture roots and both the negative half
-  (without `base`, the views differ: the stripping is part of the
-  definition) and a unit pin of the strip's spelling-agnosticism.
-- **The L spread.** Project `p`, assignment `k` → instruction
-  `(37·p + k) mod 1000`, variant `(p + k) mod 3`. Distinctness needs
-  no coprimality (round-2 review's correction: `k < 200 ≤ 1000`
-  alone makes the k-window injective, so no stride check exists);
-  37 is purely the spread constant — a hop big enough that
-  consecutive projects' windows interleave across the whole library
-  instead of stacking into bands. Coverage: all 1,000 instructions
-  appear, ≈100 assignments each (90–110 exactly, by the formula).
-  The closed form is recomputed in the tests by hand — never through
-  the module's helpers — over all 100,000 L pairs and all 2,000 M
-  pairs. Layout: headings partition the instructions into near-equal
-  consecutive groups (exactly 10×100 for L; the 4/3/3 remainder
-  branch and the empty-heading edge pinned separately), heading
-  levels cycle `2..=6`, all rows active (§12.2 measures the plain
-  upper-limit scenario). Variant names run `Main`, `Compact`,
-  `Detailed`, then numbered `Alternative 03`… — distinct NOCASE
-  names for any variant count (a cycling scheme would collide on the
-  §6.9 active-sibling uniqueness). Variant texts are sized for
-  §12.2's sync premise (≈52 characters average → a fully assigned
-  set-L project builds ≈10 KB). `set L` also reads back through
-  `build_snapshot::read` — the whole ALG-001 graph validates, so
-  T-137 benchmarks start from a snapshot the sync pipeline accepts.
-- **fs side — `eunomia_fs::temp_repos`.** `TempRepos::create(count,
-label)` lays out `<tempdir>/<label>/repo-<i:04>` with a minimal but
-  real `.git` (`HEAD`, `config`, `objects/`, `refs/` — git's own
-  validity set; the scan's ALG-052 probe and `git rev-parse` both
-  accept it), canonical paths + DB-030 keys ready for
-  `ProjectRoot`, auto-removed with the guard (the crate's idle
-  `tempfile` dependency's first staging use). Labels are validated as
-  one safe component (no separators, no `..`) so nothing escapes the
-  guard's cleanup. The two crates keep no edge between them —
-  benchmarks compose (`TempRepos` → roots → `generate`), the store
-  stays filesystem-free, fs stays database-free. Group directory
-  stored canonical (macOS `/var` → `/private/var`), roots always
-  canonical so `path`/`path_key`/scan root spellings agree.
-
-Tests: 5 unit + 7 integration in `tests/data_sets.rs` (M sizes,
-invariants and stabilized collections with M's distribution; L
-sizes/distribution/snapshot — the one heavy L fill, ≈25 s in a debug
-build; determinism both halves with folded key spellings; typed
-rejections writing nothing; heading layout edges 4/3/3 and 1/1/1/0/0
-with variant names beyond the third; the duplicate-key mid-fill
-rollback; stabilized corrupt-cell propagation through the
-`ignore_check_constraints` seam) and 2 unit + 4 integration in
-`tests/temp_repos.rs` (naming, unsafe labels, layout, canonical
-keys, the scan finding every root, teardown, empty fixture).
-
-### D-110 — vue-i18n 11 with the in-repo `eunomia/no-raw-ui-text` lint gate; pipe plurals as UI-020's "ICU plurals" — 2026-11-20
-
-Problem: UI-020 (spec §11.5) requires vue-i18n with an `en.json` catalog
-of dotted feature keys, pluralization ("ICU plurals"), and — per the
-card's acceptance criteria — a linter or test that catches a template
-string that is not going through a key. Three decisions were open: the
-vue-i18n version, the plural format reading, and the enforcement
-mechanism (`vue/no-raw-text` was suggested, but eslint-plugin-vue 10.12.1
-ships no such rule — verified against the installed package's 256-rule
-list; the rule of that name lives in `@intlify/eslint-plugin-vue-i18n`,
-an extra dependency outside the card's vue-i18n-only allow-list).
-
-Solution (T-142):
-
-- **Dependency.** `vue-i18n@^11.4.23` (dependencies) — the current v11
-  stable line on the registry (`latest` dist-tag), peer `vue ^3.0.0`,
-  `node >= 22` (the repo pins node 22/pnpm 12). v12 is alpha-only; v9/v10
-  lines carry `legacy9`/`legacy10` dist-tags. Composition API mode
-  (`legacy: false`), one instance in `src/i18n/index.ts`, installed in
-  `main.ts`; components use `useI18n()`, no global `$t` reliance.
-- **Catalog and keys.** `src/locales/en.json`, nested namespaces per UI
-  feature reached as dotted paths (UI-020's `project.settings.title`
-  convention): `app.*` for the shell today (title, version line,
-  tagline, logo alts, tracked-projects plural), later screens add their
-  own namespaces. The catalog generic (`MessageSchema = typeof en`)
-  feeds vue-i18n's key autocomplete only — its `t()` accepts any string,
-  so unknown keys are NOT a compile error; typo protection is behavioral:
-  a catalog-coverage test asserts every `t('…')` literal in `.vue`
-  templates exists (`te(key)`), and App.spec pins the rendered tagline
-  and alts (a missing key renders as the literal key string, warned
-  only). `en` is the single locale and the fallback; NFR-004…006's
-  backend error texts will resolve against this same catalog when their
-  `message_key` consumers land.
-- **Plurals.** vue-i18n's pipe-separated plural forms (`zero | one |
-other` for English, `{count}` interpolation, count passed as the
-  plural choice) — vue-i18n's CLDR plural-rule message format, which is
-  the tool-native reading of UI-020's "ICU plurals"; adopting ICU
-  MessageFormat syntax literally would need an extra message-compiler
-  dependency outside the allow-list. The working UI-visible example is
-  the tracked-projects line in App.vue: count from `projects_list`
-  through the ipc facade, rendered with
-  `t('app.trackedProjects', { count: n(projectCount) }, projectCount)` —
-  the explicit numeric argument selects the plural form, `n()` formats
-  the interpolated count.
-- **The lint gate.** A custom rule, `eunomia/no-raw-ui-text`
-  (`src/i18n/no-raw-ui-text.ts`, registered in eslint.config.js for
-  `**/*.vue`): a template text node containing any Unicode letter or
-  digit is a violation — punctuation/symbols are layout — and so is the
-  literal of a user-facing attribute (`alt`, `title`, `placeholder`,
-  `label`, `aria-label`, `aria-placeholder`, `aria-description`,
-  `aria-roledescription`, `aria-valuetext`, `aria-braillelabel`,
-  `aria-brailleroledescription`, plus `value` on submit-style inputs,
-  where the browser renders it as the control's label) and an
-  interpolation or bound expression that shows bare literal copy —
-  `{{ 'Save' }}`, `{{ 'Sa' + 've' }}`, ``{{ `Save` }}``,
-  `{{ t('k') + ' — Beta' }}`, `:title="'Save'"`: only `+`
-  concatenations, template literals and lone literals are walked, and
-  everything inside a `t`/`n`/`$t` call counts as translation data, so
-  comparisons (`x === 'en'`) and filter calls never fire; bound key
-  expressions (`:alt="t('…')"`) are the sanctioned form. A copy prefix
-  around an interpolation (`v{{ version }}` — text-node half — or
-  ``{{ `v${version}` }}`` — expression half) is caught too, which is
-  why the version line moved into the `app.versionLine` message with a
-  `{version}` placeholder. Options `ignorePattern`/`ignoreText` exist
-  for the day a genuinely text-like literal needs an exemption. Known
-  limit, accepted: copy computed in `<script setup>` and rendered via
-  `{{ label }}` is invisible to this template-only rule, and so is copy
-  smuggled through non-copy expression shapes (method calls returning
-  literals, ternary arms); the catalog-coverage test catches the typo
-  half, and a script-side scan would be its own rule if real screens
-  start doing it. eslint.config.js
-  imports the rule with an explicit `.ts` extension — Node's type
-  stripping (default since Node 22.18; CI floats `node-version: 22`,
-  local is 22.23) loads it at lint time, and vue-tsc checks the rule
-  file itself (under `src/`); the config file belongs to no tsconfig
-  project, so its import is unchecked wiring (verified end to end:
-  eslint red on a planted raw string, green after removal).
-- **The keyed/unkeyed boundary.** Not keyed, by design: mock-layer and
-  fixture data (`src/ipc/**` — project names, journal actions, error
-  message keys — data the UI renders, not UI chrome), the generated
-  `src/bindings.ts`, `index.html` (plain HTML, no Vue template; the
-  window title is Tauri's), URLs, CSS classes, and code identifiers.
-  The rule scans `.vue` templates only, which matches that boundary.
-- **Tests.** `src/i18n/no-raw-ui-text.spec.ts` pins the rule red/green
-  with ESLint RuleTester (the card's "red example": a raw template
-  string must fail; also the copy-prefix, attribute-literal,
-  expression-literal and submit-input `value` cases, plus both exemption
-  valves and a non-matching `ignorePattern`) and the eslint.config.js
-  wiring (rule present at error severity for `**/*.vue`, guarded by a
-  `@ts-expect-error` import of the JS config — no declaration file by
-  design); `src/i18n/i18n.spec.ts` pins nested keys, named
-  interpolation, the 0/1/2/5 plural forms, the `n()`-formatted count at
-  the message level, and the catalog coverage over every `t('…')`
-  literal in `.vue` templates; `App.spec.ts` mounts through the i18n
-  plugin and proves the plural line end to end over the mock facade with
-  exactly 1/2/5/0 active projects, an active-vs-archived counting case
-  (3 rows, 2 archived → "1 project tracked"), and the rendered tagline
-  and alts (per-test `resetMockState` worlds). The T-141
-  mock layer is untouched — all its suites stay green; e2e assertions
-  (title, heading text, `v\d` version line) keep holding because the
-  keyed rendering produces the same strings.
-
-Review: two rounds — findings and fixes in `.opencode/reviews/t142-round*.md`
-(owner-local). Round 1 (deepseek-v4.1-flash): no P0/P1; 2 × P2, 5 × P3,
-all applied. P2-1 — the "typed catalog" claim was false (vue-i18n's `t`
-accepts any string, so a key typo passed lint, typecheck and every
-test): the claim is corrected here and in `src/i18n/index.ts`, and the
-real guards added (the catalog-coverage `te()` test and the tagline/alt
-assertions in App.spec). P2-2 — the rule missed string literals inside
-template expressions (`{{ 'Save' }}`, `:title="'Save'"`): the
-`VExpressionContainer` literal case added with red/green pins; the
-script-side constant remains a documented known limit. P3s applied:
-`aria-valuetext`/braille attributes and submit-input `value` joined the
-attribute set (with text-input/option non-cases pinned); the
-`ignorePattern`/`ignoreText` exemption valves are tested (including a
-non-matching pattern); the plural tests gained an archived-rows case
-that separates counting active from counting everything; the eslint
-config comment now states the real Node floor (type stripping default
-since 22.18) and drops the incorrect `allowImportingTsExtensions`
-rationale (the config belongs to no tsconfig project); the count
-interpolates through the composer's `n()` ("1,000 projects tracked",
-pinned). Declined: reconciling spec §12's dangling NFR-004…006 IDs —
-`docs/spec.md` is outside this task's file scope (a docs card material).
-Round 2 (hy4-flash-free): no P0/P1/P2; 4 × P3, all applied. The
-submit-input `value` check compared the element's source-cased
-`rawName` (an uppercase `<INPUT type="submit">` slipped by) — it now
-compares the parser's lowercased `name`, with an uppercase red pin;
-the expression gate only fired on literal roots (`t('k') + ' — Beta'`,
-`'Sa' + 've'`, `` `Save` `` passed clean) — the visitor now walks the
-narrow copy-only shapes (`+` chains, template literals, lone literals,
-skipping `t`/`n`/`$t` call subtrees), with red pins for all three forms
-plus `` `v${version}` `` and green pins for comparisons/filters; the
-catalog-coverage scan read raw sources (a `t('…')` mention inside a
-comment counted as a usage) — comments are stripped before matching and
-the raw-scan intent plus its false-negative surface (aliased `t`,
-dynamic keys) documented in the spec; D-110's plural call form was a
-wrong shorthand (`t(key, n)`) — it now quotes the real expression.
-
 ### D-112 — Project availability as a service: the session diff cache, the baseline rule, and the first specta event (a manual `Event` impl) — 2026-11-20
 
 Problem: T-079 turns D-09/DB-032's three check points (startup,
@@ -12558,6 +12285,279 @@ round-1 additions; it now states the actual suite (8 mirror pins +
 the profile unit test). The review phase is complete after this
 round (no third round).
 
+### D-111 — Platform-true facts in tests: OS error codes and canonical path expectations — 2026-11-21
+
+Problem: two Windows-only CI failures in a row (runs 44864444674,
+44865217431), both invisible on the Linux dev machine and both in
+test expectations, not production code. (1) The T-069 fault-injection
+test injected `io::Error::from_raw_os_error(28)` ungated: on Unix 28
+is ENOSPC (std maps it to `ErrorKind::StorageFull`), on Windows it is
+`ERROR_OUT_OF_PAPER` — so the production `StorageFull` classification
+was right to refuse `DiskFull` and the test failed. (2) Four T-074
+IPC tests built expected paths with `std::fs::canonicalize`, which
+prepends the `\\?\` verbatim prefix on Windows, while every command
+returns the DB-030 canonical form (dunce, no prefix); the first run's
+leg aborted at (1) before reaching them, masking (2) for one round.
+
+Solution — two rules for every test that states a platform fact:
+
+- A raw OS error is a platform statement. When a test injects or
+  asserts one, it must either gate by platform (`#[cfg(unix)]` /
+  `#[cfg(windows)]` with the platform's code — ENOSPC 28 vs
+  `ERROR_DISK_FULL` 112, both `StorageFull` in std) or use
+  `io::Error::new(ErrorKind::…)` when only the kind matters.
+- A canonical-path expectation is built with
+  `eunomia_fs::paths::canonicalize` (the DB-030 form the commands
+  return), never `std::fs::canonicalize` — the two diverge by the
+  verbatim prefix on Windows and are identical on Unix, which is
+  exactly why Linux runs cannot catch it.
+
+Service commits 799163f (T-069) and 430bf22 (T-074) carry the fixes;
+subagent briefs for tasks with IPC/fs tests quote these two rules.
+
+### D-109 — The §12.2 data set generator: repository-driven fill in one transaction, determinism defined over a stabilized view, and the two-crate split (store fill / fs temp Git roots) — 2026-11-20
+
+Problem: T-136 needs the M and L benchmark databases of spec §12.2
+(M: 50 projects, 200 instructions; L: 500 projects, 1,000
+instructions, 100 headings, 3 variants per instruction, 100,000
+assignments — the confirmed upper-limit scenario) plus the temporary
+Git folders the future sync benchmarks will write into, produced
+deterministically for T-137+. Open questions: where the generator
+lives (the store cannot create folders, the fs crate cannot write
+rows, and no new crate/dependency edge is allowed); what
+determinism can even mean when the repositories own the id and
+timestamp columns (UUIDv7 `new_id`, wall-clock `now_utc` — D-031);
+how the L assignments spread; and what "generate again into the same
+database" means.
+
+Solution: two modules, one per crate, composed by the benchmark
+consumer.
+
+- **Store side — `eunomia_store::data_sets`.** `DataSetSpec`
+  (projects / headings / instructions / variants-per-instruction /
+  assignments-per-project) with the consts `M` and `L` carrying
+  §12.2's exact numbers (M: 50/0/200/1/40 → 2,000 assignments; L:
+  500/100/1000/3/200 → 100,000). `generate(&mut Connection, &spec,
+&[ProjectRoot])` fills an **empty** database through the
+  repositories' own create methods only — `projects::create`,
+  `create_item`, `create_variant`, `assign` — inside one transaction
+  it owns: the standalone-connection seam for benchmarks and
+  fixtures, which is why it takes `&mut Connection` and cannot be
+  composed under `Db::run` (D-037's executor composition stays the
+  app layer's). Integrity is the repositories' guarantee, not a
+  generator re-implementation: dense `position`/`sort_order` come
+  from the append semantics, DB-010 from the constructive
+  main-variant rules, D-02 from `assign`. Typed refusals before the
+  first write: `NotEmpty`, `NotEnoughRoots`,
+  `AssignmentsPerProjectTooHigh`, `InstructionsRequired`,
+  `VariantsRequired`; repository/transaction failures roll the whole
+  run back (empty database → a retry converges: the idempotency
+  semantics are "fresh fixture or rejection", not merge — pinned by
+  a duplicate-path-key rollback test).
+- **Determinism = the stabilized view.** No RNG exists to seed —
+  every value is a pure function of the profile counts and the row
+  ordinal. The contract is defined over what the generator cannot
+  control stripped away: `stabilized(conn, base)` reads the ALG-001
+  collections back through the repositories with ids mapped to
+  creation ordinals, timestamps dropped, and the base prefix
+  stripped **by component count** (components split on `/` and `\`,
+  empties ignored) from both `path` and `path_key`. Component
+  counting — not text-prefix matching — is what makes the rule
+  platform-true: DB-030's keying re-spells separators, NFC and case
+  (folded keys on Windows/macOS) but never changes component
+  structure, so one count strips both columns everywhere (round-1
+  review's P1: a single text prefix silently never matches a folded
+  `path_key`). Two runs with the same profile and equally named
+  roots produce **equal stabilized views** while their raw ids
+  differ — pinned as the falsifiable determinism test, with folded
+  key spellings in the fixture roots and both the negative half
+  (without `base`, the views differ: the stripping is part of the
+  definition) and a unit pin of the strip's spelling-agnosticism.
+- **The L spread.** Project `p`, assignment `k` → instruction
+  `(37·p + k) mod 1000`, variant `(p + k) mod 3`. Distinctness needs
+  no coprimality (round-2 review's correction: `k < 200 ≤ 1000`
+  alone makes the k-window injective, so no stride check exists);
+  37 is purely the spread constant — a hop big enough that
+  consecutive projects' windows interleave across the whole library
+  instead of stacking into bands. Coverage: all 1,000 instructions
+  appear, ≈100 assignments each (90–110 exactly, by the formula).
+  The closed form is recomputed in the tests by hand — never through
+  the module's helpers — over all 100,000 L pairs and all 2,000 M
+  pairs. Layout: headings partition the instructions into near-equal
+  consecutive groups (exactly 10×100 for L; the 4/3/3 remainder
+  branch and the empty-heading edge pinned separately), heading
+  levels cycle `2..=6`, all rows active (§12.2 measures the plain
+  upper-limit scenario). Variant names run `Main`, `Compact`,
+  `Detailed`, then numbered `Alternative 03`… — distinct NOCASE
+  names for any variant count (a cycling scheme would collide on the
+  §6.9 active-sibling uniqueness). Variant texts are sized for
+  §12.2's sync premise (≈52 characters average → a fully assigned
+  set-L project builds ≈10 KB). `set L` also reads back through
+  `build_snapshot::read` — the whole ALG-001 graph validates, so
+  T-137 benchmarks start from a snapshot the sync pipeline accepts.
+- **fs side — `eunomia_fs::temp_repos`.** `TempRepos::create(count,
+label)` lays out `<tempdir>/<label>/repo-<i:04>` with a minimal but
+  real `.git` (`HEAD`, `config`, `objects/`, `refs/` — git's own
+  validity set; the scan's ALG-052 probe and `git rev-parse` both
+  accept it), canonical paths + DB-030 keys ready for
+  `ProjectRoot`, auto-removed with the guard (the crate's idle
+  `tempfile` dependency's first staging use). Labels are validated as
+  one safe component (no separators, no `..`) so nothing escapes the
+  guard's cleanup. The two crates keep no edge between them —
+  benchmarks compose (`TempRepos` → roots → `generate`), the store
+  stays filesystem-free, fs stays database-free. Group directory
+  stored canonical (macOS `/var` → `/private/var`), roots always
+  canonical so `path`/`path_key`/scan root spellings agree.
+
+Tests: 5 unit + 7 integration in `tests/data_sets.rs` (M sizes,
+invariants and stabilized collections with M's distribution; L
+sizes/distribution/snapshot — the one heavy L fill, ≈25 s in a debug
+build; determinism both halves with folded key spellings; typed
+rejections writing nothing; heading layout edges 4/3/3 and 1/1/1/0/0
+with variant names beyond the third; the duplicate-key mid-fill
+rollback; stabilized corrupt-cell propagation through the
+`ignore_check_constraints` seam) and 2 unit + 4 integration in
+`tests/temp_repos.rs` (naming, unsafe labels, layout, canonical
+keys, the scan finding every root, teardown, empty fixture).
+
+### D-110 — vue-i18n 11 with the in-repo `eunomia/no-raw-ui-text` lint gate; pipe plurals as UI-020's "ICU plurals" — 2026-11-20
+
+Problem: UI-020 (spec §11.5) requires vue-i18n with an `en.json` catalog
+of dotted feature keys, pluralization ("ICU plurals"), and — per the
+card's acceptance criteria — a linter or test that catches a template
+string that is not going through a key. Three decisions were open: the
+vue-i18n version, the plural format reading, and the enforcement
+mechanism (`vue/no-raw-text` was suggested, but eslint-plugin-vue 10.12.1
+ships no such rule — verified against the installed package's 256-rule
+list; the rule of that name lives in `@intlify/eslint-plugin-vue-i18n`,
+an extra dependency outside the card's vue-i18n-only allow-list).
+
+Solution (T-142):
+
+- **Dependency.** `vue-i18n@^11.4.23` (dependencies) — the current v11
+  stable line on the registry (`latest` dist-tag), peer `vue ^3.0.0`,
+  `node >= 22` (the repo pins node 22/pnpm 12). v12 is alpha-only; v9/v10
+  lines carry `legacy9`/`legacy10` dist-tags. Composition API mode
+  (`legacy: false`), one instance in `src/i18n/index.ts`, installed in
+  `main.ts`; components use `useI18n()`, no global `$t` reliance.
+- **Catalog and keys.** `src/locales/en.json`, nested namespaces per UI
+  feature reached as dotted paths (UI-020's `project.settings.title`
+  convention): `app.*` for the shell today (title, version line,
+  tagline, logo alts, tracked-projects plural), later screens add their
+  own namespaces. The catalog generic (`MessageSchema = typeof en`)
+  feeds vue-i18n's key autocomplete only — its `t()` accepts any string,
+  so unknown keys are NOT a compile error; typo protection is behavioral:
+  a catalog-coverage test asserts every `t('…')` literal in `.vue`
+  templates exists (`te(key)`), and App.spec pins the rendered tagline
+  and alts (a missing key renders as the literal key string, warned
+  only). `en` is the single locale and the fallback; NFR-004…006's
+  backend error texts will resolve against this same catalog when their
+  `message_key` consumers land.
+- **Plurals.** vue-i18n's pipe-separated plural forms (`zero | one |
+other` for English, `{count}` interpolation, count passed as the
+  plural choice) — vue-i18n's CLDR plural-rule message format, which is
+  the tool-native reading of UI-020's "ICU plurals"; adopting ICU
+  MessageFormat syntax literally would need an extra message-compiler
+  dependency outside the allow-list. The working UI-visible example is
+  the tracked-projects line in App.vue: count from `projects_list`
+  through the ipc facade, rendered with
+  `t('app.trackedProjects', { count: n(projectCount) }, projectCount)` —
+  the explicit numeric argument selects the plural form, `n()` formats
+  the interpolated count.
+- **The lint gate.** A custom rule, `eunomia/no-raw-ui-text`
+  (`src/i18n/no-raw-ui-text.ts`, registered in eslint.config.js for
+  `**/*.vue`): a template text node containing any Unicode letter or
+  digit is a violation — punctuation/symbols are layout — and so is the
+  literal of a user-facing attribute (`alt`, `title`, `placeholder`,
+  `label`, `aria-label`, `aria-placeholder`, `aria-description`,
+  `aria-roledescription`, `aria-valuetext`, `aria-braillelabel`,
+  `aria-brailleroledescription`, plus `value` on submit-style inputs,
+  where the browser renders it as the control's label) and an
+  interpolation or bound expression that shows bare literal copy —
+  `{{ 'Save' }}`, `{{ 'Sa' + 've' }}`, ``{{ `Save` }}``,
+  `{{ t('k') + ' — Beta' }}`, `:title="'Save'"`: only `+`
+  concatenations, template literals and lone literals are walked, and
+  everything inside a `t`/`n`/`$t` call counts as translation data, so
+  comparisons (`x === 'en'`) and filter calls never fire; bound key
+  expressions (`:alt="t('…')"`) are the sanctioned form. A copy prefix
+  around an interpolation (`v{{ version }}` — text-node half — or
+  ``{{ `v${version}` }}`` — expression half) is caught too, which is
+  why the version line moved into the `app.versionLine` message with a
+  `{version}` placeholder. Options `ignorePattern`/`ignoreText` exist
+  for the day a genuinely text-like literal needs an exemption. Known
+  limit, accepted: copy computed in `<script setup>` and rendered via
+  `{{ label }}` is invisible to this template-only rule, and so is copy
+  smuggled through non-copy expression shapes (method calls returning
+  literals, ternary arms); the catalog-coverage test catches the typo
+  half, and a script-side scan would be its own rule if real screens
+  start doing it. eslint.config.js
+  imports the rule with an explicit `.ts` extension — Node's type
+  stripping (default since Node 22.18; CI floats `node-version: 22`,
+  local is 22.23) loads it at lint time, and vue-tsc checks the rule
+  file itself (under `src/`); the config file belongs to no tsconfig
+  project, so its import is unchecked wiring (verified end to end:
+  eslint red on a planted raw string, green after removal).
+- **The keyed/unkeyed boundary.** Not keyed, by design: mock-layer and
+  fixture data (`src/ipc/**` — project names, journal actions, error
+  message keys — data the UI renders, not UI chrome), the generated
+  `src/bindings.ts`, `index.html` (plain HTML, no Vue template; the
+  window title is Tauri's), URLs, CSS classes, and code identifiers.
+  The rule scans `.vue` templates only, which matches that boundary.
+- **Tests.** `src/i18n/no-raw-ui-text.spec.ts` pins the rule red/green
+  with ESLint RuleTester (the card's "red example": a raw template
+  string must fail; also the copy-prefix, attribute-literal,
+  expression-literal and submit-input `value` cases, plus both exemption
+  valves and a non-matching `ignorePattern`) and the eslint.config.js
+  wiring (rule present at error severity for `**/*.vue`, guarded by a
+  `@ts-expect-error` import of the JS config — no declaration file by
+  design); `src/i18n/i18n.spec.ts` pins nested keys, named
+  interpolation, the 0/1/2/5 plural forms, the `n()`-formatted count at
+  the message level, and the catalog coverage over every `t('…')`
+  literal in `.vue` templates; `App.spec.ts` mounts through the i18n
+  plugin and proves the plural line end to end over the mock facade with
+  exactly 1/2/5/0 active projects, an active-vs-archived counting case
+  (3 rows, 2 archived → "1 project tracked"), and the rendered tagline
+  and alts (per-test `resetMockState` worlds). The T-141
+  mock layer is untouched — all its suites stay green; e2e assertions
+  (title, heading text, `v\d` version line) keep holding because the
+  keyed rendering produces the same strings.
+
+Review: two rounds — findings and fixes in `.opencode/reviews/t142-round*.md`
+(owner-local). Round 1 (deepseek-v4.1-flash): no P0/P1; 2 × P2, 5 × P3,
+all applied. P2-1 — the "typed catalog" claim was false (vue-i18n's `t`
+accepts any string, so a key typo passed lint, typecheck and every
+test): the claim is corrected here and in `src/i18n/index.ts`, and the
+real guards added (the catalog-coverage `te()` test and the tagline/alt
+assertions in App.spec). P2-2 — the rule missed string literals inside
+template expressions (`{{ 'Save' }}`, `:title="'Save'"`): the
+`VExpressionContainer` literal case added with red/green pins; the
+script-side constant remains a documented known limit. P3s applied:
+`aria-valuetext`/braille attributes and submit-input `value` joined the
+attribute set (with text-input/option non-cases pinned); the
+`ignorePattern`/`ignoreText` exemption valves are tested (including a
+non-matching pattern); the plural tests gained an archived-rows case
+that separates counting active from counting everything; the eslint
+config comment now states the real Node floor (type stripping default
+since 22.18) and drops the incorrect `allowImportingTsExtensions`
+rationale (the config belongs to no tsconfig project); the count
+interpolates through the composer's `n()` ("1,000 projects tracked",
+pinned). Declined: reconciling spec §12's dangling NFR-004…006 IDs —
+`docs/spec.md` is outside this task's file scope (a docs card material).
+Round 2 (hy4-flash-free): no P0/P1/P2; 4 × P3, all applied. The
+submit-input `value` check compared the element's source-cased
+`rawName` (an uppercase `<INPUT type="submit">` slipped by) — it now
+compares the parser's lowercased `name`, with an uppercase red pin;
+the expression gate only fired on literal roots (`t('k') + ' — Beta'`,
+`'Sa' + 've'`, `` `Save` `` passed clean) — the visitor now walks the
+narrow copy-only shapes (`+` chains, template literals, lone literals,
+skipping `t`/`n`/`$t` call subtrees), with red pins for all three forms
+plus `` `v${version}` `` and green pins for comparisons/filters; the
+catalog-coverage scan read raw sources (a `t('…')` mention inside a
+comment counted as a usage) — comments are stripped before matching and
+the raw-scan intent plus its false-negative surface (aliased `t`,
+dynamic keys) documented in the spec; D-110's plural call form was a
+wrong shorthand (`t(key, n)`) — it now quotes the real expression.
+
 ### D-137 — The target-file watch service: parent-directory watches under the "one watch per file" rule, the ALG-033 verdict through the real builders, and the closed-list reading of §5.7 — 2026-11-21
 
 Problem: T-102 turns spec 5.7 into code (SYS-007…009, OUT-014,
@@ -13243,3 +13243,43 @@ check point, abort shape and tests are this entry's); the startup
 `running` row now only survives a refused abort or a process death);
 ARCHITECTURE.md rows for the command section (the D-132/D-133
 precedent).
+
+### D-140 — Orchestrator service commits reviewed in one round; the AGENTS §4 session rules recorded; and the flaky-bound rulings — 2026-11-22
+
+Problem: the orchestrator (main session) made seven service commits
+across the cycle without the subagent review cycle — CI follow-ups
+(799163f, 430bf22, 96b4f67, a19fe45), docs (cd2afc2, 88984e9,
+b7fea0b). The T-102 postmortem (the double-session incident) landed
+in AGENTS.md §4 but never in this file, D-111 sat out of
+chronological order, and the widened timing bounds needed their
+rationale pinned.
+
+Solution: one deepseek-v4.1-flash review round over the seven diffs
+(`.opencode/reviews/orchestrator-service-round1.md`, VERDICT:
+findings — all P2/P3):
+
+- **P2-1 accepted, resolved by 267fae1**: the 1200 ms burst window
+  still flaked on the windows runner (44999287190); 10 s holds (the
+  windows leg of 45006557685 is green). The bounds are failure
+  ceilings of conditionally-waiting tests — healthy runs return
+  early.
+- **P2-2 accepted**: DB-022's 150 ms lost its only pin when the burst
+  test widened; `the_debounce_window_is_the_spec_literal` now pins
+  the const directly.
+- **P3-4 accepted**: the D-111 block moved to its chronological
+  position (before D-137).
+- **P3-5 accepted**: `no_space_code` derives from `no_space` via
+  `raw_os_error()` — one source of truth; the assert still checks the
+  production classifier's `os_code()` path.
+- **P2-3 accepted**: the orphaned doc-block reattached —
+  `fixture_target` and `synced_hash_of_plain_body` each carry their
+  own docs again (Project Rules 11).
+- **P2-4 accepted (this record)**: the AGENTS §4 session rules
+  (synchronous runs, one executor per worktree, verified
+  session-death checks) are the distilled T-102 postmortem; the full
+  story lives in the session history of D-137.
+- **P3-1/P3-2/P3-3 noted, not acted on here**: the D-111 rule-1
+  wording is wider than the strict invariant, and the raw 32/5
+  literals in production retry paths predate it — a wider
+  constants-cleanup task would touch D-099's territory; recorded as
+  a known refinement, not a defect of the reviewed commits.

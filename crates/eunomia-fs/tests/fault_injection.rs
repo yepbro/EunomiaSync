@@ -311,7 +311,9 @@ fn mid_write_enospc_is_injectable_as_disk_full() {
     #[cfg(windows)]
     let no_space = io::Error::from_raw_os_error(112);
     #[cfg(unix)]
-    let no_space_code = 28;
+    let no_space_code = no_space
+        .raw_os_error()
+        .expect("a raw no-space code was just set");
     #[cfg(windows)]
     let no_space_code = 112;
     let _guard =
