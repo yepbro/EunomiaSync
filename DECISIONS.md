@@ -12557,3 +12557,241 @@ paragraph's test count still read "six (5 + 1)" from before the
 round-1 additions; it now states the actual suite (8 mirror pins +
 the profile unit test). The review phase is complete after this
 round (no third round).
+
+### D-137 — The target-file watch service: parent-directory watches under the "one watch per file" rule, the ALG-033 verdict through the real builders, and the closed-list reading of §5.7 — 2026-11-21
+
+Problem: T-102 turns spec 5.7 into code (SYS-007…009, OUT-014,
+MAIN-028, T-F13): watch the target files of active, available
+projects, debounce 300 ms, compute "externally modified" by ALG-033,
+report deletions separately, and never write. Seven points were open:
+what mechanical watch satisfies "one watch per file"; which files a
+project contributes under scheme C; what the ALG-033 "new side" is
+for each scheme; when `file_deleted` is honest; how subscriptions
+learn about availability without touching T-079's file; how the
+future sync pipeline (T-118) reuses the pass; and the T-F13 criterion
+without a sync pipeline.
+
+Solution: `eunomia-fs/src/watcher.rs` (mechanics) +
+`src-tauri/src/file_watch.rs` (semantics, the D-112 service shape),
+wired in `lib.rs`.
+
+- _The watch sits on the parent directory._ SYS-007's "one watch per
+  file" is honored as a per-file guarantee (each target file is
+  observed individually, name-filtered; no file is watched twice; no
+  tree walk), while the notify watch itself is a non-recursive watch
+  on the file's parent: inotify watches inodes, the app's own §9.5
+  write-then-rename and every editor's atomic save replace the inode,
+  and a file-pinned watch would go silent exactly on the external
+  edits it exists to catch (pinned by the atomic-rename-over test).
+  Directories are deduplicated — the SYS-010 watch-budget posture —
+  and `set_files` is the idempotent full-set convergence: an
+  unwatchable root leaves the converged set (`watched_files()`) with-
+  out an error, and the next call retries it.
+- _The watch set follows D-080's closed list._ One file per project
+  through `target_file_name(scheme, base_name)`: A|B →
+  `AGENTS.md`/`CLAUDE.md`, C → `<STEM>.project.md` (the spec 1.2
+  §5.7 parenthetical read as the write-target list — D-080 already
+  maps `(Scheme, BaseName)` onto exactly this list; the scheme-C main
+  file is not edited, so it is not watched).
+- _The verdict goes through the production builders, not mirrors._
+  A/C: the ALG-033 new side is `build_content`'s output minus the
+  probe marker tail it was handed — the builder IS the oracle, no
+  hand-rolled join (the dirty service needed a mirror because it
+  builds markerlessly; the comparison wants exactly this strip). B:
+  the side is `assembly_b::assemble` of the CURRENT file minus the
+  inserted marker line (the splice's own re-parse brackets the
+  block), so an edit OUTSIDE the markers does not flag the project —
+  the build preserves the outside, and the file follows itself; not
+  UTF-8 or broken markers can never match (E_NOT_UTF8 /
+  E_MARKERS_INVALID live in the sync's future).
+- _`file_deleted` is gated on a recorded sync._ A missing target with
+  a stored hash (DB-024; `NULL`/empty ≡ never, D-068) is SYS-009's
+  hint; a never-synced project without a file is not "deleted"
+  (OUT-005 creates it — the flag would mark every fresh column). A
+  pre-existing differing file IS externally modified regardless of
+  sync history (SYS-008's literal reading). The two flags are
+  mutually exclusive in the verdict.
+- _Subscriptions learn availability through T-079's event, truth
+  through its own probes._ `listen_availability` subscribes to
+  `state://project-availability` (registered in `lib.rs` BEFORE the
+  startup recheck is spawned — the session's first verdicts cannot
+  miss it) and drops a Refresh permit; every pass then probes the
+  folders itself (the D-084 probes, on the blocking pool), so no
+  stale cache ever gates a watch or a verdict. SYS-010's backend
+  errors land as a Refresh too — the "re-check everything once"
+  degrade, no crash.
+- _The bus is the serializer, so there is no ticket guard._ Unlike
+  dirty's D-121 (direct awaits can overlap the service task), every
+  pass here — startup, availability-triggered, debounced, after-sync —
+  runs on the single service task; `refresh_after_sync` does not run
+  a pass of its own but awaits one through an ack channel (the
+  D-112/no-new-dependency shape: a capacity-1 `tauri::async_runtime`
+  channel, since tokio's `sync` feature would be a new-feature owner
+  decision this task does not carry). Recovery mode is answered in
+  the seam itself (`managed_db`) — waiting for an ack from a service
+  that is never spawned in that mode would hang. The diff contract is
+  D-112's third instance over a clean baseline: first observation
+  reports modified/deleted projects, both directions are changes,
+  empty diffs are silent, emit-then-record is at-least-once, full
+  passes prune leavers, debounced partial passes merge (the rest of
+  the world was not re-read).
+- _T-F13 proven to the honest half._ The criterion test runs the full
+  watch chain: a synced scheme-A project, an external std write, the
+  debounced re-read, and the `state://file-changed` event with
+  `external_changed` — plus the display-only pin (the file still
+  holds the external bytes after the pass) and idempotence. The
+  "next sync overwrites" half is simulated: the pipeline's own write
+  (real builder bytes) + hash store + `refresh_after_sync` clears the
+  flag through the same wire. T-118 readiness: the seam exists,
+  awaits, and returns the diff; backups and the overwrite are the
+  pipeline's.
+
+Dependencies: `notify-debouncer-full` 0.7 (notify 8.2) — the §5.2 fs
+row + D-004 ruling, CC0/MIT/Apache only, `cargo deny check` green.
+Deliberately held below 0.8: it resolves notify 9, which adds
+`xxhash-rust` (BSL-1.0) — outside deny.toml's allow list, and widen-
+ing it is an owner ruling not carried by this card; notify 8.2 serves
+§5.7 identically. Recorded follow-ups (board cards, orchestrator to
+file): (1) watcher facade lines in `logging.rs` (pass/emit failures,
+watcher-init warning, the refused-watch line below — the file is
+frozen this window, the D-121 precedent); (2) refresh wiring into
+the project-mutation commands (`project_add_manual` exists,
+`project_update`/archive do not yet — `refresh_after_sync` is the
+seam to call); (3) the mock-IPC bus's `stateFileChanged` emitter
+(D-108's layer, separate task); (4) SYS-010's non-blocking UI notice
+once a UI surface exists, reading `unwatched_targets()`; (5) the
+column carrier (round-1 P1-1, below): `projects_list` /
+`ProjectColumnEntry` gains `external_changed`/`file_deleted` from
+`snapshot()` — `commands.rs` is frozen this window, so the startup
+diff currently reaches only an already-listening webview (the event
+fires from the `setup` hook before the frontend registers; Tauri
+does not replay), and the same cold-start verdicts become readable
+the moment the carrier lands; (6) the availability trigger's
+`try_send` can in principle be dropped by a full bus (round-1 P3-5;
+a refresh-pending `AtomicBool` coalescing is the sketched fix — left
+for a task that can justify the bus rework); (7) a `Backend`
+(event-queue overflow) injection test (round-1 P3-7; the fault-
+injection feature does not reach notify's stream today).
+
+Testing: 27 unit tests in `file_watch.rs` (the wire name and the
+300 ms literal; the diff semantics — baseline both halves, both
+directions, silence, prune-vs-merge, prune-to-covered, order; the
+snapshot carrier read; the unwatched seam; the verdict battery —
+fresh A/C/B files through the real builders, body/marker/outside
+edits, deletion vs never-synced, pre-existing differing files,
+reading lines, markerless-exact, empty build, broken markers, non-
+UTF-8, CRLF B; the `ever_synced` join; the chunked body builder) +
+11 integration tests in `crates/eunomia-fs/tests/watcher.rs` over a
+real backend (edit, atomic rename-over — the inode-trap pin, delete,
+rename-away, sibling filter, set drop/re-add, idempotent re-set,
+missing-root tolerance + recovery, two files one directory, the
+unwatched seam, the re-created-directory re-arm) + 8 mock-runtime
+tests in `ipc_tests.rs` (the T-F13 criterion with the display-only
+pin and the simulated-sync clearing; deletion vs never-synced; the
+B semantics; availability-driven unwatch/rewatch through the real
+T-079 event; the fire-and-forget Refresh behind file events; the
+symlinked target watched by its real file; the recovery-mode honest
+answer; the `lib.rs` wiring source scan with the
+listener-before-recheck order pin). Full suite green: `cargo test
+--workspace`, clippy `-D warnings`, fmt, cargo-deny, and the frontend
+chain (lint/format/typecheck/vitest).
+
+Session history (recorded because it shaped the seams): the first
+executor session died hung on its own test run — the recovery-mode
+test drove `refresh_after_sync` with NO spawned service, and the
+seam then awaited an ack that nothing could send (the service is
+never spawned in recovery mode by design). The successor diagnosed
+the hung processes via gdb (two 9-hour stale runs from the dead
+session had to be killed), and the fix became part of the contract:
+the seam answers recovery mode itself (`managed_db` at the entry) —
+waiting for a courier that does not exist is a hang, not an error
+path. Process note: during round-1 review a duplicate reviewer
+session (launched concurrently with the primary one, same report
+path) committed the then-working tree as `c76157f` and hand-numbered
+this entry D-126 — a number main had already given the NUL-validator
+entry; per the counter policy the number was not corrected but
+reissued through task-id-mcp (this entry is D-137), and the commit
+was amended by the executor. AGENTS.md §4 (subagent sessions) since
+codifies the underlying rules.
+
+Round-1 review addendum (D-137, same task; report
+`.opencode/reviews/t102-round1.md`, deepseek-v4.1-flash — verdict
+approve-with-fixes: 2×P1, 4×P2, 9×P3): findings processed here —
+
+- P1-1 (taken as enabler + follow-up 5): the startup verdict has no
+  carrier to the UI — the event fires before the webview listens,
+  Tauri does not replay, and `ProjectColumnEntry` carries no
+  external flags (unlike availability/dirty, whose column reads
+  re-probe fresh). `snapshot()` is added so the future carrier is a
+  read; the wiring itself is the recorded follow-up (commands.rs
+  frozen).
+- P1-2 (taken): the coalescing loop stored only the ack sender, so a
+  queued fire-and-forget `Refresh { done: None }` (the availability
+  listener's, the backend error's) collapsed into a partial pass —
+  no `set_files` convergence, no full re-read. Fixed with a separate
+  `refresh_seen` flag; pinned by a mutation-verified test (the
+  round-1 bug re-introduced → red, reverted → green).
+- P2-1 (taken): symlinked targets are watched and read at their
+  RESOLVED path (`paths::resolve_target_path`, §9.4 preflight step
+  2's "common case": `CLAUDE.md` → `AGENTS.md`) — a watch pinned to
+  the link spelling would never fire, since editors and §9.5 saves
+  rename over the real name. A resolution refusal falls back to the
+  joined path (identical for regular/absent files). Unix test with a
+  real symlink.
+- P2-2 (taken): the T-F13 criterion test raced the 40 ms debounce
+  against the after-sync seam (`cleared[0]` could panic when the
+  debounced partial pass emitted the clearing first). It now asserts
+  the race-free facts: the seam returns no stale verdict, and the
+  clearing lands on the wire exactly once.
+- P2-3 (taken): a full pass pruned ids whose file could not be read
+  (they contributed no verdict), contradicting the unreadable
+  branch's "keep the last known state" promise and sticking the
+  column on "externally modified" forever. The prune set is now the
+  COVERED ids (the intended classification set); unit-tested through
+  the recovery-emits-clearing scenario.
+- P2-4 (taken): SYS-010's two halves split honestly — the
+  event-queue overflow is the `Backend` event (one full re-check);
+  a REFUSED watch (unwatchable root, the inotify limit) is a
+  persistent fact exposed as `TargetWatcher::unwatched_files()`,
+  recorded per full pass into `FileWatchState::unwatched_targets()`
+  for the future warning line and notice (never an event: Backend →
+  re-check → set_files → Backend would loop). The module and
+  ARCHITECTURE.md claims corrected to match (verified against the
+  vendored notify-debouncer-full 0.7 sources: `watch()` failures are
+  synchronous `Result`s, the `Err` arm carries event-stream errors).
+  As part of the same finding: `set_files` now re-arms every wanted
+  directory unconditionally (P3-6) — the kernel ends a deleted
+  directory's watch with a silent `IN_IGNORED`, and "already in the
+  map" must not substitute for the syscall (idempotent for a live
+  watch); pinned by the re-created-directory test.
+- P3-1/2/4/8/9 (taken): dead test artifacts removed; the fs suite's
+  positive assertions return as soon as the event lands (20.8 s →
+  10.0 s wall, ceilings unchanged); partial passes probe only the
+  affected roots; the seam's doc no longer promises the diff is "on
+  the wire" when the emit failed (at-least-once wording); and the
+  SYS-009 deviation is now stated here: `file_deleted` requires a
+  recorded sync, so a never-synced project whose pre-existing target
+  the user deletes shows NO flag — SYS-009's literal wording is
+  unconditional, this reading trades it for not flagging every fresh
+  project's absent file (OUT-005 creates it), and the round-1
+  reviewer independently agreed with the trade.
+- P3-3 (taken via P2-2's drain shape for the criterion test; the
+  remaining `wait_for_watch_passes` anchors count passes and sleep
+  past the debounce before their negative `try_recv`s — accepted).
+- P3-5, P3-7: recorded as follow-ups (6) and (7) above.
+
+Round-2 review addendum (D-137, same task; report
+`.opencode/reviews/t102-round2.md`, hy4-flash-free — no P0/P1/P2;
+1×P3): the finding is fixed here —
+
+- R2-P3-1 (taken): `ARCHITECTURE.md`'s watcher heading still pointed
+  at the colliding hand-numbered "D-126"; corrected to D-137 (the
+  only occurrence outside the collision note in D-137's own session
+  history).
+- The round re-derived all six focus points from code and the
+  installed crate sources (ALG-033 byte-level against `compare.rs`
+  and `assembly_b`; the `MASK_ADD` idempotence of notify 8.2.2's
+  `add_single_watch` — the re-arm premise; the two-projects-one-file
+  collision shown unreachable through the `path_key` UNIQUE
+  constraint plus the root-containment refusal) and audited the
+  tests clean: counts match, oracles independent, no evasion.

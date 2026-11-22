@@ -438,6 +438,7 @@ export const commands = {
 /** Events */
 export const events = {
 	stateDirty: makeEvent<DirtyEvent, DirtyEvent>("state://dirty"),
+	stateFileChanged: makeEvent<FileChangedEvent, FileChangedEvent>("state://file-changed"),
 	stateProjectAvailability: makeEvent<ProjectAvailabilityEvent_Serialize, ProjectAvailabilityEvent_Deserialize>("state://project-availability"),
 };
 
@@ -1281,6 +1282,26 @@ export type ExistingProject = {
 };
 
 /**
+ *  The `state://file-changed` event payload (§7.10): only the
+ *  projects whose verdict changed since the previous pass, in
+ *  `sort_order` (the snapshot order). Never emitted with an empty
+ *  `changes`.
+ * 
+ *  The event name is the spec's literal wire name, pinned by the
+ *  manual [`tauri_specta::Event`] implementation below for the same
+ *  reason as `availability`'s and `dirty`'s (D-112): the derive macro
+ *  cannot produce the `state://` prefix, and the `derive` cargo
+ *  feature that ships it is not enabled.
+ */
+export type FileChangedEvent = {
+	/**
+	 *  The changed projects; empty diffs are not emitted (see the
+	 *  module docs' diff contract).
+	 */
+	changes: ProjectFileChange[],
+};
+
+/**
  *  The `markdown_preview` response (§7.10 Library module): the
  *  sanitized preview HTML plus D-15's non-blocking Markdown warnings.
  *  A named struct since T-056, which carried only `html` in the shape
@@ -1701,6 +1722,27 @@ export type ProjectDirtyChange = {
 	 *  (DB-021) — the dot icon MAIN-028 marks the column with.
 	 */
 	dirty: boolean,
+};
+
+/**
+ *  One entry of the `state://file-changed` diff (§7.10): the project
+ *  a change is about, addressed by its row id, plus the two §5.7
+ *  flags that now hold. The display name is deliberately absent — the
+ *  UI already holds it keyed by id from `projects_list` (D-112).
+ */
+export type ProjectFileChange = {
+	/**
+	 *  The project row id (UUIDv7 TEXT, DB-002) whose target-file
+	 *  verdict changed since the previous pass.
+	 */
+	project_id: string,
+	/**
+	 *  SYS-008: the target file on disk does not match the project's
+	 *  current build by the ALG-033 comparison.
+	 */
+	external_changed: boolean,
+	/**  SYS-009: the target file is gone after a recorded sync. */
+	file_deleted: boolean,
 };
 
 /**

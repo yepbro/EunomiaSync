@@ -74,8 +74,19 @@ unicode-case-mapping = "1"
 #   addendum), so this edge is unix-effective only.
 rustix = { version = "1", features = ["fs"] }
 
-# Target-file watching (spec 5.7) needs `notify-debouncer-full`; it is not
-# part of this dependency set yet and joins with its own module and task.
+# - `notify-debouncer-full` debounces the target-file watches (spec 5.7
+#   SYS-007: `notify` with `notify-debouncer-full`, 300 ms debounce); the
+#   §5.2 fs row pins it and D-004 is the owner ruling. 0.7.0 re-exports
+#   `notify` 8.2, so no separate notify edge exists. Deliberately held
+#   below 0.8: 0.8 resolves `notify` 9, which adds `xxhash-rust`
+#   (BSL-1.0) — outside deny.toml's license allow list, and widening
+#   that list is an owner ruling this task does not carry; notify 8.2
+#   serves §5.7 identically. The own deps add `notify` (CC0-1.0 —
+#   already in deny.toml's allow list) plus `file-id`/`notify-types`
+#   (MIT OR Apache-2.0) and the per-OS backends (`inotify` on Linux,
+#   `kqueue` on the BSDs — MIT OR Apache-2.0), none outside the allow
+#   list. Active since the watcher task (T-102).
+notify-debouncer-full = "0.7"
 ignore = "0.4"
 walkdir = "2"
 tempfile = "3"

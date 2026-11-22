@@ -134,6 +134,13 @@ pub(crate) mod sync_phase3;
 // stays with the caller's Phase0Outcome (its RAII drop is §9.4
 // phase 4 step 5's reset, D-123/T-118's to own).
 pub(crate) mod sync_phase4;
+// The target-file watch service (spec §5.7, SYS-007…009, OUT-014,
+// §7.10's `state://file-changed` event; T-102): the debounced watch
+// over the target files of active, available projects, the SYS-008
+// re-read-and-compare verdicts, and the startup/availability/after-
+// sync triggers wired below. Display-only: a watch event never
+// writes a file.
+pub(crate) mod file_watch;
 
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
@@ -182,20 +189,23 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::settings_set::<tauri::Wry>,
         ])
         // The registered §7.10 events: `state://project-availability`
-        // (T-079, D-09/DB-032) and `state://dirty` (T-101,
-        // DB-021/DB-022) — the events the builder carries, emitted by
+        // (T-079, D-09/DB-032), `state://dirty` (T-101,
+        // DB-021/DB-022) and `state://file-changed` (T-102, §5.7
+        // SYS-007…009) — the events the builder carries, emitted by
         // `availability::recheck_and_emit` at DB-032's three check
-        // points and by `dirty_recalc::recalc_and_emit` at DB-022's
-        // three recalculation points. The wire names are the spec's
+        // points, by `dirty_recalc::recalc_and_emit` at DB-022's
+        // three recalculation points, and by `file_watch`'s service
+        // at §5.7's watch points. The wire names are the spec's
         // literal `state://…` spellings (pinned by the manual `Event`
-        // implementations in `availability.rs` and `dirty_recalc.rs`);
-        // the generated TypeScript accessors are their camelCase
-        // forms (`stateProjectAvailability`, `stateDirty`). Every
-        // later event task (sync://progress, state://file-changed, …)
-        // lists its own §7.10 name here.
+        // implementations in `availability.rs`, `dirty_recalc.rs` and
+        // `file_watch.rs`); the generated TypeScript accessors are
+        // their camelCase forms (`stateProjectAvailability`,
+        // `stateDirty`, `stateFileChanged`). Every later event task
+        // (sync://progress, …) lists its own §7.10 name here.
         .events(collect_events![
             availability::ProjectAvailabilityEvent,
             dirty_recalc::DirtyEvent,
+            file_watch::FileChangedEvent,
         ])
         // `AppError` (§7.10: every command returns `Result<T, AppError>`)
         // is registered directly instead of through a command
@@ -371,6 +381,18 @@ pub fn run() {
             let (dirty_state, dirty_triggers) = dirty_recalc::DirtyState::new();
             app.manage(dirty_state);
 
+            // The file-watch session cache (§5.7, T-102): the last
+            // externally-changed/target-deleted verdicts per project
+            // and the command bus's sending half. Managed here for
+            // the same reason as the dirty cache — infallible, needed
+            // in every mode (the availability listener and the pump
+            // thread clone the sending half through the managed
+            // state, and in recovery mode it exists unused: no
+            // listener, no service). The bus's receiving half waits
+            // in `file_watch_commands` for the service spawn below.
+            let (file_watch_state, file_watch_commands) = file_watch::FileWatchState::new();
+            app.manage(file_watch_state);
+
             // Machine-level config (spec §5.8, SYS-011…013): read or
             // create `config.toml` from the data directory — before
             // logging (SYS-011: the log level comes from here) and
@@ -539,6 +561,25 @@ pub fn run() {
             // module docs); a failure records nothing and waits for
             // the next trigger (at-least-once).
             dirty_recalc::spawn_service(app.handle().clone(), dirty_triggers);
+            // §5.7's watch service (T-102): subscribe to the
+            // availability event FIRST — the listener must exist
+            // before the startup recheck below can emit, or the
+            // session's first verdicts would miss it — then spawn the
+            // service with the SYS-007 debounce. A watcher backend
+            // that fails to start degrades: no watching this session,
+            // the launch unaffected (SYS-010's no-crash posture; the
+            // facade warning line is the recorded logging follow-up).
+            file_watch::listen_availability(app.handle());
+            if let Err(_init) = file_watch::spawn_service(
+                app.handle().clone(),
+                file_watch_commands,
+                file_watch::DEBOUNCE,
+            ) {
+                // The degrade is total but silent: the bus's
+                // receiving half was dropped with the refusal, later
+                // `try_send`s fail harmlessly, and the app runs
+                // without external-change detection until restart.
+            }
             retention::spawn_daily_cleanup(retention_db);
 
             // DB-032's startup check point (D-09, T-079): one

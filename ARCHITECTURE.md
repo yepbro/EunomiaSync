@@ -30,12 +30,12 @@ crates/
     markdown               #   Markdown processing           (planned)
     diff                   #   Text diffing                  (planned)
     sync                   #   AGENTS.md sync engine         (planned)
-    watch                  #   File watching                 (planned)
   eunomia-fs/              # File-system layer (scan/paths/backup/atomic), no Tauri dependency
     src/scan.rs            #   Repository tree scanning           (skeleton)
     src/paths.rs           #   Path normalization and validation  (skeleton)
     src/backup.rs          #   Backup copies before writes        (skeleton)
     src/atomic.rs          #   Atomic writes with retries         (skeleton)
+    src/watcher.rs         #   Target-file watching (spec 5.7)    (working)
   eunomia-store/           # Database layer (SQLite), no Tauri dependency
     src/storage.rs         #   SQLite storage + migrations   (working)
     src/values.rs          #   UUIDv7 ids, ISO-8601 UTC times (working)
@@ -686,13 +686,23 @@ location on each OS rest on the manual smoke run.
 ## Watcher
 
 File watching uses `notify` with debouncing through `notify-debouncer-full`
-(DECISIONS.md D-004). **Planned** — not implemented yet. Scope: the target files
-of active, available projects, display-only — external edits are shown in the UI
-and overwritten by the next sync (spec 5.7); the watcher backend lives in
-`eunomia-fs` (the crate skeleton exists since D-019; the watch module and the
-`notify-debouncer-full` dependency land with the watching task). On Linux, the
-`fs.inotify.max_user_watches` limit must be respected; hitting it should
-surface as a clear, actionable error message.
+(DECISIONS.md D-004, D-137). Scope: the target files of active, available
+projects, display-only — external edits are shown in the UI and overwritten
+by the next sync (spec 5.7); a watch event never writes a file. The mechanic
+half lives in `eunomia-fs` (`watcher`: one debounced, non-recursive parent-
+directory watch per set of target files, name-filtered — the inode-trap
+rationale in the module docs), the semantic half in `src-tauri`
+(`file_watch`: the SYS-008 re-read-and-compare verdicts behind the
+`state://file-changed` event; subscriptions refresh at startup, on
+availability events, and through the after-sync seam the sync pipeline
+calls). On Linux, the `fs.inotify.max_user_watches` limit must be
+respected: an event-queue overflow degrades to one full re-check
+through the `Backend` event (SYS-010), while a REFUSED watch (an
+unwatchable root, the watch limit itself) leaves the file unwatched —
+silently for events, but recorded as the wanted-but-unwatched set the
+future warning line and SYS-010's non-blocking notice read; neither
+case ever crashes, and the diagnostic log lines are a recorded
+follow-up.
 
 ## Updater
 

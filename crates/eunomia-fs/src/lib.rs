@@ -19,6 +19,9 @@
 //! - [`free_space`], [`temp_files`], [`write_access`] — the §9.4
 //!   preflight seams (volume space, the staging-name grammar and its
 //!   sweep, write rights)
+//! - [`watcher`] — target-file watching with the spec's 300 ms
+//!   debounce (§5.7, SYS-007…009): the debounced watch over exactly
+//!   the caller's file set, Tauri-free and project-free
 //! - `fault_injection` — spec 15.1's failure points for tests,
 //!   behind the non-default `fault-injection` feature (absent from
 //!   release builds by construction; see its docs)
@@ -32,11 +35,10 @@
 //! [`paths`] since the availability/canonicalization/root-lookup
 //! tasks, [`scan`]/[`scan_classify`] since T-061/T-068,
 //! [`free_space`]/[`temp_files`]/[`write_access`] since the §9.4
-//! preflight tasks, [`backup`] since T-064/D-091 and [`atomic`]
-//! since T-066/T-067 (D-095/D-099). Target-file watching
-//! (spec 5.7) is still planned for this crate: it arrives with its
-//! own module and task, together with the
-//! `notify-debouncer-full` dependency.
+//! preflight tasks, [`backup`] since T-064/D-091, [`atomic`] since
+//! T-066/T-067 (D-095/D-099) and [`watcher`] since T-102 (spec 5.7,
+//! together with the `notify-debouncer-full` dependency the §5.2 fs
+//! row pins).
 
 pub mod atomic;
 pub mod backup;
@@ -48,4 +50,5 @@ pub mod scan;
 pub mod scan_classify;
 pub mod temp_files;
 pub mod temp_repos;
+pub mod watcher;
 pub mod write_access;
