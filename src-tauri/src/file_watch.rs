@@ -48,9 +48,11 @@
 //!   hash updates committed: files may have appeared, and every
 //!   written/unchanged project's external state must be re-computed
 //!   (SYS-008's "right after a sync").
-//! - **Debounced watch events** — the pump thread turns
-//!   [`WatchEvent`]s into `FilesChanged` batches; the pass re-reads
-//!   only the affected projects (the noise filter SYS-008 names).
+//! - **Debounced watch events** — the pump thread turns the watcher's
+//!   file deliveries into `FilesChanged` batches (the backend's
+//!   lost-events signal becomes a full `Refresh`, below); the pass
+//!   re-reads only the affected projects (the noise filter SYS-008
+//!   names).
 //! - **Project mutations** — SYS-007's own set points: a project
 //!   ADDED joins the watched set (`project_add_manual`'s committed
 //!   arm awaits [`refresh_after_sync`] since T-257), and the
@@ -62,12 +64,16 @@
 //!   service's, and this service's pass probes folders — a hook that
 //!   fires inside the connection's mutex must never block (D-121).
 //!
-//! An event-stream error ([`WatchEvent::Backend`], SYS-010's
-//! overflow case) also lands as a `Refresh`: the documented
-//! "re-check all target files once" degrade, no crash. A REFUSED
-//! watch (an unwatchable root, the inotify limit) is the other
-//! SYS-010 half: not an event but a persistent fact, recorded per
-//! full pass as the wanted-but-unwatched set
+//! The backend's lost-events signal ([`WatchEvent::Backend`], SYS-010)
+//! also lands as a `Refresh`: the documented "re-check all target
+//! files once" degrade, no crash. Both of the signal's shapes ask for
+//! that one full re-check — an event-queue overflow (which inotify
+//! delivers as a rescan flag riding an ORDINARY batch, not a stream
+//! error: corrected by D-139) and a stream-error batch alike; the
+//! pump's mapping ([`pump_event`]) is pinned per variant since T-259.
+//! A REFUSED watch (an unwatchable root, the inotify limit) is the
+//! other SYS-010 half: not an event but a persistent fact, recorded
+//! per full pass as the wanted-but-unwatched set
 //! ([`FileWatchState::unwatched_targets`]) the future warning line
 //! and non-blocking notice read.
 //!
@@ -236,8 +242,8 @@ impl Event for FileChangedEvent {
 pub(crate) enum Command {
     /// Recompute the watch set and every available project's verdict.
     /// `done` receives the pass's result (the after-sync seam); the
-    /// fire-and-forget triggers (startup, availability, backend
-    /// errors) pass `None`.
+    /// fire-and-forget triggers (startup, availability, the backend's
+    /// lost-events signal) pass `None`.
     Refresh {
         done: Option<tauri::async_runtime::Sender<Result<Vec<ProjectFileChange>, AppError>>>,
     },
@@ -916,6 +922,34 @@ pub(crate) fn listen_availability<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
+/// The pump's one step, extracted after the watcher's own `dispatch`
+/// precedent (D-139, its round-1 P2-2 follow-up) so the mapping is
+/// drivable without notify's event thread: one debounced
+/// [`WatchEvent`] becomes the command the service task consumes on
+/// the bus. A `Changed`/`Removed` delivery names exactly its own
+/// file — the partial re-read's input, SYS-008's noise filter. The
+/// backend's LOST-EVENTS signal ([`WatchEvent::Backend`], SYS-010: an
+/// event-queue overflow — delivered by inotify as a rescan flag
+/// riding an ordinary batch — or a stream-error batch alike, D-139)
+/// is the one full re-check of everything, FIRE-AND-FORGET:
+/// `done: None`, because no caller waits on this trigger's outcome
+/// (the after-sync seam builds its own ack pair).
+///
+/// The send is a `try_send` onto the bounded bus: a FULL bus drops
+/// the delivery instead of blocking the pump behind a slow pass (the
+/// drop is covered by the next refresh point, the reconciliation
+/// anchor — see [`BUS_CAPACITY`]), and a CLOSED bus (the service task
+/// gone at app teardown) drops it too — never a panic, the same
+/// delivery-while-the-consumer-lives contract as the watcher's sink.
+fn pump_event(event: WatchEvent, trigger: &tauri::async_runtime::Sender<Command>) {
+    let command = match event {
+        WatchEvent::Changed(path) | WatchEvent::Removed(path) => Command::FilesChanged(vec![path]),
+        // SYS-010's degrade: one full re-check of everything.
+        WatchEvent::Backend => Command::Refresh { done: None },
+    };
+    let _ = trigger.try_send(command);
+}
+
 /// Spawns the service: the fs watcher (failure to start it degrades —
 /// no watching this session, the launch unaffected, SYS-010's
 /// no-crash posture; the diagnostic line is the logging follow-up),
@@ -943,18 +977,14 @@ pub(crate) fn spawn_service<R: Runtime>(
     // The pump: the debouncer's closure delivers onto a std channel
     // from its own thread; this thread is the async side's bridge.
     // It exits when the watcher drops (the channel closes) — with the
-    // service task at app teardown, or never in between.
+    // service task at app teardown, or never in between. The
+    // event→command step itself lives in [`pump_event`], extracted so
+    // the mapping is testable without notify's event thread (the
+    // `dispatch` precedent, D-139).
     let pump_trigger = app.state::<FileWatchState>().trigger.clone();
     std::thread::spawn(move || {
         while let Ok(event) = event_receiver.recv() {
-            let command = match event {
-                WatchEvent::Changed(path) | WatchEvent::Removed(path) => {
-                    Command::FilesChanged(vec![path])
-                }
-                // SYS-010's degrade: one full re-check of everything.
-                WatchEvent::Backend => Command::Refresh { done: None },
-            };
-            let _ = pump_trigger.try_send(command);
+            pump_event(event, &pump_trigger);
         }
     });
 
@@ -982,7 +1012,7 @@ pub(crate) fn spawn_service<R: Runtime>(
                     // storing the sender alone would collapse "a
                     // Refresh happened" into "an ack is owed" and
                     // silently downgrade the availability listener's
-                    // and the SYS-010 backend-error re-checks into a
+                    // and the SYS-010 lost-events re-checks into a
                     // partial pass (the round-1 review's P1-2).
                     let mut all_paths = paths;
                     let mut refresh_seen = false;
@@ -1092,7 +1122,8 @@ fn send_error() -> AppError {
 mod tests {
     //! The pure halves of the service — the SYS-008 verdict over
     //! literal file bytes, the diff semantics over the clean
-    //! baseline, the wire name, the debounce literal. The
+    //! baseline, the wire name, the debounce literal, and the pump's
+    //! event→command mapping over a bounded channel. The
     //! mock-runtime halves (the card's criteria, the triggers, the
     //! subscription changes) live in `ipc_tests.rs`, which owns the
     //! mock-app harness.
@@ -1373,6 +1404,137 @@ mod tests {
             state.unwatched_targets().is_empty(),
             "a later healthy full pass clears the gap"
         );
+    }
+
+    // ---- the pump mapping (D-139's round-1 P2-2, the dispatch
+    // precedent) ---------------------------------------------------
+
+    /// Drives one [`WatchEvent`] through the extracted pump step and
+    /// hands back the command it landed on, plus the drained bus: the
+    /// same observable the service task consumes, read without
+    /// notify's event thread — the reason the step is extracted (the
+    /// watcher's `dispatch` shape, D-139).
+    fn pumped(event: WatchEvent) -> (Command, tauri::async_runtime::Receiver<Command>) {
+        let (trigger, mut commands) = tauri::async_runtime::channel(BUS_CAPACITY);
+        pump_event(event, &trigger);
+        let command = commands
+            .try_recv()
+            .expect("try_send lands the command on the bus before the step returns");
+        (command, commands)
+    }
+
+    /// The FilesChanged shape asserted without `Command: Debug` (the
+    /// enum deliberately carries no derives): exactly one path, the
+    /// event's own.
+    fn assert_files_changed(command: Command, path: &str) {
+        match command {
+            Command::FilesChanged(paths) => {
+                assert_eq!(
+                    paths,
+                    vec![PathBuf::from(path)],
+                    "the batch names its own file"
+                );
+            }
+            Command::Refresh { .. } => {
+                panic!("a file delivery must become a FilesChanged batch, not a Refresh");
+            }
+        }
+    }
+
+    #[test]
+    fn changed_and_removed_events_become_files_changed_batches_of_their_own_path() {
+        // SYS-008's noise filter, input side: one delivery names
+        // EXACTLY its own file. A dropped path would re-check nothing
+        // (the empty batch is noise to the consumer), a swapped or
+        // widened batch would re-check the wrong projects — both
+        // variants are pinned separately because the shared or-pattern
+        // could hide a variant swap behind one combined assertion.
+        let (command, mut commands) = pumped(WatchEvent::Changed(PathBuf::from("/repo/AGENTS.md")));
+        assert_files_changed(command, "/repo/AGENTS.md");
+        assert!(
+            commands.try_recv().is_err(),
+            "one event forwards exactly one command"
+        );
+        let (command, mut commands) = pumped(WatchEvent::Removed(PathBuf::from("/repo/CLAUDE.md")));
+        assert_files_changed(command, "/repo/CLAUDE.md");
+        assert!(
+            commands.try_recv().is_err(),
+            "one event forwards exactly one command"
+        );
+    }
+
+    #[test]
+    fn a_backend_event_becomes_a_fire_and_forget_full_refresh() {
+        // SYS-010's lost-events signal: since D-139 the `Backend`
+        // event carries BOTH of its shapes (the overflow rescan batch
+        // and the stream-error batch), and the pump's whole answer is
+        // the one full re-check the spec sanctions — a `Refresh` with
+        // no ack. `done` must be `None`: no caller waits on this
+        // trigger (the after-sync seam builds its own ack pair), so a
+        // sender here would answer a channel nobody receives.
+        let (command, mut commands) = pumped(WatchEvent::Backend);
+        match command {
+            Command::Refresh { done } => assert!(
+                done.is_none(),
+                "the pump's Refresh is fire-and-forget: done must be None"
+            ),
+            Command::FilesChanged(_) => {
+                panic!("the lost-events signal must become a full Refresh, not a batch");
+            }
+        }
+        assert!(
+            commands.try_recv().is_err(),
+            "one event forwards exactly one command"
+        );
+    }
+
+    #[test]
+    fn a_full_bus_drops_the_delivery_without_panicking_or_displacing_queued_commands() {
+        // The bounded-bus contract ([`BUS_CAPACITY`]'s docs): a full
+        // bus is an intended drop — the pump must neither block behind
+        // a slow pass nor displace the commands already queued. The
+        // two fillers still lead the bus and nothing follows them; the
+        // falsifiable form is an `expect` on the try_send, which
+        // panics here.
+        let (trigger, mut commands) = tauri::async_runtime::channel(2);
+        let _ = trigger.try_send(Command::FilesChanged(vec![PathBuf::from("/f0")]));
+        let _ = trigger.try_send(Command::FilesChanged(vec![PathBuf::from("/f1")]));
+        pump_event(WatchEvent::Backend, &trigger);
+        pump_event(
+            WatchEvent::Changed(PathBuf::from("/repo/AGENTS.md")),
+            &trigger,
+        );
+        let first = commands.try_recv().expect("filler 0 survived the overflow");
+        assert_files_changed(first, "/f0");
+        let second = commands.try_recv().expect("filler 1 survived the overflow");
+        assert_files_changed(second, "/f1");
+        assert!(
+            commands.try_recv().is_err(),
+            "the deliveries past the capacity were dropped, not queued"
+        );
+    }
+
+    #[test]
+    fn a_dead_bus_drops_every_variant_delivery_instead_of_panicking() {
+        // The teardown shape: the service task is gone while the pump
+        // thread still lives, so the bus's receiving half is dropped.
+        // A panicking pump thread dies silently and every later watch
+        // event is lost — exactly the crash SYS-010 forbids in
+        // miniature. All three variants go through the one send site
+        // (the watcher's own dead-consumer pin, D-139's round-2 P3-2);
+        // reaching the end is the surviving behavior, falsifiable by
+        // an `expect` on the try_send.
+        let (trigger, commands) = tauri::async_runtime::channel(BUS_CAPACITY);
+        drop(commands);
+        pump_event(
+            WatchEvent::Changed(PathBuf::from("/repo/AGENTS.md")),
+            &trigger,
+        );
+        pump_event(
+            WatchEvent::Removed(PathBuf::from("/repo/AGENTS.md")),
+            &trigger,
+        );
+        pump_event(WatchEvent::Backend, &trigger);
     }
 
     // ---- the verdict (SYS-008/SYS-009 through the real builders) ------

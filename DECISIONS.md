@@ -13999,3 +13999,142 @@ relink as those commands land; the UI re-read of projects_list on
 stateFileChanged registration; the bounded wait for mutation-time
 refresh). The cards are the tracking unit; this note only records
 their existence.
+
+### D-146 — T-259: the pump's Backend→Refresh mapping pinned by tests (the app-layer `dispatch` precedent) and the module doc's overflow wording corrected — 2026-11-22
+
+Problem: T-259 closes two of D-139's recorded follow-ups, both
+against `src-tauri/src/file_watch.rs` (frozen in D-139's window).
+(Round-1 P2-2) the pump's event→command mapping — the inline loop
+that turns `WatchEvent`s into bus commands, at current-main lines
+950-956, drifted from the card's ≈946-955 — had NO test, with extra
+weight since D-139 because `WatchEvent::Backend` carries BOTH
+lost-events shapes (the overflow rescan batch AND the stream-error
+batch), not just the rarer stream error the old comment implied.
+(Round-2 P3-1) the module doc at :61-62 still called `Backend` "an
+event-stream error, SYS-010's overflow case" — the pre-D-139 premise
+D-139's own docs were corrected away from.
+
+Solution: the watcher's `dispatch` precedent (D-139), applied one
+layer up — the extraction D-139's own follow-up text prescribed
+("extract the event→command mapping into a testable function"). (The
+card's named fake-backend seam cannot reach this layer: `WatchBackend`
+only arms and disarms watches and never emits events — the debouncer
+that delivers lives inside `NotifyBackend` — and `spawn_service`
+constructs its own watcher internally, so "no real-FS waits" is
+achievable only through the extraction, the follow-up's alternate
+route; round-1 review P3-1 asked for this sentence.) The pump's
+per-event step — the match plus the `try_send`, verbatim — moved into
+`pump_event(event, &trigger)`; the pump thread is now a one-line
+forward per event; `spawn_service`'s signature, its `lib.rs`
+caller and the thread's lifecycle are untouched, and the mapping's
+logic is unrefactored. Four tests in the module's colocated suite
+drive `pump_event` directly over a fresh bounded channel — the same
+observable the service task consumes; no notify event thread, no app
+harness, no filesystem waits:
+
+- `changed_and_removed_events_become_files_changed_batches_of_their_own_path`
+  — each file variant maps to a `FilesChanged` batch of exactly its
+  own path (the partial re-read's input, SYS-008's noise filter), one
+  command per event; the variants are asserted separately so the
+  shared or-pattern cannot hide a variant swap behind one combined
+  assertion.
+- `a_backend_event_becomes_a_fire_and_forget_full_refresh` — the
+  lost-events signal maps to `Refresh { done: None }`: the one full
+  re-check SYS-010 sanctions, fire-and-forget because no caller waits
+  on this trigger (the after-sync seam builds its own ack pair).
+- `a_full_bus_drops_the_delivery_without_panicking_or_displacing_queued_commands`
+  — the bounded-bus contract (`BUS_CAPACITY`'s docs): a full bus
+  drops the delivery, never blocks the pump, never displaces the
+  commands already queued.
+- `a_dead_bus_drops_every_variant_delivery_instead_of_panicking` —
+  the closed-bus teardown shape (the service task gone while the pump
+  thread lives) through all three variants, the pump-side twin of
+  D-139's round-2 P3-2 dead-consumer pin; the documented
+  falsifiability is an `expect` on the try_send.
+
+Mutation-verified, each red with cargo exit 101 observed, then
+reverted to green (Rule 5): M1 the file arm delivers an empty batch →
+the path test red; M2 the `Backend` arm delivers a `FilesChanged` →
+the refresh test red; M3 `done: None` becomes a fresh `Some` sender →
+the fire-and-forget assertion red; M4 `let _ = try_send` becomes
+`.expect` → both bus-contract tests red (panic).
+
+The doc: the module doc's stale sentence is reworded to the D-139
+truth — the signal covers both shapes, and the overflow arrives as a
+rescan flag riding an ORDINARY batch, not a stream error — and now
+points at the pinned mapping. A repo-wide sweep for the stale claim
+("event-stream error", "overflow case") found no other live-code
+copy: `ARCHITECTURE.md` (the watcher section) already states the
+post-D-139 truth, `watcher.rs`'s test-helper comment uses
+"event-stream error" correctly (about the `Err` batch itself), and
+the remaining hits are DECISIONS.md history, left alone by the
+card's instruction.
+
+Honest boundaries: no production defect found — the extraction is
+behavior-identical and the tests were green against the current code
+on first run (no red-first bug-fix path). The unpinned remainder is
+the pump's `while let` recv loop and the thread spawn — one-line
+forwards, the same boundary D-139 left at the debouncer callback.
+The `Changed`/`Removed` distinction is deliberately NOT preserved by
+the mapping (both mean "this file needs a re-read"; the pass re-reads
+either way), so no test distinguishes them downstream of the pump.
+Checks green by exit code: fmt, clippy `-D warnings`, `cargo test
+--workspace`, and the frontend `format:check` (added after round 1
+below — the first cut's trailing blank line in this file failed it).
+Frozen zones untouched (`commands.rs`, `lib.rs`, `dirty_recalc.rs`,
+`sync_phase0.rs`, benches).
+
+Round-1 review addendum (D-146, same task; report
+`.opencode/reviews/t259-round1.md`, deepseek-v4.1-flash — verdict
+approve with one must-fix: 2×P2, 3×P3), findings processed here —
+the round independently re-ran all four mutations red in a throwaway
+copy, re-verified the extraction token-identical to HEAD's inline
+body, confirmed the doc truth against D-139 and the sweep claim, and
+found no contradiction with D-144:
+
+- P2-1 (taken): this entry introduced a trailing blank line at
+  `DECISIONS.md`'s EOF — `git diff --check` and the project's
+  `format:check` (CI `ci.yml`, the pre-commit hook) both failed on
+  it. Removed; `format:check` re-run green here, and the checks
+  sentence above now names it.
+- P2-2 (taken): the `mod tests` header still enumerated the suite's
+  halves without the new pump-mapping section (the D-144 P2-1 shape
+  — an enumeration that lies); extended.
+- P3-1 (taken): the Solution now records why the card's named
+  fake-backend seam could not reach the pump (`WatchBackend` never
+  emits; `spawn_service` builds its own watcher) — the reasoning
+  previously lived only in the review report.
+- P3-2 (taken for `file_watch.rs`, refused for `ipc_tests.rs`): the
+  pre-D-139 "backend error(s)" vocabulary replaced at this module's
+  three sites (the `Refresh` doc's trigger list, the coalescing
+  comment, the module-doc pump bullet). The fourth copy,
+  `ipc_tests.rs`'s "the SYS-010 backend error's" (its fire-and-forget
+  Refresh test), is NOT this task's file — the card's ownership is
+  `file_watch.rs` — so it is left untouched; reported to the
+  orchestrator as a one-line wording follow-up for the next task
+  that owns `ipc_tests.rs` (not board-carded by this executor — the
+  board rule reserves card creation to the main session).
+- P3-3 (taken): the dead-bus test renamed to
+  `a_dead_bus_drops_every_variant_delivery_instead_of_panicking`
+  (grammar; the name above updated too).
+
+Round-2 review addendum (D-146, same task; report
+`.opencode/reviews/t259-round2.md`, hy4-flash-free — verdict APPROVE,
+no P0/P1/P2/P3): a clean round. The reviewer re-ran the whole gate
+chain green by exit code (fmt, clippy `-D warnings`, workspace tests,
+the frontend `format:check`, `git diff --check`, plus a
+`RUSTDOCFLAGS="-D warnings" cargo doc` pass confirming the new
+`pump_event` intra-doc links resolve), reproduced all four mutations
+red in a throwaway copy, re-verified the extraction
+behavior-identical to HEAD's inline body, the doc truth against
+D-139's settlement, the round-1 fixes, the frozen zones, and the
+record's accuracy (no overclaim). One note carried forward: the
+report file had been polluted by the reviewer CLI's transcript before
+its write (the known harness issue D-144's process note recorded);
+the reviewer overwrote it with the clean report.
+
+Orchestrator addendum (merge, 2026-11-22): the two out-of-file stale
+wordings this task surfaced are tracked — two cards in the board's
+INBOX ("Follow-up T-259: …" — the ipc_tests.rs:7132 comment and the
+crates/eunomia-fs/tests/watcher.rs:50-52 doc copy). The cards are the
+tracking unit; this note only records their existence.
