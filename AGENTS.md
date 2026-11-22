@@ -58,3 +58,16 @@ already cost the project a fix. Every rule is checkable at review.
 11. **Docs must not lie.** Changing behavior updates the claims about it
     in the same change; what automation cannot prove goes to the manual
     smoke checklist, not a pseudo-test.
+
+## 4. Subagent Sessions
+
+- **Briefs forbid background commands.** Every long run (tests, builds,
+  reviews) executes synchronously inside the agent's own call;
+  `nohup`/&-launches that park the agent on a later notification are how
+  sessions hang.
+- **One executor per worktree.** Never resume a second session onto a
+  worktree that may still have a live one.
+- **"Session not found" is checked, not assumed.** Before declaring a
+  session dead, re-verify its ID against the launch receipt and inspect
+  the worktree (`git status`) and processes — a wrong-ID wake-up reads
+  identically to a dead session.
