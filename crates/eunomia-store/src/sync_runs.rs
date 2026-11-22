@@ -16,10 +16,11 @@
 //! verdicts (`mark_project_written`, `mark_project_failed`), phase
 //! 4's finisher (`finish_run`: the counted verdict, the counters and
 //! `finished_at` — and with it MAIN-027's derived last-success time,
-//! [`last_success_finished_at`]), plus the reads the later phases
-//! and the history UI will consume. The one remaining transition —
-//! the startup `interrupted` recovery — belongs to the startup task
-//! that causes it, exactly the way `projects.rs` hands
+//! [`last_success_finished_at`]), the startup crash-recovery sweep
+//! (`mark_interrupted_runs`: §9.4's "recovery after a crash"), plus
+//! the reads the later phases and the history UI will consume. The
+//! startup pass that fires the recovery belongs to the app layer's
+//! startup sequence, exactly the way `projects.rs` hands
 //! `last_synced_at`/`last_synced_hash` to
 //! `record_last_synced` and the sync tasks that call it (OUT-020): a
 //! repository owns the shape of a row,
@@ -935,6 +936,62 @@ pub fn finish_run(
     // D-037 — no concurrent delete exists); the reasoned-panic
     // posture over that proof, the `create_running` shape.
     Ok(get(conn, run_id)?.expect("the row just finished must be readable"))
+}
+
+/// The startup crash-recovery sweep (§9.4's "Recovery after a crash":
+/// "At startup, `sync_runs` records with the `running` status get the
+/// `interrupted` status"): every `running` row a dead process left
+/// behind goes `running → interrupted` with the caller's recovery
+/// timestamp in `finished_at`. A bulk sweep over the source state —
+/// the [`reset_projects_not_started`] shape, not the per-row writers'
+/// zero-row refusal: a database with no corpse rows is the NORMAL
+/// startup, and the sweep answers `Ok(0)` for it. Idempotent by the
+/// same scoping: a second pass (the next restart) matches no row.
+///
+/// What the sweep deliberately does NOT write:
+///
+/// - `error_code`/`details` stay NULL (a `running` row carries them
+///   NULL, and no §10 code names a process death — the "" literal is
+///   the two deliberate user-shaped stops' spelling, D-138, and the
+///   first reader of the cell treats both NULL and "" as "no code").
+/// - The per-status counters stay at their zeros: phase 4 owns them,
+///   and a crashed run reached no verdict (§9.4's "the project status
+///   already reflects what was written at the time of the crash" —
+///   the per-project rows are the record, and they are not touched:
+///   a `written` row keeps claiming its write, a `not_started` row
+///   its non-write, the T-F3 shape).
+/// - `finished_at` IS stamped — the moment the row reached its
+///   terminal status, exactly what the column names for `aborted`
+///   rows too — so every terminal row carries it (the summary DTO's
+///   documented invariant, and the fact MAIN-027's derived read
+///   filters by `success` alone).
+///
+/// `finished_at` is the **caller's** timestamp (the
+/// [`create_running`]/[`abort_run`] contract: the app layer captures
+/// the moment — here the startup pass — and the column names it) and
+/// must be the DB-002 UTC shape.
+///
+/// Joins the caller's transaction like every writer here (D-037/
+/// D-051); the app layer runs the sweep in ONE short transaction at
+/// exactly two callers — the `setup` hook, before the event loop can
+/// serve any command, and the recovery commands' reopen tail — the
+/// two moments every `running` row is a corpse by definition (no
+/// command of this process can hold the flag yet: startup has served
+/// nothing, recovery mode never managed a `Db`), the precondition a
+/// deferred/spawned pass cannot promise (T-258, D-147).
+///
+/// # Errors
+///
+/// Returns [`SyncRunsError::Sql`] when the statement fails. Zero
+/// matched rows is `Ok(0)`, not an error (see above).
+pub fn mark_interrupted_runs(conn: &Connection, finished_at: &str) -> Result<usize, SyncRunsError> {
+    conn.execute(
+        "UPDATE sync_runs \
+         SET status = 'interrupted', finished_at = ?1 \
+         WHERE status = 'running'",
+        rusqlite::params![finished_at],
+    )
+    .map_err(SyncRunsError::Sql)
 }
 
 /// MAIN-027's overall time of the last successful sync (§9.4 phase 4

@@ -51,8 +51,9 @@ use eunomia_store::settings::{BaseName, ExtraFile, Position, Scheme};
 use eunomia_store::storage::{open_db, run_migrations};
 use eunomia_store::sync_runs::{
     NewSyncRunProject, SyncRunProjectStatus, SyncRunStatus, SyncRunsError, abort_run,
-    create_running, finish_run, get, last_success_finished_at, list_projects, mark_project_failed,
-    mark_project_skipped, mark_project_unchanged, mark_project_written, reset_projects_not_started,
+    create_running, finish_run, get, last_success_finished_at, list_projects,
+    mark_interrupted_runs, mark_project_failed, mark_project_skipped, mark_project_unchanged,
+    mark_project_written, reset_projects_not_started,
 };
 use rusqlite::Connection;
 
@@ -1133,4 +1134,112 @@ fn last_success_finished_at_answers_the_newest_success_by_the_run_order() {
         Some("2026-11-21T12:30:00.000Z"),
         "the newest START is the last success, whatever the finish stamps say"
     );
+}
+
+#[test]
+fn mark_interrupted_runs_sweeps_every_running_row_and_no_terminal_one() {
+    // §9.4's "recovery after a crash" (T-122/T-258): the startup sweep
+    // takes EVERY `running` row a dead process left — two corpses here,
+    // in one statement — and answers how many it took, while the
+    // terminal rows (a `success`, an `aborted`) keep exactly what their
+    // own writers wrote: the sweep is scoped to the `running` source
+    // state, so it can never rewrite history.
+    let (conn, _guard) = runs_db("interrupted");
+    let project = seed_project(&conn, 1);
+    let first = create_running(&conn, STARTED_AT, &[run_project(&project, 1)])
+        .expect("the first corpse should create");
+    let second = create_running(&conn, STARTED_AT, &[run_project(&project, 2)])
+        .expect("the second corpse should create");
+    let finished = create_running(&conn, STARTED_AT, &[run_project(&project, 3)])
+        .expect("the finished run should create");
+    mark_project_written(&conn, &finished.id, &project).expect("the verdict should work");
+    finish_run(&conn, &finished.id, "2026-11-21T12:00:00.000Z")
+        .expect("finishing the run should work");
+    let aborted = create_running(&conn, STARTED_AT, &[run_project(&project, 4)])
+        .expect("the aborted run should create");
+    abort_run(
+        &conn,
+        &aborted.id,
+        "2026-11-21T12:01:00.000Z",
+        "E_DISK_FULL",
+        "free 0 bytes",
+    )
+    .expect("aborting the run should work");
+    const RECOVERED_AT: &str = "2026-11-22T08:00:00.000Z";
+
+    let taken = mark_interrupted_runs(&conn, RECOVERED_AT).expect("the startup sweep should work");
+
+    assert_eq!(taken, 2, "exactly the two corpses were taken");
+    for corpse in [&first, &second] {
+        let row = get(&conn, &corpse.id)
+            .expect("reading the corpse should work")
+            .expect("the corpse must persist");
+        assert_eq!(row.status, SyncRunStatus::Interrupted);
+        assert_eq!(
+            row.finished_at.as_deref(),
+            Some(RECOVERED_AT),
+            "the recovery moment is the terminal moment"
+        );
+        assert_eq!(row.error_code, None, "no §10 code names a process death");
+        assert_eq!(row.details, None, "a crashed run claims no details line");
+        assert_eq!(
+            row.projects_written, 0,
+            "phase 4's counters stay at their zeros"
+        );
+        assert_eq!(row.projects_failed, 0);
+    }
+    let kept = get(&conn, &finished.id)
+        .expect("reading the finished run should work")
+        .expect("the finished run must persist");
+    assert_eq!(kept.status, SyncRunStatus::Success);
+    assert_eq!(
+        kept.finished_at.as_deref(),
+        Some("2026-11-21T12:00:00.000Z")
+    );
+    let kept = get(&conn, &aborted.id)
+        .expect("reading the aborted run should work")
+        .expect("the aborted run must persist");
+    assert_eq!(kept.status, SyncRunStatus::Aborted);
+    assert_eq!(kept.error_code.as_deref(), Some("E_DISK_FULL"));
+    assert_eq!(
+        kept.finished_at.as_deref(),
+        Some("2026-11-21T12:01:00.000Z")
+    );
+}
+
+#[test]
+fn mark_interrupted_runs_is_idempotent_and_touches_no_project_row() {
+    // The convergence half (§9.4's "the project status already
+    // reflects what was written at the time of the crash", T-F3): the
+    // sweep never touches a `sync_run_projects` row — a `written` row
+    // keeps claiming its write verbatim — and a second sweep matches
+    // no row (`Ok(0)`): the next restart over an already-recovered
+    // database is the honest no-op.
+    let (conn, _guard) = runs_db("interrupted-idempotent");
+    let project = seed_project(&conn, 1);
+    let corpse = create_running(&conn, STARTED_AT, &[run_project(&project, 1)])
+        .expect("the corpse should create");
+    mark_project_written(&conn, &corpse.id, &project).expect("the crash-mid-write verdict");
+    const RECOVERED_AT: &str = "2026-11-22T08:00:00.000Z";
+
+    mark_interrupted_runs(&conn, RECOVERED_AT).expect("the first sweep should work");
+    let second = mark_interrupted_runs(&conn, RECOVERED_AT).expect("the second sweep should work");
+
+    assert_eq!(second, 0, "nothing is left running after the first sweep");
+    let row = get(&conn, &corpse.id)
+        .expect("reading the corpse should work")
+        .expect("the corpse must persist");
+    assert_eq!(
+        row.status,
+        SyncRunStatus::Interrupted,
+        "not re-marked, still interrupted"
+    );
+    let rows = list_projects(&conn, &corpse.id).expect("reading the rows should work");
+    assert_eq!(rows[0].status, SyncRunProjectStatus::Written);
+    assert_eq!(
+        rows[0].build_hash,
+        Some("1".repeat(64)),
+        "the fingerprint is intact"
+    );
+    assert_eq!(rows[0].error_code, None);
 }

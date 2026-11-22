@@ -14138,3 +14138,270 @@ wordings this task surfaced are tracked — two cards in the board's
 INBOX ("Follow-up T-259: …" — the ipc_tests.rs:7132 comment and the
 crates/eunomia-fs/tests/watcher.rs:50-52 doc copy). The cards are the
 tracking unit; this note only records their existence.
+### D-147 — T-258: the live run's cancel token published through a managed slot; the startup `interrupted` recovery T-122 never landed, landed here; and D-138's first-reader obligation pinned at a seam — 2026-11-22
+
+Problem: T-258 carries three halves out of D-138's follow-up list.
+(1) The `sync_run` command constructs a cancel token nobody can reach
+— D-138 recorded "publishing the running run's token for the future
+`sync_cancel` command (a managed slot in `lib.rs`'s setup …) is the
+recorded follow-up", and the card IS that follow-up (the command
+itself is T-120's, not this card's). (2) The card's text says the
+startup `interrupted` recovery (card T-122) "exists — synchronize
+the spec"; verification said otherwise, and Rule 11 forbids papering
+over the drift. (3) D-138's round-1 P2-1 records "the follow-up
+below names the first reader's obligation" for the run row's
+`error_code = ""` spelling — the obligation needed a binding place.
+
+Solution, half by half.
+
+**Half 1 — the token publication.** `commands.rs` gains
+`SyncCancelSlot` (a `Mutex<Option<CancelToken>>` managed by `setup`
+in every mode beside `SyncRunning`, for the same reason the flag is:
+the future `sync_cancel` must find the state, and in recovery mode
+the slot simply stays empty) and `CancelLease`, the clearing half in
+the `SyncGuard` RAII shape (D-123) — the ONE mechanism, not a second
+cancel path:
+
+| moment                                                                                                | the slot holds                                                                                                                                                                                                                                                    |
+| ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| no run live (fresh app, between runs, recovery mode)                                                  | `None`                                                                                                                                                                                                                                                            |
+| `sync_run_with` entered, after `data_root`, before phase 0's flag take                                | the run's token (`publish`: set-if-empty)                                                                                                                                                                                                                         |
+| the run runs                                                                                          | the run's token; a refused second start publishes nothing and clears nothing (its latch is not current)                                                                                                                                                           |
+| the run answered — finish, the D-25 stop, the cancel stop, the P3-4 wrapper's `Err`, a panic's unwind | `None` (the lease's `clear_if_current`; the finish path drops the lease explicitly beside the guard, before the never-fatal aftermath — the D-138 P2-2 shape applied to the slot: a wedged after-run seam must not leave a published token behind a finished run) |
+| the process dies mid-run                                                                              | the slot dies with it (in-memory); the corpse row is half 2's case                                                                                                                                                                                                |
+
+Readings chosen: publish BEFORE the flag take (phase 0's snapshot
+build takes real time — a cancel arriving over it must find the
+latch; a token published but never taken is a harmless latch the
+lease clears); set-if-empty so a second start can never evict the
+live run's token; `clear_if_current` compares the inner `Arc`
+(`ptr_eq`) so no run's exit unpublishes another's; publication
+itself looks the state up with the panicking `app.state` (a wiring
+bug must be loud) while the lease's `Drop` uses `try_state` (a Drop
+must not abort mid-unwind). A stale token cannot exist in a live
+process: every exit drops the lease, and a release-build panic
+aborts the process (the flag's own `panic = "abort"` caveat). The
+cancel POINT is untouched — D-138's law: `token()` hands the future
+command a clone of the same latched `Arc`, so "cancel through the
+slot" IS the existing check, never a second consultation.
+
+**Half 2 — the interrupted recovery, and the honest T-122 finding.**
+The card believed T-122 ("mark interrupted runs at startup") DONE.
+Verification (Rule 11, before any design): no commit in
+`git log --all` names it; no D-entry exists; `grep -rn interrupted`
+finds the status literal, doc comments promising the pass, and tests
+commenting on it — but no store writer, no startup call, no tests.
+The behavior had NOT landed; the drift is recorded here and the
+board card needs the orchestrator's correction (follow-up below).
+This card implements it (the "close the gap" reading — the half is
+this card's own title):
+
+- `eunomia_store::sync_runs::mark_interrupted_runs` — one UPDATE,
+  `running → interrupted` + `finished_at`, scoped to the source
+  state (the `reset_projects_not_started` bulk-sweep shape:
+  `Ok(0)` over a clean database, idempotent on re-run; NOT the
+  per-row writers' zero-row refusal — a clean startup is normal).
+  Deliberately NOT written: `error_code`/`details` (a process death
+  is nobody's recorded decision — "" stays exclusive to the two
+  deliberate user-shaped stops, and `finish_run`'s verdicts write
+  NULL, so interrupted matches the finished runs' spelling), the
+  counters (phase 4's), and every `sync_run_projects` row (§9.4:
+  "the project status already reflects what was written at the time
+  of the crash" — the T-F3 shape). `finished_at` IS stamped — the
+  moment the row went terminal is what the column names for `aborted`
+  rows too, and every terminal row carrying it keeps the summary
+  DTO's documented invariant true for the future `sync_last_result`.
+- `Db::mark_interrupted_runs` — the sweep over the SYNCHRONOUS seam
+  (`ensure_daily_backup`'s shape: `lock_recovering_poison` + one
+  short transaction). Synchronous on purpose, and stronger than
+  precedent: the sweep is only correct over rows no live run owns,
+  and the one moment that holds by definition is startup, before the
+  event loop serves a command (the same setup-completes-before-
+  invokes assumption every managed state and the ERR-001 copy
+  already rest on). A `Db::run`-shaped spawned pass could race this
+  process's own first `sync_run` — the flag lives in memory, SQL
+  cannot see it — and mark a LIVE run `interrupted`.
+- `lib.rs` `setup` runs it right after `Db::open` succeeds, BEFORE
+  the commit hook (the marking's row change would otherwise drop a
+  dirty trigger for a pass that reads projects, not runs). A refusal
+  degrades — logged through the new `sync_runs_interrupt_failed`
+  facade edge, the launch continues (D-046/D-054), the next restart
+  retries the idempotent sweep; zero corpses log nothing (the
+  `AlreadyPresent` posture); N ≥ 1 corpses take one `warn` line
+  carrying the count alone (`sync_runs_interrupted`; SEC-008 — run
+  ids would be legal but the count is the triage fact). The spec's
+  "hashes are recalculated" clause is ALREADY wired — the DB-022
+  startup recalculation pass (T-101) — and the §7.7 journal stays
+  phase 4's (D-138: the action vocabulary has no member for this;
+  recorded, not invented).
+
+**Half 3 — the first reader's obligation, pinned at a seam.**
+Verification first (the card asks where the obligation binds): grep
+shows NO production reader of the RUN row's `error_code` today —
+`summary_of` reads only per-project rows' codes, phase 4's journal
+reads only per-project codes (and shape-checks them against §10), so
+the pins at `ipc_tests.rs` (`error_code == Some("")`) are the only
+readers. The first production reader will be `sync_last_result`
+(§7.10, a future card — this card adds no command, no `bindings.ts`
+change). What lands so the obligation BINDS in code instead of
+prose: `commands::run_error_code_or_none` — the one seam collapsing
+BOTH no-code spellings (NULL and "") to "no code", dead-code-allowed
+with the true reason (the `CancelToken::cancel` precedent), which
+the future reader calls instead of re-deciding; plus the census
+(`count_empty_run_error_codes` in the tests) counting the empty
+literal across `sync_runs`, pinned per run shape: the D-25 gate stop
+and the cancel stop each hold exactly one, a finished run zero
+(NULL), an error abort zero (its §10 literal), an interrupted row
+zero (half 2's NULL ruling) — a future writer inventing a third
+source of "" (or losing one of the two) fails the count.
+
+Tests: store (`tests/sync_runs.rs`) — the sweep takes every corpse
+and no terminal row (two corpses + one success + one aborted: count
+2, statuses and finish stamps verbatim), and the idempotent second
+pass touches neither the row nor any project row (a crash-mid-write
+`written` row keeps its fingerprint). `db_tests.rs` — the sweep over
+the `Db` seam with crash-shaped rows planted by raw SQL (the oracle
+is the schema, not the store's DTOs), read back verbatim, idempotent
+on the second call. `ipc_tests.rs` — the lifecycle in one run over
+the parked-write shape: empty before; `Some` while parked (flag up,
+mid-phase-3); STILL `Some` after a refused second start's
+`E_SYNC_RUNNING` (set-if-empty held); a cancel latched through the
+slot's token AFTER the check point is the §9.4 no-op (the run
+finishes `success`, the project stamped); `None` after the answer —
+and THAT clearing is the identity discriminator: only the first
+run's own lease can produce it (an overwrite would have left the
+second start's token, an unconditional clear would have emptied the
+slot at the refusal); census 0 over the finished run. The gate stop
+(slot cleared, census 1), the cancel stop (existing test
+strengthened: slot cleared, census 1), the error abort (slot
+cleared, census 0 — the row carries `E_BACKUP_FAILED`), the
+normalizer's three cases, and the `setup` wiring pin (the
+config_tests style: open → sweep → commit hook → manage, each marker
+exactly once, in order). `logging.rs` — both new edges' lines (warn
+with `count=N`, error with the code literal, both class-only).
+Mutation check: M1 the then-only publication step disabled (the
+pre-`publish_owned` first cut) → the lifecycle test red at the
+mid-run read; M2 clear made unconditional → red at "the refused
+start left the live run's token in place"; M3 publish made
+overwriting → red at the same assertion (the second start's lease
+then empties the slot); M4 the store UPDATE's `running` scoping
+dropped → both store tests red (terminal rows taken, idempotence
+broken); M5 the `finished_at` stamp dropped → the store test red at
+the stamp pin; M6 the normalizer's "" arm dropped → the normalizer
+test red — all green after revert; `cargo fmt --check`, clippy
+`-D warnings`, `cargo test --workspace` all green (exit codes);
+`src/bindings.ts` byte-identical (no command or type surface
+changed). The composition note, honestly: the end-to-end "cancel
+through the published token stops a run at the check point" is
+proven as (identity: the slot's token shares the latch with the
+token the pipeline consults — ASSERTED through the test-only
+`shares_latch` probe while the run is parked) + (D-138's existing
+pre-latched-token test: a token cancelled before the run stops it
+at the point, before the backups) + (the no-op above for post-point
+latches) — three deterministic tests instead of one racy one (no
+injectable seam exists between the check and phase 2 to park a run
+AT the point; a polling race was rejected as flaky by design, the
+D-140 posture).
+
+Frozen zones untouched (`file_watch.rs`, `dirty_recalc.rs`,
+`sync_phase0.rs`, `benches/`); `commands.rs` + `lib.rs` owned as
+briefed; the store sweep, the `Db` seam method and the two logging
+edges are the minimal unavoidable widenings outside that pair,
+each justified above. Stale docs fixed in the same change (Rule 11):
+`CancelToken`'s "recorded follow-up" sentence, `stop_run`'s
+"obligation recorded in D-138's follow-ups" pointer, and the store
+module docs' "the one remaining transition" line.
+
+Follow-ups for the board (the orchestrator cards them): the T-122
+card's claimed done-state is FALSE — the behavior landed HERE (the
+board needs the correction or a close-as-duplicate note); T-120
+(`sync_cancel`) consumes the slot (`token().cancel()`; its answer
+shape and registration are that card's); T-122's speculative
+`sync_last_result` sibling card, when carded, must start from
+`run_error_code_or_none` and the census; the D-138 ARCHITECTURE.md
+rows follow-up stands. Honest boundaries: a refused-abort corpse
+row (D-138's degraded path) stays `running` until the NEXT restart
+— mid-session corpse sweeping is out of scope (the spec's recovery
+is startup-only, and no in-process marker can distinguish a live
+run's row from a corpse's); the `setup` wiring is marker-pinned, not
+executed in a test (the house posture — the real `run()` cannot
+launch under a unit harness).
+
+Round-1 review addendum (D-147, same task; report
+`.opencode/reviews/t258-round1.md`, deepseek-v4.1-flash — FINDINGS:
+1×P2, 5×P3): findings processed here —
+
+- P2-1 (taken): slot ownership and run ownership are decided by
+  different races — the pre-take `publish` is set-if-empty, the flag
+  is `compare_and_swap` — so a start that pre-published first but
+  lost the flag left ITS token published, and its lease's exit then
+  EMPTIED the slot over the live run (a `sync_cancel` arriving next
+  would find no run to cancel; the failure mode is silent). The fix
+  is the second publication step: after phase 0 answers `Ok` — only
+  the flag holder reaches that point — `publish_owned` stores the
+  token UNCONDITIONALLY over whatever a losing start left; the
+  loser's later `clear_if_current` no-ops over the winner's latch
+  (`ptr_eq`), and the pre-take publish's snapshot-build window stays.
+  The lifecycle table above carries the new row.
+- P3-1 (taken): the store doc's "(D-258)" pointed at a decision that
+  does not exist — the task number was meant; now "(T-258, D-147)".
+- P3-2 (taken): the blank line between the seam helper and
+  `summary_of`'s docs restored (fmt does not police doc attachment).
+- P3-3 (taken): the unreachable `Member` arm of the Db seam carried
+  `member.to_string()` — the stored cell's value — into the
+  diagnostic, the exact shape Rule 8 exists to stop; it now mirrors
+  the `runs_to_app_error` house shape (class-only: the column named,
+  never the value).
+- P3-4 (taken): the identity discriminator proved the slot held the
+  LEASE's token, not that it held the latch the pipeline CONSULTS —
+  a refactor publishing a fresh token while the pipeline kept the
+  parameter would have stayed green. `CancelToken::shares_latch`
+  (a `#[cfg(test)]` method, the `set_busy_timeout_for_tests` shape)
+  now pins it directly: the lifecycle test constructs the token,
+  keeps a clone, and asserts the slot's token shares the latch with
+  it while parked. The composition note's first leg is corrected
+  accordingly: identity is ASSERTED, not inferred from the clearing.
+- P3-5 (taken): the recovery commands' reopen tail mirrored the
+  startup tail but skipped the sweep — a restored copy may carry
+  `running` rows a dead process left (a daily copy taken mid-run, or
+  any user-restored file), and recovery mode is the one state where
+  no run can be live. `run_recovery` now runs the same sweep after
+  the reopen, before the ERR-001 baseline (the day's copy captures
+  the truthful state), same degrade; `ARCHITECTURE.md`'s tail
+  sentence updated in the same change (Rule 11); pinned by the new
+  `db_restore_sweeps_the_corpse_rows_of_the_restored_copy` (a real
+  migrated copy carrying one corpse and one settled row, restored
+  over IPC, read back by raw SQL).
+
+Round-2 review addendum (D-147, same task; report
+`.opencode/reviews/t258-round2.md`, hy4-flash-free — APPROVE, no
+P0/P1/P2; 2×P3): the round verified every round-1 fix in place and
+discriminating (the full interleaving analysis of `publish_owned`
+over two and three concurrent starts; the recovery-tail placement
+and degrade; the frozen zones and `bindings.ts` byte-identical; the
+single consultation; SEC-008; mutation spot-checks M2/M4/M6).
+Findings processed here —
+
+- R2-P3-1 (taken): after round 1 added the recovery-tail caller,
+  the sweep's docs and `sync_runs_interrupted`'s message still said
+  "at startup" — a restore-time line would have claimed to be a
+  startup line (Rule 11). The message drops the qualifier; the
+  store/`Db`/logging docs now name BOTH callers and the invariant
+  they share (the two moments no run can be live).
+- R2-P3-2 (taken): D-147's M1 claim was literally false after the
+  round-1 two-step split — disabling only the pre-take `publish`
+  leaves every test green now (`publish_owned` restores the token
+  before any test reads the slot), so the PRE-TAKE half's purpose
+  (a cancel latching during phase 0's snapshot build) is a design
+  guarantee, not a test-oracled fact — no injectable seam exists
+  before the check point to pin it, the D-144 "awaited-vs-spawned"
+  posture. The M1 sentence above now names the then-only step it
+  actually mutated; the pre-take window's honesty is this note.
+
+Orchestrator addendum (merge, 2026-11-22): the follow-ups are
+tracked on the board — the false-done T-122 card carries a
+correcting comment (the behavior lives in THIS entry), and four
+cards sit in INBOX ("Follow-up T-258: …" — the T-120 token
+consumption note, the sync_last_result starting seams, the D-138
+ARCHITECTURE.md rows). The cards are the tracking unit; this note
+only records their existence.

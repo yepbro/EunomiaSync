@@ -278,6 +278,21 @@ async fn run_recovery<R: Runtime>(app: &AppHandle<R>, operation: Recovery) -> Re
             &db_path,
         ),
     }
+    // The §9.4 crash-recovery sweep, the same step, order and posture
+    // as the `setup` hook (T-258): the reopened database may carry
+    // `running` rows a dead process left — a daily copy taken
+    // mid-run, or any file the user restored — and recovery mode is
+    // the one state where no run can be live (no `Db` was managed
+    // until this command), so every `running` row is a corpse by the
+    // same definition as startup. Before the ERR-001 baseline copy
+    // (the day's copy should capture the truthful state), degrading
+    // like it when refused (the next restart retries the idempotent
+    // sweep).
+    match database.mark_interrupted_runs(&eunomia_store::values::now_utc()) {
+        Ok(0) => {}
+        Ok(count) => logging::sync_runs_interrupted(count),
+        Err(error) => logging::sync_runs_interrupt_failed(error.code.as_str()),
+    }
     // The ERR-001 daily baseline of the recovered database, the same
     // step and degrade-never-abort policy as the `setup` hook
     // (D-046): the recovered database is the day's working state, and
@@ -742,11 +757,11 @@ pub(crate) struct SyncRunProjectEntry {
 /// already running, and everything after phase 2 is uncancellable by
 /// spec, so a latched flag checked once is the whole policy.
 ///
-/// The public command constructs a fresh token nobody can reach yet;
-/// publishing the running run's token for the future `sync_cancel`
-/// command (a managed slot in `lib.rs`'s setup) is the recorded
-/// follow-up — the check point and the abort shape it triggers land
-/// here, tested through [`sync_run_with`].
+/// The token the command drives the pipeline with is PUBLISHED for
+/// the run's lifetime through the managed [`SyncCancelSlot`] (T-258,
+/// D-138's recorded follow-up landed), so the future `sync_cancel`
+/// command reaches this same latch; the check point and the abort
+/// shape it triggers land here, tested through [`sync_run_with`].
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CancelToken {
     cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -770,6 +785,161 @@ impl CancelToken {
     /// the flag seam's own ordering pair).
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Test-support identity probe for [`CancelToken`](CancelToken):
+/// whether two tokens share one latch (the `Arc` inside) — the
+/// discriminator that pins the managed slot's published token to the
+/// very latch the pipeline's ONE check point reads, which no
+/// behavioral outcome can (a post-point cancel is a no-op on any
+/// token). Exists only under `cfg(test)`; no production caller can
+/// reach it (the `Db::set_busy_timeout_for_tests` shape).
+#[cfg(test)]
+impl CancelToken {
+    pub(crate) fn shares_latch(&self, other: &CancelToken) -> bool {
+        Arc::ptr_eq(&self.cancelled, &other.cancelled)
+    }
+}
+
+/// The managed slot publishing the LIVE run's cancel token (D-138's
+/// recorded follow-up, landed here — T-258): [`sync_run_with`]
+/// publishes the token it drives the pipeline with at the run's start
+/// and clears it at the run's end, so the future `sync_cancel`
+/// command (§7.10, T-120) reaches the ONE cooperative cancel point
+/// through the same latched token the pipeline consults (§9.4 phase 2
+/// step 3's point of no return) — no second cancel mechanism exists
+/// or is needed: `token().cancel()` IS the cancel, and its semantics
+/// are D-138's law unchanged (a latch before the check point stops
+/// the run before the backups; a latch after it is the no-op the
+/// uncancellable tail already defines).
+///
+/// **The lifecycle — one mechanism, the [`sync_running::SyncGuard`]
+/// shape (D-123).**
+///
+/// | moment | the slot holds |
+/// | ------ | -------------- |
+/// | no run live (fresh app, between runs, recovery mode) | `None` |
+/// | `sync_run_with` entered, before the phase-0 flag take | the start's token (`publish`: set-if-empty) |
+/// | phase 0 answered `Ok` — the flag is held | the flag holder's token (`publish_owned`, unconditional: the pre-take race's loser must not stay published over the live run — the round-1 P2-1 fix) |
+/// | the run runs (phases 0–4) | the run's token — a refused second start publishes nothing and clears nothing (its token is not current) |
+/// | the run answered — every exit: the finish, the D-25 stop, the cancel stop, the P3-4 wrapper's `Err`, a panic's unwind | `None` again (the [`CancelLease`] RAII drop's `clear_if_current`; the finish path drops the lease beside the guard, before the never-fatal aftermath — the D-138 P2-2 shape) |
+/// | the process dies mid-run | the slot dies with it (in-memory state); the corpse row is the startup `interrupted` recovery's case (§9.4, T-258) |
+///
+/// The publication is TWO steps by construction: the pre-take
+/// `publish` (set-if-empty) closes the missed-cancel window — a
+/// cancel latched while phase 0 builds its snapshot is honored at the
+/// check point — and the post-take `publish_owned` (unconditional,
+/// the flag holder alone) reconciles the two races that decide the
+/// slot and the run (the round-1 P2-1 fix): a start that pre-published
+/// but lost the flag would otherwise stay published over the winner,
+/// and its lease's exit would empty the slot mid-run. `publish` being
+/// set-if-empty means a second start can never evict a live token,
+/// and `clear_if_current` clears only the lease's OWN latch, so no
+/// run's exit can unpublish another's. A stale token cannot exist in
+/// a live process: every exit drops the lease, and a release-build
+/// panic aborts the process (the slot dies with it, the flag's own
+/// `panic = "abort"` caveat).
+///
+/// Managed by `setup` in every mode (recovery included) beside
+/// [`sync_running::SyncRunning`], for the same reason the flag is:
+/// the future `sync_cancel` must FIND the state in every mode — in
+/// recovery mode it simply stays empty (a sync refuses at phase 0).
+#[derive(Debug, Default)]
+pub(crate) struct SyncCancelSlot {
+    /// `std::sync::Mutex` — the guard never crosses an await point
+    /// (each method body is one lock); `None` means no run is live.
+    token: std::sync::Mutex<Option<CancelToken>>,
+}
+
+impl SyncCancelSlot {
+    /// An empty slot — the state `setup` manages before anything that
+    /// could fail.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Publishes `token` only when the slot is EMPTY: the live run's
+    /// publisher wins, and a concurrent second start (the
+    /// `E_SYNC_RUNNING` path) publishes nothing — it never evicts the
+    /// running run's token.
+    fn publish(&self, token: &CancelToken) {
+        let mut slot = self
+            .token
+            .lock()
+            .expect("the cancel slot must not be poisoned");
+        if slot.is_none() {
+            *slot = Some(token.clone());
+        }
+    }
+
+    /// The flag holder's re-assertion of ownership: stores `token`
+    /// UNCONDITIONALLY, over whatever a losing start's pre-take
+    /// `publish` left (the round-1 P2-1 fix). Ownership of the slot
+    /// and ownership of the run are decided by different races —
+    /// `publish` is set-if-empty, the flag is `compare_and_swap` — so
+    /// a start that pre-published first but lost the flag would
+    /// otherwise leave ITS token in the slot, and its lease's exit
+    /// would then empty the slot over the LIVE run (a `sync_cancel`
+    /// arriving next would find no run to cancel). Only the flag
+    /// holder reaches this call, so exactly one run re-asserts; the
+    /// loser's later `clear_if_current` no-ops over the winner's
+    /// latch (`ptr_eq`), and the pre-take `publish`'s window — a
+    /// cancel latching during phase 0's snapshot build — is kept.
+    fn publish_owned(&self, token: &CancelToken) {
+        *self
+            .token
+            .lock()
+            .expect("the cancel slot must not be poisoned") = Some(token.clone());
+    }
+
+    /// The live run's token, if one is published — the future
+    /// `sync_cancel` command's (T-120) read; cancelling the clone is
+    /// cancelling the run's (one `Arc` latches both spellings).
+    #[allow(dead_code)] // consumed by the future sync_cancel command's task; tested today
+    pub(crate) fn token(&self) -> Option<CancelToken> {
+        self.token
+            .lock()
+            .expect("the cancel slot must not be poisoned")
+            .clone()
+    }
+
+    /// Clears the slot only while it still holds exactly `token`'s
+    /// latch — a lease that published nothing (the slot was occupied)
+    /// clears nothing, so no run's exit unpublishes another's token.
+    fn clear_if_current(&self, token: &CancelToken) {
+        let mut slot = self
+            .token
+            .lock()
+            .expect("the cancel slot must not be poisoned");
+        let current = slot.as_ref();
+        if current.is_some_and(|current| Arc::ptr_eq(&current.cancelled, &token.cancelled)) {
+            *slot = None;
+        }
+    }
+}
+
+/// The publication's RAII other half (the [`sync_running::SyncGuard`]
+/// shape, D-123): clearing the slot on EVERY exit of
+/// [`sync_run_with`] — held across the run, dropped at the answer;
+/// an `Err`'s early return and a panic's unwind drop it the same way,
+/// and the finish path drops it explicitly beside the guard, before
+/// the never-fatal aftermath (a wedged after-run seam must not leave
+/// a published token behind a finished run — the D-138 P2-2
+/// reasoning, applied to the slot). The drop's state read is the
+/// non-panicking `try_state` on purpose: publication already proved
+/// the state exists (a panicking lookup there), and a `Drop` must not
+/// turn a wiring bug into an abort mid-unwind.
+struct CancelLease<R: Runtime> {
+    app: AppHandle<R>,
+    token: CancelToken,
+}
+
+impl<R: Runtime> Drop for CancelLease<R> {
+    fn drop(&mut self) {
+        if let Some(slot) = self.app.try_state::<SyncCancelSlot>() {
+            slot.clear_if_current(&self.token);
+        }
     }
 }
 
@@ -835,6 +1005,12 @@ pub(crate) async fn sync_run<R: Runtime>(
 ///
 /// **The composition, §9.4's own order.**
 ///
+/// 0. The cancel-token publication (T-258) — the token is placed in
+///    the managed [`SyncCancelSlot`] BEFORE phase 0's flag take (a
+///    cancel latched during the snapshot build is honored at the
+///    check point; a token whose take is refused is a harmless latch
+///    the [`CancelLease`] clears on the way out), and the lease holds
+///    the clearing duty for every exit below.
 /// 1. Phase 0 ([`sync_phase0::run`]) — the flag-guarded start: a
 ///    second run meets the typed `E_SYNC_RUNNING` refusal here, the
 ///    snapshot is built in one read transaction, and the `running` row
@@ -899,9 +1075,33 @@ pub(crate) async fn sync_run_with<R: Runtime>(
     // (an uninitialized-app bug) does not churn the flag at all.
     let data_dir = data_root(&app)?;
 
+    // Step 0 — publish the cancel token (T-258, D-138's recorded
+    // follow-up): the managed slot the future `sync_cancel` command
+    // reads. BEFORE the flag take (the missed-cancel window closes:
+    // phase 0's snapshot build takes real time, and a cancel arriving
+    // over it must find the latch), set-if-empty (a refused second
+    // start never evicts the live run's token). The lease is the
+    // clearing half: every exit of this function — including the
+    // `Err`s below and a panic's unwind — drops it, and the finish
+    // path drops it explicitly beside the guard.
+    app.state::<SyncCancelSlot>().publish(&cancel);
+    let _cancel_lease = CancelLease {
+        app: app.clone(),
+        token: cancel.clone(),
+    };
+
     // Step 1 — phase 0. An `Err` here leaves no run row (the flag is
     // RAII-released inside the phase), so there is nothing to abort.
     let phase0 = sync_phase0::run(&app).await?;
+    // The flag holder re-asserts slot ownership (the round-1 P2-1
+    // fix): the pre-take `publish` and the flag's `compare_and_swap`
+    // are separate races, and a start that pre-published first but
+    // lost the flag must not stay published over THIS run — its lease
+    // exit would empty the slot while the live run still needs it.
+    // Only the flag holder reaches here, so exactly one run
+    // re-asserts; the loser's `clear_if_current` no-ops over this
+    // latch.
+    app.state::<SyncCancelSlot>().publish_owned(&cancel);
     let run_id = phase0.run.id.clone();
 
     // Step 2 — DB-032's "before a sync" checkpoint. The diff is the
@@ -1077,9 +1277,12 @@ pub(crate) async fn sync_run_with<R: Runtime>(
     // the guard leaves the pipeline before the never-fatal aftermath
     // (SYS-008's refresh) and the summary read, so a seam that never
     // returns cannot wedge SYS-004 behind a finished run (the round-1
-    // P2-2 fix). An `Err` above unwinds through the guard's Drop, the
-    // same release.
+    // P2-2 fix). The cancel lease drops the same way, beside it: a
+    // wedged after-run seam must not leave a published token behind a
+    // finished run either. An `Err` above unwinds through the guard's
+    // Drop — and the lease's — the same release.
     drop(guard);
+    drop(_cancel_lease);
 
     // Step 6 — the never-fatal aftermath: the watcher's after-sync
     // refresh (SYS-008; its class-only §10 code is all that rides the
@@ -1166,8 +1369,8 @@ fn wire_count(count: i64) -> i32 {
 /// cancel point — are decisions, not §10 situations, and pass the
 /// empty literal: the store's writer takes `&str` (NULL is not an
 /// input it offers), so "" is the no-code spelling and the first run
-/// reader (`sync_last_result`) must treat it so — the obligation
-/// recorded in D-138's follow-ups.
+/// reader's reading is pinned at [`run_error_code_or_none`] (D-138's
+/// obligation, landed as the one seam — T-258).
 async fn stop_run<R: Runtime>(
     app: &AppHandle<R>,
     run_id: &str,
@@ -1213,6 +1416,26 @@ async fn stop_run_if_running<R: Runtime>(
         })
         .await
 }
+
+/// D-138's first-reader obligation, landed as the one seam (T-258):
+/// the RUN row's `error_code` cell spells "no code" TWO ways — `NULL`
+/// ([`finish_run`]'s verdicts, the startup `interrupted` sweep) and
+/// the empty literal `""` (the two user-shaped stops, whose store
+/// writer takes `&str`; no §10 code names a user decision). The first
+/// reader of the cell — the future `sync_last_result` command (§7.10)
+/// — must collapse both spellings to "no code", and every later
+/// reader reuses this seam instead of re-deciding the spelling. The
+/// PER-PROJECT rows' codes are not this helper's business: a
+/// `skipped`/`failed` row carries a real §10 literal by definition,
+/// and phase 4's journal already shape-checks those against §10.
+#[allow(dead_code)] // consumed by the future sync_last_result command's task; tested today
+pub(crate) fn run_error_code_or_none(error_code: Option<&str>) -> Option<&str> {
+    match error_code {
+        None | Some("") => None,
+        Some(code) => Some(code),
+    }
+}
+
 /// Reads one run's committed truth back as the wire summary — the
 /// verdict and counters `finish_run` wrote (or the abort this command
 /// wrote), and every per-project row in `sort_order`. Called only over

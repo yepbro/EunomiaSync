@@ -1525,6 +1525,47 @@ pub(crate) fn sync_run_aborted(reason: &str) {
     );
 }
 
+/// The crash-recovery sweep's record line (§9.4's "recovery after a
+/// crash", T-258): N run rows a dead process left `running` were
+/// marked `interrupted`. Emitted at the TWO moments no run can be
+/// live — the `setup` hook (§9.4's literal "at startup") and the
+/// recovery commands' reopen tail (a restored copy may carry the
+/// corpses; recovery mode never managed a `Db`, so no run of this
+/// process exists). `warn`: a process death is a degraded fact the
+/// user should find in the log, but the launch itself is healthy —
+/// the corpses are history now, the files are intact by §9.5's
+/// atomicity, and the hashes were recalculated by the DB-022 startup
+/// pass (T-101, already wired). The count is the whole payload:
+/// SEC-008's class-only posture — run ids are DB keys, not user
+/// content, and the count is the fact triage needs. A clean database
+/// (zero corpses) logs nothing here: the sweep's no-op is not an
+/// event (the `AlreadyPresent` posture).
+pub(crate) fn sync_runs_interrupted(count: usize) {
+    tracing::warn!(
+        target: "eunomia::sync",
+        count,
+        "sync runs left running by a dead process were marked interrupted"
+    );
+}
+
+/// The crash-recovery sweep's refusal line (§9.4, T-258): the corpse
+/// rows stay `running` — exactly the state the sweep exists to clear,
+/// so the next reader of `sync_runs` meets rows that will never
+/// finish on their own. Emitted at the sweep's two callers (the
+/// `setup` hook and the recovery commands' reopen tail). `error` per
+/// the facade contract; both callers continue anyway (the D-046/
+/// D-054 startup-housekeeping degrade), and the next restart retries
+/// the idempotent sweep. The `code` is the store failure's §10
+/// literal — the class-only fact, never the error's params.
+pub(crate) fn sync_runs_interrupt_failed(code: &str) {
+    tracing::error!(
+        target: "eunomia::sync",
+        code,
+        "marking interrupted the runs left running by a dead process was refused; \
+         the rows stay running and the next restart retries"
+    );
+}
+
 /// One per-project refusal of a finished run (T-118, §10's every-error
 /// rule: "every error is written to the log with its code, project,
 /// path, and OS code"): the §10 code travels as the code literal, the
@@ -2704,6 +2745,38 @@ mod tests {
         assert!(
             log.contains("continuing without it"),
             "the line must say the launch continues, got: {log}"
+        );
+    }
+
+    #[test]
+    fn interrupted_recovery_lines_carry_the_count_and_the_code() {
+        // The §9.4 crash-recovery pair (T-258): the sweep's record is
+        // a `warn` carrying the COUNT alone (class-only, SEC-008 — no
+        // run ids, no content), and its refusal is an `error` carrying
+        // the §10 code literal that survives the strictest config,
+        // saying the rows stay running and the next restart retries.
+        let (_temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Warn)
+            .expect("building the subscriber must work");
+
+        tracing::subscriber::with_default(subscriber, || {
+            sync_runs_interrupted(2);
+            sync_runs_interrupt_failed("E_DB_LOCKED");
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains(" WARN ")
+                && log.contains("count=2")
+                && log.contains("were marked interrupted"),
+            "the record line must be a warn with the count, got: {log}"
+        );
+        assert!(
+            log.contains(" ERROR ")
+                && log.contains("code=\"E_DB_LOCKED\"")
+                && log.contains("the rows stay running and the next restart retries"),
+            "the refusal line must be an error with the code literal, got: {log}"
         );
     }
 

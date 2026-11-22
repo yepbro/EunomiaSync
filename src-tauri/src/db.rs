@@ -435,6 +435,65 @@ impl Db {
         eunomia_store::storage::daily_backup(&connection, &self.backups_dir, now)
     }
 
+    /// The §9.4 crash-recovery sweep (T-258): every `running` run row
+    /// a dead process left behind goes `interrupted`, in ONE short
+    /// transaction, answering how many rows were taken.
+    ///
+    /// Synchronous like [`ensure_daily_backup`], and for a stronger
+    /// reason than precedent: the sweep is only correct over rows no
+    /// live run owns, and the moments that is true by definition are
+    /// the `setup` hook (before the event loop can serve a command)
+    /// and the recovery commands' reopen tail (recovery mode never
+    /// managed a `Db`, so no run of this process exists) — the same
+    /// setup-completes-before-invokes assumption every managed state
+    /// and the ERR-001 copy already rest on. A `Db::run`-shaped
+    /// spawned pass could race this process's own first `sync_run` —
+    /// the flag is in memory and invisible to SQL — and mark a LIVE
+    /// run `interrupted`; a synchronous call at either caller cannot.
+    ///
+    /// The callers (the `setup` hook and `run_recovery`'s tail) own
+    /// the degrade posture: a refusal is logged, never fatal to the
+    /// launch or the recovery (the D-046/D-054 startup-housekeeping
+    /// shape), and the next restart retries the idempotent sweep
+    /// (the store scopes the UPDATE to `running` rows, so a re-run
+    /// over recovered state answers zero).
+    ///
+    /// # Errors
+    ///
+    /// Returns the §7.10 wire value of the underlying store failure —
+    /// the shared SQLite classifier for [`eunomia_store::sync_runs::
+    /// SyncRunsError::Sql`] (the sweep decodes no vocabulary cell, so
+    /// the `Member` arm is unreachable through this writer and maps to
+    /// the class-only fallback).
+    pub(crate) fn mark_interrupted_runs(&self, finished_at: &str) -> Result<usize, AppError> {
+        let mut connection = lock_recovering_poison(&self.connection);
+        let transaction = connection
+            .transaction()
+            .map_err(sqlite_error_to_app_error)?;
+        let taken = eunomia_store::sync_runs::mark_interrupted_runs(&transaction, finished_at)
+            .map_err(|error| match error {
+                eunomia_store::sync_runs::SyncRunsError::Sql(sql) => sqlite_error_to_app_error(sql),
+                // Unreachable through this writer (it writes the
+                // status literal itself and decodes no vocabulary
+                // cell), and class-only by the house shape either
+                // way (SEC-008: the stored value never rides the
+                // diagnostic — the `runs_to_app_error` Member arm).
+                eunomia_store::sync_runs::SyncRunsError::Member { column, .. } => {
+                    let mut app_error = AppError::new(ErrorCode::DbLocked);
+                    app_error.details = Some(ErrorDetails {
+                        os_code: None,
+                        os_kind: Some("SyncRunsCorrupt".to_owned()),
+                        os_message: Some(format!(
+                            "a stored {column} cell is outside its vocabulary"
+                        )),
+                    });
+                    app_error
+                }
+            })?;
+        transaction.commit().map_err(sqlite_error_to_app_error)?;
+        Ok(taken)
+    }
+
     /// Runs `operation` on the blocking pool inside one transaction
     /// and returns its result as the §7.10 wire value (SYS-001,
     /// SYS-002, NFR-008).

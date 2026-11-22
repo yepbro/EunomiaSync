@@ -2700,3 +2700,97 @@ fn a_successful_open_runs_the_protective_copy_retention_pass() {
     );
     drop(database);
 }
+
+#[test]
+fn the_interrupted_sweep_marks_corpse_rows_over_the_db_seam() {
+    // The §9.4 crash-recovery sweep through the synchronous [`Db`]
+    // seam (T-258): the corpse rows a dead process left — planted by
+    // raw SQL, the honest shape a crashed process actually leaves
+    // behind — go `interrupted` with `finished_at` stamped and
+    // `error_code` left NULL, a `success` row keeps its own terminal
+    // shape, and the sweep is idempotent (a second pass takes zero).
+    // Read back by raw SQL on purpose: the assertion oracle is the
+    // schema, not the store's own DTOs.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    crate::data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout must work");
+    let db = Db::open(temp.path()).expect("opening a fresh database must work");
+    let seeder = db.clone();
+    async_runtime::block_on(seeder.run(|tx| {
+        tx.execute_batch(
+            "INSERT INTO sync_runs (id, started_at, status) VALUES \
+                 ('corpse-1', '2026-11-21T12:00:00.000Z', 'running'); \
+             INSERT INTO sync_runs (id, started_at, status) VALUES \
+                 ('corpse-2', '2026-11-21T12:05:00.000Z', 'running'); \
+             INSERT INTO sync_runs (id, started_at, finished_at, status) VALUES \
+                 ('settled', '2026-11-21T11:00:00.000Z', \
+                  '2026-11-21T11:01:00.000Z', 'success');",
+        )
+        .map_err(sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("planting the crash-shaped rows must work");
+
+    let taken = db
+        .mark_interrupted_runs("2026-11-22T08:00:00.000Z")
+        .expect("the sweep must work over the synchronous seam");
+
+    assert_eq!(taken, 2, "exactly the two corpses were taken");
+    let reader = db.clone();
+    let rows: Vec<(String, String, Option<String>, Option<String>)> =
+        async_runtime::block_on(reader.run(|tx| {
+            let mut statement = tx
+                .prepare(
+                    "SELECT id, status, finished_at, error_code FROM sync_runs \
+                          ORDER BY started_at",
+                )
+                .map_err(sqlite_error_to_app_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .map_err(sqlite_error_to_app_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sqlite_error_to_app_error)?;
+            Ok(rows)
+        }))
+        .expect("reading the rows back must work");
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "settled".to_owned(),
+                "success".to_owned(),
+                Some("2026-11-21T11:01:00.000Z".to_owned()),
+                None
+            ),
+            (
+                "corpse-1".to_owned(),
+                "interrupted".to_owned(),
+                Some("2026-11-22T08:00:00.000Z".to_owned()),
+                None
+            ),
+            (
+                "corpse-2".to_owned(),
+                "interrupted".to_owned(),
+                Some("2026-11-22T08:00:00.000Z".to_owned()),
+                None
+            ),
+        ],
+        "the corpses are interrupted with the recovery stamp and no \
+         code; the settled row keeps its own shape"
+    );
+    let again = db
+        .mark_interrupted_runs("2026-11-22T09:00:00.000Z")
+        .expect("the second sweep must work");
+    assert_eq!(
+        again, 0,
+        "nothing is left running — the sweep is idempotent"
+    );
+    drop(db);
+}

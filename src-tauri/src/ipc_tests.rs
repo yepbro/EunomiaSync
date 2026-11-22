@@ -488,6 +488,124 @@ fn db_restore_applies_the_chosen_copy_over_ipc() {
 }
 
 #[test]
+fn db_restore_sweeps_the_corpse_rows_of_the_restored_copy() {
+    // T-258's recovery-tail sweep: a restored copy may carry `running`
+    // rows a dead process left (a daily copy taken mid-run by an
+    // earlier process), and recovery mode is the one state where no
+    // run can be live — no `Db` was managed until the command — so
+    // the reopen tail runs the same §9.4 crash-recovery sweep as the
+    // `setup` hook, and the corpse comes back `interrupted` with the
+    // recovery stamp while a `success` row keeps its own shape.
+    let _serial = IPC_RECOVERY_TESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (temp, app) = recovery_mode_app();
+    let backups = temp.path().join("db-backups");
+    let db_path = temp.path().join("db").join("eunomiasync.sqlite3");
+    // A real daily copy carrying the crash shape — built the way
+    // production writes copies (`VACUUM INTO` through the `Db` seam, a
+    // self-contained file): one corpse row and one settled row seeded
+    // through a scratch database of its own, then the copy is placed
+    // as the chosen backup.
+    let scratch_root = temp.path().join("scratch-root");
+    crate::data_dirs::ensure_data_layout(&scratch_root)
+        .expect("creating the scratch layout must work");
+    let scratch_db =
+        crate::db::Db::open(&scratch_root).expect("opening the scratch database must work");
+    let seeding = scratch_db.clone();
+    tauri::async_runtime::block_on(seeding.run(|tx| {
+        tx.execute_batch(
+            "INSERT INTO sync_runs (id, started_at, status) VALUES \
+                 ('corpse', '2026-11-21T12:00:00.000Z', 'running'); \
+             INSERT INTO sync_runs (id, started_at, finished_at, status) VALUES \
+                 ('settled', '2026-11-21T11:00:00.000Z', \
+                  '2026-11-21T11:01:00.000Z', 'success');",
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)?;
+        Ok(())
+    }))
+    .expect("seeding the crash-shaped copy must work");
+    let copy = match scratch_db.ensure_daily_backup(
+        "2026-11-20T12:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .expect("the fixed fixture timestamp must parse"),
+    ) {
+        Ok(eunomia_store::storage::DailyBackupOutcome::Written(path)) => path,
+        other => panic!("the scratch copy must be written, got {other:?}"),
+    };
+    drop(scratch_db);
+    std::fs::rename(&copy, backups.join("daily-20261120.sqlite3"))
+        .expect("placing the copy must work");
+    std::fs::remove_dir_all(temp.path().join("scratch-root"))
+        .expect("removing the scratch root must work");
+    std::fs::write(&db_path, b"this is not a database at all")
+        .expect("writing the damaged fixture must work");
+
+    // Act
+    tauri::test::get_ipc_response(
+        &main_webview(&app),
+        invoke_request(
+            "db_restore_backup",
+            serde_json::json!({ "backupName": "daily-20261120.sqlite3" }),
+        ),
+    )
+    .expect("restore must succeed over IPC")
+    .deserialize::<()>()
+    .expect("the success payload is the unit value");
+
+    // Assert: the sweep ran in the reopen tail — the corpse is
+    // `interrupted` with the recovery stamp and no code, the settled
+    // row keeps its own terminal shape (raw SQL: the oracle is the
+    // schema, not any DTO).
+    let database = app
+        .try_state::<crate::db::Db>()
+        .expect("the restored database must be managed");
+    let rows: Vec<(String, String, Option<String>, Option<String>)> =
+        tauri::async_runtime::block_on(database.run(|tx| {
+            let mut statement = tx
+                .prepare(
+                    "SELECT id, status, finished_at, error_code FROM sync_runs \
+                          ORDER BY started_at",
+                )
+                .map_err(crate::db::sqlite_error_to_app_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .map_err(crate::db::sqlite_error_to_app_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(crate::db::sqlite_error_to_app_error)?;
+            Ok(rows)
+        }))
+        .expect("reading the restored runs must work");
+    let interrupted_at = rows
+        .iter()
+        .find(|(id, ..)| id == "corpse")
+        .map(|(_, status, finished_at, error_code)| (status.as_str(), finished_at, error_code))
+        .expect("the corpse row must survive the restore");
+    assert_eq!(interrupted_at.0, "interrupted", "the tail swept the corpse");
+    assert!(interrupted_at.1.is_some(), "the recovery moment is stamped");
+    assert_eq!(interrupted_at.2, &None, "no §10 code names a process death");
+    let settled = rows
+        .iter()
+        .find(|(id, ..)| id == "settled")
+        .map(|(_, status, finished_at, _)| (status.as_str(), finished_at.clone()))
+        .expect("the settled row must survive the restore");
+    assert_eq!(settled.0, "success", "the sweep touched no terminal row");
+    assert_eq!(
+        settled.1.as_deref(),
+        Some("2026-11-21T11:01:00.000Z"),
+        "the settled row keeps its own finish stamp"
+    );
+    drop(temp);
+}
+
+#[test]
 fn a_payload_without_the_backup_name_is_rejected() {
     // The command argument's wire name is `backupName`; anything else
     // must be rejected by the invoke layer itself (the same shape the
@@ -7599,6 +7717,7 @@ fn sync_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
     app.manage(database);
     app.manage(data_dirs::DataRoot(temp.path().to_path_buf()));
     app.manage(crate::sync_running::SyncRunning::new());
+    app.manage(crate::commands::SyncCancelSlot::new());
     app.manage(crate::availability::AvailabilityState::new());
     app.manage(crate::dirty_recalc::DirtyState::new().0);
     let (watch_state, _no_service) = crate::file_watch::FileWatchState::new();
@@ -7796,6 +7915,38 @@ fn sync_all_runs(app: &tauri::App<tauri::test::MockRuntime>) -> Vec<(String, Str
         Ok(rows)
     }))
     .expect("reading the runs must work")
+}
+
+/// The live run's published cancel token through the managed slot —
+/// the EXACT read the future `sync_cancel` command (T-120) will make;
+/// cancelling the returned clone is cancelling the run's latch (one
+/// `Arc`).
+fn published_cancel_token(
+    app: &tauri::App<tauri::test::MockRuntime>,
+) -> Option<crate::commands::CancelToken> {
+    use tauri::Manager;
+    app.state::<crate::commands::SyncCancelSlot>().token()
+}
+
+/// The no-code spelling census (D-138/T-258): how many run rows carry
+/// the EMPTY `error_code` literal. Exactly the two user-shaped stops
+/// — the D-25 gate and the cancel point — may produce it; a finished
+/// or interrupted run holds NULL, an error abort its §10 literal. The
+/// first reader of the cell collapses the spelling
+/// (`run_error_code_or_none`); this census pins WHICH rows produce
+/// it, so a future writer inventing a third source of "" (or losing
+/// one of the two) fails the count.
+fn count_empty_run_error_codes(app: &tauri::App<tauri::test::MockRuntime>) -> i64 {
+    let database = sync_database_of(app);
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.query_row(
+            "SELECT COUNT(*) FROM sync_runs WHERE error_code = ''",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("counting the empty-code rows must work")
 }
 
 /// One project's `last_synced_*` cells — OUT-020's observable.
@@ -8135,6 +8286,268 @@ fn a_second_sync_run_while_one_runs_is_refused_with_e_sync_running() {
 }
 
 #[test]
+fn the_published_token_reaches_the_live_run_and_no_other() {
+    // T-258's publication lifecycle, the whole table in one run: the
+    // slot is empty before and between runs; the live run's token is
+    // reachable through it (the exact read the future `sync_cancel`
+    // makes); a refused second start neither evicts the live run's
+    // token (set-if-empty) nor clears it on its exit
+    // (clear-if-current — the identity discriminator: after the
+    // second start's `E_SYNC_RUNNING`, the slot still holds SOME
+    // token, and after the FIRST run answers it is EMPTY, which only
+    // its own lease's clearing can produce); a cancel latched through
+    // the slot AFTER the check point (the run is parked inside phase
+    // 3) is the no-op §9.4 phase 2 step 3 defines — the run completes
+    // `success` with its write stamped — and the finished run holds
+    // no empty-code row (the census: "" belongs to the user-shaped
+    // stops alone).
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        12,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let target = repo.join("AGENTS.md");
+    std::fs::write(&target, b"old bytes").expect("the fixture must be writable");
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let seams = crate::commands::SyncRunSeams {
+        backup: crate::commands::SyncRunSeams::production().backup,
+        write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
+            entered_tx
+                .send(target.to_path_buf())
+                .expect("the test must live to receive the entry signal");
+            release_rx
+                .lock()
+                .expect("the release lock must not be poisoned")
+                .recv()
+                .expect("the test must live to release the parked write");
+            crate::sync_phase3::production_write(target, contents)
+        }),
+    };
+    assert!(
+        published_cancel_token(&app).is_none(),
+        "no run live — the slot is empty"
+    );
+
+    let cancel = crate::commands::CancelToken::new();
+    let running_token = cancel.clone();
+    let handle = app.app_handle().clone();
+    let running = tauri::async_runtime::spawn(async move {
+        crate::commands::sync_run_with(handle, None, running_token, seams).await
+    });
+    let _parked = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the pipeline must reach its write phase");
+
+    // The live run's token is published and reachable — flag up, the
+    // run mid-phase-3 — and it is THE latch the pipeline's one check
+    // point reads (the `shares_latch` identity probe; no behavioral
+    // outcome can prove this, a post-point cancel being a no-op on
+    // any token).
+    let published = published_cancel_token(&app).expect("the live run's token is published");
+    assert!(
+        published.shares_latch(&cancel),
+        "the slot's token shares the latch the pipeline consults"
+    );
+
+    // The refused second start: over the real IPC path, `E_SYNC_RUNNING`
+    // — and the slot still holds the FIRST run's token afterwards
+    // (its own lease published nothing and may clear nothing).
+    let webview = main_webview(&app);
+    let error = invoke_sync_run(&webview, serde_json::json!(null))
+        .expect_err("a second start while one runs must be refused");
+    assert_eq!(error, sync_running_envelope(), "the §10 refusal envelope");
+    assert!(
+        published_cancel_token(&app).is_some(),
+        "the refused start left the live run's token in place"
+    );
+
+    // The future `sync_cancel`'s use, after the point of no return
+    // (§9.4 phase 2 step 3): the latch lands on the live run's own
+    // token — and changes nothing, because the one check point
+    // already passed. Releasing the park lets the run finish.
+    published.cancel();
+    release_tx
+        .send(())
+        .expect("the parked write must be released");
+    let outcome = tauri::async_runtime::block_on(running)
+        .expect("the parked run must join")
+        .expect("a post-phase-2 cancel cannot fail the run");
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the cancelled-after-phase-2 run completes, got {outcome:?}");
+    };
+    assert_eq!(summary.verdict, "success", "the no-op, per §9.4");
+    assert_eq!(summary.projects_written, 1, "the write really happened");
+    assert!(
+        sync_project_stamps(&app, &project).0.is_some(),
+        "OUT-020: the finished run stamped the project"
+    );
+    // The identity discriminator + the clearing: only the first run's
+    // own lease clears the slot (a second start's lease holds a token
+    // that was never current), and the finished run leaves no
+    // empty-code row — the census holds "" for the user-shaped stops.
+    assert!(
+        published_cancel_token(&app).is_none(),
+        "the slot cleared with the run's answer — the lease cleared \
+         the token IT published, proving the slot held this run's \
+         token throughout"
+    );
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        0,
+        "a finished run carries NULL, never the empty literal"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_slot_and_the_empty_code_census_follow_the_gate_stop() {
+    // The D-25 stop is one of the two user-shaped "" spellings
+    // (D-138), and the NeedsConfirmation exit clears the slot like
+    // every other exit: the run is terminal, its token unreachable.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        14,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    // NO assignments — the build is empty — over a non-empty file.
+    std::fs::write(repo.join("AGENTS.md"), b"precious old bytes")
+        .expect("the fixture must be writable");
+    let webview = main_webview(&app);
+
+    let outcome = invoke_sync_run(&webview, serde_json::json!(null))
+        .expect("the unconfirmed call must answer, not fail");
+
+    let crate::commands::SyncRunOutcome::NeedsConfirmation { projects } = outcome else {
+        panic!("the empty build over a non-empty file must ask, got {outcome:?}");
+    };
+    assert_eq!(projects, vec![project], "the asking list");
+    assert!(
+        published_cancel_token(&app).is_none(),
+        "the NeedsConfirmation exit cleared the slot"
+    );
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        1,
+        "the gate's aborted row is one of the two \"\" spellings"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_slot_clears_and_the_census_stays_zero_on_an_error_abort() {
+    // The P3-4 wrapper's `Err` exit (a failing backup, phase 2's own
+    // abort): the slot clears with the answer, and the aborted row
+    // carries the §10 literal `E_BACKUP_FAILED` — a real code, never
+    // the empty spelling (the census stays zero).
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        15,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let target = repo.join("AGENTS.md");
+    std::fs::write(&target, b"old bytes").expect("the fixture must be writable");
+    let seams = crate::commands::SyncRunSeams {
+        backup: std::sync::Arc::new(|_target: &eunomia_fs::backup::BackupTarget<'_>| {
+            Err(eunomia_fs::backup::BackupError::FolderCreateFailed {
+                path: std::path::PathBuf::from("/data/backups"),
+                source: std::io::Error::from_raw_os_error(13),
+            })
+        }),
+        write: crate::commands::SyncRunSeams::production().write,
+    };
+
+    let error = run_sync_with(&app, None, crate::commands::CancelToken::new(), seams)
+        .expect_err("the failing copy must abort the run");
+
+    assert_eq!(error.code.as_str(), "E_BACKUP_FAILED");
+    assert!(
+        published_cancel_token(&app).is_none(),
+        "the error exit cleared the slot"
+    );
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        0,
+        "an error abort carries its §10 literal, never \"\""
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_first_run_code_reader_collapses_both_no_code_spellings() {
+    // D-138's obligation landed as the seam (T-258): the run row's
+    // `error_code` cell reaches its first reader as "no code" under
+    // BOTH spellings — NULL (finish_run, the interrupted sweep) and
+    // the empty literal (the two user-shaped stops) — while a real
+    // §10 literal passes through untouched.
+    assert_eq!(crate::commands::run_error_code_or_none(None), None);
+    assert_eq!(crate::commands::run_error_code_or_none(Some("")), None);
+    assert_eq!(
+        crate::commands::run_error_code_or_none(Some("E_DISK_FULL")),
+        Some("E_DISK_FULL")
+    );
+}
+
+#[test]
+fn the_startup_interrupted_sweep_is_wired_before_the_first_command() {
+    // The wiring pin (the config_tests.rs style): the §9.4
+    // crash-recovery sweep runs inside `setup`, synchronously after
+    // the database opens and BEFORE the commit hook, the `manage`
+    // publish and every spawned service — the only moment "every
+    // running row is a corpse" holds by definition (a later pass
+    // could race this process's own first sync and mark a LIVE run).
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    let markers = [
+        "db::Db::open(&data_dir)",
+        "database.mark_interrupted_runs(",
+        "database.set_commit_hook(",
+        "app.manage(database);",
+    ];
+    let positions: Vec<usize> = markers
+        .iter()
+        .map(|marker| {
+            assert_eq!(
+                lib.matches(marker).count(),
+                1,
+                "lib.rs must contain `{marker}` exactly once, live (a \
+                 commented-out or duplicated line must not count)"
+            );
+            lib.find(marker)
+                .expect("the exactly-once check above guarantees one match")
+        })
+        .collect();
+    for pair in positions.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "the interrupted sweep must run after the database opens and \
+             before the commit hook and the manage publish (§9.4, T-258); \
+             marker positions: {positions:?}"
+        );
+    }
+}
+
+#[test]
 fn a_cancelled_token_stops_the_run_before_the_backups() {
     // The cancel seam's one check point (§9.4: cancel is possible
     // before the backups, impossible after phase 2): a latched token
@@ -8199,6 +8612,15 @@ fn a_cancelled_token_stops_the_run_before_the_backups() {
         row.details.as_deref(),
         Some("cancelled by the user before the backups"),
         "the stop row's no-code literal and class-only line"
+    );
+    assert!(
+        published_cancel_token(&app).is_none(),
+        "the cancel stop cleared the slot with the answer"
+    );
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        1,
+        "the cancel stop is the other of the two \"\" spellings"
     );
     assert!(
         !app.state::<crate::sync_running::SyncRunning>().is_running(),
@@ -8685,6 +9107,7 @@ fn sync_run_answers_honestly_without_a_database() {
         .expect("failed to build mock app");
     app.manage(data_dirs::DataRoot(temp.path().to_path_buf()));
     app.manage(crate::sync_running::SyncRunning::new());
+    app.manage(crate::commands::SyncCancelSlot::new());
     let webview = main_webview(&app);
 
     let error = invoke_sync_run(&webview, serde_json::json!(null))

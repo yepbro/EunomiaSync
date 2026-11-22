@@ -365,6 +365,18 @@ pub fn run() {
             // (no database) and the flag simply stays down.
             app.manage(sync_running::SyncRunning::new());
 
+            // The live run's published cancel token (§7.10's future
+            // `sync_cancel`, §9.4's one cancel point; T-258, D-138's
+            // recorded follow-up): `sync_run` publishes the token it
+            // drives the pipeline with for the run's lifetime and
+            // clears it on every exit (the RAII lease inside
+            // `sync_run_with`). Managed beside the flag for the same
+            // reason — infallible, needed in every mode: the future
+            // cancel command must FIND the state, and in recovery
+            // mode the slot simply stays empty (a sync refuses at
+            // phase 0, so there is never a live run to cancel).
+            app.manage(commands::SyncCancelSlot::new());
+
             // The availability session cache (D-09/DB-032, T-079):
             // the last D-084 verdicts per active project, plus the
             // in-flight slot that coalesces overlapping rechecks.
@@ -514,6 +526,31 @@ pub fn run() {
                     return Err(error.into());
                 }
             };
+            // The §9.4 crash-recovery pass ("Recovery after a crash",
+            // T-258): every `running` run row a dead process left is
+            // marked `interrupted` — synchronously, here, BEFORE the
+            // event loop can serve a command: at this moment every
+            // `running` row is a corpse by definition (no command of
+            // this process holds the flag yet), which a deferred pass
+            // could not promise (a spawned sweep could race this
+            // process's own first sync and mark a LIVE run). The
+            // per-project rows and the project stamps stay exactly as
+            // the crash left them (§9.4: "the project status already
+            // reflects what was written"; T-F3), and the hashes'
+            // recalculation is the DB-022 startup pass below (T-101,
+            // already wired). Deliberately BEFORE the commit hook:
+            // the marking's row change would otherwise drop a dirty
+            // trigger for a pass that reads projects, not runs. A
+            // refusal degrades like the housekeeping steps (logged
+            // through the facade, the launch continues — D-046/D-054):
+            // the corpse rows stay `running`, the next restart retries
+            // the idempotent sweep. Zero corpses (the normal startup)
+            // logs nothing.
+            match database.mark_interrupted_runs(&eunomia_store::values::now_utc()) {
+                Ok(0) => {}
+                Ok(count) => logging::sync_runs_interrupted(count),
+                Err(error) => logging::sync_runs_interrupt_failed(error.code.as_str()),
+            }
             // The DB-022 commit seam (T-101): every transaction that
             // commits with row changes drops one trigger permit onto
             // the dirty-recalc bus, which debounces it 150 ms and
