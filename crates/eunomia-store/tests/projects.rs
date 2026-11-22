@@ -38,8 +38,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use eunomia_store::projects::{
     AddedVia, ExclusionReason, ListScope, NewExclusion, NewProject, Project, ProjectState,
     ProjectUpdate, ProjectsError, archive, create, create_exclusion, delete_exclusion,
-    find_by_path_key, find_exclusion_by_path_key, get, list, list_exclusions, reorder, restore,
-    update,
+    find_by_path_key, find_exclusion_by_path_key, get, list, list_exclusions, record_last_synced,
+    reorder, restore, update,
 };
 use eunomia_store::settings::{BaseName, ExtraFile, Position, Scheme};
 use eunomia_store::storage::{open_db, run_migrations};
@@ -574,6 +574,91 @@ fn reorder_inside_a_transaction_rolls_back_as_a_set() {
 }
 
 // ---- Update semantics (PRJ-008/PRJ-012) -----------------------------------------
+
+#[test]
+fn record_last_synced_sets_exactly_the_sync_columns() {
+    // DB-024/OUT-020, §9.4 phase 3 step 2's stamp half: the call sets
+    // `last_synced_at` and `last_synced_hash` — and NOTHING else. The
+    // sync stamp is not a project edit: `updated_at` keeps the row's
+    // own edit stamp, and the state, position and content columns
+    // stay verbatim. Re-recording overwrites both cells (idempotent
+    // convergence); an unknown id is the typed NotFound.
+    let (conn, _dir) = projects_db("record-sync");
+    let original = seed(&conn, 1);
+    assert_eq!(original.last_synced_at, None, "OUT-020: no sync has run");
+    assert_eq!(original.last_synced_hash, None);
+
+    // Sleeping past a millisecond boundary before the record (the
+    // update test's D-031 precedent) makes the edit-stamp assertion
+    // below discriminating: an implementation that restamped
+    // `updated_at` would move it off the creation stamp, and only the
+    // correct one keeps them equal.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    let stamped = record_last_synced(
+        &conn,
+        &original.id,
+        "2026-11-21T10:30:00.123Z",
+        &"a".repeat(64),
+    )
+    .expect("recording the sync facts should work");
+    assert_eq!(
+        stamped.last_synced_at.as_deref(),
+        Some("2026-11-21T10:30:00.123Z")
+    );
+    assert_eq!(
+        stamped.last_synced_hash.as_deref(),
+        Some("a".repeat(64).as_str())
+    );
+    // The read-back equals a plain get — the returned row is no
+    // second spelling.
+    assert_eq!(
+        get(&conn, &original.id).expect("the row must read"),
+        Some(stamped.clone())
+    );
+    // Everything else is untouched: the edit stamp, the state, the
+    // position, the content columns.
+    assert_eq!(
+        stamped.updated_at, original.updated_at,
+        "a sync stamp does not restamp updated_at"
+    );
+    assert_eq!(stamped.state, original.state);
+    assert_eq!(stamped.sort_order, original.sort_order);
+    assert_eq!(stamped.name, original.name);
+    assert_eq!(stamped.scheme, original.scheme);
+
+    // Re-recording overwrites both cells and stays idempotent.
+    let restamped = record_last_synced(
+        &conn,
+        &original.id,
+        "2026-11-21T11:00:00.000Z",
+        &"b".repeat(64),
+    )
+    .expect("re-recording should work");
+    assert_eq!(
+        restamped.last_synced_at.as_deref(),
+        Some("2026-11-21T11:00:00.000Z")
+    );
+    assert_eq!(
+        restamped.last_synced_hash.as_deref(),
+        Some("b".repeat(64).as_str())
+    );
+
+    // An unknown id is the typed refusal, not a silent success (the
+    // suite's `matches!` shape).
+    assert!(
+        matches!(
+            record_last_synced(
+                &conn,
+                "no-such-id",
+                "2026-11-21T10:30:00.123Z",
+                &"a".repeat(64)
+            ),
+            Err(ProjectsError::NotFound { ref id }) if id == "no-such-id"
+        ),
+        "an unknown id must be the typed NotFound"
+    );
+}
 
 #[test]
 fn update_writes_exactly_the_present_fields_and_restamps_updated_at() {

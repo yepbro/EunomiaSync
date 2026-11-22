@@ -110,6 +110,19 @@ pub(crate) mod sync_phase1;
 // canceled (§9.4 phase 2 step 3).
 pub(crate) mod sync_phase2;
 
+// The sync pipeline's phase 3 — the write (spec §9.4 phase 3, §9.5
+// through eunomia-fs's atomic pipeline, §9.3's ALG-030/031/032
+// assembly, §10's four write rows, DB-024/OUT-020; T-116): one
+// `ready` project at a time, in order — the run's ONE creation
+// marker (ALG-032, T-111's criterion) around phase 0's managed text,
+// laid down atomically. Success lands `written` plus the project's
+// `last_synced_at`/`last_synced_hash` in one short transaction; a
+// refused write lands `failed` with its §10 code and the run takes
+// the next project (the backup stays). Phase 4 (T-117) owns the
+// final run verdict; the flag lease stays with the caller's
+// Phase0Outcome (D-123).
+pub(crate) mod sync_phase3;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -561,6 +574,9 @@ mod sync_phase1_tests;
 
 #[cfg(test)]
 mod sync_phase2_tests;
+
+#[cfg(test)]
+mod sync_phase3_tests;
 
 #[cfg(test)]
 mod tests {

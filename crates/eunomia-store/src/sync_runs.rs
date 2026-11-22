@@ -10,16 +10,17 @@
 //! store's writer for the phase-0 shape (`create_running`: the
 //! `running` run with its `not_started` rows), phase 1's transitions
 //! (`mark_project_skipped`, `mark_project_unchanged`, `abort_run`:
-//! preflight's per-project verdicts and the `E_DISK_FULL` abort), and
+//! preflight's per-project verdicts and the `E_DISK_FULL` abort),
 //! phase 2's abort reset (`reset_projects_not_started`: §9.4 phase 2
-//! step 2's "`not_started` except `skipped`"), plus the reads the
-//! later phases and the history UI will consume. The remaining
-//! transitions — the phase 3
-//! `written`/`failed` writers, phase 4's counters and
+//! step 2's "`not_started` except `skipped`"), phase 3's write
+//! verdicts (`mark_project_written`, `mark_project_failed`), plus the
+//! reads the later phases and the history UI will consume. The
+//! remaining transitions — phase 4's counters and
 //! success/partial/failed verdicts, the startup `interrupted`
 //! recovery — belong to the phase tasks that cause them, exactly the
-//! way `projects.rs` leaves `last_synced_at`/`last_synced_hash` to
-//! the sync tasks (OUT-020): a repository owns the shape of a row,
+//! way `projects.rs` hands `last_synced_at`/`last_synced_hash` to
+//! `record_last_synced` and the sync tasks that call it (OUT-020): a
+//! repository owns the shape of a row,
 //! the pipeline owns when the world is ready to claim it.
 //!
 //! # One transaction, joined — not owned
@@ -711,6 +712,91 @@ pub fn reset_projects_not_started(conn: &Connection, run_id: &str) -> Result<usi
         rusqlite::params![run_id],
     )?;
     Ok(changed)
+}
+
+// ---- Phase 3's writers --------------------------------------------------------
+
+/// Phase 3's success verdict (§9.4 phase 3 step 2): one row goes
+/// `not_started → written`, with both error columns cleared — a row
+/// that reaches this transition carries no refusal, and a stale error
+/// cell from an earlier spelling of the run must not survive into the
+/// summary (the [`mark_project_unchanged`] clearing rule, spelled for
+/// this edge).
+///
+/// The stamp half of step 2 — `projects.last_synced_at` and
+/// `last_synced_hash` "updated right away in a separate short
+/// transaction" (DB-024/OUT-020) — is [`record_last_synced`]'s; the
+/// phase applies BOTH statements in one short transaction (one commit
+/// per project: a `written` row without its stamp, or a stamp without
+/// its `written` row, would be half a verdict). The row's
+/// `target_path`/`build_hash` fingerprint stays untouched, exactly as
+/// on every other transition.
+///
+/// Scoped to the `not_started` source state like
+/// [`mark_project_skipped`] — the same wrong-state refusal.
+///
+/// Joins the caller's transaction (D-037/D-051).
+///
+/// # Errors
+///
+/// Returns [`SyncRunsError::Sql`] when the statement fails or matched
+/// no row in the expected state (see [`mark_project_skipped`]'s doc
+/// for the ruling).
+///
+/// [`record_last_synced`]: crate::projects::record_last_synced
+pub fn mark_project_written(
+    conn: &Connection,
+    run_id: &str,
+    project_id: &str,
+) -> Result<(), SyncRunsError> {
+    let changed = conn.execute(
+        "UPDATE sync_run_projects \
+         SET status = 'written', error_code = NULL, error_message = NULL \
+         WHERE sync_run_id = ?1 AND project_id = ?2 AND status = 'not_started'",
+        rusqlite::params![run_id, project_id],
+    )?;
+    row_was_there(changed)
+}
+
+/// Phase 3's failure verdict (§9.4 phase 3 step 3): one row goes
+/// `not_started → failed`, carrying the §10 code of the refused write
+/// (the atomic pipeline's four: `E_WRITE_FAILED`, `E_VERIFY_FAILED`,
+/// `E_FILE_LOCKED`, the write-time `E_DISK_FULL`) and a short,
+/// class-only message for the summary row — paths and OS codes only,
+/// never file content (SEC-008). The row's `target_path`/`build_hash`
+/// fingerprint stays untouched (the failure explains a build that
+/// happened, it does not erase it), and the project's backup copy and
+/// `last_synced_*` cells are deliberately not this function's to
+/// touch: §9.4's "the backup stays" and OUT-020's "a failed project
+/// keeps its previous sync state".
+///
+/// Scoped to the `not_started` source state like
+/// [`mark_project_skipped`] — the same wrong-state refusal.
+///
+/// Joins the caller's transaction (D-037/D-051); the phase's
+/// production shape applies one verdict per project in its own short
+/// transaction (§9.4 phase 3's "the other projects continue" rides on
+/// each verdict committing alone).
+///
+/// # Errors
+///
+/// Returns [`SyncRunsError::Sql`] when the statement fails or matched
+/// no row in the expected state (see [`mark_project_skipped`]'s doc
+/// for the ruling).
+pub fn mark_project_failed(
+    conn: &Connection,
+    run_id: &str,
+    project_id: &str,
+    error_code: &str,
+    error_message: &str,
+) -> Result<(), SyncRunsError> {
+    let changed = conn.execute(
+        "UPDATE sync_run_projects \
+         SET status = 'failed', error_code = ?3, error_message = ?4 \
+         WHERE sync_run_id = ?1 AND project_id = ?2 AND status = 'not_started'",
+        rusqlite::params![run_id, project_id, error_code, error_message],
+    )?;
+    row_was_there(changed)
 }
 
 /// The zero-rows-changed refusal shared by the per-project writers: an

@@ -11884,3 +11884,220 @@ zones), and re-ran the suites. Findings fixed here —
 The round-2 non-findings confirm the recorded rulings (the UNIQUE
 dedup ruling, `finished_at`, the mirror, the expect posture) and the
 follow-up list below.
+
+### D-133 — T-116: sync phase 3 (the write) over Phase1Outcome — the run's one marker, the per-project commit, and DB-024's hash ruling — 2026-11-21
+
+Problem: T-116 turns §9.4 phase 3 into code: every `ready` project,
+one at a time in `sort_order`, gets its final bytes — ALG-030/031's
+assembly around the run's creation marker — through §9.5's atomic
+pipeline; success lands `written` plus the project's
+`last_synced_at`/`last_synced_hash` "right away in a separate short
+transaction"; a refused write lands `failed` with its §10 code while
+the others continue and the backup stays. Six points were open: when
+ALG-032's "taken once per run, at the start of the write phase"
+capture happens now that phase 0 exists and took no marker; which
+hash DB-024 stores — the DB-020 build hash or the digest of the
+written bytes (the written file carries the marker; D-24/ALG-033
+compare the markerless form); what "a separate short transaction"
+separates (one transaction per project covering row and stamp, or
+two); where the build hash comes from when `Phase1Outcome` does not
+carry it; what the phase's own `Err` means when §9.4 says failures
+are rows; and how the D-130 "read tx, blocking pass, write tx"
+composition applies to a per-project loop.
+
+Solution: `eunomia_store::sync_runs` phase-3 writers
+(`mark_project_written`, `mark_project_failed`) +
+`eunomia_store::projects::record_last_synced` (the point method —
+no restamp existed; T-071's `update` deliberately leaves the two
+columns to the sync tasks) + `src-tauri/src/sync_phase3.rs` (the
+phase), with `lib.rs` mod blocks (the D-130 boundary judgment, same
+anchor).
+
+- _The marker, once, at the write phase's start._ The `clock`
+  parameter is `FnOnce() -> MarkerClock` — production passes
+  `now_marker_clock` (its >24h POSIX-zone guard included), tests fix
+  the instant, and an empty `ready` list captures nothing at all.
+  The phase formats `marker_line` ONCE from the one capture and
+  hands the same `String` to every project's assembly — "every file
+  of the run carries one marker" is structural (a `FnOnce` cannot be
+  re-asked), and the behavior suite pins the byte-exact file forms
+  sharing that one line (the T-111 criterion at the composition
+  level; `marker_clock`'s own suite pins the capture side). Note:
+  `marker_clock.rs`'s module docs mused the capture "belongs" at
+  phase 0 — §9.4 phase 0 takes no marker and D-131's preflight
+  explicitly cannot know it, so the ruling is ALG-032's own words:
+  the write phase's start, i.e. here (core is a frozen zone; the
+  doc line stays as written and this entry is the correction of
+  record).
+- _DB-024's hash ruling._ `last_synced_hash` is the run's own DB-020
+  build hash of the MARKERLESS managed text — the very fingerprint
+  phase 0 froze into `sync_run_projects.build_hash`, which phase 3
+  reads back in its one up-front read transaction (D-130's "read
+  the fingerprint instead of rebuilding" — no recomputation, no
+  second build). It is NOT `WrittenFile::sha256_hex` (§9.5 step 6's
+  digest of the written bytes, marker included): D-24/ALG-033
+  compare the markerless form, so the stored value must be what the
+  next comparison recomputes against. The outcome still carries the
+  written-bytes digest as the §9.5 proof fact; the behavior test
+  asserts the stamp equals the frozen fingerprint AND differs from
+  the written digest (the concepts pinned apart). A `ready` project
+  whose row holds no fingerprint is the class-only
+  broken-invariant refusal (`Phase3FingerprintMissing`, the
+  phase-1 `project_missing_refusal` family).
+- _One commit per project._ §9.4 phase 3 step 2's "updated right
+  away in a separate short transaction" is read as ONE transaction
+  per project covering BOTH facts: `mark_project_written` (the
+  state-machine edge `not_started → written`, error columns cleared
+  — the unchanged edge's clearing rule) and `record_last_synced`
+  (the run's ONE DB-002 instant as `last_synced_at`; the build hash
+  as `last_synced_hash`; `updated_at` deliberately untouched — a
+  sync stamp is not a project edit). "Separate" separates the
+  verdict from the file write (not transactional) and from every
+  other project's verdict (§9.4 step 3's "the other projects
+  continue" rides on each verdict committing alone); a `written`
+  row without its stamp, or a stamp without its row, would be half
+  a verdict. The failure arm is one transaction too
+  (`not_started → failed` with the §10 code and class-only
+  Display message); the loop then takes the next project, and
+  neither the backup (phase 2's committed history) nor the failed
+  project's `last_synced_*` (OUT-020) is touched.
+- _The composition is per-project, by spec._ D-130's
+  read/blocking/write shape does not apply: §9.4 phase 3's own
+  words are "one by one, in order", so the phase is ONE read
+  transaction (the fingerprints) + a per-project [pure assembly →
+  `spawn_blocking` write (SYS-001, the §9.5 syscall run) → one
+  short verdict transaction] loop. The write operation rides an
+  `Arc` (each blocking closure is `'static`) — hence the `Sync`
+  bound on the seam. The `write` seam (production
+  `production_write` closing over `write_target_file` + the real
+  free-space probe; tests inject the typed refusals) is the
+  phase-2 injector pattern; the §10 table maps arm by arm
+  (`NameFailed` folds into `E_WRITE_FAILED`, the D-099 ruling).
+- _The phase's own `Err`._ Never a write refusal (that is a `failed`
+  row carried in the outcome, with the structured OS details for
+  T-118's log line — the Skipped shape). `Err` is the store/executor
+  family: the fingerprint read or a verdict transaction refusing, or
+  `NoDatabase` — every one leaves the run row `running` (the
+  crash-recovery rule's case, the D-131 posture). The recorded
+  residual window mirrors D-132's orphaned copies: on the success
+  path the FILE is already written when its transaction refuses —
+  the file stays (§9.5's old-or-new; atomic's own docs forbid
+  deleting it), the row stays `not_started`, and the next run's
+  phase 1 sees the content (ALG-033 ignores the marker line) while
+  the startup recovery recalculates hashes over what is on disk.
+- _`whole_file` is the last mirror._ The WholeFile tail
+  (`managed` + blank line + marker + break, or marker + break when
+  empty) is spelled in the phase (the plan owns the assembled
+  managed text; `build_content` consumes body + reading lines) and
+  pinned against the real builder's own output — the D-130 posture.
+  Splice calls the REAL `assembly_b::splice` (content, span,
+  managed, marker): no mirror exists for the half the real builder
+  owns, and D-131's plan carries the read `content`/`span` so phase
+  3 never re-reads the file (§9.4's reader is phase 1).
+
+Tests: store — `mark_project_written` (stale error cells cleared,
+fingerprint intact), `mark_project_failed` (code + message,
+fingerprint intact), both folded into the wrong-state refusal test
+(unknown id and settled row are the typed `Sql` refusal);
+`record_last_synced` (exactly the two sync columns — `updated_at`
+pinned equal across a sleep past the millisecond boundary, state/
+position/content verbatim, re-record overwrites, unknown id typed
+NotFound). src-tauri — 4 unit in `sync_phase3.rs` (the ALG-030 tail
+pinned against `build_content` over the builder's own assembly; the
+§10 table arm by arm with synthetic errors; the DB-002 stamp incl.
+truncation; the class-only refusal shape) + 5 in
+`sync_phase3_tests.rs` on the mock-app harness with real repo
+folders and the real §9.5 operation: the success path (both files
+byte-exact around the ONE marker, exactly one marker per file,
+`Written` digest against an independent hasher, rows `written`,
+stamps = the frozen fingerprints ≠ the written digests, `updated_at`
+unmoved, run row `running`, the creation case written), the scheme-B
+splice (outside preserved byte for byte, marker inside the fence,
+literal oracle), the card's criterion (first project's write
+refused: `failed` row with code + message + OS details, second
+project written, failed target and `last_synced_*` unchanged, both
+backups still on disk), the E_VERIFY_FAILED injection (digest
+mismatch: `failed` with the code, no OS fact — a decision, not an
+OS failure), and the empty-ready list (zero write calls, no
+verdicts, phase-1 rows untouched, run continues). Mutation check:
+M2 stamp fed the written digest — the fingerprint pin red; M3 a
+failed project stopped the loop — the continuation pin red; both
+green after revert.
+
+Follow-ups for the board (the orchestrator cards them):
+ARCHITECTURE.md rows for `sync_phase3` (outside this task's allowed
+list, the D-132 precedent); the marker_clock doc-line correction
+("capture belongs at phase 0" → the write phase's start, D-133's
+ruling) rides the first task allowed to touch `eunomia-core`.
+
+Round-1 review addendum (D-133, same task; report
+`.opencode/reviews/t116-round1.md`, deepseek-v4.1-flash — no
+P0/P1/P2; 8×P3): findings fixed here —
+
+- P3-1 (taken): the T-111 "marker taken once" pin was structural
+  only (a fixed-instant clock cannot see a per-project re-capture).
+  The success test now drives a SEQUENCED clock — the first capture
+  is the fixed Prague instant, every later one a later minute — and
+  asserts the capture counter is exactly 1, so a seam widened to
+  `Fn` with per-project captures fails on the bytes AND the counter.
+  The helper's closure is typed `Fn` precisely so that refactor
+  compiles and dies on the assertions instead of on the bound.
+  Mutation M4 verified red (re-capture per project →
+  `captures == 2`), green after revert.
+- P3-2 (taken): the missing-fingerprint invariant is now a
+  PRECONDITION PASS over the whole `ready` list right after the
+  fingerprint read — a broken phase-0 chain refuses the phase before
+  the first byte moves (the empty-list "zero writes when the phase
+  cannot proceed" posture) instead of mid-loop over a half-processed
+  run; the in-loop lookup rides the reasoned-panic posture over that
+  proof (D-061).
+- P3-5 (taken): the "what the phase does NOT decide" list now names
+  the D-25 precondition — the loop writes EVERY `ready` project, and
+  the `confirm_empty` gate is T-118's, resolved through
+  `Phase1Outcome::needs_confirmation` before this phase.
+- P3-6 (taken): `production_write`'s dead no-parent arm collapsed
+  into one code path — the frozen pipeline refuses a parent-less
+  target before consulting the probe, so the `unwrap_or(target)`
+  fallback only hands the closure a path; the comment says so.
+- P3-7 (taken): the store-failure doc citation now states what the
+  frozen crate actually states (never deletes a written target; the
+  no-delete posture is its `VerifyFailed` docs') instead of
+  attributing a general prohibition to it (house rule 11).
+- P3-8 (taken): the duplicated comment line in the store test
+  removed.
+- P3-3 (declined, recorded): re-reading scheme-B targets before the
+  splice is a spec ruling, not a task-level fix — §9.4's reader IS
+  phase 1 (D-131's plan carries content+span so phase 3 never
+  re-reads), the between-phases TOCTOU is §9.4's own design, and
+  SYS-008's watcher owns external edits (the next sync converges;
+  the backup covers the window). A follow-up card goes to the owner
+  with the reviewer's re-read option.
+- P3-4 (declined, recorded → follow-up): the terminal state of a
+  `running` run behind a phase-level `Err` (flag released by the
+  guard's drop, row `running` until the NEXT startup's
+  `interrupted` recovery) is the recorded D-131 posture; the
+  decision whether T-118's error path should finish the run instead
+  is T-118's, and a follow-up card names it.
+
+Round-2 review addendum (D-133, same task; report
+`.opencode/reviews/t116-round2.md`, hy4-flash-free — no P0/P1/P2;
+1×P3): the reviewer verified every round-1 fix in place and
+discriminating (the sequenced clock's bytes-and-counter double pin,
+the precondition pass's ordering and its `is_none_or(Option::
+is_none)` double arm, the doc corrections), confirmed both round-1
+declinations without new arguments, re-audited the loop fresh
+(transaction boundaries, the `Arc<write>` sharing, the marker reuse,
+the failure-vs-`Err` split, SEC-008, the §10 table against the
+frozen enum) and re-ran the suites. Findings fixed here —
+
+- P3-1 (taken): the round-1 P3-2 fix's own property — a broken
+  phase-0 chain refuses the phase BEFORE the first byte moves — had
+  no behavior test. Added
+  `a_missing_fingerprint_refuses_the_phase_before_any_write`: the
+  second `ready` project's `build_hash` planted NULL by direct SQL
+  (the store suite's planting shape), the counting write sentinel,
+  and the assertions — class-only `Phase3FingerprintMissing`
+  refusal, ZERO write calls (the first project's intact fingerprint
+  must not buy it a write), rows/files/stamps untouched. Mutation M5
+  verified red (the pre-pass disabled → project 1 written, then the
+  reasoned-panic `expect` fires), green after revert.

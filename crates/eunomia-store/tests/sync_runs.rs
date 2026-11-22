@@ -43,8 +43,8 @@ use eunomia_store::settings::{BaseName, ExtraFile, Position, Scheme};
 use eunomia_store::storage::{open_db, run_migrations};
 use eunomia_store::sync_runs::{
     NewSyncRunProject, SyncRunProjectStatus, SyncRunStatus, SyncRunsError, abort_run,
-    create_running, get, list_projects, mark_project_skipped, mark_project_unchanged,
-    reset_projects_not_started,
+    create_running, get, list_projects, mark_project_failed, mark_project_skipped,
+    mark_project_unchanged, mark_project_written, reset_projects_not_started,
 };
 use rusqlite::Connection;
 
@@ -426,6 +426,67 @@ fn mark_project_unchanged_clears_the_error_columns_with_the_status() {
 }
 
 #[test]
+fn mark_project_written_clears_the_error_columns_with_the_status() {
+    // §9.4 phase 3 step 2's verdict: `written` — a row that reaches
+    // this transition carries no refusal, so a stale error cell must
+    // not survive into the summary (the unchanged clearing rule,
+    // spelled for this edge; the stale cells are planted by direct
+    // SQL for the same reason — the state scoping makes the natural
+    // sequence unreachable). The fingerprint stays verbatim.
+    let (conn, _guard) = runs_db("written");
+    let project = seed_project(&conn, 1);
+    let run = create_running(&conn, STARTED_AT, &[run_project(&project, 1)])
+        .expect("creating the run should work");
+    conn.execute(
+        "UPDATE sync_run_projects SET error_code = 'E_WRITE_FAILED', error_message = 'stale refusal' \
+         WHERE sync_run_id = ?1 AND project_id = ?2",
+        rusqlite::params![run.id, project],
+    )
+    .expect("planting the stale error cells should work");
+
+    mark_project_written(&conn, &run.id, &project).expect("marking the verdict should work");
+
+    let rows = list_projects(&conn, &run.id).expect("reading the rows should work");
+    assert_eq!(rows[0].status, SyncRunProjectStatus::Written);
+    assert_eq!(rows[0].error_code, None);
+    assert_eq!(rows[0].error_message, None);
+    assert_eq!(
+        rows[0].build_hash,
+        Some("1".repeat(64)),
+        "the fingerprint phase 0 froze stays"
+    );
+}
+
+#[test]
+fn mark_project_failed_writes_the_code_and_message() {
+    // §9.4 phase 3 step 3's verdict: `failed` carrying the §10 code
+    // and the class-only message — with the fingerprint intact, the
+    // failure explains a build that happened, it does not erase it.
+    let (conn, _guard) = runs_db("failed");
+    let project = seed_project(&conn, 1);
+    let run = create_running(&conn, STARTED_AT, &[run_project(&project, 1)])
+        .expect("creating the run should work");
+
+    mark_project_failed(
+        &conn,
+        &run.id,
+        &project,
+        "E_VERIFY_FAILED",
+        "the written file failed the check",
+    )
+    .expect("marking the failure should work");
+
+    let rows = list_projects(&conn, &run.id).expect("reading the rows should work");
+    assert_eq!(rows[0].status, SyncRunProjectStatus::Failed);
+    assert_eq!(rows[0].error_code.as_deref(), Some("E_VERIFY_FAILED"));
+    assert_eq!(
+        rows[0].error_message.as_deref(),
+        Some("the written file failed the check")
+    );
+    assert_eq!(rows[0].build_hash, Some("1".repeat(64)));
+}
+
+#[test]
 fn abort_run_finishes_the_run_without_touching_counters_or_rows() {
     // §9.4's tail rules (phase 1's E_DISK_FULL here): the run row
     // goes `aborted` with the caller's finish timestamp verbatim, the
@@ -495,6 +556,8 @@ fn updates_addressing_no_row_or_a_settled_row_are_the_typed_refusal() {
     for outcome in [
         mark_project_skipped(&conn, &run.id, "no-such-project", "E_NOT_UTF8", "m"),
         mark_project_unchanged(&conn, &run.id, "no-such-project"),
+        mark_project_written(&conn, &run.id, "no-such-project"),
+        mark_project_failed(&conn, &run.id, "no-such-project", "E_WRITE_FAILED", "m"),
         abort_run(&conn, "no-such-run", STARTED_AT, "E_DISK_FULL", "d"),
     ] {
         assert!(
@@ -504,7 +567,8 @@ fn updates_addressing_no_row_or_a_settled_row_are_the_typed_refusal() {
     }
 
     // A settled row: the skip landed once, and no later transition may
-    // move it again — the second skip and the unchanged both refuse.
+    // move it again — the second skip, the unchanged and both phase-3
+    // verdicts refuse.
     mark_project_skipped(
         &conn,
         &run.id,
@@ -526,6 +590,26 @@ fn updates_addressing_no_row_or_a_settled_row_are_the_typed_refusal() {
             Err(SyncRunsError::Sql(_))
         ),
         "unchanged over a settled row must refuse"
+    );
+    assert!(
+        matches!(
+            mark_project_written(&conn, &run.id, &project),
+            Err(SyncRunsError::Sql(_))
+        ),
+        "written over a settled row must refuse"
+    );
+    assert!(
+        matches!(
+            mark_project_failed(
+                &conn,
+                &run.id,
+                &project,
+                "E_WRITE_FAILED",
+                "rewrite attempt"
+            ),
+            Err(SyncRunsError::Sql(_))
+        ),
+        "failed over a settled row must refuse"
     );
     let rows = list_projects(&conn, &run.id).expect("reading the rows should work");
     assert_eq!(rows[0].status, SyncRunProjectStatus::Skipped);

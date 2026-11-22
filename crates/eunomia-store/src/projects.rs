@@ -982,6 +982,58 @@ pub fn restore(conn: &Connection, id: &str) -> Result<Project, ProjectsError> {
     Ok(get(conn, id)?.expect("the row just restored must be readable"))
 }
 
+/// Records one project's last-sync facts (DB-024/OUT-020, §9.4 phase
+/// 3 step 2): `last_synced_at` and `last_synced_hash` are set to the
+/// caller's values, and NOTHING else moves — `updated_at` is
+/// deliberately not restamped (the column names the project row's
+/// last EDIT; a sync stamping a file is not an edit of the project,
+/// and §9.4 phase 3 names exactly these two columns), `state`,
+/// `sort_order` and every content column stay as they were.
+///
+/// `last_synced_at` is the **caller's** run-instant timestamp in the
+/// DB-002 UTC shape (the [`create_running`]-family contract: the app
+/// layer captures the moment — §9.4 phase 3's "right away" — the
+/// column names it), and `last_synced_hash` is the run's DB-020 build
+/// hash of the markerless managed text (the very fingerprint phase 0
+/// froze into `sync_run_projects.build_hash`), NOT the digest of the
+/// bytes on disk: the written file carries the run's creation marker,
+/// and D-24/ALG-033 compare the markerless form, so the stored hash
+/// must be the value the next comparison recomputes against.
+///
+/// Idempotent: re-recording overwrites both cells and returns the
+/// fresh row (SQLite's `changes()` counts a matched row even when the
+/// cells already held these values).
+///
+/// Joins the caller's transaction (D-037/D-051); the phase-3
+/// production shape applies this in the SAME short transaction as the
+/// row's `written` transition — one commit per project.
+///
+/// # Errors
+///
+/// Returns [`ProjectsError::NotFound`] when no row has this id, and
+/// [`ProjectsError::Sql`] when the statement fails.
+///
+/// [`create_running`]: crate::sync_runs::create_running
+pub fn record_last_synced(
+    conn: &Connection,
+    id: &str,
+    last_synced_at: &str,
+    last_synced_hash: &str,
+) -> Result<Project, ProjectsError> {
+    let changed = conn.execute(
+        "UPDATE projects
+         SET last_synced_at = ?2, last_synced_hash = ?3
+         WHERE id = ?1",
+        rusqlite::params![id, last_synced_at, last_synced_hash],
+    )?;
+    if changed == 0 {
+        return get(conn, id)?.ok_or_else(|| ProjectsError::NotFound { id: id.to_owned() });
+    }
+    // Unreachable while the UPDATE above matched (one connection,
+    // D-037 — no concurrent delete exists).
+    Ok(get(conn, id)?.expect("the row just recorded must be readable"))
+}
+
 /// Reads the row for a conditional writer whose `UPDATE` matched
 /// nothing: the existing row (idempotent re-run) or
 /// [`ProjectsError::NotFound`] (no such id).
