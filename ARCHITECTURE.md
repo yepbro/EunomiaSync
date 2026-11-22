@@ -736,8 +736,13 @@ directory watch per set of target files, name-filtered — the inode-trap
 rationale in the module docs), the semantic half in `src-tauri`
 (`file_watch`: the SYS-008 re-read-and-compare verdicts behind the
 `state://file-changed` event; subscriptions refresh at startup, on
-availability events, and through the after-sync seam the sync pipeline
-calls). On Linux, the `fs.inotify.max_user_watches` limit must be
+availability events, through the after-sync seam the sync pipeline
+calls, and through that same seam after the project mutations that
+change the watched set — `project_add_manual`'s committed arm today,
+the scheme/name/archive/restore commands as they land, D-144; the
+verdicts are readable by any caller through the `projects_list`
+column carrier). On Linux, the `fs.inotify.max_user_watches` limit
+must be
 respected: an event-queue overflow degrades to one full re-check
 through the `Backend` event (SYS-010), while a REFUSED watch (an
 unwatchable root, the watch limit itself) leaves the file unwatched —

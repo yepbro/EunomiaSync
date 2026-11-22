@@ -272,6 +272,62 @@ describe('generateFixtures: dirty rules (DB-021)', () => {
   })
 })
 
+describe('generateFixtures: watch rules (§5.7)', () => {
+  // The fixture mirror of the backend watch verdicts (D-137; carried
+  // by `projects_list` since T-257). The oracles are the spec's domain
+  // rules, not the generator's implementation.
+  it('never flags both §5.7 markings at once (the verdict is exclusive)', () => {
+    for (const project of generateFixtures(PROFILE).projects) {
+      expect(
+        !(project.external_changed && project.file_deleted),
+        `${project.name} carries both markings`,
+      ).toBe(true)
+    }
+  })
+
+  it('flags only active, available projects (SYS-007: the watch set)', () => {
+    const longer = generateFixtures({ ...PROFILE, projects: 23, assignments: 23 })
+    expect(longer.projects.filter((p) => !p.available).length).toBeGreaterThan(0)
+    for (const project of longer.projects) {
+      if (project.state !== 'active' || !project.available) {
+        expect(project.external_changed, `${project.name} is outside the watch set`).toBe(false)
+        expect(project.file_deleted, `${project.name} is outside the watch set`).toBe(false)
+      }
+    }
+  })
+
+  it('flags file_deleted only after a recorded sync (SYS-009 gate)', () => {
+    for (const project of generateFixtures(PROFILE).projects) {
+      if (project.file_deleted) {
+        expect(project.last_synced_at, `${project.name} is deleted but never synced`).not.toBeNull()
+      }
+    }
+  })
+
+  it('marks exactly one project of each §5.7 kind in the pinned world', () => {
+    // The deterministic picks: the first watchable SYNCED row is the
+    // target-deleted case, the first OTHER watchable row the
+    // externally-modified one (the generator's comment). PROFILE has
+    // five active rows, none unavailable, so both picks exist.
+    const projects = generateFixtures(PROFILE).projects
+    expect(projects.filter((p) => p.file_deleted)).toHaveLength(1)
+    expect(projects.filter((p) => p.external_changed)).toHaveLength(1)
+  })
+
+  it('ships both markings in the default dev world (set S)', () => {
+    // The round-1 review's P2-2: a marking the default world can
+    // never show is a marking no dev session or UI test ever sees.
+    // Set S (3 projects, 1 archived): index 1 is the first synced
+    // active row (the deleted case), index 0 the other watchable row
+    // (the modified case) — pinned by the seed, asserted here.
+    const s = generateFixtures(FIXTURE_PROFILE_S).projects
+    expect(s.filter((p) => p.file_deleted)).toHaveLength(1)
+    expect(s.filter((p) => p.external_changed)).toHaveLength(1)
+    const deleted = s.find((p) => p.file_deleted)
+    expect(deleted?.last_synced_at).not.toBeNull()
+  })
+})
+
 describe('generateFixtures: rejection of impossible profiles', () => {
   it('refuses more assignments than the unique pair space', () => {
     expect(() => generateFixtures({ ...PROFILE, projects: 2, assignments: 99 })).toThrow(

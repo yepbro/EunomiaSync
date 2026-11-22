@@ -1844,6 +1844,15 @@ fn projects_list_serves_active_columns_in_sort_order_over_ipc() {
     assert!(first.available, "a real repository folder is available");
     assert_eq!(first.unavailable_reason, None);
     assert!(!first.dirty);
+    // The T-257 watch flags' cold baseline: no watch service runs in
+    // this harness (no `FileWatchState` even managed), so the carrier
+    // answers the clean baseline — absent ≡ clean, the service's own
+    // diff rule. The LIVE verdicts are pinned by the watch-section
+    // carrier test.
+    assert!(
+        !first.external_changed && !first.file_deleted,
+        "without a watch service every column reads the clean baseline"
+    );
     assert_eq!(first.last_synced_at, None);
     let vanished_column = &columns[3];
     assert!(!vanished_column.available, "the missing folder is a flag");
@@ -3045,6 +3054,16 @@ fn add_manual_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>)
     // (T-105): without it the add flow would meet the gate's honest
     // missing-state fallback instead of the real path under test.
     app.manage(crate::sync_running::SyncRunning::new());
+    // The watch session state the setup hook manages (T-257): the
+    // add flow's committed arm awaits the watch refresh, which reads
+    // this state. The bus's RECEIVING half is dropped on purpose —
+    // no service is spawned in these tests, so the awaited seam
+    // answers its honest `FileWatchGone` refusal immediately (never
+    // a hang), and every add here pins the never-fatal posture: the
+    // project stays added. The wiring's positive proof runs in the
+    // watch section's `add_manual_watch_app` with the real service.
+    let (watch_state, _no_service) = crate::file_watch::FileWatchState::new();
+    app.manage(watch_state);
     (temp, app)
 }
 
@@ -6075,6 +6094,10 @@ fn project_add_manual_is_refused_during_a_sync_before_the_sec003_gate() {
 /// `state://project-availability` because the service's listener
 /// subscribes to it (the registration `lib.rs`'s setup performs is
 /// pinned by the source scan at the bottom of this section).
+/// `projects_list` is registered too: the T-257 column-carrier tests
+/// read the service's verdicts back through the real command path
+/// (the wiring tests never invoke it — registering a command no test
+/// calls changes nothing).
 fn file_watch_app() -> (
     tempfile::TempDir,
     tauri::App<tauri::test::MockRuntime>,
@@ -6086,6 +6109,7 @@ fn file_watch_app() -> (
     let database = crate::db::Db::open(temp.path())
         .expect("opening a fresh database in a temp directory must work");
     let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::projects_list])
         .build(mock_context(noop_assets()))
         .expect("failed to build mock app");
     app.manage(database);
@@ -6534,6 +6558,339 @@ fn deleting_a_synced_target_file_reports_target_deleted_a_never_synced_one_repor
         },
         "SYS-009's own flag — A/C recreate the file at sync, B would \
          skip with E_MARKERS_INVALID (the sync pipeline's half)"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn projects_list_carries_the_watch_service_verdicts_from_its_snapshot() {
+    // The T-257 column carrier (D-137's round-1 P1-1): the §5.7
+    // verdicts the service computed must be readable through the
+    // REAL command path — not only through the event, which an
+    // already-listening webview alone receives (Tauri does not
+    // replay events to late listeners). Three worlds in one pass:
+    // a synced file edited externally (SYS-008), a synced file
+    // deleted (SYS-009 — the recorded sync is what makes the
+    // deletion a flag), and a matching file (clean). The verdicts'
+    // oracle is the real builder output, not a mirror.
+    let (temp, app, commands) = file_watch_app();
+    let database = watch_database_of(&app);
+    let off = eunomia_core::project::ExtraFile {
+        enabled: false,
+        position: eunomia_core::project::ExtraFilePosition::End,
+    };
+    let lines = eunomia_core::extra_files::extra_file_lines(
+        eunomia_core::project::BaseName::AgentsMd,
+        off,
+        off,
+    );
+    let marker = eunomia_core::marker::creation_marker_line(
+        eunomia_core::marker::MarkerTime {
+            year: 2026,
+            month: 11,
+            day: 22,
+            hour: 10,
+            minute: 0,
+            second: 0,
+        },
+        None,
+        0,
+    );
+    let synced = eunomia_core::target_file::build_content(
+        eunomia_core::project::Scheme::A,
+        "Be brief.",
+        &lines,
+        &marker,
+    );
+    let seed_synced = |name: &'static str, key: &'static str| {
+        let root = repo_dir(temp.path(), name);
+        let target = root.join("AGENTS.md");
+        std::fs::write(&target, &synced).expect("the synced fixture must work");
+        let id = seed_watched_project(
+            &database,
+            root.display().to_string(),
+            key,
+            eunomia_store::settings::Scheme::A,
+        );
+        seed_assigned_instruction(&database, id.clone(), name, "Be brief.");
+        simulate_sync_hash(
+            &database,
+            id.clone(),
+            eunomia_core::hash::build_hash(
+                eunomia_core::project::Scheme::A,
+                &target,
+                off,
+                off,
+                "Be brief.",
+            ),
+        );
+        (id, target)
+    };
+    let (alpha_id, alpha_target) = seed_synced("alpha", "/alpha");
+    let (bravo_id, bravo_target) = seed_synced("bravo", "/bravo");
+    let (charlie_id, charlie_target) = seed_synced("charlie", "/charlie");
+    // The external edit and the external deletion, both made outside
+    // the app before the first pass classifies anything.
+    std::fs::write(&alpha_target, "Edited in an editor.\n").expect("the external edit must work");
+    std::fs::remove_file(&bravo_target).expect("the external deletion must work");
+    let _ = charlie_target; // stays the synced bytes: the clean case
+
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    let _events = listen_file_changed(&app);
+    wait_for_watch_passes(&app, 1);
+
+    // Act: the carrier read, through the real IPC path.
+    let webview = main_webview(&app);
+    let columns =
+        invoke_projects_list(&webview, serde_json::Value::Null).expect("the read must succeed");
+
+    // Assert: the three §5.7 states on the wire, in sort_order —
+    // LIVE verdicts from the service's snapshot, not constants (a
+    // carrier reading the clean baseline would answer three clean
+    // columns; one reading the store would answer nothing at all).
+    assert_eq!(
+        columns
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        [alpha_id.as_str(), bravo_id.as_str(), charlie_id.as_str()],
+        "sort_order, as every projects_list pin holds"
+    );
+    assert!(
+        columns[0].external_changed && !columns[0].file_deleted,
+        "SYS-008: the externally edited file flags its column — got \
+         {:?}",
+        columns[0]
+    );
+    assert!(
+        !columns[1].external_changed && columns[1].file_deleted,
+        "SYS-009: the deleted-after-sync file flags its column — got \
+         {:?}",
+        columns[1]
+    );
+    assert!(
+        !columns[2].external_changed && !columns[2].file_deleted,
+        "the matching file is clean — got {:?}",
+        columns[2]
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn an_archived_row_never_carries_watch_flags_even_from_a_stale_cache_entry() {
+    // The row-decidable half of the carrier (the `dirty_verdict`
+    // DB-014 posture, mirrored): a project archived BETWEEN the pass
+    // that recorded it externally modified and the next full pass's
+    // prune still sits in the cache — the archived column must not
+    // leak that stale marking. The archive goes through the store
+    // directly: no archive command exists yet (T-109's card), and
+    // the store call is exactly what that command will run.
+    let (temp, app, commands) = file_watch_app();
+    let database = watch_database_of(&app);
+    let root = repo_dir(temp.path(), "delta");
+    let target = root.join("AGENTS.md");
+    let project_id = seed_watched_project(
+        &database,
+        root.display().to_string(),
+        "/delta",
+        eunomia_store::settings::Scheme::A,
+    );
+    seed_assigned_instruction(&database, project_id.clone(), "Style", "Be brief.");
+    let off = eunomia_core::project::ExtraFile {
+        enabled: false,
+        position: eunomia_core::project::ExtraFilePosition::End,
+    };
+    // A synced file, then the external edit — the cache will hold
+    // the modified verdict after the first pass.
+    let synced = eunomia_core::target_file::build_content(
+        eunomia_core::project::Scheme::A,
+        "Be brief.",
+        &eunomia_core::extra_files::extra_file_lines(
+            eunomia_core::project::BaseName::AgentsMd,
+            off,
+            off,
+        ),
+        &eunomia_core::marker::creation_marker_line(
+            eunomia_core::marker::MarkerTime {
+                year: 2026,
+                month: 11,
+                day: 22,
+                hour: 10,
+                minute: 0,
+                second: 0,
+            },
+            None,
+            0,
+        ),
+    );
+    std::fs::write(&target, &synced).expect("the synced fixture must work");
+    simulate_sync_hash(
+        &database,
+        project_id.clone(),
+        eunomia_core::hash::build_hash(
+            eunomia_core::project::Scheme::A,
+            &target,
+            off,
+            off,
+            "Be brief.",
+        ),
+    );
+    std::fs::write(&target, "Edited in an editor.\n").expect("the external edit must work");
+
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    let _events = listen_file_changed(&app);
+    wait_for_watch_passes(&app, 1);
+    // The stale-window premise, verified: the cache holds the
+    // modified verdict for the still-active project.
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>().snapshot(),
+        vec![crate::file_watch::ProjectFileChange {
+            project_id: project_id.clone(),
+            external_changed: true,
+            file_deleted: false,
+        }],
+        "the first pass recorded the external modification"
+    );
+
+    // The archive — no command exists (T-109), the store call is it.
+    archive_project(&database, project_id.clone());
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>()
+            .pass_count(),
+        1,
+        "no further pass ran — the stale cache entry is the premise"
+    );
+
+    // Act: the widened read carries the archived row.
+    let webview = main_webview(&app);
+    let columns = invoke_projects_list(&webview, serde_json::Value::Bool(true))
+        .expect("the widened read must succeed");
+
+    // Assert: the archived column is clean whatever the cache says.
+    assert_eq!(columns.len(), 1, "the archived screen sees its row");
+    assert_eq!(columns[0].id, project_id);
+    assert_eq!(columns[0].state, "archived");
+    assert!(
+        !columns[0].external_changed && !columns[0].file_deleted,
+        "an archived row is outside SYS-007's watch set — the stale \
+         cache entry must not leak onto its column: {:?}",
+        columns[0]
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn an_unavailable_row_never_carries_watch_flags_even_from_a_stale_cache_entry() {
+    // The watch set's OTHER row-decidable half (the round-1 review's
+    // P3-1): a project whose folder died BETWEEN the pass that
+    // recorded it externally modified and the next full pass's prune
+    // still sits in the cache — and unlike the archived case, no
+    // store call marks the row; the ONLY fresher fact is this
+    // response's own availability probe. The column must not leak
+    // the stale marking over `available: false` (the service's own
+    // rule: an unavailable project is outside the covered set and is
+    // pruned on the next full pass).
+    let (temp, app, commands) = file_watch_app();
+    let database = watch_database_of(&app);
+    let root = repo_dir(temp.path(), "echo");
+    let target = root.join("AGENTS.md");
+    let project_id = seed_watched_project(
+        &database,
+        root.display().to_string(),
+        "/echo",
+        eunomia_store::settings::Scheme::A,
+    );
+    seed_assigned_instruction(&database, project_id.clone(), "Style", "Be brief.");
+    let off = eunomia_core::project::ExtraFile {
+        enabled: false,
+        position: eunomia_core::project::ExtraFilePosition::End,
+    };
+    let synced = eunomia_core::target_file::build_content(
+        eunomia_core::project::Scheme::A,
+        "Be brief.",
+        &eunomia_core::extra_files::extra_file_lines(
+            eunomia_core::project::BaseName::AgentsMd,
+            off,
+            off,
+        ),
+        &eunomia_core::marker::creation_marker_line(
+            eunomia_core::marker::MarkerTime {
+                year: 2026,
+                month: 11,
+                day: 22,
+                hour: 10,
+                minute: 0,
+                second: 0,
+            },
+            None,
+            0,
+        ),
+    );
+    std::fs::write(&target, &synced).expect("the synced fixture must work");
+    simulate_sync_hash(
+        &database,
+        project_id.clone(),
+        eunomia_core::hash::build_hash(
+            eunomia_core::project::Scheme::A,
+            &target,
+            off,
+            off,
+            "Be brief.",
+        ),
+    );
+    std::fs::write(&target, "Edited in an editor.\n").expect("the external edit must work");
+
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    let _events = listen_file_changed(&app);
+    wait_for_watch_passes(&app, 1);
+    // The stale-window premise, verified: the cache holds the
+    // modified verdict for the still-available project.
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>().snapshot(),
+        vec![crate::file_watch::ProjectFileChange {
+            project_id: project_id.clone(),
+            external_changed: true,
+            file_deleted: false,
+        }],
+        "the first pass recorded the external modification"
+    );
+
+    // The folder dies — the .git entry goes, exactly the D-084 probe
+    // failure the availability suite uses. No availability recheck
+    // runs here (this command probes but emits nothing), so the
+    // cache's entry survives: the window under test.
+    std::fs::remove_dir_all(root.join(".git")).expect("removing the .git entry must work");
+
+    // Act + assert: the same response that probes the folder dead
+    // serves the column WITHOUT the stale marking.
+    let webview = main_webview(&app);
+    let columns =
+        invoke_projects_list(&webview, serde_json::Value::Null).expect("the read must succeed");
+    assert_eq!(columns.len(), 1);
+    assert!(
+        !columns[0].available,
+        "the D-084 probe sees the dead folder"
+    );
+    assert!(
+        !columns[0].external_changed && !columns[0].file_deleted,
+        "an unavailable row is outside SYS-007's watch set — the \
+         stale cache entry must not leak onto its column: {:?}",
+        columns[0]
+    );
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>()
+            .pass_count(),
+        1,
+        "no further pass ran — the stale cache entry is the premise"
     );
     // Windows teardown rule.
     drop(app);
@@ -7023,6 +7380,152 @@ fn the_after_sync_seam_answers_honestly_without_a_database() {
          database command shares"
     );
     assert!(events.try_recv().is_err(), "no event without a database");
+}
+
+/// A mock app in the healthy state the add flow's watch wiring
+/// serves (the `add_manual_app` shape plus the watch service's own
+/// state): `project_add_manual` registered over a fresh database,
+/// the SEC-003 allowlist, the SYS-005 flag, and the
+/// [`crate::file_watch::FileWatchState`] with its bus receiver
+/// returned so the test spawns the REAL service — the wiring's proof
+/// needs the service task, not a stub.
+fn add_manual_watch_app() -> (
+    tempfile::TempDir,
+    tauri::App<tauri::test::MockRuntime>,
+    tauri::async_runtime::Receiver<crate::file_watch::Command>,
+) {
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::project_add_manual
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    app.manage(crate::session_paths::SessionPaths::new());
+    app.manage(crate::sync_running::SyncRunning::new());
+    let (state, commands) = crate::file_watch::FileWatchState::new();
+    app.manage(state);
+    tauri_specta::Builder::<tauri::test::MockRuntime>::new()
+        .events(tauri_specta::collect_events![
+            crate::file_watch::FileChangedEvent
+        ])
+        .mount_events(&app);
+    (temp, app, commands)
+}
+
+#[test]
+fn project_add_manual_refreshes_the_watch_set_through_the_after_sync_seam() {
+    // D-137's follow-up 2, wired by T-257: the committed add joins
+    // the watched set through ONE awaited full pass on the
+    // after-sync seam — the same seam the sync pipeline calls, never
+    // a second refresh path. The proof needs a verdict only a pass
+    // that COVERED the new row can record: a PRE-EXISTING differing
+    // `AGENTS.md` (SYS-008's literal reading — externally modified
+    // regardless of sync history). Without the wiring the cache
+    // stays empty (absent ≡ clean) and the flag reads false.
+    let (temp, app, commands) = add_manual_watch_app();
+    let repo = repo_dir(temp.path(), "eunomia-repo");
+    std::fs::write(
+        repo.join("AGENTS.md"),
+        "A pre-existing file an editor left.\n",
+    )
+    .expect("the pre-existing target must work");
+
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    let _events = listen_file_changed(&app);
+    wait_for_watch_passes(&app, 1); // the startup pass over an empty table
+
+    // Act: the committed add, over the real IPC path.
+    let picked = pick_folder(&app, &repo);
+    let webview = main_webview(&app);
+    let added = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect("the add must succeed — the refresh is never-fatal aftermath");
+
+    // The answer first: the add committed and carries the new row.
+    assert_eq!(added.outcome, "added");
+    let new_id = added
+        .project
+        .expect("the added arm carries the created row")
+        .id;
+
+    // The wiring's proof: the service's cache holds the new
+    // project's verdict — recordable only by a full pass that
+    // covered the row after its commit.
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>().snapshot(),
+        vec![crate::file_watch::ProjectFileChange {
+            project_id: new_id.clone(),
+            external_changed: true,
+            file_deleted: false,
+        }],
+        "the pre-existing differing file is reported — only a pass \
+         that covered the new row can record this"
+    );
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>()
+            .pass_count(),
+        2,
+        "the awaited seam ran exactly one full pass after the startup one"
+    );
+    // Display-only even through the mutation's refresh: adding a
+    // project writes no target file (OUT-005 — the sync's job).
+    assert_eq!(
+        std::fs::read_to_string(repo.join("AGENTS.md")).expect("the file must be readable"),
+        "A pre-existing file an editor left.\n",
+        "the add (and its watch pass) never writes the target file"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_refused_add_runs_no_watch_pass() {
+    // The wiring's negative half: the REFUSAL arms (the duplicate
+    // check here) write nothing, so they must run no watch pass —
+    // the refresh belongs to the committed arm alone. The pass
+    // counter is the deterministic observable (an empty diff is
+    // silent on the wire by contract).
+    let (temp, app, commands) = add_manual_watch_app();
+    let repo = repo_dir(temp.path(), "eunomia-repo");
+    let picked = pick_folder(&app, &repo);
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    let _events = listen_file_changed(&app);
+    wait_for_watch_passes(&app, 1);
+    let webview = main_webview(&app);
+    let added = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect("the first add must succeed");
+    assert_eq!(added.outcome, "added");
+    wait_for_watch_passes(&app, 2); // the seam's pass, awaited in the add
+
+    // Act: the duplicate add — a typed refusal, nothing written.
+    let duplicate = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
+        .expect("the duplicate is a typed answer, not an error");
+    assert_eq!(duplicate.outcome, "duplicate_active");
+    assert!(
+        duplicate.project.is_none() && duplicate.existing.is_some(),
+        "the refusal arm answers about the existing row"
+    );
+
+    // Assert: settled silence — no pass ran for the refusal.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>()
+            .pass_count(),
+        2,
+        "a refused add runs no watch pass — the refresh is the \
+         committed arm's alone"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
 }
 
 #[test]

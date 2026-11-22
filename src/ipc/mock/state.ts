@@ -52,6 +52,10 @@ export type MockProjectRow = {
   available: boolean
   unavailableReason: string | null
   dirty: boolean
+  /** §5.7 SYS-008: the target file differs from the build (D-137). */
+  externalChanged: boolean
+  /** §5.7 SYS-009: the target file is gone after a recorded sync. */
+  fileDeleted: boolean
   lastSyncedAt: string | null
 }
 
@@ -78,6 +82,8 @@ export function toColumnEntry(row: MockProjectRow): ProjectColumnEntryWire {
     available: row.available,
     unavailable_reason: row.unavailableReason,
     dirty: row.dirty,
+    external_changed: row.externalChanged,
+    file_deleted: row.fileDeleted,
     last_synced_at: row.lastSyncedAt,
   }
 }
@@ -278,6 +284,8 @@ function rowsFromFixtures(
     available: project.available,
     unavailableReason: project.unavailable_reason,
     dirty: project.dirty,
+    externalChanged: project.external_changed,
+    fileDeleted: project.file_deleted,
     lastSyncedAt: project.last_synced_at,
   }))
 }

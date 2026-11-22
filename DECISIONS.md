@@ -13725,3 +13725,277 @@ titled "Follow-up T-255: …" (the workspace-wide print_stderr/
 print_stdout gate; the CappedDailyWriter retirement when upstream
 ships size rotation; the three Windows GUI smoke items). The cards
 are the tracking unit; this note only records their existence.
+
+### D-144 — T-257: the watcher refresh wired into `project_add_manual` and the `projects_list` column carrier — D-137's follow-ups 2 and 5 closed — 2026-11-22
+
+Problem: D-137 recorded two follow-ups this card closes. (2) the
+watch service's set followed startup, availability and sync only — a
+project ADDED after startup stayed unwatched until some other anchor
+happened to fire; (5) the §5.7 verdicts reached only an
+already-listening webview (`state://file-changed` fires from the
+`setup` hook before the frontend registers, and Tauri does not
+replay events), so a cold-start caller had no read path —
+`snapshot()` was added in D-137's round 1 precisely as the future
+carrier, with `commands.rs` frozen then. Five readings were open:
+which mutations trigger the refresh; what the refresh failure does
+to the user's mutation; awaited or fire-and-forget; where the
+carrier's fields come from at command time; and what an archived or
+unobserved row reads as.
+
+Solution — follow-up 2, the refresh wiring:
+
+- _SYS-007's own list is the arbiter of scope._ "Watches are added
+  when a project is added or its scheme or file name changes, and
+  removed when a project is archived or becomes unavailable" — of
+  those mutation points, exactly ONE command exists today:
+  `project_add_manual` (the spec's `project_update`,
+  `project_archive`, `project_restore`, `project_relink` are §7.10
+  names without commands; `project_archive`/`project_restore` are
+  T-109's card — `ipc_tests.rs`'s own comments say so). The
+  committed arm ("added") awaits [`file_watch::refresh_after_sync`]
+  after the write-access probe — the SAME seam the sync pipeline
+  calls (D-138), never a second refresh path; the future commands
+  call the same one-liner as they land (the SYS-005 gate's "join as
+  they land" precedent, `reject_during_sync`'s docs). The other
+  existing mutations run no refresh, each for a stated reason:
+  `projects_reorder` moves `sort_order` only (neither the watched
+  SET nor any verdict input), `exclusion_remove` touches no project
+  row, `settings_set` writes `default.*` which is copy-at-creation
+  (PRJ-012/DEF-005 — never retroactive). The DB-022 commit hook is
+  deliberately NOT reused as a trigger: the hook runs under the
+  connection's mutex and must never block (D-121), while a watch
+  pass probes folders.
+- _Never-fatal aftermath, the D-138 watch posture._ The project IS
+  added whatever the pass answers: `let _never_fatal… =
+refresh_after_sync(&app).await`, the refusal swallowed. The real
+  refusal case is a watcher backend that refused to start (the
+  service task never exists; the bus receiver was dropped with it,
+  so the send fails fast — never a hang; recovery mode is
+  unreachable in this flow, it already answered `NoDatabase` at
+  `managed_db`). Convergence survives the degrade: every full pass
+  re-derives the watch set from the project table
+  (`set_files`' idempotent full-set convergence), so the next
+  anchor — an availability change, a debounced file event, the next
+  sync or mutation — re-converges without loss. The warn line the
+  degrade deserves lives in `logging.rs`, a frozen zone this window
+  (T-255); recorded as the follow-up below (the D-096/D-121
+  documented-gap precedent — no invented log path, SEC-008 holds:
+  nothing user-content rides any diagnostic).
+- _Awaited, not fire-and-forget._ The card names `refresh_after_sync`
+  as the seam; the awaited form guarantees the converged set and the
+  emitted first-observation diff by the time the answer lands, and it
+  cannot silently no-op (`send().await` on a full bus waits;
+  `try_send` drops). The cost is one full pass in the response
+  latency — the same pass the sync pipeline already pays after every
+  run. The wiring test pins the pass's PRESENCE and its coverage of
+  the committed row (the falsifiable facts); awaited-vs-spawned
+  ordering is this entry's design guarantee, not a test-oracled fact
+  (a spawned refresh would usually also land before the test's
+  reads — the round-1 review's P3-3 wording fix).
+
+Solution — follow-up 5, the column carrier:
+
+- _`ProjectColumnEntry` gains `external_changed`/`file_deleted`_
+  (D-137's naming; MAIN-028's "externally modified"/"target deleted"
+  markings — the icon set's last two members become readable by any
+  caller of `projects_list`, closing the cold-start gap). The source
+  is ONE `FileWatchState::snapshot()` read per command — the read
+  D-137's round-1 P1-1 prepared — taken AFTER the blocking
+  availability probes (the T-254 dirty ordering rule: probes over
+  dead folders can stall seconds, and a snapshot taken before them
+  would let the response carry verdicts older than an event the
+  webview already applied), read under the cache's existing mutex
+  (no new locks), then per-row map lookups (linear, no re-read per
+  row).
+- _The per-row rules mirror `dirty_verdict`, plus the watch set's own
+  second row-decidable half._ An ARCHIVED row and a row whose folder
+  fails THIS response's availability probe both read `(false,
+false)`, decided from the row and the probe BEFORE the cache —
+  SYS-007's watch set is the active, available projects' (the
+  service's own pass PRUNES every leaver from its covered set), and
+  the rules close the windows between a folder dying or a row being
+  archived (no command exists yet) and the next full pass's prune,
+  where a stale cache entry would leak a marking onto a column that
+  shows unavailable/archived (each window pinned by a test that holds
+  the stale entry open and reads through it). An active, available
+  row the service has not observed — before the first pass, a
+  service that never started — reads the clean baseline `(false,
+false)`: absent ≡ clean, the service's own diff rule, one truth
+  with the event. A missing managed state (an uninitialized-app bug;
+  `setup` manages it before anything that could fail, recovery mode
+  included) answers the clean baseline, never a failed read over
+  display flags — the `DirtyState` degrade posture.
+- _The loud-drift chain held._ The regenerated `bindings.ts` (D-003;
+  the export test's rewrite-and-compare cycle) forced the fixture
+  generator (`ProjectFixture` IS the wire type), `MockProjectRow`,
+  `toColumnEntry` and the mock's add-row to carry the fields before
+  `pnpm typecheck` went green. The fixture's final pass models the
+  domain rules the way the dirty pass does (deliberately ahead of
+  nothing here — the backend now computes these): only active,
+  available rows are flagged, `file_deleted` only after a recorded
+  sync (SYS-009's gate), the two never both true — deterministic
+  PICKS over the seed-pinned synced pattern (pure scans, NO rng draws
+  so the dirty pass's rng sequence stays byte-identical): the first
+  watchable synced row is the target-deleted case, the first other
+  watchable row the externally-modified one, so every world with two
+  active available rows (one synced) — set S included — shows exactly
+  one marking of each kind. `snapshot()`'s and `refresh_after_sync`'s
+  `cfg_attr(not(test), allow(dead_code))` markers are gone — both
+  now have production consumers (the latter already did since
+  D-138; its doc's "Unused in production until T-118 lands" line was
+  stale and is fixed here, Rule 11).
+
+Tests: 5 new IPC tests in `ipc_tests.rs` — the carrier over the real
+command path (a synced-edited, a synced-deleted and a matching file
+through the real builder oracle, all three §5.7 states on the wire);
+the archived stale-entry pin (the cache's entry verified open, the
+archive through the store — no command exists, T-109's seam — and
+the column read clean through it); the unavailable stale-entry pin
+(the round-1 review's P3-1: the folder dies after the recording
+pass, no recheck runs, and the SAME response that probes the folder
+dead serves the column clean — the probe is the only fresher fact);
+the wiring's positive proof (a pre-existing differing `AGENTS.md`:
+only a pass that covered the committed row can record
+`external_changed: true`, plus exactly one pass after the startup
+one, plus the display-only no-write pin); and the refused-add
+negative (the duplicate arm runs no pass — the counter is the
+deterministic observable). The existing full-field set pin carries
+the cold baseline; `add_manual_app` now manages the watch state with
+the receiver dropped, so every existing add test pins the
+never-fatal degrade implicitly (the seam answers `FileWatchGone`;
+the adds succeed). Frontend: the mock key-set pin gains the two
+fields, a row→wire round-trip pin plus the generator invariants
+(mutual exclusivity, archived/unavailable clean,
+deleted-only-after-sync, exactly one marking of each kind in the
+pinned worlds and in set S). Mutation checks, all red-then-green:
+M1 the seam call stubbed out → both wiring tests red (empty
+snapshot, pass count 1); M2 the snapshot read disabled → the carrier
+red (clean column over a live modified verdict); M3 the archived
+rule dropped → the stale marking leaks onto the archived column; M4
+the generator's marking disabled → the frontend pins red; M5 the
+unavailable arm dropped → the stale marking leaks onto the
+unavailable column.
+
+Honest boundaries: the carrier reads the service's LAST RECORDED
+verdict, not a fresh probe — a file edited after the service's
+latest pass reads stale until that pass's debounce lands, exactly
+like the event a listener would instead receive (the reconciliation
+rule: the read corrects, the event updates). The add's response
+awaits one full watch pass — a hung mount hangs the response, but
+the add flow ALREADY touches the same folder's target file in its
+own write-access probe before that (the §6.9 step-5 ordering), so
+the exposure is not new; a bounded wait for mutation callers is a
+recorded follow-up idea (the pass would keep converging on the
+service task whatever the caller does). The add-flow refresh
+degrade is silent (no log line exists for it; the frozen
+`logging.rs` owns the fix). After a recovery-mode `db_recreate`/
+`db_restore_backup` no watch service exists (the D-121-recorded
+recovery gap — the recovery commands' task re-arms the services);
+the carrier reads the clean baseline there, which is honest for a
+session whose watcher never started. The carrier closes the
+cold-start gap only for a read that happens after the first pass —
+a screen whose first `projectsList` races that pass still reads the
+baseline, and (the same reason the carrier exists) nothing replays
+the startup event to a late listener: the MAIN-028 UI card must
+re-read on listener registration (recorded for that card). D-137's
+follow-ups (1) (logging.rs facade lines — frozen zone, untouched
+here), (3) (the mock bus's `stateFileChanged` emitter), (4) (the
+SYS-010 notice) and (6)/(7) remain open on their own cards.
+
+Follow-ups for the board (the orchestrator cards them): extend the
+D-137 follow-up-(1) logging card (or its own) with the add-flow
+refresh-refused warn line (`project_add_manual`'s seam arm — same
+class-only §10-code shape as `sync_run_degraded`'s watch arm); the
+future `project_update`/`project_archive`/`project_restore`/
+`project_relink` cards must call `refresh_after_sync` in their
+committed arms (this entry's seam) — worth a note on T-109's card.
+
+Round-1 review addendum (D-144, same task; report
+`.opencode/reviews/t257-round1.md`, deepseek-v4.1-flash — verdict
+approve-with-fixes: 3×P2, 5×P3): findings processed here —
+
+- P2-1 (taken): `domain.ts`'s `ProjectFixture` doc still enumerated
+  the T-072 field list without the two new fields — the sentence now
+  lies about the type it aliases (Rule 11). Fixed.
+- P2-2 (taken): the fixture's `file_deleted` branch was unfalsifiable
+  (`i % 5 === 3` never true in any pinned world — set S has three
+  projects, its only synced active is index 1; a `fileDeleted =
+false` mutation left the whole suite green) and the DEFAULT dev
+  world could never show the "target deleted" marking. The rule is
+  redesigned as deterministic picks over the seed-pinned synced
+  pattern (pure scans, no rng draws): the first watchable synced row
+  is the deleted case, the first other watchable row the modified
+  one — one marking of each kind in every world with two active
+  available rows, set S included (pinned).
+- P2-3 (taken): the mock's `syncRun` cleared `dirty` and stamped
+  `lastSyncedAt` but left the new flags — serving
+  `external_changed: true` on a just-written row, a state the
+  backend's after-sync pass forbids (a sync's write clears the
+  marking). The `written` branch now clears both flags (the mock
+  twin of the post-sync pass). The `applyMockAvailability` half of
+  the observation stays with D-137's follow-up (3) (the mock bus
+  card) — it predates this task's fields and belongs to the emitter
+  work.
+- P3-1 (taken): `watch_verdict` checked the row's `state` but not
+  the freshly probed `available` fact, while its doc claimed the
+  ACTIVE-AND-AVAILABLE watch set — an active project whose folder
+  died kept its marking until some anchor triggered a full pass
+  (this command probes but emits nothing). The probe's fact now
+  decides beside the state (the pass's own covered-set rule), and
+  the new stale-unavailable test pins the window (mutation M5).
+- P3-2 (taken): the carrier test's `!dirty` assertion could not fail
+  for the reason its message gave (no `DirtyState` in the harness —
+  the absent-cache degrade answers `false` regardless); dropped
+  rather than spawning the whole dirty service for a side claim
+  (SYS-008's independence sentence stays pinned by the spec and the
+  dirty suite).
+- P3-3 (taken as wording): the "awaited" bullet claimed the wiring
+  test's oracle depends on the await; it pins presence and coverage,
+  not ordering (a spawned refresh would usually also land before the
+  reads). The bullet and the test now say exactly that.
+- P3-4 (recorded): the interactive add awaits a discarded full pass
+  — a hung mount hangs the response. Not new exposure (the flow's
+  own write-access probe touches the same folder first); the
+  bounded-wait idea is a board follow-up, the honest-boundaries
+  sentence names the shape.
+- P3-5 (recorded): the carrier fixes cold-start only for reads after
+  the first pass; the MAIN-028 UI card must re-read on listener
+  registration — added to the boundaries and the board notes (that
+  card's scope, not this backend's).
+
+Round-2 review addendum (D-144, same task; report
+`.opencode/reviews/t257-round2.md`, hy4-flash-free — verdict
+findings: 1×P1, 1×P2, 1×P3; the implementation itself assessed
+sound, "would merit approval" once these landed): findings
+processed here —
+
+- R2-P1 (taken): the branch base was stale — `main` advanced to
+  T-255's merge mid-session, so the reviewed `git diff main..HEAD`
+  APPEARED to revert T-255's logging writer and its
+  `deny(clippy::print_stderr)` gate (this branch never touched
+  `logging.rs`; the appearance was the moved-base diff artifact, but
+  a squash/patch integration would have made it real). The branch
+  was rebased onto current `main` and the full check chain re-run on
+  the rebased tree; the merge-integration hazard is gone.
+- R2-P2 (taken): the round-1 P2-3 fix (the mock `syncRun` clearing
+  the §5.7 markings on written rows) had no test anywhere — the mock
+  `syncRun` was invoked by nothing. A falsifying spec now seeds one
+  externally-modified and one target-deleted row, runs the sync, and
+  reads the clearing back through `projectsList` (plus the skipped
+  row's untouched contrast).
+- R2-P3 (taken): two doc typos this diff introduced ("reads read the
+  row"; "an row whose folder" in this entry) — fixed.
+
+Process note (the round-2 report file was mangled by the reviewer's
+own session writing its transcript into the report path; the body
+was recovered verbatim from the session's saved shell output and the
+recovered text is what this addendum processed).
+
+Orchestrator addendum (merge, 2026-11-22): the follow-ups above are
+tracked — four cards created in the board's INBOX for owner triage,
+titled "Follow-up T-257: …" (the add-flow refresh-refused warn line;
+the refresh seam obligation for project_update/archive/restore/
+relink as those commands land; the UI re-read of projects_list on
+stateFileChanged registration; the bounded wait for mutation-time
+refresh). The cards are the tracking unit; this note only records
+their existence.

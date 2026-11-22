@@ -44,19 +44,23 @@
 //!   availability recheck is spawned, so the session's first verdict
 //!   cannot slip past the listener.
 //! - **After a sync** — [`refresh_after_sync`], the awaited seam the
-//!   future sync pipeline (T-118) calls once its writes and DB-024
+//!   sync pipeline (T-118/D-138) calls once its writes and DB-024
 //!   hash updates committed: files may have appeared, and every
 //!   written/unchanged project's external state must be re-computed
 //!   (SYS-008's "right after a sync").
 //! - **Debounced watch events** — the pump thread turns
 //!   [`WatchEvent`]s into `FilesChanged` batches; the pass re-reads
 //!   only the affected projects (the noise filter SYS-008 names).
-//! - **Project additions, archiving, scheme/name changes** — no
-//!   command exists for these yet and `commands.rs` is outside this
-//!   task's window, so the refresh seam is left public
-//!   ([`refresh_after_sync`] serves any caller) and the wiring is a
-//!   recorded follow-up (DECISIONS.md); the DB-022 commit hook is the
-//!   dirty service's, not a shared bus this service could piggyback.
+//! - **Project mutations** — SYS-007's own set points: a project
+//!   ADDED joins the watched set (`project_add_manual`'s committed
+//!   arm awaits [`refresh_after_sync`] since T-257), and the
+//!   scheme/file-name/archive/restore/relink changes call the same
+//!   seam as their §7.10 commands land (`project_update`,
+//!   `project_archive`, `project_restore`, `project_relink` — the
+//!   SYS-005 gate's "join as they land" precedent). No commit-hook
+//!   piggyback exists here by design: the DB-022 hook is the dirty
+//!   service's, and this service's pass probes folders — a hook that
+//!   fires inside the connection's mutex must never block (D-121).
 //!
 //! An event-stream error ([`WatchEvent::Backend`], SYS-010's
 //! overflow case) also lands as a `Refresh`: the documented
@@ -305,13 +309,12 @@ impl FileWatchState {
     }
 
     /// The session's current verdicts, one entry per observed project
-    /// in id order — the read side the future column carrier needs
-    /// (the round-1 review's P1-1): the startup diff reaches the
-    /// webview's listener only through a replayed read like this,
+    /// in id order — the read side the `projects_list` column carrier
+    /// reads (T-257, D-137's round-1 P1-1): the startup diff reaches
+    /// the webview's listener only through a replayed read like this,
     /// because events are not replayed to late listeners. The shape
-    /// is the event's own [`ProjectFileChange`], so the future command
-    /// is a read, not a redesign.
-    #[cfg_attr(not(test), allow(dead_code))] // consumed by the column-carrier follow-up (round-1 P1-1); tested today
+    /// is the event's own [`ProjectFileChange`], so the carrier is a
+    /// read, not a redesign.
     pub(crate) fn snapshot(&self) -> Vec<ProjectFileChange> {
         let last = self
             .last
@@ -1029,9 +1032,11 @@ pub(crate) fn spawn_service<R: Runtime>(
 /// NOT the caller's problem to detect: the diff is returned anyway,
 /// the cache deliberately stays unrecorded, and the next trigger
 /// re-detects and re-emits it (the at-least-once contract — the same
-/// posture as `dirty_recalc`'s seam). Also the public refresh seam
-/// for the project-mutation commands' future wiring (the recorded
-/// follow-up).
+/// posture as `dirty_recalc`'s seam). Also the refresh seam the
+/// project-mutation commands call when a commit can change the
+/// watched set (SYS-007: `project_add_manual`'s committed arm since
+/// T-257; the scheme/name/archive/restore commands join as they
+/// land) — one seam, never a second refresh path.
 ///
 /// # Errors
 ///
@@ -1044,12 +1049,10 @@ pub(crate) fn spawn_service<R: Runtime>(
 /// still accepts the send (a reasoned-impossible panic;
 /// blocking-half panics surface as join errors instead), the ack
 /// never arrives and the await never returns — the reasoned-away
-/// branch, stated here so it is not discovered by a hang.
-///
-/// Unused in production until T-118 lands its caller — the
-/// `compute_dirty_verdicts` precedent (the tests drive it now; the
-/// attr keeps the non-test lib build silent).
-#[cfg_attr(not(test), allow(dead_code))]
+/// branch, stated here so it is not discovered by a hang. The
+/// callers treat the refusal as never-fatal aftermath (the sync
+/// pipeline logs its class-only §10 code; the add flow degrades
+/// silently — its `logging.rs` line is the recorded follow-up).
 pub(crate) async fn refresh_after_sync<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<ProjectFileChange>, AppError> {

@@ -1913,6 +1913,16 @@ pub(crate) struct ProjectColumnEntry {
     /// icon); see [`dirty_verdict`] for the cache-backed boundary
     /// this command serves it under (D-121, closed by T-254).
     pub(crate) dirty: bool,
+    /// SYS-008's external-change flag at this read (MAIN-028's
+    /// "externally modified" marking): the watch service's last known
+    /// verdict, served under the same cache-backed boundary as
+    /// [`ProjectColumnEntry::dirty`] — see [`watch_verdict`] (D-137's
+    /// round-1 P1-1, landed by T-257).
+    pub(crate) external_changed: bool,
+    /// SYS-009's target-deleted hint at this read (MAIN-028's "target
+    /// deleted" marking), from the same [`watch_verdict`] read; the
+    /// two flags are mutually exclusive in the service's verdict.
+    pub(crate) file_deleted: bool,
     /// The last successful sync's time (LOG-007/OUT-020), DB-002 UTC
     /// shape; `None` until the first sync writes it.
     pub(crate) last_synced_at: Option<String>,
@@ -1958,6 +1968,19 @@ pub(crate) struct ProjectColumnEntry {
 /// (the T-105 gate covers project-*changing* commands; a read
 /// during a sync is safe and answers the verdicts the running pass
 /// will refresh).
+///
+/// `external_changed`/`file_deleted` are the SAME shape of read for
+/// §5.7's watch verdicts (SYS-008/SYS-009, MAIN-028's "externally
+/// modified"/"target deleted" markings, D-137's round-1 P1-1):
+/// one [`file_watch::FileWatchState::snapshot`] of the managed
+/// [`file_watch::FileWatchState`] cache — the state the
+/// `state://file-changed` diff is taken against — taken after the
+/// probes for the same staleness rule, served per row through
+/// [`watch_verdict`]. The startup verdicts therefore reach ANY
+/// caller of this command, not only a webview that was already
+/// listening when the event fired (Tauri does not replay events);
+/// the cold-start carrier is exactly what the follow-up existed
+/// for.
 ///
 /// Failures reach the log with their §10 code
 /// ([`logging::projects_list_failed`], the D-096 follow-up this edge
@@ -2023,12 +2046,29 @@ async fn projects_list_impl<R: Runtime>(
     // [`dirty_verdict`]'s absent ≡ clean, one truth with the
     // service's diff rule.
     let dirty_cache = app.try_state::<DirtyState>();
+    // The §5.7 watch verdicts (T-257): ONE snapshot read of the watch
+    // service's session cache, taken AFTER the probes for the same
+    // staleness rule the dirty read states above — probes over dead
+    // folders can stall for seconds, and a snapshot taken before
+    // them would let this response arrive carrying verdicts older
+    // than a `state://file-changed` event the webview already
+    // applied. One read, then per-row map lookups (linear in the
+    // observed set, no re-read per row); the map is the carrier the
+    // service's own `snapshot()` prepares (D-137's round-1 P1-1).
+    // A missing state is the [`DirtyState`] degrade posture:
+    // `setup` manages it before anything that could fail (recovery
+    // mode included), so its absence is an uninitialized-app bug,
+    // and the honest degraded answer is the clean baseline —
+    // [`watch_verdict`]'s absent ≡ clean, one truth with the
+    // service's diff rule.
+    let watch_flags = watch_verdicts_of(&app);
     let entries = probed
         .into_iter()
         .map(|(project, available, unavailable_reason)| {
             // The verdict reads the row before the struct build moves
             // its fields.
             let dirty = dirty_verdict(dirty_cache.as_deref(), &project);
+            let (external_changed, file_deleted) = watch_verdict(&watch_flags, &project, available);
             ProjectColumnEntry {
                 id: project.id,
                 name: project.name,
@@ -2038,6 +2078,8 @@ async fn projects_list_impl<R: Runtime>(
                 available,
                 unavailable_reason,
                 dirty,
+                external_changed,
+                file_deleted,
                 last_synced_at: project.last_synced_at,
             }
         })
@@ -2089,6 +2131,77 @@ fn dirty_verdict(cache: Option<&DirtyState>, project: &eunomia_store::projects::
             .map(|cache| cache.last_verdict(&project.id))
             .unwrap_or(false),
     }
+}
+
+/// §5.7's watch verdict pair as `projects_list` serves it (SYS-008/
+/// SYS-009, MAIN-028's "externally modified"/"target deleted"
+/// markings; D-137's round-1 P1-1, landed by T-257): the watch
+/// service's last recorded flags, read from the one
+/// [`file_watch::FileWatchState::snapshot`] map this command took
+/// after its blocking probes (the `dirty_verdict` staleness rule).
+///
+/// The shape mirrors [`dirty_verdict`], with the watch set's own
+/// second row-decidable half: SYS-007's watch set is the ACTIVE,
+/// AVAILABLE projects', and the service's full pass PRUNES every
+/// leaver from its cache (an archived or unavailable project
+/// contributes no verdict — `blocking_half` excludes both from the
+/// covered set). This command probes availability itself, fresher
+/// than the cache's last pass, so the row half is decided from the
+/// row's `state` AND this response's own `available` fact — BEFORE
+/// the cache — and the window between a folder dying (or a row being
+/// archived, no command exists yet) and the next full pass's prune
+/// cannot leak a stale marking onto a column that shows
+/// unavailable/archived. An active, available project the service
+/// has not observed (before its first pass, a service that never
+/// started) reads as the clean baseline `(false, false)` — the
+/// service's own diff rule (absent ≡ clean), one truth with the
+/// `state://file-changed` event. A consumer reconciling the event
+/// with this read treats the read as the truth; the event updates,
+/// the read corrects — the same at-least-once posture as the dirty
+/// read above.
+fn watch_verdict(
+    flags: &std::collections::HashMap<String, (bool, bool)>,
+    project: &eunomia_store::projects::Project,
+    available: bool,
+) -> (bool, bool) {
+    match (project.state, available) {
+        // SYS-007: archived or unavailable rows are outside the watch
+        // set; the row decides alone, whatever a stale cache entry
+        // says.
+        (ProjectState::Archived, _) | (ProjectState::Active, false) => (false, false),
+        // Active and available: the service's last recorded pair,
+        // clean baseline for the not-yet-observed.
+        (ProjectState::Active, true) => flags
+            .get(project.id.as_str())
+            .copied()
+            .unwrap_or((false, false)),
+    }
+}
+
+/// Takes the one [`file_watch::FileWatchState::snapshot`] read a
+/// `projects_list` call serves its rows from: the managed state's
+/// current verdicts keyed by project id. A missing state (an
+/// uninitialized-app bug — `setup` manages it before anything that
+/// could fail, recovery mode included) answers the empty map, the
+/// clean baseline for every row — the [`DirtyState`] degrade
+/// posture, never a failed read over display flags.
+fn watch_verdicts_of<R: Runtime>(
+    app: &AppHandle<R>,
+) -> std::collections::HashMap<String, (bool, bool)> {
+    app.try_state::<file_watch::FileWatchState>()
+        .map(|state| {
+            state
+                .snapshot()
+                .into_iter()
+                .map(|change| {
+                    (
+                        change.project_id,
+                        (change.external_changed, change.file_deleted),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Runs the D-084 availability probe and shapes its verdict onto the
@@ -2422,6 +2535,22 @@ pub(crate) struct ExistingProject {
 ///    the transaction — a dead drive must not hold the one database
 ///    lock, the D-096 probe-order rule). The verdict travels as the
 ///    response's `write_access_warning`; the project stays added.
+/// 6. **The watch refresh** (§5.7 SYS-007, T-257/D-137's follow-up
+///    2): the committed row joins the watched set, so the answer
+///    waits for one FULL pass through
+///    [`file_watch::refresh_after_sync`] — the SAME seam the sync
+///    pipeline runs after its writes (never a second refresh path),
+///    on the service task, its blocking half on the pool. The
+///    refresh is never-fatal aftermath (D-138's watch posture): the
+///    project IS added whatever the pass answers — a refusal
+///    degrades silently, and the next anchor (an availability
+///    change, a debounced file event, the next sync or mutation)
+///    re-converges the set, because every full pass re-derives it
+///    from the project table. The other SYS-005-gated mutations
+///    change no watched file (`projects_reorder` moves sort_order,
+///    `exclusion_remove` touches no project row) and run no
+///    refresh; the spec's scheme/name/archive/restore/relink
+///    commands call the same seam as they land.
 ///
 /// Failures reach the log with their §10 code
 /// ([`logging::project_add_failed`]); the three typed non-add
@@ -2644,6 +2773,24 @@ async fn project_add_manual_impl<R: Runtime>(
             })
             .await
             .map_err(db::join_failure_to_app_error)?;
+            // Step 6 — the watch refresh (§5.7 SYS-007, T-257): the
+            // committed row joins the watched set, so one FULL pass
+            // runs through the after-sync seam — the same awaited
+            // pass the sync pipeline runs after its writes, with the
+            // converged set and the emitted first-observation diff in
+            // place by the time the answer lands (a pre-existing
+            // differing target file is therefore already reported,
+            // SYS-008's literal reading). NEVER-FATAL (the command
+            // docs' step 6): the project IS added whatever the pass
+            // answers — the refusal arms below (recovery mode is
+            // unreachable here, the flow holds a database; the real
+            // case is a watcher backend that refused to start, when
+            // no service task exists and the send fails fast)
+            // degrade silently, and the next watch anchor re-converges
+            // the set. The warn line this degrade deserves lives in
+            // `logging.rs` — a frozen zone this window; the recorded
+            // logging follow-up owns it (the D-121 precedent).
+            let _never_fatal_watch_refresh = file_watch::refresh_after_sync(&app).await;
             Ok(ProjectAddResult::added(&project, warning))
         }
     }

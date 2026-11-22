@@ -265,6 +265,10 @@ export function generateFixtures(profile: FixtureProfile): FixtureBundle {
       unavailable_reason: unavailable ? UNAVAILABLE_REASONS[i % UNAVAILABLE_REASONS.length] : null,
       // Placeholder: assignments decide dirtiness in the second pass.
       dirty: false,
+      // Placeholders: the watch pass decides both §5.7 markings in
+      // the final pass.
+      external_changed: false,
+      file_deleted: false,
       last_synced_at: synced ? isoUtc(BASE_TS_MS - rng.int(1, 30) * DAY_MS) : null,
     })
   }
@@ -387,16 +391,45 @@ export function generateFixtures(profile: FixtureProfile): FixtureBundle {
     dirtyProjects.add(p)
   }
 
-  // --- dirty pass (DB-021's fixture mirror: only projects with work) -------
-  // The active half is deliberately ahead of today's backend: D-096 serves
-  // `dirty: false` for actives until the DB-022 hash pipeline lands, but
-  // fixtures model the domain rule (an active project with assignments can
-  // be dirty), not the current backend gap. Archived rows are NEVER dirty
-  // (DB-014/DB-021: the row decides alone, pinned by a Rust test).
-  const finalProjects = projects.map((project, i) => ({
-    ...project,
-    dirty: project.state === 'active' && dirtyProjects.has(i) ? rng.bool() : false,
-  }))
+  // --- dirty + watch passes (the fixture mirrors of DB-021 and §5.7) -------
+  // Dirty (DB-021): the active half is deliberately ahead of today's
+  // backend: D-096 served `dirty: false` for actives until the DB-022
+  // hash pipeline landed, but fixtures model the domain rule (an
+  // active project with assignments can be dirty), not the current
+  // backend gap. Archived rows are NEVER dirty (DB-014/DB-021: the
+  // row decides alone, pinned by a Rust test).
+  //
+  // Watch (§5.7, SYS-008/009): the same domain-ahead posture — the
+  // backend's verdicts come from the watch service's snapshot
+  // (D-137, carried by `projects_list` since T-257). The domain
+  // rules: only ACTIVE, AVAILABLE rows are ever flagged (SYS-007's
+  // watch set), `file_deleted` only after a recorded sync (SYS-009's
+  // gate, mirrored by `last_synced_at`), and the two flags never
+  // both true (the verdict's own mutual exclusion). Deterministic
+  // picks over the seed-pinned synced pattern (a pure scan, NO rng
+  // draws before the dirty line: its rng sequence stays
+  // byte-identical): the FIRST watchable synced row is the
+  // target-deleted case, the FIRST other watchable row the
+  // externally-modified one — so every world with two active
+  // available rows, one of them synced (set S included, pinned by
+  // the spec), shows exactly one marking of each kind.
+  const firstDeleted = projects.findIndex(
+    (project) => project.state === 'active' && project.available && project.last_synced_at !== null,
+  )
+  const firstChanged = projects.findIndex(
+    (project, i) => project.state === 'active' && project.available && i !== firstDeleted,
+  )
+  const finalProjects = projects.map((project, i) => {
+    const watchable = project.state === 'active' && project.available
+    const fileDeleted = watchable && i === firstDeleted
+    const externalChanged = watchable && i === firstChanged
+    return {
+      ...project,
+      external_changed: externalChanged,
+      file_deleted: fileDeleted,
+      dirty: project.state === 'active' && dirtyProjects.has(i) ? rng.bool() : false,
+    }
+  })
 
   // --- exclusions (the D-10 screen's rows, §6.2 project_exclusions) ------
   // Distinct created_at stamps keep the wire order (created_at, id)

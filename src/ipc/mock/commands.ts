@@ -339,6 +339,11 @@ export const mockCommands: IpcCommands = {
       available: true,
       unavailableReason: null,
       dirty: false,
+      // §5.7's clean baseline for a fresh row: never synced, no file
+      // verdict exists (OUT-005: the sync creates the file) — the
+      // watch-service mock twin would compute exactly this.
+      externalChanged: false,
+      fileDeleted: false,
       lastSyncedAt: null,
     }
     state.projects.push(row)
@@ -601,9 +606,10 @@ export const mockCommands: IpcCommands = {
    * `sync_run` (§7.10, §9.4; T-118): a stand-in over the mock state,
    * not a pipeline mirror (D-108's limits posture): no library or
    * assignment state exists here, so no build is possible — every
-   * AVAILABLE active project is `written` (its `dirty` flag clears
-   * and `lastSyncedAt` stamps, readable back through `projectsList`),
-   * every UNAVAILABLE one skips with `E_PROJECT_UNAVAILABLE` (D-09:
+   * AVAILABLE active project is `written` (its `dirty` flag and both
+   * §5.7 watch markings clear and `lastSyncedAt` stamps, readable
+   * back through `projectsList` — the mock twin of the backend's
+   * after-sync pass), every UNAVAILABLE one skips with `E_PROJECT_UNAVAILABLE` (D-09:
    * skipped, never stopping the run), and the run journals one
    * `sync.project_result` per project plus the `sync.run_finished`
    * summary (the helper's `sync_run_id` stays null — the mock journal
@@ -637,7 +643,13 @@ export const mockCommands: IpcCommands = {
           error_message: 'the mock row is marked unavailable',
         }
       }
+      // The after-sync row update, mock twin of the backend's
+      // post-sync pass (D-137/D-144): a written file matches its
+      // build again, so the §5.7 markings clear with `dirty` — the
+      // real `state://file-changed` diff would carry the clearing.
       row.dirty = false
+      row.externalChanged = false
+      row.fileDeleted = false
       row.lastSyncedAt = now
       journal('sync.project_result', { projectId: row.id })
       return {

@@ -62,6 +62,8 @@ describe('projectsList', () => {
       'available',
       'color',
       'dirty',
+      'external_changed',
+      'file_deleted',
       'id',
       'label',
       'last_synced_at',
@@ -69,6 +71,54 @@ describe('projectsList', () => {
       'state',
       'unavailable_reason',
     ])
+  })
+
+  it('serves the §5.7 watch flags from the rows, never both at once', async () => {
+    // T-257's carrier, mock side: the flags are row state mapped onto
+    // the wire (a UI test edits the row, exactly like the write-access
+    // warning arms). The pinned PROFILE world also pins the
+    // generator's deterministic picks (seed 21): index 0 — the first
+    // synced active row — is the target-deleted case, index 1 the
+    // externally-modified one.
+    const rows = mockState().projects
+    const clean = rows[0]!
+    clean.externalChanged = false
+    clean.fileDeleted = false
+    const modified = rows[1]!
+    modified.externalChanged = true
+    modified.fileDeleted = false
+    const deleted = rows[2]!
+    deleted.externalChanged = false
+    deleted.fileDeleted = true
+
+    const served = await commands.projectsList(null)
+    const byId = new Map(served.map((p) => [p.id, p]))
+    expect(byId.get(clean.id)?.external_changed).toBe(false)
+    expect(byId.get(clean.id)?.file_deleted).toBe(false)
+    expect(byId.get(modified.id)?.external_changed).toBe(true)
+    expect(byId.get(modified.id)?.file_deleted).toBe(false)
+    expect(byId.get(deleted.id)?.file_deleted).toBe(true)
+    expect(byId.get(deleted.id)?.external_changed).toBe(false)
+
+    // The generator invariants over the fresh pinned world (reset:
+    // the edits above must not leak into them). The deterministic
+    // picks over seed 21's synced pattern: index 0 (the first synced
+    // active row) is the deleted case, index 1 the modified one.
+    resetMockState(PROFILE)
+    const generated = await commands.projectsList(null)
+    expect(
+      generated.every((p) => !(p.external_changed && p.file_deleted)),
+      'SYS-008/009 verdicts are mutually exclusive',
+    ).toBe(true)
+    expect(generated.filter((p) => p.external_changed)).toHaveLength(1)
+    expect(generated.filter((p) => p.file_deleted)).toHaveLength(1)
+    expect(
+      generated.every((p) => !p.file_deleted || p.last_synced_at !== null),
+      'SYS-009: deleted only after a recorded sync',
+    ).toBe(true)
+    const archived = (await commands.projectsList(true)).find((p) => p.state === 'archived')
+    expect(archived?.external_changed).toBe(false)
+    expect(archived?.file_deleted).toBe(false)
   })
 })
 
@@ -651,5 +701,48 @@ describe('markdownPreview', () => {
     expect(preview.warnings).toEqual([{ kind: 'unclosed_code_fence', line: 3 }])
     // Everything after the opening fence renders as code.
     expect(preview.html).toContain('const x = 1')
+  })
+})
+
+describe('syncRun (the mock stand-in, T-118/D-144)', () => {
+  it("clears a written row's §5.7 markings and dirty flag with the sync", async () => {
+    // Round-1 P2-3's fix, made falsifiable (round-2's P2-1): the
+    // mock's post-sync row update models the backend's after-sync
+    // pass — a written file matches its build again, so the markings
+    // clear with `dirty` (D-137/D-144). A SKIPPED row is not written:
+    // its row state stays untouched (the stand-in's documented shape
+    // — the real backend never flags an unavailable project at all).
+    const rows = mockState().projects
+    const actives = rows.filter((row) => row.state === 'active')
+    expect(actives.length).toBeGreaterThanOrEqual(3)
+    const modified = actives[0]!
+    modified.externalChanged = true
+    modified.fileDeleted = false
+    const deleted = actives[1]!
+    deleted.externalChanged = false
+    deleted.fileDeleted = true
+    const skipped = actives[2]!
+    skipped.available = false
+    skipped.unavailableReason = 'missing'
+    skipped.externalChanged = true
+
+    const outcome = await commands.syncRun(null)
+    expect(outcome.outcome).toBe('completed')
+
+    const served = await commands.projectsList(true)
+    const byId = new Map(served.map((entry) => [entry.id, entry]))
+    // Written rows: both §5.7 markings and the dirty flag clear, the
+    // sync stamps its time.
+    for (const row of [modified, deleted]) {
+      expect(byId.get(row.id)?.external_changed, `${row.name} was written`).toBe(false)
+      expect(byId.get(row.id)?.file_deleted, `${row.name} was written`).toBe(false)
+      expect(byId.get(row.id)?.dirty, `${row.name} was written`).toBe(false)
+      expect(byId.get(row.id)?.last_synced_at, `${row.name} was written`).not.toBeNull()
+    }
+    // The skipped row: not written, not stamped — and the mock leaves
+    // its row state alone (the documented approximation).
+    expect(byId.get(skipped.id)?.last_synced_at).toBeNull()
+    expect(byId.get(skipped.id)?.external_changed).toBe(true)
+    expect(byId.get(skipped.id)?.file_deleted).toBe(false)
   })
 })

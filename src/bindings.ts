@@ -271,6 +271,22 @@ export const commands = {
 	 *     the transaction — a dead drive must not hold the one database
 	 *     lock, the D-096 probe-order rule). The verdict travels as the
 	 *     response's `write_access_warning`; the project stays added.
+	 *  6. **The watch refresh** (§5.7 SYS-007, T-257/D-137's follow-up
+	 *     2): the committed row joins the watched set, so the answer
+	 *     waits for one FULL pass through
+	 *     [`file_watch::refresh_after_sync`] — the SAME seam the sync
+	 *     pipeline runs after its writes (never a second refresh path),
+	 *     on the service task, its blocking half on the pool. The
+	 *     refresh is never-fatal aftermath (D-138's watch posture): the
+	 *     project IS added whatever the pass answers — a refusal
+	 *     degrades silently, and the next anchor (an availability
+	 *     change, a debounced file event, the next sync or mutation)
+	 *     re-converges the set, because every full pass re-derives it
+	 *     from the project table. The other SYS-005-gated mutations
+	 *     change no watched file (`projects_reorder` moves sort_order,
+	 *     `exclusion_remove` touches no project row) and run no
+	 *     refresh; the spec's scheme/name/archive/restore/relink
+	 *     commands call the same seam as they land.
 	 * 
 	 *  Failures reach the log with their §10 code
 	 *  ([`logging::project_add_failed`]); the three typed non-add
@@ -320,6 +336,19 @@ export const commands = {
 	 *  (the T-105 gate covers project-*changing* commands; a read
 	 *  during a sync is safe and answers the verdicts the running pass
 	 *  will refresh).
+	 * 
+	 *  `external_changed`/`file_deleted` are the SAME shape of read for
+	 *  §5.7's watch verdicts (SYS-008/SYS-009, MAIN-028's "externally
+	 *  modified"/"target deleted" markings, D-137's round-1 P1-1):
+	 *  one [`file_watch::FileWatchState::snapshot`] of the managed
+	 *  [`file_watch::FileWatchState`] cache — the state the
+	 *  `state://file-changed` diff is taken against — taken after the
+	 *  probes for the same staleness rule, served per row through
+	 *  [`watch_verdict`]. The startup verdicts therefore reach ANY
+	 *  caller of this command, not only a webview that was already
+	 *  listening when the event fired (Tauri does not replay events);
+	 *  the cold-start carrier is exactly what the follow-up existed
+	 *  for.
 	 * 
 	 *  Failures reach the log with their §10 code
 	 *  ([`logging::projects_list_failed`], the D-096 follow-up this edge
@@ -1649,6 +1678,20 @@ export type ProjectColumnEntry_Deserialize = {
 	 */
 	dirty: boolean,
 	/**
+	 *  SYS-008's external-change flag at this read (MAIN-028's
+	 *  "externally modified" marking): the watch service's last known
+	 *  verdict, served under the same cache-backed boundary as
+	 *  [`ProjectColumnEntry::dirty`] — see [`watch_verdict`] (D-137's
+	 *  round-1 P1-1, landed by T-257).
+	 */
+	external_changed: boolean,
+	/**
+	 *  SYS-009's target-deleted hint at this read (MAIN-028's "target
+	 *  deleted" marking), from the same [`watch_verdict`] read; the
+	 *  two flags are mutually exclusive in the service's verdict.
+	 */
+	file_deleted: boolean,
+	/**
 	 *  The last successful sync's time (LOG-007/OUT-020), DB-002 UTC
 	 *  shape; `None` until the first sync writes it.
 	 */
@@ -1705,6 +1748,20 @@ export type ProjectColumnEntry_Serialize = {
 	 *  this command serves it under (D-121, closed by T-254).
 	 */
 	dirty: boolean,
+	/**
+	 *  SYS-008's external-change flag at this read (MAIN-028's
+	 *  "externally modified" marking): the watch service's last known
+	 *  verdict, served under the same cache-backed boundary as
+	 *  [`ProjectColumnEntry::dirty`] — see [`watch_verdict`] (D-137's
+	 *  round-1 P1-1, landed by T-257).
+	 */
+	external_changed: boolean,
+	/**
+	 *  SYS-009's target-deleted hint at this read (MAIN-028's "target
+	 *  deleted" marking), from the same [`watch_verdict`] read; the
+	 *  two flags are mutually exclusive in the service's verdict.
+	 */
+	file_deleted: boolean,
 	/**
 	 *  The last successful sync's time (LOG-007/OUT-020), DB-002 UTC
 	 *  shape; `None` until the first sync writes it.
