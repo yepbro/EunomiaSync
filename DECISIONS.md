@@ -9850,7 +9850,7 @@ no-op, the archived refusal, empty/duplicate refusals). Bindings
 regenerated: `projectsReorder`.
 
 Scope note: the regenerated `src/bindings.ts` forced two frontend
-mock-layer edits — `src/ipc/mock/commands.ts` (the D-141 loud-drift
+mock-layer edits — `src/ipc/mock/commands.ts` (the D-154 loud-drift
 rule: every bindings command needs a mock or `pnpm run typecheck`
 fails) and `src/ipc/mode.spec.ts` (the explicit shipped-set pin). The
 mock mirrors the command's semantics honestly (validation, splice,
@@ -13352,7 +13352,7 @@ bundled for one call site), `stop_run`, `pipeline_refusal`,
   and the backup-name validation folds into phase 2's
   `NameFailed`→`E_BACKUP_FAILED` envelope (D-132's table, pinned by
   its suite); recorded here as the checklist's "by name" audit.
-- _The mock-layer deviation (rule 10)._ D-141's loud-drift layer
+- _The mock-layer deviation (rule 10)._ D-154's loud-drift layer
   (`src/ipc/mock/commands.ts`, typed by the generated `IpcCommands`)
   fails `pnpm typecheck` until every new command has a mock — the
   card froze `src/**`, but a red typecheck is not a shippable
@@ -15786,3 +15786,105 @@ mapping (`build_snapshot.rs:238-239`), re-argued byte-identity from
 `body.rs`'s actual reads, confirmed grep-clean and the frozen zones
 (`git diff --check` exit 0), and audited the tests clean. The review
 phase is complete after this round (no third round).
+
+### D-154 — T-270: the mock layer's loud-drift rule written as the entry the dangling "D-141" citations promised, the three citations re-pointed — 2026-11-22
+
+Problem: three live citations pointed at "D-141" — a number the
+counter never issued and no entry ever carried (D-142's round-1 P2-1,
+carded as the T-256 follow-up): D-115's scope note ("the D-141
+loud-drift rule"), D-138's mock-layer-deviation bullet ("D-141's
+loud-drift layer"), and the mock module header (`src/ipc/mock/
+commands.ts` 6, "see DECISIONS.md D-141"). A reader following any of
+the three landed on nothing: the design the citations promised
+existed only as prose inside D-108 and the code comments. The same
+gap class T-287 closed by restoring D-071/D-072; closed here by
+writing the missing record under a fresh number.
+
+Solution (T-270): the loud-drift rule, recorded as its citation sites
+use it — the Rust command surface and the frontend mock layer cannot
+drift apart silently, by composed pins on both sides:
+
+- _The Rust half._ `export_bindings_are_up_to_date`
+  (src-tauri/src/lib.rs 705–724, D-034) re-exports the specta
+  bindings inside `cargo test` and compares the fresh output
+  (EOL-normalized) with the committed `src/bindings.ts` embedded at
+  compile time: a changed contract without regeneration is red on the
+  developer's first run (the same run regenerates the file), and CI —
+  which compiles the committed file before any export — stays red
+  until the regenerated bindings are committed. The per-command
+  registration pins in `ipc_tests.rs` (each asserts its own
+  `commands::*` line present exactly once, the D-034 wiring-pin
+  rationale) guard the registry itself: a registration dropped and
+  the regeneration committed would leave the export check green
+  while the command quietly vanished from the wire.
+- _The frontend half._ `src/ipc/mock/commands.ts` implements every
+  generated command as one object annotated with the derived
+  `IpcCommands` type (`typeof commands`, src/ipc/contract.ts 14): a
+  regenerated `bindings.ts` carrying a new command fails
+  `pnpm run typecheck` until a mock member with the exact signature
+  exists — the citation sites' own wording ("every bindings command
+  needs a mock or `pnpm run typecheck` fails", D-115's scope note).
+  A REMOVED command fires the same boundary from the other side (the
+  annotation flags the now-extra member), so the mock can neither lag
+  nor outrun the real surface.
+- _Why "loud"._ The pins compose into one chain: a contract change →
+  the Rust pin red until regeneration → the regenerated `bindings.ts`
+  → the frontend typecheck red until the mock member lands (the
+  first exercise: T-078's exclusions commands demanded their mocks at
+  the T-141 rebase, D-108). Skipping a step anywhere turns a test
+  red — drift is announced, never absorbed. This is the rule the
+  mock header alludes to as "the same loud-drift rule the bindings
+  tests pin on the Rust side" — plural, because the export check and
+  the registration pins together own the Rust half.
+- _The reader-facing complements._ `src/ipc/mode.spec.ts`'s
+  shipped-set test lists every mock member by name: a command the
+  type annotation forced into the mock also fails this explicit list
+  until it is pinned there (the one-line list extension D-138's
+  bullet records). D-108 carries the prose version of the rule; this
+  entry is the citable home both kinds of citation can point at.
+
+Numbering note: the three citations predate this entry and were
+hand-made — git attributes the commands.ts one to the mock layer's
+own creation commit (`87ed97b`, T-141) and the DECISIONS.md ones to
+T-080 (`2032910`, D-115's scope note) and T-118 (`74cf781`, D-138's
+bullet); no counter issuance ever stood behind the number. The
+collision surfaced when task-id-mcp issued 141 for D-142 (T-256):
+that entry took the next issued number per the counter policy, 141
+stayed burned, and the follow-up card asked for this entry under a
+fresh number. task-id-mcp issued 154 at the moment of writing; the
+three citations are re-pointed to this entry, nothing was renumbered,
+and D-142's numbering note keeps quoting the old number as history.
+
+Honest boundaries: this entry records the rule and its pins, it pins
+nothing new in code; the mock's behavioral LIMITS (D-108's deliberate
+approximations, the module header's list) are a different subject —
+the loud-drift rule is about the command SURFACE (every command
+mocked, exact signature), not about each mock's fidelity, and the
+citation contexts (the D-115 scope note, the D-138 freeze deviation)
+were exactly that surface.
+
+Checks (docs pass; the only non-md change is one comment line in
+`src/ipc/mock/commands.ts`): tests waived under the md-only ruling
+as the card extends it to the one comment line; `pnpm lint`,
+`pnpm run typecheck` and `pnpm run format:check` green by exit code;
+the acceptance grep over tracked content (`git grep -n "D-141" --
+'*.md' '*.ts'`) returns only historical quotations — D-142's
+follow-ups paragraph, its numbering note, its orchestrator addendum,
+and this note's own history.
+
+Round-1 review addendum (D-154, same task; report
+`.opencode/reviews/t270-round1.md`, deepseek-v4.1-flash — verdict
+approve after fixes, no P0/P1): P2 (taken) — the first citation had
+been attributed here to D-116's scope note, but the scope note lives
+in D-115's entry (the T-080 `projects_reorder` block, 9741–9861;
+D-116's own entry carries no D-141 mention): a dangling-citation task
+must not introduce a mis-aiming citation of its own — all four labels
+corrected to D-115, the commit and line attributions unchanged (git
+blame confirmed 2032910 wrote the 9853 line). P3 (taken): the Checks
+line's grep spelling was split mid-flag and matched gitignored review
+artifacts; it now names the tracked-content form and all three D-142
+historical sites. P3 (declined, recorded): D-142's follow-ups
+paragraph quotes the then-current line numbers (9649/13120), stale
+since T-287's insertion shifted the file — a historical record stays
+as written, and this entry's Problem paragraph carries the current
+locations.

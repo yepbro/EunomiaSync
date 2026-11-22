@@ -3,7 +3,7 @@
 // in `src/bindings.ts` has a mock with the exact signature — a regenerated
 // bindings file with a new command fails `pnpm run typecheck` here until a
 // mock is written (the same loud-drift rule the bindings tests pin on the
-// Rust side; see DECISIONS.md D-141).
+// Rust side; see DECISIONS.md D-154).
 //
 // Fidelity rules:
 // - Read commands serve generator fixtures through the real wire DTOs.
