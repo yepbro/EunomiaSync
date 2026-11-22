@@ -40,6 +40,10 @@ crates/
     src/storage.rs         #   SQLite storage + migrations   (working)
     src/values.rs          #   UUIDv7 ids, ISO-8601 UTC times (working)
     migrations/            #   Embedded SQL migration files
+benches/
+  eunomia-load/           # §12.2 load benchmarks (criterion; local tool — CI runs its tests, never the benches)
+    src/lib.rs            #   Fixtures (TempRepos + data_sets) + the mirrored T-101/T-112 pass mechanics
+    benches/              #   project_build, dirty_recalc (the two §12.2 budget rows)
 src-tauri/
   src/db.rs                # DB state + one-transaction executor   (working)
   src/recovery.rs          # Recovery-screen file mechanics       (working)
@@ -701,14 +705,15 @@ updater is part of the MVP scope (spec 7.9).
 
 ## Testing strategy
 
-| Level       | Scope                                         | Tooling / command                                    |
-| ----------- | --------------------------------------------- | ---------------------------------------------------- |
-| Unit        | Rust crates and Vue components                | `cargo test --workspace` / `pnpm run test` (Vitest)  |
-| Integration | `eunomia-store` storage & migrations          | `cargo test -p eunomia-store` (in-memory + file DB)  |
-| API         | Tauri runtime behavior (updater init, wiring) | `cargo test -p eunomia-sync` (`tauri::test` mocks)   |
-| Executor    | DB transaction/rollback/runtime paths         | `cargo test -p eunomia-sync` (`db_tests.rs`)         |
-| E2E         | Browser scenarios against Vite server         | `pnpm run e2e` (Playwright, DECISIONS.md D-007)      |
-| Smoke       | App builds on all three platforms             | CI `build` matrix: `tauri build --debug --no-bundle` |
+| Level       | Scope                                                      | Tooling / command                                                    |
+| ----------- | ---------------------------------------------------------- | -------------------------------------------------------------------- |
+| Unit        | Rust crates and Vue components                             | `cargo test --workspace` / `pnpm run test` (Vitest)                  |
+| Integration | `eunomia-store` storage & migrations                       | `cargo test -p eunomia-store` (in-memory + file DB)                  |
+| API         | Tauri runtime behavior (updater init, wiring)              | `cargo test -p eunomia-sync` (`tauri::test` mocks)                   |
+| Executor    | DB transaction/rollback/runtime paths                      | `cargo test -p eunomia-sync` (`db_tests.rs`)                         |
+| Load        | Spec §12.2 budgets on generated data (set L today; M open) | `cargo bench -p eunomia-load` (criterion; local, DECISIONS.md D-135) |
+| E2E         | Browser scenarios against Vite server                      | `pnpm run e2e` (Playwright, DECISIONS.md D-007)                      |
+| Smoke       | App builds on all three platforms                          | CI `build` matrix: `tauri build --debug --no-bundle`                 |
 
 ## CI
 

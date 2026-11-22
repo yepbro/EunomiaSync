@@ -1,0 +1,52 @@
+[package]
+name = "eunomia-load"
+version.workspace = true
+edition.workspace = true
+description = "Load benchmarks for EunomiaSync (spec 12.2, criterion): building one project up to 1000 items and recalculating dirty over data set L, on the generated data sets of D-109. A local tool: CI runs the crate's tests but never the benchmarks."
+license.workspace = true
+publish = false
+
+[dependencies]
+# The build mechanics under measurement (spec 9.2 body, ALG-030 managed
+# text, DB-020 hash, DB-021 predicate, ALG-001 snapshot types) — the same
+# public core seams the production passes in src-tauri compose.
+eunomia-core = { path = "../../crates/eunomia-core" }
+# TempRepos, the T-136 fixture roots (D-109): the temporary Git folders
+# the generator's ProjectRoot inputs come from. The two library crates
+# share no dependency edge by design, so the composition lives here, in
+# the benchmark crate D-109 named.
+eunomia-fs = { path = "../../crates/eunomia-fs" }
+# The data set generator (data_sets), the build snapshot read
+# (build_snapshot), the projects read behind the stored hashes, and the
+# open_db/run_migrations production configuration of the fixture
+# database (DB-001 pragmas included).
+eunomia-store = { path = "../../crates/eunomia-store" }
+# The fixture's own Connection: open_db returns it and the harness joins
+# read transactions on it (the standalone-connection seam D-109 built
+# for exactly this caller). No features restated — the store stays the
+# single declaration point for the build shape (the src-tauri
+# precedent); rusqlite 0.41 is already resolved workspace-wide.
+rusqlite = "0.41"
+# The fixture database's self-cleaning home directory (the TempRepos
+# pattern). Already resolved workspace-wide via eunomia-fs.
+tempfile = "3"
+
+[dev-dependencies]
+# Spec 15.1's Load row names criterion; task T-137's card sanctions the
+# crate (DECISIONS.md D-entry of this task records the version pin and
+# the feature cut). "=0.8.2": pinned exactly, the tauri-specta precedent
+# for tooling the whole team runs. default-features = false drops
+# plotters (no plot generation — the console report and
+# target/criterion data are the deliverable) and rayon; cargo_bench_support
+# stays so `cargo bench` drives the harness. License Apache-2.0 OR MIT,
+# inside deny.toml's allow list; cargo-deny verified with the crate in
+# the graph.
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "project_build"
+harness = false
+
+[[bench]]
+name = "dirty_recalc"
+harness = false

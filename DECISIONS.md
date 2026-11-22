@@ -12359,3 +12359,201 @@ Round-2 review addendum (D-134, same task; report
   replays the whole closure, D-122's convergence re-marks the
   already-removed files); step A adds no TOCTOU (`finish_run`'s
   UPDATE re-checks `status='running'`).
+
+### D-135 — The §12.2 load benchmarks: the eunomia-load workspace member, criterion 0.8.2 pinned minimal, the T-101/T-112 passes mirrored behind pin tests, and both budget rows measured inside their budgets — 2026-11-21
+
+Problem: T-137 turns §15.1's Load row ("Section 12.2 metrics on sets
+M and L — criterion benchmarks and e2e scripts") into the criterion
+half: benchmarks for the two §12.2 budget rows — building one project
+with up to 1000 items (≤ 20 ms) and the dirty recalculation over all
+of set L (≤ 500 ms) — on the D-109 generator's data. Six points were
+open: where such benchmarks can even live (the generator's halves
+refuse an edge: the store stays file-system-free, the fs layer stays
+database-free, so neither crate can host the composition D-109 named
+"the benchmark crate"); which criterion version and features enter
+the graph (a new dependency — D-035's discipline, the card's sanction
+to record it); what exactly one measured iteration is for each row
+(the card cuts the emit seam but leaves the shape to the task);
+whether the src-tauri Cargo.toml needs touching; what "the reference
+machine" means when CI runs no benchmarks; and how a third spelling
+of the D-064/D-121 mirrors (after `dirty_recalc.rs` and
+`sync_phase0.rs`) can be kept from drifting.
+
+Solution: `benches/eunomia-load`, a new workspace member (the
+"benchmark crate" D-109 predicted; `src-tauri` untouched, and no
+library crate gains an edge) — a harness lib plus two bench targets.
+
+- _Where it lives, and why a member._ The harness needs
+  `eunomia_fs::temp_repos` (roots) feeding
+  `eunomia_store::data_sets::generate` (rows) into an
+  `open_db`/`run_migrations` database, plus `eunomia-core`'s build
+  seams — a composition no existing crate can host without breaking
+  D-109's no-edge rule (a store dev-dependency on fs would create
+  exactly the edge that entry's design refuses, dev-only or not). A
+  bench-only member keeps every production build graph clean while
+  `cargo clippy --workspace --all-targets` still lints the harness.
+  Root `Cargo.toml` gained the members entry only.
+- _criterion pinned `=0.8.2`, minimal features._ The card and §15.1
+  name criterion; 0.8.2 (2026-02-04) is the current line of the
+  demonstrably maintained series (the D-035 precedent for choosing by
+  maintenance), MSRV 1.86 against the workspace's 1.99 toolchain.
+  `default-features = false` with `cargo_bench_support` only: no
+  plotters (no plot generation — the console report and
+  `target/criterion` data are the deliverable, the card's "disable
+  plot generation"), no rayon, no async/csv/html extras. The exact
+  pin follows the tauri-specta precedent for tooling every task
+  runs. New to the lockfile: 21 external crates — criterion itself
+  plus 20 transitive (alloca, anes, anstyle, cast, ciborium + -io/-ll,
+  clap + builder/lex, criterion-plot, crunchy, either, half,
+  itertools, oorandom, page_size, tinytemplate, zerocopy + -derive) —
+  `cargo deny check`
+  green in all four categories (licenses: Apache-2.0 OR MIT at the
+  root; advisories/bans/sources unchanged posture). The bench profile
+  is the workspace's release-inherited one (opt-level 3, LTO,
+  codegen-units 1, `panic = "abort"`); no profile overrides were
+  added and `cargo bench` builds and runs under it as-is.
+- _What one iteration measures._ The build row
+  (`project_build/one_project_1000_items`): one read transaction for
+  the ALG-001 snapshot (SYS-005's shape) plus the whole T-112 build
+  slice of the one project — §9.2 body over the scoped chunk, ALG-030
+  managed text, §9.4 target path, DB-020 hash. The dirty row
+  (`dirty_recalc/full_pass_set_L`): the full T-101 pass minus its UI
+  plumbing (the card's seam) — one read transaction carrying the
+  snapshot **and** the stored hashes together (D-105), then the
+  chunked verdicts: per chunk of 25 (D-121's constant, mirrored) a
+  fresh scoped mini-snapshot, per project the build slice plus
+  DB-021's `is_dirty`; the chunks spread over parallel threads
+  (production: `spawn_blocking`; the bench: `std::thread::scope`, the
+  same one-task-per-chunk, collected-in-chunk-order shape without an
+  app handle) and collected in `sort_order`. The diagnostic
+  `dirty_recalc/snapshot_read_set_L` isolates the read transaction
+  half. Fixtures are generated in setup only — `TempRepos::create` +
+  `generate` + a migrated `open_db` database under a self-cleaning
+  `TempDir`; stored hashes stay `NULL` (the honest startup pass every
+  dirty verdict of which reads true — D-121's probe measured the same
+  state).
+- _The single-project profile._ `ONE_PROJECT_1000_ITEMS`: data set
+  L's library (1000 instructions, 100 headings, 3 variants per
+  instruction) with one project carrying **all** 1000 assignments —
+  the §12.2 row's premise read as its upper limit ("up to 1000
+  items" is reachable only by assigning the whole library; the named
+  sets' per-project densities are M's 40 and L's 200). Parameterized
+  through `DataSetSpec`, so the profile is a documented constant, not
+  a generator change.
+- _The third mirror cannot drift silently._ The mirrors
+  (`managed_text`, the 25-chunk scoping, the pass compositions) are
+  the harness lib's public API and are pinned by six tests: the
+  managed text against `build_content`'s real output (A and C, the
+  file minus its marker tail; B against the body — `build_content`
+  refuses B by design), the chunk scoping against an independent
+  full-snapshot `build_body` spelling on a boundary-crossing fixture
+  (57 projects → 25+25+7), and the parallel pass against the
+  sequential one id-for-id with DB-021 verified in both directions
+  (never-synced dirty, stored-matching-hash clean). Both oracle
+  chains were mutation-verified red: joining the managed parts with
+  a single break fails the `build_content` pin; unscoping a chunk's
+  assignments fails the equivalence and verdict tests (the
+  mini-snapshot's own validation refuses the foreign project's row).
+- _The reference machine, honestly._ §12.2's budgets are checked "on
+  a reference machine (4 cores, 16 GB RAM, SSD)" and CI runs no
+  `cargo bench` (verified against `.github/workflows/ci.yml` — the
+  crate is linted and compiled there, never run). The ruling: the
+  benchmark report is produced by whatever machine runs
+  `cargo bench -p eunomia-load`; the numbers below are that report
+  on this 8-core box (the same class D-121 measured on), and the
+  §15.5 release gate remains a rerun on the actual 4-core reference
+  machine — recorded as open, not silently assumed equal.
+- _Measurements (bench profile, this 8-core box, under unrelated
+  load)._ `project_build/one_project_1000_items`: **12.19 ms**
+  [12.06, 12.35], 50 samples — inside the ≤ 20 ms budget.
+  `dirty_recalc/full_pass_set_L`: **383.4 ms** [380.7, 385.7], 10
+  samples — inside the ≤ 500 ms budget (T-101's precedent measured
+  480 ms; D-121's whole-pass range 430–545 ms).
+  `dirty_recalc/snapshot_read_set_L`: 297.0 ms [295.2, 300.9] — the
+  read transaction is ~77 % of the pass, so the parallel compute
+  half is ~86 ms (D-121's sequential ~210 ms over the same 20
+  chunks); the store's snapshot read, not the build, owns the dirty
+  row's cost — the same attribution D-121's read-split probe made.
+  No optimization was needed or performed; both rows landed inside
+  their budgets on the first honest composition. One measurement
+  condition the numbers carry: the fixture database lives under the
+  system temp directory (the `TempDir` house pattern), which on this
+  machine is `tmpfs`, and criterion's steady-state iterations read it
+  fully page-cache warm — §12.2's premise is an SSD-backed data
+  directory and a startup pass, so the release rerun on the actual
+  4-core reference machine must include a cold-cache startup pass
+  before the row is called confirmed (round-1 review's P3-1; the
+  rerun was already recorded open).
+
+Testing: the pin/composition suite — 8 in `tests/mirror_pins.rs`
+(the `build_content` pins, the chunk-scoping equivalence, the
+parallel-vs-sequential and DB-021 direction pins, and the three the
+round-1 review added: the read-half pin, the no-assignments
+exception, the chunk-size tripwire) plus the profile-composition
+unit test — run by `cargo test --workspace` like every crate; the
+benchmarks themselves are the load-level deliverable
+(`cargo bench -p eunomia-load` green locally, report as above).
+ARCHITECTURE.md gained the crate in the workspace tree and the
+testing-strategy Load row (rule 11).
+
+Follow-ups: D-130's consolidation card (one shared builder for the
+managed-text/chunking spellings) now covers three copies — this
+entry's mirror joins it; §15.1's "e2e scripts" half of the Load row
+(startup-to-window, matrix scrolling, RSS) is untouched and stays
+with the UI-load tasks; the release-checklist rerun on the actual
+4-core reference machine is the §15.5 gate, open.
+
+Round-1 review addendum (D-135, same task; report
+`.opencode/reviews/t137-round1.md`, deepseek-v4.1-flash — no
+P0/P1/P2; 7×P3, all processed here; the reviewer independently
+re-ran the suite, deny, prettier and both benches, corroborating the
+numbers within run-to-run noise):
+
+- P3-1 (taken): the measurement bullet now states the tmpfs/warm-page-
+  cache condition of the fixture database and names the cold-cache
+  startup pass as part of the open reference-machine rerun.
+- P3-2 (taken): `read_snapshot_and_hashes` — the dirty mirror's read
+  half, previously exercised only for crash-freedom — gained its pin:
+  the stored-hash map's keys are exactly the snapshot's active
+  project ids, every generated value is `None`, and archiving one
+  project through the repository drops it from both halves (the
+  `ListScope::Active` scope was previously unpinned; mutation-
+  verified red by widening the scope to `All`).
+- P3-3 (taken): DB-021's no-assignments exception gained its pin — a
+  zero-assignment fixture reads clean despite non-empty managed text
+  (mutation-verified red by passing `has_assignments = true`
+  unconditionally).
+- P3-4 (taken): `LoadFixture`'s fields reordered so the connection
+  closes before the database home drops — on Windows the previous
+  order left the fixture behind in `%TEMP%` silently (Unix
+  unlink-while-open had hidden it); the drop-order rule is now a
+  field comment.
+- P3-5 (taken): both bench files' criterion comments corrected — the
+  measurement time is per benchmark (20 s / 35 s respectively, ~30 s
+  and ~1.5 min of wall clock), not shared.
+- P3-6 (taken): "CI never runs it" sharpened to the true claim (CI
+  runs the crate's pin tests like any member's, but no `cargo bench`
+  step exists) in the lib docs, the manifest description and the
+  ARCHITECTURE tree; the lockfile delta corrected to 21 external
+  crates (criterion itself had been omitted from the count); the
+  ARCHITECTURE Load row now says set L today with M open.
+- P3-7 (taken): a source-scan tripwire (the `dirty_recalc_tests.rs`
+  `include_str!` precedent) pins both production spellings'
+  `MINI_SNAPSHOT_PROJECTS = 25` — a production chunking change turns
+  this harness's suite red until it is re-mirrored; the structural
+  fix remains D-130's consolidation card, which this third copy
+  joins.
+
+Round-2 review addendum (D-135, same task; report
+`.opencode/reviews/t137-round2.md`, hy4-flash-free — no P0/P1/P2;
+1×P3): the round re-verified with fresh eyes the post-round-1 state —
+the three new pins' oracles are independent and live (the archive
+pin against the real `projects::archive`, the zero-assignment spec
+against the generator's own acceptance bounds, the tripwire against
+both production spellings), `compute_verdicts_parallel`'s scoped
+threads capture only shared references, and the frozen zones are
+untouched — and found one docs nit, taken here: the Testing
+paragraph's test count still read "six (5 + 1)" from before the
+round-1 additions; it now states the actual suite (8 mirror pins +
+the profile unit test). The review phase is complete after this
+round (no third round).
