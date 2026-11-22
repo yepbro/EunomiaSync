@@ -2,9 +2,7 @@
 
 EunomiaSync keeps `AGENTS.md` files consistent across many projects. This
 document describes how the codebase is laid out and how the pieces talk to
-each other. Everything marked **planned** is not implemented yet; everything
-marked **skeleton** is a declared-but-empty crate or module stub (docs and
-planned responsibilities only, see DECISIONS.md D-019).
+each other. Everything marked **planned** is not implemented yet.
 
 ## Overview
 
@@ -20,41 +18,95 @@ planned responsibilities only, see DECISIONS.md D-019).
 
 ```text
 crates/
-  eunomia-core/            # Core library, no Tauri dependency, no I/O
-    src/project.rs         #   Project write vocabulary: scheme, base name, extra files (working)
-    src/library.rs         #   Library items: instructions, headings, variants (working)
-    src/assignment.rs      #   The project ↔ instruction ↔ variant link (working)
-    src/snapshot.rs        #   Immutable build snapshot, ALG-001 (working)
-    src/normalize.rs       #   ALG-002 variant text normalization (working)
-    src/body.rs            #   ALG-020…022 project body assembly (working)
-    src/content_build.rs   #   Chunked multi-project content pass over one snapshot (working)
-    markdown               #   Markdown processing           (planned)
-    diff                   #   Text diffing                  (planned)
-    sync                   #   AGENTS.md sync engine         (planned)
-  eunomia-fs/              # File-system layer (scan/paths/backup/atomic), no Tauri dependency
-    src/scan.rs            #   Repository tree scanning           (skeleton)
-    src/paths.rs           #   Path normalization and validation  (skeleton)
-    src/backup.rs          #   Backup copies before writes        (skeleton)
-    src/atomic.rs          #   Atomic writes with retries         (skeleton)
-    src/watcher.rs         #   Target-file watching (spec 5.7)    (working)
-  eunomia-store/           # Database layer (SQLite), no Tauri dependency
-    src/storage.rs         #   SQLite storage + migrations   (working)
-    src/values.rs          #   UUIDv7 ids, ISO-8601 UTC times (working)
-    migrations/            #   Embedded SQL migration files
+  eunomia-core/                # Core library, no Tauri/SQLite/fs dependency
+    src/assembly_b.rs          #   Scheme-B assembly: block spliced into the user's markers (ALG-031) (working)
+    src/assignment.rs          #   The project ↔ instruction ↔ variant link (working)
+    src/backup_name.rs         #   Backup path grammar: pure string half of §7.6/§5.5 (working)
+    src/body.rs                #   ALG-020…022 project body assembly (working)
+    src/color_pick.rs          #   New-project palette color: least-used, hash tie-break (D-29) (working)
+    src/compare.rs             #   ALG-033 compare: file vs build, the unchanged verdict (working)
+    src/content_build.rs       #   Chunked multi-project content pass over one snapshot (working)
+    src/dirty.rs               #   DB-021 dirty predicate: build hash vs stored (working)
+    src/extra_files.rs         #   Scheme-A extra-file reading lines (D-01/D-21) (working)
+    src/gaps.rs                #   LIB-032 heading-level skips, facts for the UI warning (working)
+    src/hash.rs                #   DB-020 build hash (SHA-256, D-064) (working)
+    src/heading_range.rs       #   ALG-060 branch range of a heading, as index range (working)
+    src/levels.rs              #   ALG-062 level ops: point change, branch shift ±1 (working)
+    src/library.rs             #   Library items: instructions, headings, variants (working)
+    src/library_validators.rs  #   §6.9 library field validators: names, variant text (working)
+    src/marker.rs              #   Creation-marker line format (ALG-032, D-061) (working)
+    src/marker_clock.rs        #   Once-per-run marker clock: instant + zone capture (D-104) (working)
+    src/markers.rs             #   Scheme-B marker parser: exactly one D-19 pair (working)
+    src/normalize.rs           #   ALG-002 variant text normalization (working)
+    src/project.rs             #   Project write vocabulary: scheme, base name, extra files, palette color (working)
+    src/project_validators.rs  #   §6.9 project field validators + DB-042 default label (working)
+    src/reorder.rs             #   ALG-061 move: cut, insert, renumber positions from 1 (working)
+    src/snapshot.rs            #   Immutable build snapshot, ALG-001 (working)
+    src/target_file.rs         #   ALG-030 managed text seam + whole-file content for A/C (working)
+    src/version_snapshot.rs    #   ALG-070 version snapshots of instructions/variants + SHA-256 (working)
+    markdown                   #   Markdown processing (planned)
+    diff                       #   Text diffing (planned)
+    sync                       #   AGENTS.md sync engine (planned)
+  eunomia-fs/                  # File-system layer (scan/preflight/backup/atomic/watcher), no Tauri dependency
+    src/atomic.rs              #   Atomic writes with retries (working)
+    src/backup.rs              #   Backup copies before writes (working)
+    src/fault_injection.rs     #   Spec 15.1 failure points (test builds, fault-injection feature)
+    src/free_space.rs          #   §9.4 preflight: free space on the data volume (working)
+    src/paths.rs               #   Path normalization and validation (working)
+    src/scan.rs                #   Repository tree scanning (working)
+    src/scan_classify.rs       #   ALG-053 classification: path_key, New/Known/Archived/Excluded (working)
+    src/temp_files.rs          #   Staging temp-file names + stale-file sweep (working)
+    src/temp_repos.rs          #   Temp .git repo roots for benchmark fixtures (fixture tooling)
+    src/watcher.rs             #   Target-file watching (spec 5.7)    (working)
+    src/write_access.rs        #   §9.4 preflight: write-rights probe (tmp create, read-only) (working)
+  eunomia-store/               # Database layer (SQLite), no Tauri dependency
+    src/action_log.rs          #   Journal repository: LOG-001…005 + LOG-006 cleanup (working)
+    src/backup_records.rs      #   Per-run backup records + the BKP-010 dedup lookup (working)
+    src/backup_retention.rs    #   BKP-003 retention: newest N copies per pair (working)
+    src/build_snapshot.rs      #   ALG-001 snapshot read: one read transaction (SYS-005) (working)
+    src/data_sets.rs           #   Deterministic benchmark data sets M and L (working)
+    src/library.rs             #   Library repository: items, variants, assignments (working)
+    src/library_versions.rs    #   Revisions bookkeeping: ALG-070…072 + prune (working)
+    src/projects.rs            #   Projects + exclusions repository (working)
+    src/settings.rs            #   Typed settings repository, §6.5 keys (working)
+    src/storage.rs             #   SQLite storage + migrations   (working)
+    src/sync_runs.rs           #   sync_runs / sync_run_projects repositories (working)
+    src/values.rs              #   UUIDv7 ids, ISO-8601 UTC times (working)
+    migrations/                #   Embedded SQL migration files
 benches/
   eunomia-load/           # §12.2 load benchmarks (criterion; local tool — CI runs its tests, never the benches)
     src/lib.rs            #   Fixtures (TempRepos + data_sets) + the reads + the parallel bench substrate
     benches/              #   project_build, dirty_recalc (the two §12.2 budget rows)
 src-tauri/
+  src/availability.rs      # Availability service: re-probes + state://project-availability (working)
+  src/commands.rs          # IPC commands, the §7.10 registered set (working)
+  src/config.rs            # config.toml load-or-create; broken file falls back to defaults (working)
+  src/data_dirs.rs         # Data-directory layout + SEC-007 Unix modes (working)
   src/db.rs                # DB state + one-transaction executor   (working)
-  src/recovery.rs          # Recovery-screen file mechanics       (working)
-  src/commands.rs          # IPC commands (recovery group)        (working)
+  src/dirty_recalc.rs      # Background dirty recalc, state://dirty events (working)
   src/errors.rs            # AppError + MVP error-code registry  (working)
+  src/file_watch.rs        # Target-file watch service, state://file-changed (working)
+  src/logging.rs           # File log: daily + 10 MB rotation, 5-file cap (working)
+  src/markdown.rs          # Markdown preview renderer (pulldown-cmark; preview only) (working)
+  src/recovery.rs          # Recovery-screen file mechanics       (working)
+  src/retention.rs         # LOG-006 retention task: journal/runs prune daily (working)
+  src/session_paths.rs     # SEC-003 session allowlist + UI path check (working)
+  src/single_instance.rs   # Single-instance handoff: restore + focus (SYS-006) (working)
+  src/sync_phase0.rs       # Sync phase 0: flag, run record, built content (working)
+  src/sync_phase1.rs       # Sync phase 1 preflight: ready/unchanged/skipped (working)
+  src/sync_phase2.rs       # Sync phase 2: §7.6 backups + records (working)
+  src/sync_phase3.rs       # Sync phase 3: the §9.5 atomic writes (working)
+  src/sync_phase4.rs       # Sync phase 4 finish: stamps, retention, verdict, journal (working)
+  src/sync_running.rs      # The global sync_running flag (SYS-004) (working)
   src/lib.rs               # App builder, specta registration   (working)
 src/                      # Frontend
   bindings.ts              # GENERATED by tauri-specta, committed
+  ipc/                     # Typed IPC facade: only bindings importer, mock/real backend (D-003) (working)
+  main.ts                  # Frontend entry: createApp + Pinia + i18n (working)
   i18n/                    # vue-i18n setup + the no-raw-ui-text lint rule (working)
   locales/en.json          # Message catalog, nested feature namespaces (working)
+  date/                    # Date/time formatting helpers (UI-020) (working)
+  assets/                  # Tailwind theme tokens + global styles (working)
   components/              # Reusable UI components               (working)
     AppErrorAlert.vue      # UI-011 AppError alert, copyable details (working)
   App.vue                  # Root view                           (working)
@@ -62,7 +114,7 @@ src/                      # Frontend
 ```
 
 `eunomia-core` is deliberately independent of Tauri so that markdown,
-diff, sync, and watch logic can be tested without a UI layer (see
+diff, and sync logic can be tested without a UI layer (see
 DECISIONS.md D-006); it is also free of database dependencies, so the
 "core = pure logic, no I/O" rule holds at the dependency level. The
 domain vocabulary now lives here (T-033, DECISIONS.md D-042): the
@@ -88,10 +140,12 @@ break. SQLite storage lives in `eunomia-store` (see
 DECISIONS.md D-010), which is free of Tauri dependencies for the same
 reason. File-system work — repository scan, path normalization and
 validation, backup copies, atomic writes — lives in `eunomia-fs` (see
-DECISIONS.md D-019), currently a skeleton: the module plan is fixed
-and its dependencies are pinned ahead of use, but no module is
-implemented yet. `src-tauri` is a thin shell:
-commands, managed state, and specta wiring.
+DECISIONS.md D-019): the D-019 module plan is implemented today, from
+scan and the §9.4 preflight seams to backup, atomic write and watcher,
+with the spec-15.1 fault-injection seams feature-gated for tests.
+`src-tauri` is the app shell: commands, managed state, specta wiring,
+and the services that drive them (sync pipeline, watch, availability,
+dirty recalc, retention).
 
 ## IPC contract
 

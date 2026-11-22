@@ -14820,3 +14820,85 @@ tracked — two cards in the board's INBOX ("Follow-up T-264: …" — the
 test-side assertion helpers on the shared mapper; the store-mapper
 family's second-copy trigger). The cards are the tracking unit; this
 note only records their existence.
+
+### D-150 — T-266: ARCHITECTURE.md's workspace tree rebuilt to the
+
+actual module layout — 2026-11-22
+
+Problem: D-145's follow-up audit showed the tree stale far beyond
+T-265's own rows: eunomia-core listed 7 of 25 modules, eunomia-store
+2 of 12, eunomia-fs showed implemented modules as "(skeleton)" (its
+own lib.rs says "Every module listed is implemented"), and src-tauri
+listed 5 of 21 production modules. The tree is the doc's map; every
+later claim navigates by it.
+
+The rebuild is oracle'd on the filesystem + `mod` declarations: 69
+module rows now match `ls` and the lib.rs `pub mod` sets exactly
+(core 25, fs 11 incl. the `cfg(any(test, feature))`-gated
+fault_injection, store 12 plus migrations/, src-tauri 21 incl.
+lib.rs); benches rows unchanged; the frontend section gained 4 rows
+(ipc/, main.ts, date/, assets/). Accounting classes
+(listed-vs-deliberately-not): a library crate's root lib.rs is
+represented by its crate header row; src-tauri/src/main.rs is the
+binary entry; the 11 `*_tests.rs` modules (all `#[cfg(test)]`,
+src-tauri/src/lib.rs:649-680), the crates' `tests/` dirs and
+benches/eunomia-load/tests/mirror_pins.rs are test-only; core's
+markdown/diff/sync stay as "(planned)" rows — the crate's `//!`
+still declares them future work. The old format never listed the
+excluded classes either; the convention holds.
+
+Annotations: still-true text kept verbatim; the four fs
+"(skeleton)" markers became "(working)"; reworded where false — the
+core header row's "no I/O" (D-104's recorded clock exemption) and
+commands.rs's "(recovery group)" (the registered set is 16 commands,
+src-tauri/src/lib.rs:181-198). Two Rule-11 prose fixes rode along
+where the rebuilt tree itself had made sentences false: the intro no
+longer defines a "**skeleton**" marker none of the markers use, and
+the paragraph under the tree no longer calls eunomia-fs "currently a
+skeleton … no module is implemented yet" nor src-tauri a commands-only
+thin shell; the "watch logic" attribution to core went with it (watch
+lives in `eunomia-fs`/`src-tauri`).
+
+Judgment calls (rules 1/11): (1) the crates block is re-sorted
+ALPHABETICALLY per crate — with 25 modules the curated order was
+unmaintainable, and alphabetical makes the ls cross-check mechanical;
+annotation text is untouched by the move. (2) "Module" = a
+mod-declared production module; test-only and binary roots are
+accounted in the task report, not listed. (3) The frontend rows were
+refreshed too — same tree block, same drift, though outside the four
+named Rust roots.
+
+Checks: `pnpm exec prettier --check ARCHITECTURE.md` and
+`pnpm run format:check` both exit 0; the pre-commit hook
+(eslint/prettier/vue-tsc) green; no cargo run — nothing
+compile-bearing changed (md-only task). The ls-vs-tree cross-check
+(every tree row exists on disk; every .rs under the four roots is a
+row or in an accounted class) is exit 0. Reviews: two rounds on two
+models (opencode-go/deepseek-v4.1-flash →
+.opencode/reviews/t266-round1.md; opencode-go/hy4-flash-free →
+t266-round2.md), both "VERDICT: approve", no P0/P1/P2. Taken
+findings: fault_injection's marker now states the real gate (test
+builds, fault-injection feature — not "feature only"), and the intro
+paragraph's "watch" attribution (above). Refusals, recorded: the
+IPC-contract prose's stale 8-of-16 command enumeration is T-264's
+adjacent Rule-11 obligation (frozen-zone note — the orchestrator's
+rebase problem), and the stale CODE doc comments below are outside an
+md-only task.
+
+Follow-ups for the board (main session creates the cards):
+
+- ARCHITECTURE.md's IPC contract section still enumerates 8 commands;
+  16 are registered (src-tauri/src/lib.rs:181-198) — T-264-adjacent.
+- crates/eunomia-store/src/backup_retention.rs:7 `//!` still says
+  "today only the tests drive this service"; sync_phase4.rs:332 calls
+  it in production (both reviewers flagged it independently) — a
+  Rule-11 code-doc fix task.
+- crates/eunomia-fs/src/paths.rs:3's header still says "Planned
+  responsibility" over an implemented module (minor, same class).
+
+Orchestrator addendum (merge, 2026-11-22): the follow-ups above are
+tracked — three cards in the board's INBOX ("Follow-up T-266: …" —
+the IPC-contract prose's 8-vs-16 command list; the backup_retention
+module-doc staleness; the paths.rs planned-responsibility header).
+The cards are the tracking unit; this note only records their
+existence.
