@@ -168,7 +168,9 @@ use tauri::async_runtime;
 use rusqlite::ErrorCode as SqliteCode;
 
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
+use eunomia_store::backup_records::BackupRecordsError;
 use eunomia_store::storage::{DailyBackupOutcome, StorageError};
+use eunomia_store::sync_runs::SyncRunsError;
 
 /// How many automatic retries a busy/locked failure earns (§10
 /// `E_DB_LOCKED`: "Operation rejected; up to 3 automatic retries").
@@ -460,36 +462,19 @@ impl Db {
     ///
     /// # Errors
     ///
-    /// Returns the §7.10 wire value of the underlying store failure —
-    /// the shared SQLite classifier for [`eunomia_store::sync_runs::
-    /// SyncRunsError::Sql`] (the sweep decodes no vocabulary cell, so
-    /// the `Member` arm is unreachable through this writer and maps to
-    /// the class-only fallback).
+    /// Returns the §7.10 wire value of the underlying store failure
+    /// through [`sync_runs_to_app_error`] — the shared SQLite
+    /// classifier for [`eunomia_store::sync_runs::SyncRunsError::Sql`]
+    /// (the sweep decodes no vocabulary cell, so the `Member` arm is
+    /// unreachable through this writer and maps to the class-only
+    /// fallback).
     pub(crate) fn mark_interrupted_runs(&self, finished_at: &str) -> Result<usize, AppError> {
         let mut connection = lock_recovering_poison(&self.connection);
         let transaction = connection
             .transaction()
             .map_err(sqlite_error_to_app_error)?;
         let taken = eunomia_store::sync_runs::mark_interrupted_runs(&transaction, finished_at)
-            .map_err(|error| match error {
-                eunomia_store::sync_runs::SyncRunsError::Sql(sql) => sqlite_error_to_app_error(sql),
-                // Unreachable through this writer (it writes the
-                // status literal itself and decodes no vocabulary
-                // cell), and class-only by the house shape either
-                // way (SEC-008: the stored value never rides the
-                // diagnostic — the `runs_to_app_error` Member arm).
-                eunomia_store::sync_runs::SyncRunsError::Member { column, .. } => {
-                    let mut app_error = AppError::new(ErrorCode::DbLocked);
-                    app_error.details = Some(ErrorDetails {
-                        os_code: None,
-                        os_kind: Some("SyncRunsCorrupt".to_owned()),
-                        os_message: Some(format!(
-                            "a stored {column} cell is outside its vocabulary"
-                        )),
-                    });
-                    app_error
-                }
-            })?;
+            .map_err(sync_runs_to_app_error)?;
         transaction.commit().map_err(sqlite_error_to_app_error)?;
         Ok(taken)
     }
@@ -1131,6 +1116,60 @@ pub(crate) fn sqlite_error_to_app_error(error: rusqlite::Error) -> AppError {
         os_message: Some(os_message),
     });
     app_error
+}
+
+/// Maps the run repository's failures onto the §7.10 wire — the ONE
+/// spelling of the mapper every `sync_runs` consumer routes through
+/// (seven spellings consolidated by T-264/D-149: the five per-phase
+/// copies, the `commands.rs` one, and the inline match this file's
+/// `mark_interrupted_runs` used to carry; the phases had their own
+/// because `commands.rs` was a frozen zone when they landed,
+/// D-130/D-132).
+/// The two arms are the family's whole semantics: SQLite failures
+/// through the shared base classifier above, a corrupt vocabulary
+/// cell as the class-only fallback — the column is named, the stored
+/// value never enters the diagnostic (SEC-008, the D-039
+/// corrupt-cells policy).
+///
+/// The mapper answers the `Err` envelope only; it writes no row and
+/// no log line. Which terminal state a failed run's row reaches is
+/// decided beside it, by the row's own state (the D-138 P3-4 ruling
+/// in `commands.rs`'s stop-run wrapper) — never by this mapping.
+pub(crate) fn sync_runs_to_app_error(error: SyncRunsError) -> AppError {
+    match error {
+        SyncRunsError::Sql(source) => sqlite_error_to_app_error(source),
+        SyncRunsError::Member { column, .. } => {
+            let mut app_error = AppError::new(ErrorCode::DbLocked);
+            app_error.details = Some(ErrorDetails {
+                os_code: None,
+                os_kind: Some("SyncRunsCorrupt".to_owned()),
+                os_message: Some(format!("a stored {column} cell is outside its vocabulary")),
+            });
+            app_error
+        }
+    }
+}
+
+/// Maps the backup-record repository's failures onto the §7.10 wire —
+/// the [`sync_runs_to_app_error`] twin over the backups table's own
+/// error enum (the label names which table's cell is corrupt). Same
+/// two arms, same class-only rule (SEC-008); the kind label stays
+/// distinct on purpose: `BackupRecordsCorrupt` over a
+/// `backup_records` cell is a different triage fact than
+/// `SyncRunsCorrupt` over a `sync_runs` cell.
+pub(crate) fn backup_records_to_app_error(error: BackupRecordsError) -> AppError {
+    match error {
+        BackupRecordsError::Sql(source) => sqlite_error_to_app_error(source),
+        BackupRecordsError::Member { column, .. } => {
+            let mut app_error = AppError::new(ErrorCode::DbLocked);
+            app_error.details = Some(ErrorDetails {
+                os_code: None,
+                os_kind: Some("BackupRecordsCorrupt".to_owned()),
+                os_message: Some(format!("a stored {column} cell is outside its vocabulary")),
+            });
+            app_error
+        }
+    }
 }
 
 /// Why the database could not be opened or migrated at startup. Kept

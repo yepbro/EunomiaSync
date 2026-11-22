@@ -122,12 +122,10 @@ use eunomia_core::assembly_b::splice;
 use eunomia_core::marker_clock::MarkerClock;
 use eunomia_fs::atomic::{AtomicWriteError, WrittenFile};
 use eunomia_store::projects;
-use eunomia_store::sync_runs::{
-    SyncRunsError, list_projects, mark_project_failed, mark_project_written,
-};
+use eunomia_store::sync_runs::{list_projects, mark_project_failed, mark_project_written};
 
 use crate::commands::{managed_db, projects_store_to_app_error};
-use crate::db::{join_failure_to_app_error, sqlite_error_to_app_error};
+use crate::db::{join_failure_to_app_error, sync_runs_to_app_error};
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use crate::sync_phase1::{Phase1Outcome, PreflightVerdict, WritePlan};
 
@@ -493,25 +491,6 @@ fn fingerprint_missing_refusal() -> AppError {
         ),
     });
     error
-}
-
-/// Maps the run repository's failures onto the §7.10 wire (the
-/// D-132 mapper family, spelled again because each phase module owns
-/// its own): SQLite through the shared base classifier, a corrupt
-/// vocabulary cell as the class-only fallback (SEC-008).
-fn sync_runs_to_app_error(error: SyncRunsError) -> AppError {
-    match error {
-        SyncRunsError::Sql(source) => sqlite_error_to_app_error(source),
-        SyncRunsError::Member { column, .. } => {
-            let mut error = AppError::new(ErrorCode::DbLocked);
-            error.details = Some(ErrorDetails {
-                os_code: None,
-                os_kind: Some("SyncRunsCorrupt".to_owned()),
-                os_message: Some(format!("a stored {column} cell is outside its vocabulary")),
-            });
-            error
-        }
-    }
 }
 
 #[cfg(test)]

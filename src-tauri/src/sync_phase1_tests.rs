@@ -88,8 +88,11 @@ fn database_of(app: &tauri::App<tauri::test::MockRuntime>) -> Db {
 }
 
 /// The assertion-side error mapping for run-repository reads (only
-/// `Sql` is reachable on a database this suite just wrote; the other
-/// arms stay class-only, SEC-008).
+/// `Sql` is reachable on a database this suite just wrote). The
+/// non-`Sql` fallback deliberately embeds the error's `Display` —
+/// the richest panic message when an assertion-side read fails — and
+/// never reaches the wire; the wire's class-only rule lives in
+/// `db::sync_runs_to_app_error` (SEC-008).
 fn runs_app_error(error: eunomia_store::sync_runs::SyncRunsError) -> AppError {
     match error {
         eunomia_store::sync_runs::SyncRunsError::Sql(sql) => {

@@ -107,10 +107,10 @@ use tauri::{AppHandle, Runtime};
 use eunomia_core::content_build::BuiltProject;
 use eunomia_core::snapshot::BuildSnapshot;
 use eunomia_store::build_snapshot::read as read_build_snapshot;
-use eunomia_store::sync_runs::{NewSyncRunProject, SyncRun, SyncRunsError};
+use eunomia_store::sync_runs::{NewSyncRunProject, SyncRun};
 
 use crate::commands::{begin_sync, managed_db};
-use crate::db::{join_failure_to_app_error, sqlite_error_to_app_error};
+use crate::db::{join_failure_to_app_error, sync_runs_to_app_error};
 use crate::dirty_recalc::build_snapshot_to_app_error;
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use crate::sync_running::SyncGuard;
@@ -165,8 +165,8 @@ pub(crate) struct Phase0Outcome {
 /// holds the flag ([`begin_sync`]); the honest `NoDatabase` fallback
 /// in recovery mode; the classified store errors of the snapshot
 /// read and the run insert ([`build_snapshot_to_app_error`],
-/// [`sync_runs_to_app_error`]); and the blocking-join failure of the
-/// build step.
+/// [`crate::db::sync_runs_to_app_error`]); and the blocking-join
+/// failure of the build step.
 pub(crate) async fn run<R: Runtime>(app: &AppHandle<R>) -> Result<Phase0Outcome, AppError> {
     // Step 1 — §9.4 phase 0 step 1. The guard local is the run's
     // lease from here on: every `?` below releases it on the way
@@ -309,78 +309,20 @@ fn target_path_text(path: &std::path::Path) -> Result<String, AppError> {
     })
 }
 
-/// Maps the run repository's failures onto the §7.10 wire — the
-/// D-093/D-096 boundary in the `projects_store_to_app_error` shape
-/// (this module owns its mapper because `commands.rs` is a frozen
-/// zone for this task; the shape is the same): SQLite failures
-/// through the shared base classifier, a corrupt vocabulary cell as a
-/// class-only fallback (never the stored value — SEC-008).
-///
-/// The `Member` arm serves the repository's **reads** (`get`,
-/// `list_projects`, which phases 1–4 will route through this same
-/// mapper); `create_running` — the only store call phase 0 makes —
-/// cannot produce it today (it writes the literals itself), so the
-/// arm is a forward seam, kept because dropping it would invite the
-/// reads' future caller to hand-roll a worse one.
-fn sync_runs_to_app_error(error: SyncRunsError) -> AppError {
-    match error {
-        SyncRunsError::Sql(source) => sqlite_error_to_app_error(source),
-        SyncRunsError::Member { column, .. } => sync_fallback(
-            "SyncRunsCorrupt",
-            &format!("a stored {column} cell is outside its vocabulary"),
-        ),
-    }
-}
-
-/// Builds the D-037 fallback with a family label and a fixed,
-/// class-only diagnostic — the `projects_fallback`/`dirty_fallback`
-/// shape.
-fn sync_fallback(kind: &str, message: &str) -> AppError {
-    let mut app_error = AppError::new(ErrorCode::DbLocked);
-    app_error.details = Some(ErrorDetails {
-        os_code: None,
-        os_kind: Some(kind.to_owned()),
-        os_message: Some(message.to_owned()),
-    });
-    app_error
-}
-
 #[cfg(test)]
 mod tests {
-    //! The module's own pure halves — the wire mapper's arms and the
-    //! target-path TEXT spelling. The managed-text seam moved to
-    //! `eunomia_core::target_file`'s suite when this module's mirror
-    //! dissolved (T-265/D-145); the phase behavior (the card's
-    //! criterion, the flag, the records, the chunk boundary) lives in
-    //! `sync_phase0_tests.rs`, which owns its mock-app harness.
+    //! The module's own pure half — the target-path TEXT spelling
+    //! (the managed-text seam moved to `eunomia_core::target_file`'s
+    //! suite when this module's mirror dissolved, T-265/D-145; the
+    //! wire mapper's arms are pinned at the one mapper's home,
+    //! `db_tests.rs`, since T-264/D-149 consolidated the copies). The phase
+    //! behavior (the card's criterion, the flag, the records, the
+    //! chunk boundary) lives in `sync_phase0_tests.rs`, which owns
+    //! its mock-app harness.
 
     use std::path::PathBuf;
 
-    use crate::errors::ErrorCode;
-    use eunomia_store::sync_runs::SyncRunsError;
-
-    use super::{sync_runs_to_app_error, target_path_text};
-
-    /// The wire mapper's arms: SQLite through the shared classifier,
-    /// the corrupt cell class-only (the stored value never enters the
-    /// diagnostics, SEC-008).
-    #[test]
-    fn the_store_mapper_shapes_the_wire_arms() {
-        let sql = sync_runs_to_app_error(SyncRunsError::Sql(rusqlite::Error::InvalidQuery));
-        assert_eq!(sql.code, ErrorCode::DbLocked);
-
-        let member = sync_runs_to_app_error(SyncRunsError::Member {
-            column: "status",
-            found: "paused<script>".to_owned(),
-        });
-        let details = member.details.expect("the Member arm carries details");
-        assert_eq!(details.os_kind.as_deref(), Some("SyncRunsCorrupt"));
-        assert_eq!(
-            details.os_message,
-            Some("a stored status cell is outside its vocabulary".to_owned()),
-            "the stored value must not enter the class-only diagnostic"
-        );
-    }
+    use super::target_path_text;
 
     /// The UTF-8 spelling is the path verbatim; the broken-invariant
     /// arm is class-only (the broken bytes never enter the message).

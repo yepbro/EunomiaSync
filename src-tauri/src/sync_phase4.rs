@@ -132,10 +132,10 @@ use eunomia_store::backup_retention;
 use eunomia_store::projects;
 use eunomia_store::settings;
 use eunomia_store::settings::{SettingKey, SettingValue};
-use eunomia_store::sync_runs::{SyncRun, SyncRunProjectStatus, SyncRunsError, finish_run};
+use eunomia_store::sync_runs::{SyncRun, SyncRunProjectStatus, finish_run};
 
 use crate::commands::{managed_db, projects_store_to_app_error};
-use crate::db::sqlite_error_to_app_error;
+use crate::db::sync_runs_to_app_error;
 use crate::dirty_recalc::ProjectDirtyChange;
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use crate::sync_phase3::Phase3Outcome;
@@ -264,8 +264,8 @@ where
             // from them (the counted verdict reads the same rows
             // inside `finish_run`), so a broken chain refuses HERE,
             // before a stamp or a prune moves.
-            let rows =
-                eunomia_store::sync_runs::list_projects(tx, &run_id).map_err(runs_app_error)?;
+            let rows = eunomia_store::sync_runs::list_projects(tx, &run_id)
+                .map_err(sync_runs_to_app_error)?;
             if rows
                 .iter()
                 .any(|row| row.status == SyncRunProjectStatus::NotStarted)
@@ -286,7 +286,7 @@ where
             // before the store's own zero-row refusal rolled the
             // database half back (the round-1 P3-4 finding).
             let run_row = eunomia_store::sync_runs::get(tx, &run_id)
-                .map_err(runs_app_error)?
+                .map_err(sync_runs_to_app_error)?
                 .ok_or_else(run_not_running_refusal)?;
             if run_row.status != eunomia_store::sync_runs::SyncRunStatus::Running {
                 return Err(run_not_running_refusal());
@@ -364,7 +364,7 @@ where
             // Step D — §9.4 phase 4 step 3 (+ step 4's MAIN-027, the
             // same UPDATE): the counted verdict, `finished_at`, the
             // counters, and the empty-run message.
-            let run = finish_run(tx, &run_id, &finished_at).map_err(runs_app_error)?;
+            let run = finish_run(tx, &run_id, &finished_at).map_err(sync_runs_to_app_error)?;
 
             // The run journal (LOG-001…004, D-051): one
             // `sync.project_result` per project in `sort_order`,
@@ -645,25 +645,6 @@ fn fingerprint_missing_refusal() -> AppError {
         ),
     });
     error
-}
-
-/// Maps the run repository's failures onto the §7.10 wire (the
-/// D-130/D-133 mapper family, spelled once more because each phase
-/// module owns its own): SQLite through the shared base classifier,
-/// a corrupt vocabulary cell as the class-only fallback (SEC-008).
-fn runs_app_error(error: SyncRunsError) -> AppError {
-    match error {
-        SyncRunsError::Sql(source) => sqlite_error_to_app_error(source),
-        SyncRunsError::Member { column, .. } => {
-            let mut error = AppError::new(ErrorCode::DbLocked);
-            error.details = Some(ErrorDetails {
-                os_code: None,
-                os_kind: Some("SyncRunsCorrupt".to_owned()),
-                os_message: Some(format!("a stored {column} cell is outside its vocabulary")),
-            });
-            error
-        }
-    }
 }
 
 #[cfg(test)]

@@ -155,13 +155,11 @@ use eunomia_fs::paths::{
 use eunomia_fs::temp_files::remove_stale_tmp_files;
 use eunomia_fs::write_access::{WriteAccessError, check_write_access};
 use eunomia_store::settings::{SettingKey, SettingValue};
-use eunomia_store::sync_runs::{
-    SyncRunsError, abort_run, mark_project_skipped, mark_project_unchanged,
-};
+use eunomia_store::sync_runs::{abort_run, mark_project_skipped, mark_project_unchanged};
 use eunomia_store::{projects, settings};
 
 use crate::commands::{managed_db, projects_store_to_app_error, settings_cell_to_app_error};
-use crate::db::{join_failure_to_app_error, sqlite_error_to_app_error};
+use crate::db::{join_failure_to_app_error, sync_runs_to_app_error};
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use crate::sync_phase0::{Phase0Outcome, PreparedProject};
 
@@ -818,25 +816,6 @@ fn project_missing_refusal() -> AppError {
         ),
     });
     error
-}
-
-/// Maps the run repository's failures onto the §7.10 wire (the D-130
-/// `sync_runs_to_app_error` shape, spelled again because that module
-/// owns its own mapper): SQLite through the shared base classifier, a
-/// corrupt vocabulary cell as the class-only fallback (SEC-008).
-fn sync_runs_to_app_error(error: SyncRunsError) -> AppError {
-    match error {
-        SyncRunsError::Sql(source) => sqlite_error_to_app_error(source),
-        SyncRunsError::Member { column, .. } => {
-            let mut error = AppError::new(ErrorCode::DbLocked);
-            error.details = Some(ErrorDetails {
-                os_code: None,
-                os_kind: Some("SyncRunsCorrupt".to_owned()),
-                os_message: Some(format!("a stored {column} cell is outside its vocabulary")),
-            });
-            error
-        }
-    }
 }
 
 #[cfg(test)]

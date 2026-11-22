@@ -70,7 +70,9 @@ use std::time::{Duration, Instant};
 
 use tauri::async_runtime;
 
-use crate::db::{Db, sqlite_error_to_app_error};
+use crate::db::{
+    Db, backup_records_to_app_error, sqlite_error_to_app_error, sync_runs_to_app_error,
+};
 use crate::errors::AppError;
 
 /// The wall-clock budget the responsive-runtime probe must stay
@@ -557,6 +559,111 @@ fn sqlite_failures_map_to_registry_codes_and_the_wire_form() {
             "the numeric SQLite result code must stay attached, got: {message}"
         );
     }
+}
+
+#[test]
+fn sync_runs_failures_map_to_the_wire_through_the_one_mapper() {
+    // Arrange: the consolidated `sync_runs_to_app_error` — the ONE
+    // spelling every `sync_runs` consumer routes through since the
+    // five per-phase copies and the `commands.rs` one were deleted
+    // (T-264). The `Sql` arm delegates to the shared classifier, so
+    // the oracle here is the §10 table's literals (one representative
+    // per or-group plus the unmapped fallback — the classifier's own
+    // table test above pins all nine members); the `Member` arm is
+    // the mapper's own semantics and is pinned in full: the corrupt
+    // vocabulary cell surfaces class-only — the column is named, the
+    // stored value never enters the wire (SEC-008, the D-039
+    // corrupt-cells policy the per-phase suites pinned before the
+    // copies dissolved).
+    use eunomia_store::backup_records::BackupRecordsError;
+    use eunomia_store::sync_runs::SyncRunsError;
+    use rusqlite::ffi::{Error as SqliteError, SQLITE_BUSY, SQLITE_CONSTRAINT, SQLITE_FULL};
+
+    use crate::errors::ErrorCode;
+
+    let sql_cases: [(SqliteError, &str, &str, &str); 3] = [
+        (
+            SqliteError::new(SQLITE_BUSY),
+            "E_DB_LOCKED",
+            "errors.db_locked",
+            "DatabaseBusy",
+        ),
+        (
+            SqliteError::new(SQLITE_FULL),
+            "E_DISK_FULL",
+            "errors.disk_full",
+            "DiskFull",
+        ),
+        (
+            SqliteError::new(SQLITE_CONSTRAINT),
+            "E_VALIDATION",
+            "errors.validation",
+            "ConstraintViolation",
+        ),
+    ];
+
+    // Act & Assert: every classified store failure reaches the wire
+    // exactly as the classifier shapes it — the delegation is the
+    // mapper's contract, not a re-classification.
+    for (sqlite_error, code, message_key, sqlite_kind) in sql_cases {
+        let app_error = sync_runs_to_app_error(SyncRunsError::Sql(rusqlite::Error::SqliteFailure(
+            sqlite_error,
+            Some("the runs table says no".to_owned()),
+        )));
+        let wire = serde_json::to_value(&app_error).expect("a classified error must serialize");
+        assert_eq!(wire["code"], serde_json::json!(code));
+        assert_eq!(wire["message_key"], serde_json::json!(message_key));
+        assert_eq!(wire["details"]["os_kind"], serde_json::json!(sqlite_kind));
+    }
+
+    // A non-`SqliteFailure` rusqlite error is not re-examined: it
+    // lands on the classifier's recorded fallback (the arm the old
+    // phase-0 pin covered — `InvalidQuery` stays `E_DB_LOCKED`).
+    let fallback = sync_runs_to_app_error(SyncRunsError::Sql(rusqlite::Error::InvalidQuery));
+    assert_eq!(fallback.code, ErrorCode::DbLocked);
+
+    // The `Member` arm: the full class-only envelope, and the stored
+    // value appears nowhere in the serialized wire — the hostile
+    // `found` text proves the exclusion, not just the message shape.
+    let member = sync_runs_to_app_error(SyncRunsError::Member {
+        column: "status",
+        found: "paused<script>".to_owned(),
+    });
+    let wire = serde_json::to_value(&member).expect("the corrupt-cell error must serialize");
+    assert_eq!(wire["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(wire["message_key"], serde_json::json!("errors.db_locked"));
+    assert_eq!(
+        wire["details"]["os_kind"],
+        serde_json::json!("SyncRunsCorrupt")
+    );
+    assert_eq!(
+        wire["details"]["os_message"],
+        serde_json::json!("a stored status cell is outside its vocabulary"),
+        "the stored value must not enter the class-only diagnostic"
+    );
+    let wire_text = wire.to_string();
+    assert!(
+        !wire_text.contains("paused<script>"),
+        "the offending stored value must not appear anywhere in the wire, got: {wire_text}"
+    );
+
+    // The backups-table sibling keeps its own distinct label — the
+    // two corrupt-cell kinds name different tables, a deliberate
+    // difference the consolidation preserves (T-264).
+    let record = backup_records_to_app_error(BackupRecordsError::Member {
+        column: "status",
+        found: "ok<script>".to_owned(),
+    });
+    let record_wire =
+        serde_json::to_value(&record).expect("the corrupt-record error must serialize");
+    assert_eq!(
+        record_wire["details"]["os_kind"],
+        serde_json::json!("BackupRecordsCorrupt")
+    );
+    assert_eq!(
+        record_wire["details"]["os_message"],
+        serde_json::json!("a stored status cell is outside its vocabulary")
+    );
 }
 
 #[test]

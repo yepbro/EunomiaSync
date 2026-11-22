@@ -14660,3 +14660,163 @@ cards sit in INBOX ("Follow-up T-258: …" — the T-120 token
 consumption note, the sync_last_result starting seams, the D-138
 ARCHITECTURE.md rows). The cards are the tracking unit; this note
 only records their existence.
+
+### D-149 — T-264: the sync-run error mapper consolidated to one `db.rs` spelling — seven copies deleted, the deliberate non-copies ruled real — 2026-11-22
+
+Problem: D-132's follow-up card. The `SyncRunsError → AppError`
+wire mapping had accumulated SEVEN production copies, not the card's
+four (the card was written at D-132, before phases 3/4 and T-258
+existed): `sync_runs_to_app_error` in each of `sync_phase0.rs`
+(325, via its private `sync_fallback`), `sync_phase1.rs` (827),
+`sync_phase2.rs` (913), `sync_phase3.rs` (502), `runs_app_error` in
+`sync_phase4.rs` (654), `runs_to_app_error` in `commands.rs` (1506),
+and an inline match in `db.rs`'s `mark_interrupted_runs` (474–492,
+born in D-147's R1-P3-3 fix). Every copy carried the "each module
+owns its mapper" doctrine, which was only ever a frozen-zone
+workaround (`commands.rs` was frozen when the phases landed,
+D-130/D-132). Three readings were open before coding: where the one
+mapper lives; what its input type is (the union must be explicit);
+and whether any two copies DELIBERATELY differ (D-138's P3-4 warning
+— the mapping is entangled with which terminal state each error
+class produces).
+
+Solution: one `pub(crate) fn sync_runs_to_app_error(SyncRunsError)
+-> AppError` in `db.rs`, placed beside `sqlite_error_to_app_error`
+— the shared base classifier it delegates to, which every consumer
+already imports from `crate::db`, and whose module docs already
+claim the "shared base classifier" role. No new module (a two-entry
+store-mapper module would be structure for structure's sake).
+
+- _Deliberate differences: none among the seven._ All seven spelled
+  the identical two arms: `Sql` → the shared classifier; `Member` →
+  `DbLocked` + `SyncRunsCorrupt` + the class-only "a stored {column}
+  cell is outside its vocabulary" (SEC-008). The only drift was
+  naming (three spellings) and phase 0's `sync_fallback`
+  indirection. A truly-identical merge was therefore possible; no
+  parameterization, no variants. The input type is exactly
+  `eunomia_store::sync_runs::SyncRunsError` — the type every copy
+  already took; the union widened nothing.
+- _Deliberate non-copies, ruled real and kept distinct._ (1)
+  `backup_records_to_app_error` (was `sync_phase2.rs` 896): a
+  different input enum (`BackupRecordsError`) and a different kind
+  label — `BackupRecordsCorrupt` names WHICH table's cell is
+  corrupt, a real triage distinction. D-132's follow-up named it in
+  the consolidation parenthetical, so it moved to `db.rs` as the
+  sibling — co-located, same two-arm shape, distinct label and
+  enum, NOT folded into one parameterized function. (2) The six
+  test-side assertion helpers (`sync_runs_app_error` in
+  `sync_phase0_tests.rs`, `runs_app_error` in the phase 1–4 test
+  files, `sync_runs_read_error` in `ipc_tests.rs`): assertion
+  plumbing, not wire mappers — their fallback is `SyncRunsRead` +
+  the error's `Display` (the richest panic message; the wire
+  mapper's class-only rule exists for user-facing diagnostics), and
+  their `Member` arm is unreachable (the suites read rows they just
+  wrote through the sanctioned writers). Left as-is.
+- _The P3-4 and "" boundaries are untouched by construction._ The
+  mapper answers only the `Err` envelope; which terminal state a
+  failed run's row reaches is decided by `stop_run_if_running` from
+  the ROW's state (D-138's law), and the run row's `error_code`
+  literals ride `abort_run`'s arguments, not this mapping — so no
+  caller's terminal-row semantics can change and no new "" spelling
+  can appear (D-147's exclusivity census stays valid; its counts are
+  re-proven green by the untouched `ipc_tests` pins).
+- _The migration map._ 17 production sync-run call sites re-pointed
+  (phase 0: 1, phase 1: 3, phase 2: 2, phase 3: 3, phase 4: 3 —
+  renamed from `runs_app_error`, commands: 5 — renamed from
+  `runs_to_app_error`) plus the `db.rs` inline collapse (18 sync-run
+  mapping sites in all) and phase 2's 3 backup-record sites. Phases
+  0–3 kept the name, so their sites changed only by import. The
+  deleted per-copy docs ("spelled again because…") went with the
+  functions; `sync_phase0.rs`'s `# Errors` link and `db.rs`'s
+  `mark_interrupted_runs` `# Errors` section now name the one
+  mapper (Rule 11). `file_watch.rs` (T-260's frozen zone) never
+  referenced any copy — untouched.
+
+Tests: the union pin lives at the one mapper's home,
+`db_tests::sync_runs_failures_map_to_the_wire_through_the_one_mapper`
+— phase 0's old inline pin (deleted with its copy) moved there and
+grew into the consolidation table: three representative §10 classes
+through `Sql` (busy/full/constraint — one per or-group; the
+classifier's own nine-member table above it stays the classifier's
+oracle), the non-`SqliteFailure` fallback arm (`InvalidQuery` →
+`DbLocked`, the old pin's case), the `Member` envelope asserted in
+full on the SERIALIZED wire (code, message key, `SyncRunsCorrupt`,
+the exact class-only message) with a hostile `found` value
+(`paused<script>`) proven absent from the whole JSON, and the
+sibling's distinct `BackupRecordsCorrupt` label. The per-caller
+oracle is unchanged: every `sync_phase*_tests.rs` and `ipc_tests.rs`
+pin that reads these envelopes through the real phases stayed green
+without one edit. Mutation check: M1 the `Member` kind label
+flipped → the pin red; M2 the `Sql` arm mutated to bypass the
+classifier → red at the delegation assertion (db_tests.rs:616);
+both green after revert. `cargo fmt --check`, clippy
+`--workspace --all-targets -D warnings`, `cargo test --workspace`
+(34 suites) — all green by exit code.
+
+Honest boundaries: the six test-side helpers keep their own
+spelling (the ruling above); TWO of them (the phase-0 and phase-1
+test files) carried doc comments claiming "class-only here too"
+while a reachable `Member` arm would embed the `Display` text — the
+round-1 review caught the lying wording and it is reworded in this
+change (assertion-only, deliberately `Display`-rich); whether the
+six helpers should adopt the shared mapper's `Sql` arm outright is
+the follow-up below. The OTHER store-table
+mappers (`projects_store_to_app_error`, `activity_log_to_app_error`,
+the settings pair in `commands.rs`, the library mapping in
+`dirty_recalc.rs`) are single-copy, not duplication, and stay where
+they are — this card consolidates the sync-run family only.
+ARCHITECTURE.md has no mapper rows to update (the D-138 rows
+follow-up stands).
+
+Follow-ups for the board (the orchestrator cards them): the
+test-side assertion helpers (six sites) could adopt the shared
+mapper's `Sql` arm with a documented panic-rich fallback instead of
+their local spellings; revisit the wider store-mapper family only if
+any of its members ever gains a second copy.
+
+Round-1 review addendum (D-149, same task; report
+`.opencode/reviews/t264-round1.md`, deepseek-v4.1-flash — APPROVE,
+no P0/P1; 1×P2, 2×P3): the round verified the semantic identity of
+every deleted copy against `HEAD^`, the untouched P3-4 wrapper and
+"" census (the two empty-`code` stops named at their commands.rs
+sites, outside the diff), the grep-clean deletion, the frozen zone,
+and the mutation reasoning. Findings fixed here —
+
+- P2-1 (taken): the migration map above said "phase 4: 4" — three
+  call sites exist (the fourth grep hit was the deleted fn
+  definition); the counts now sum explicitly: 17 sync-run sites plus
+  the db.rs inline collapse (18 mapping sites) and phase 2's 3
+  backup-record sites.
+- P3-1 (taken): the assertion-helper drift was over-scoped to six
+  helpers — only the phase-0 and phase-1 test files claimed
+  "class-only" (the others say only "`Sql` is reachable", which is
+  true). The two lying comments are reworded in this change
+  (assertion-only, deliberately `Display`-rich, never on the wire);
+  the honest-boundaries paragraph above is corrected to the two-file
+  scope, and the adoption question stays the follow-up.
+- P3-2 (taken): `sync_phase2.rs`'s `project_missing_refusal` doc
+  still said "spelled again because each module owns its mapper" —
+  the doctrine this task deleted. Reworded to the refusal-family
+  phrasing; a repo-wide grep confirms no other occurrence of the
+  doctrine remains.
+
+Round-2 review addendum (D-149, same task; report
+`.opencode/reviews/t264-round2.md`, hy4-flash-free — APPROVE, no
+P0/P1/P2; 1×P3): the round independently re-derived the phase-4
+count fix, re-verified the identical-merge claim copy by copy
+against `HEAD^`, the "" census, the P3-4 row-state law, the frozen
+zone, and the grep-clean deletion, and audited the union table
+test's oracle (§10 literals, not a classifier mirror). Finding fixed
+here —
+
+- R2-P3-1 (taken): the mapper's home doc named six consolidated
+  spellings ("five per-phase plus the commands.rs one") where this
+  entry counts seven — the db.rs inline match was the missing
+  seventh. The doc now says "seven spellings" and names all three
+  categories, matching the record.
+
+Orchestrator addendum (merge, 2026-11-22): the follow-ups above are
+tracked — two cards in the board's INBOX ("Follow-up T-264: …" — the
+test-side assertion helpers on the shared mapper; the store-mapper
+family's second-copy trigger). The cards are the tracking unit; this
+note only records their existence.

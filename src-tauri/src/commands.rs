@@ -106,7 +106,7 @@ use eunomia_store::action_log::{
 use eunomia_store::projects::{ListScope, ProjectState, ProjectsError};
 use eunomia_store::settings::{SettingKey, SettingValue, SettingsError};
 use eunomia_store::storage::StorageError;
-use eunomia_store::sync_runs::{SyncRunsError, abort_run};
+use eunomia_store::sync_runs::abort_run;
 
 /// Serializes the two destructive recovery commands against each
 /// other: both end in `app.manage(database)`, and tauri's `manage`
@@ -1383,7 +1383,8 @@ async fn stop_run<R: Runtime>(
     let finished_at = eunomia_store::values::now_utc();
     managed_db(app)?
         .run(move |tx| {
-            abort_run(tx, &run_id, &finished_at, &code, &details).map_err(runs_to_app_error)
+            abort_run(tx, &run_id, &finished_at, &code, &details)
+                .map_err(db::sync_runs_to_app_error)
         })
         .await
 }
@@ -1406,12 +1407,13 @@ async fn stop_run_if_running<R: Runtime>(
     managed_db(app)?
         .run(move |tx| {
             let running = eunomia_store::sync_runs::get(tx, &run_id)
-                .map_err(runs_to_app_error)?
+                .map_err(db::sync_runs_to_app_error)?
                 .is_some_and(|row| row.status == eunomia_store::sync_runs::SyncRunStatus::Running);
             if !running {
                 return Ok(false);
             }
-            abort_run(tx, &run_id, &finished_at, &code, &details).map_err(runs_to_app_error)?;
+            abort_run(tx, &run_id, &finished_at, &code, &details)
+                .map_err(db::sync_runs_to_app_error)?;
             Ok(true)
         })
         .await
@@ -1449,10 +1451,10 @@ async fn summary_of<R: Runtime>(
     managed_db(app)?
         .run(move |tx| {
             let run = eunomia_store::sync_runs::get(tx, &run_id)
-                .map_err(runs_to_app_error)?
+                .map_err(db::sync_runs_to_app_error)?
                 .ok_or_else(run_row_missing_refusal)?;
-            let rows =
-                eunomia_store::sync_runs::list_projects(tx, &run_id).map_err(runs_to_app_error)?;
+            let rows = eunomia_store::sync_runs::list_projects(tx, &run_id)
+                .map_err(db::sync_runs_to_app_error)?;
             Ok(SyncRunSummary {
                 run_id: run.id,
                 verdict: run.status.as_str().to_owned(),
@@ -1497,25 +1499,6 @@ fn run_row_missing_refusal() -> AppError {
         ),
     });
     error
-}
-
-/// Maps the run repository's failures onto the §7.10 wire (the D-130
-/// mapper family, spelled once more because each module owns its own):
-/// SQLite through the shared base classifier, a corrupt vocabulary
-/// cell as the class-only fallback (SEC-008).
-fn runs_to_app_error(error: SyncRunsError) -> AppError {
-    match error {
-        SyncRunsError::Sql(source) => db::sqlite_error_to_app_error(source),
-        SyncRunsError::Member { column, .. } => {
-            let mut error = AppError::new(ErrorCode::DbLocked);
-            error.details = Some(ErrorDetails {
-                os_code: None,
-                os_kind: Some("SyncRunsCorrupt".to_owned()),
-                os_message: Some(format!("a stored {column} cell is outside its vocabulary")),
-            });
-            error
-        }
-    }
 }
 
 /// The body of [`activity_list`], split from the command wrapper the

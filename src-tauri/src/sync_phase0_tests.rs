@@ -116,7 +116,10 @@ fn run_row_of(
 
 /// The assertion-side error mapping for the store reads (only `Sql`
 /// is reachable from these reads on a database this suite just
-/// wrote; the other arms stay class-only here too, SEC-008).
+/// wrote). The non-`Sql` fallback deliberately embeds the error's
+/// `Display` — the richest panic message when an assertion-side read
+/// fails — and never reaches the wire; the wire's class-only rule
+/// lives in `db::sync_runs_to_app_error` (SEC-008).
 fn sync_runs_app_error(error: eunomia_store::sync_runs::SyncRunsError) -> AppError {
     match error {
         eunomia_store::sync_runs::SyncRunsError::Sql(sql) => {

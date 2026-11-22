@@ -144,13 +144,12 @@ use eunomia_core::backup_name::{BackupTime, backup_dir_name};
 use eunomia_core::project::{BaseName, ProjectId, Scheme};
 use eunomia_fs::backup::{BackupCopy, BackupError, BackupOutcome, BackupTarget};
 use eunomia_store::backup_records::{
-    BackupRecordStatus, BackupRecordsError, CheckedCopy, NewBackupRecord, insert as insert_record,
-    last_checked,
+    BackupRecordStatus, CheckedCopy, NewBackupRecord, insert as insert_record, last_checked,
 };
-use eunomia_store::sync_runs::{SyncRunsError, abort_run, reset_projects_not_started};
+use eunomia_store::sync_runs::{abort_run, reset_projects_not_started};
 
 use crate::commands::{managed_db, projects_store_to_app_error};
-use crate::db::{join_failure_to_app_error, sqlite_error_to_app_error};
+use crate::db::{backup_records_to_app_error, join_failure_to_app_error, sync_runs_to_app_error};
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use crate::sync_phase1::{Phase1Outcome, PreflightVerdict};
 
@@ -818,8 +817,8 @@ fn core_base_name(base_name: eunomia_store::settings::BaseName) -> BaseName {
 }
 
 /// The class-only refusal for a project row phase 1 recorded that the
-/// projects table no longer backs (the phase-1 family, spelled again
-/// because each module owns its mapper).
+/// projects table no longer backs (the phase-1 refusal family, each
+/// phase naming its own refusal).
 fn project_missing_refusal() -> AppError {
     let mut error = AppError::new(ErrorCode::DbLocked);
     error.details = Some(ErrorDetails {
@@ -886,42 +885,6 @@ fn error_kind(error: &BackupError) -> &'static str {
         BackupError::SourceFailed { .. } => "SourceFailed",
         BackupError::CopyFailed { .. } => "CopyFailed",
         BackupError::VerifyFailed { .. } => "VerifyFailed",
-    }
-}
-
-/// Maps the record repository's failures onto the §7.10 wire (the
-/// D-130 mapper family, spelled again because this module owns its
-/// own): SQLite through the shared base classifier, a corrupt
-/// vocabulary cell as the class-only fallback (SEC-008).
-fn backup_records_to_app_error(error: BackupRecordsError) -> AppError {
-    match error {
-        BackupRecordsError::Sql(source) => sqlite_error_to_app_error(source),
-        BackupRecordsError::Member { column, .. } => {
-            let mut error = AppError::new(ErrorCode::DbLocked);
-            error.details = Some(ErrorDetails {
-                os_code: None,
-                os_kind: Some("BackupRecordsCorrupt".to_owned()),
-                os_message: Some(format!("a stored {column} cell is outside its vocabulary")),
-            });
-            error
-        }
-    }
-}
-
-/// Maps the run repository's failures onto the §7.10 wire (the
-/// D-131 mapper, spelled again — each phase module owns its own).
-fn sync_runs_to_app_error(error: SyncRunsError) -> AppError {
-    match error {
-        SyncRunsError::Sql(source) => sqlite_error_to_app_error(source),
-        SyncRunsError::Member { column, .. } => {
-            let mut error = AppError::new(ErrorCode::DbLocked);
-            error.details = Some(ErrorDetails {
-                os_code: None,
-                os_kind: Some("SyncRunsCorrupt".to_owned()),
-                os_message: Some(format!("a stored {column} cell is outside its vocabulary")),
-            });
-            error
-        }
     }
 }
 
