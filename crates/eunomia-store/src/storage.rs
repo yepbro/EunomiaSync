@@ -5,7 +5,9 @@
 //! schema version through the SQLite `user_version` pragma (spec DB-004),
 //! so upgrading an existing database only requires adding the next
 //! migration file. Schema version 1 — the eleven tables of spec §6.2 — is
-//! defined by `migrations/0001_init.sql`.
+//! defined by `migrations/0001_init.sql`; version 2
+//! (`migrations/0002_backup_records_pair_index.sql`) adds the
+//! `backup_records` per-pair lookup index.
 //!
 //! Before every migration applied to an existing database,
 //! [`run_migrations`] writes a safety copy of the current state into a
@@ -54,9 +56,21 @@ use crate::settings::SettingsError;
 /// `sync_runs`, `sync_run_projects`, `backup_records` and `action_log`,
 /// with every CHECK, UNIQUE and foreign-key constraint plus the indexes
 /// the spec names (including the extra `project_instructions` indexes on
-/// `instruction_id` and `variant_id`). After it runs,
-/// `PRAGMA user_version` is 1.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
+/// `instruction_id` and `variant_id`).
+///
+/// Version 2 (`migrations/0002_backup_records_pair_index.sql`) is
+/// index-only: `ix_backup_records_pair_lookup` over
+/// `backup_records (project_id, source_path, status, created_at)`,
+/// the owner-approved column set serving the per-pair [`last_checked`]
+/// lookup (BKP-010's dedup input, §9.4 phase 2 — previously a full
+/// table scan per project per sync run). After it runs,
+/// `PRAGMA user_version` is 2.
+///
+/// [`last_checked`]: crate::backup_records::last_checked
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_backup_records_pair_index.sql"),
+];
 
 /// Builds the [`Migrations`] set from the embedded SQL files.
 fn migrations() -> Migrations<'static> {
@@ -545,8 +559,9 @@ pub fn run_migrations(
 ///
 /// Split out from [`run_migrations`] so the backup and per-step semantics
 /// can be tested against synthetic multi-step migration sets — the
-/// embedded set defines a single migration today, so no upgrade path
-/// exists through the public API yet.
+/// embedded set's one real upgrade hop (v1→v2) is covered through the
+/// public API by `tests/schema_v2.rs`, but the multi-step and
+/// broken-step paths these tests need still cannot go through it.
 ///
 /// Migration runs are expected to be serialized by the caller (the app
 /// opens one connection behind a mutex, spec SYS-002); the backup naming
@@ -1066,8 +1081,10 @@ mod tests {
     }
 
     /// Builds a synthetic migration set (real SQL, applied to real
-    /// databases) — the embedded set defines a single migration, so the
-    /// upgrade paths these tests need cannot go through it.
+    /// databases) — these tests need multi-step hops and broken steps,
+    /// which the two-step embedded set cannot provide (its one real
+    /// upgrade path, v1→v2, is covered through the public API by
+    /// `tests/schema_v2.rs`).
     fn set_of(sqls: &[&'static str]) -> Migrations<'static> {
         Migrations::new(sqls.iter().map(|sql| M::up(sql)).collect())
     }
@@ -1141,9 +1158,13 @@ mod tests {
     fn run_migrations_rejects_a_database_newer_than_the_set() {
         // A database whose user_version exceeds the embedded set must be
         // rejected (spec DB-004), not silently declared up to date.
+        // `latest_schema_version` keeps the fixture one step ahead of
+        // whatever the embedded set grows to (the `db_tests.rs`
+        // `app_schema_version` posture).
         let mut conn = Connection::open_in_memory().unwrap();
         run_migrations(&mut conn, Path::new(UNUSED_BACKUP_DIR)).unwrap();
-        conn.pragma_update(None, "user_version", 2)
+        let newer = latest_schema_version() as i64 + 1;
+        conn.pragma_update(None, "user_version", newer)
             .expect("user_version should be settable");
 
         let err = run_migrations(&mut conn, Path::new(UNUSED_BACKUP_DIR))
@@ -1152,7 +1173,7 @@ mod tests {
             matches!(err, StorageError::Migration { backup: None, .. }),
             "expected StorageError::Migration without a copy (no step ran), got: {err:?}"
         );
-        assert_eq!(user_version(&conn), 2, "the version must be untouched");
+        assert_eq!(user_version(&conn), newer, "the version must be untouched");
     }
 
     #[test]
@@ -1500,7 +1521,7 @@ mod tests {
     #[test]
     fn a_failed_migration_changes_neither_schema_nor_data_and_names_the_copy() {
         // The T-019 acceptance criterion, on the private seam (the
-        // embedded set has a single working migration, so an
+        // embedded set holds only working migrations, so an
         // intentionally broken one exists only here): a migration that
         // fails must leave the database exactly as it was and the
         // error must carry the path to the copy of that state
@@ -2211,7 +2232,11 @@ mod tests {
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .unwrap();
         assert_eq!(integrity, "ok");
-        assert_eq!(user_version(&copy), 1, "the copy carries the schema");
+        assert_eq!(
+            user_version(&copy),
+            latest_schema_version() as i64,
+            "the copy carries the schema"
+        );
         let marker: String = copy
             .query_row(
                 "SELECT value FROM settings WHERE key = 'daily.marker'",

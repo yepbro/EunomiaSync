@@ -60,9 +60,9 @@ fn fresh_database_reaches_latest_migration_without_backups() {
             .expect("migrations should apply cleanly on a fresh database")
     };
 
-    // Schema v0 → v1 on an empty database is a bootstrap, not an upgrade:
-    // there is no state to lose, so no pre-migration copy is written
-    // (spec DB-004, DECISIONS.md D-038).
+    // Schema v0 → latest on an empty database is a bootstrap, not an
+    // upgrade: there is no state to lose, so no pre-migration copy is
+    // written (spec DB-004, DECISIONS.md D-038).
     assert!(
         backups.is_empty(),
         "a fresh database must not produce backup copies"
@@ -104,8 +104,8 @@ fn migrations_run_on_file_backed_database() {
         run_migrations(&mut conn, &backup_dir(&dir)).unwrap();
     }
 
-    // Reopening must report a fully migrated database: schema version 1
-    // (0001_init.sql is the only migration so far, spec DB-004). The
+    // Reopening must report a fully migrated database: schema version 2
+    // (0001_init.sql plus the 0002 pair-lookup index, spec DB-004). The
     // no-op rerun writes no backup copy.
     {
         let mut conn = Connection::open(&path).unwrap();
@@ -114,7 +114,7 @@ fn migrations_run_on_file_backed_database() {
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 1, "schema version must be exactly 1");
+        assert_eq!(user_version, 2, "schema version must be exactly 2");
         assert!(backups.is_empty(), "a no-op run must not produce copies");
         assert!(
             backup_files(&dir).is_empty(),

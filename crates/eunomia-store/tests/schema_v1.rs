@@ -4,8 +4,9 @@
 //! (`run_migrations`) and assert observable SQLite behavior:
 //!
 //! * the migration applies to an empty database and creates exactly the
-//!   eleven spec tables plus its indexes, with `PRAGMA user_version = 1`
-//!   (spec DB-004);
+//!   eleven spec tables plus its indexes — the v1 schema of
+//!   `0001_init.sql` and the v2 `backup_records` pair-lookup index —
+//!   with `PRAGMA user_version = 2` (spec DB-004);
 //! * every CHECK, UNIQUE and foreign-key constraint rejects invalid rows,
 //!   identified by the SQLite extended result code
 //!   (`SQLITE_CONSTRAINT_CHECK`, `_UNIQUE`, `_PRIMARYKEY`,
@@ -101,10 +102,11 @@ fn accepts(conn: &Connection, sql: &str, label: &str) {
         .unwrap_or_else(|err| panic!("{label}: statement should succeed, got {err}"));
 }
 
-/// An in-memory database migrated to schema version 1 with foreign-key
-/// enforcement switched on (mirroring `open_db`). The backup directory
-/// argument is never touched: a fresh in-memory database produces no
-/// backup copy (D-038), and the path deliberately does not exist.
+/// An in-memory database migrated to the current schema version with
+/// foreign-key enforcement switched on (mirroring `open_db`). The backup
+/// directory argument is never touched: a fresh in-memory database
+/// produces no backup copy (D-038), and the path deliberately does not
+/// exist.
 fn migrated() -> Connection {
     let mut conn = Connection::open_in_memory().unwrap();
     run_migrations(&mut conn, Path::new("unused-backup-dir"))
@@ -328,8 +330,14 @@ fn schema_v1_contains_the_spec_indexes() {
     // silently created on the wrong column is a regression a name-only
     // comparison would miss. The partial-WHERE clause and the COLLATE
     // NOCASE of the two ux_ indexes are pinned behaviorally by the
-    // main-variant and variant-name tests.
+    // main-variant and variant-name tests. The pair-lookup index is
+    // schema version 2's addition (T-256).
     let expected: &[(&str, &str, &[&str])] = &[
+        (
+            "ix_backup_records_pair_lookup",
+            "backup_records",
+            &["project_id", "source_path", "status", "created_at"],
+        ),
         ("ix_items_position", "library_items", &["position"]),
         ("ix_log_ts", "action_log", &["ts"]),
         (
@@ -381,7 +389,8 @@ fn schema_v1_contains_the_spec_indexes() {
         .collect();
     assert_eq!(
         actual_pairs, expected_pairs,
-        "the schema must create the §6.2 indexes plus the two project_instructions lookups, on the right tables"
+        "the schema must create the §6.2 indexes, the two project_instructions lookups, \
+         and the v2 pair-lookup index, on the right tables"
     );
 
     for (name, _, columns) in expected {
@@ -473,12 +482,12 @@ fn schema_v1_declares_the_spec_foreign_keys() {
 }
 
 #[test]
-fn schema_v1_records_user_version_one() {
+fn a_fully_migrated_database_records_user_version_two() {
     let conn = migrated();
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 1, "schema version must be exactly 1");
+    assert_eq!(user_version, 2, "schema version must be exactly 2");
 }
 
 #[test]
@@ -506,18 +515,18 @@ fn schema_v1_applies_to_a_file_backed_database() {
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 1);
+        assert_eq!(user_version, 2);
     }
 
     // The applied version persists in the file: a reopened database is
-    // already at version 1 and re-running migrations is a no-op.
+    // already at version 2 and re-running migrations is a no-op.
     {
         let mut conn = Connection::open(&path).unwrap();
         run_migrations(&mut conn, &backup_dir).expect("re-running migrations must be a no-op");
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 1);
+        assert_eq!(user_version, 2);
         let tables: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'

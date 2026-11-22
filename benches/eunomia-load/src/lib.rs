@@ -255,10 +255,11 @@ impl LoadFixture {
         let db_home = TempDir::new().map_err(LoadError::Io)?;
         let mut conn = storage::open_db(&db_home.path().join("eunomiasync.sqlite3"))
             .map_err(LoadError::Storage)?;
-        // A fresh database takes the single embedded migration with no
+        // A fresh database takes every embedded migration with no
         // upgrade backups to write (the store suite's own fixture
-        // spelling); the directory exists, so a future multi-step set
-        // would land its copies inside the guard too.
+        // spelling — a bootstrap run writes no copies however many
+        // steps it applies); the directory exists, so an upgrade run's
+        // copies would land inside the guard too.
         storage::run_migrations(&mut conn, &db_home.path().join("migration-backups"))
             .map_err(LoadError::Storage)?;
         let generated = data_sets::generate(&mut conn, spec, &roots).map_err(LoadError::DataSet)?;

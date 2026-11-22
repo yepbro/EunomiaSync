@@ -13283,3 +13283,176 @@ findings — all P2/P3):
   literals in production retry paths predate it — a wider
   constants-cleanup task would touch D-099's territory; recorded as
   a known refinement, not a defect of the reviewed commits.
+
+### D-142 — T-256: schema v2 — the `backup_records` per-pair lookup index (`ix_backup_records_pair_lookup`) — 2026-11-22
+
+Problem: D-132's sync phase 2 issues `last_checked(conn, project_id,
+source_path)` once per eligible project per run, and schema v1 had no
+index on `backup_records` — every lookup was a full table scan, N scans
+per sync run (D-132's recorded follow-up). An index is an owner
+decision; the owner approved the column set
+`(project_id, source_path, status, created_at)` by moving T-256 into
+the dev cycle. Secondary questions: how a v1→v2 upgrade is tested
+through the public API (which applies the whole embedded set, so a
+"v1 database" must be built, not migrated down); how an
+`EXPLAIN QUERY PLAN` test stays tied to the production SQL that lives
+private in the repository module; and which version pins advance
+legitimately with the version bump (updating a pin because the
+version moved is fine; weakening one is not).
+
+Solution: `migrations/0002_backup_records_pair_index.sql`, appended to
+`MIGRATIONS` (append-only; `0001_init.sql` untouched) —
+`CREATE INDEX ix_backup_records_pair_lookup ON backup_records
+(project_id, source_path, status, created_at)`; `user_version` 2;
+naming per `ix_<table>_<purpose>` (`ix_items_position`, `ix_log_ts`).
+
+- _The shape, as approved._ The equality prefix
+  `(project_id, source_path, status)` is the lookup's WHERE clause and
+  its "project and file" pair; `created_at` is the ORDER BY's first
+  term. The green plan reads
+  `SEARCH backup_records USING INDEX ix_backup_records_pair_lookup
+(project_id=? AND source_path=? AND status=?)` — the seek replaces
+  the scan; the pair's rows walk newest-first from the index, and only
+  the `id DESC` tiebreak term still sorts
+  (`USE TEMP B-TREE FOR LAST TERM OF ORDER BY`: `id` is not an index
+  column — a wider shape would be a new owner escalation, not this
+  task's call). `backup_retention::apply`'s window (PARTITION BY
+  project_id, source_path; ORDER BY created_at DESC, id DESC;
+  status='ok') reads the same pair/stamp columns — a likely secondary
+  beneficiary, noted without a claim (its plan is not pinned here).
+- _Mechanics unchanged by design._ rusqlite_migration's per-step
+  transaction and the D-038 pre-migration `VACUUM INTO` copy carry the
+  step: a v1 database upgraded through the public API writes
+  `pre-migration-v1-<UTC>.sqlite3` — the first real upgrade path
+  through `run_migrations` (D-038's "the embedded set defines a single
+  migration" testing boundary moved; the private synthetic seam keeps
+  the multi-step and broken-step paths, which a two-step set still
+  cannot provide).
+- _The v1 fixture's authenticity (Rule 2)._ `tests/schema_v2.rs`
+  builds a v1 database by executing the real `0001_init.sql` and
+  setting `PRAGMA user_version = 1` inside one transaction — the exact
+  steps rusqlite_migration 2.7's `goto_up` performs (src/lib.rs
+  618–653: `execute_batch` of the SQL, then `PRAGMA user_version`
+  inside the transaction, commit), verified against the installed
+  sources, not assumed: the upgrade starts from a state schema- and
+  version-identical to what a shipped v1 app leaves behind.
+- _The plan test's mirror._ `EXPLAIN QUERY PLAN` needs the statement
+  text; `backup_records::last_checked` keeps it private. The test
+  mirrors the SQL and cross-checks the mirror against the production
+  function on the same fixture (both must answer the pair's newest
+  `ok` copy identically), so a semantic drift fails the suite — the
+  D-132 `db002_stamp` mirror posture. Residual, recorded: a purely
+  syntactic rewrite of the production SQL (same semantics, different
+  text) would not be caught.
+- _Pins advanced with the version._ `schema_v1.rs`: the version
+  asserts moved 1→2 and `ix_backup_records_pair_lookup` joined the
+  exhaustive explicit-index list (the list stays exact — strengthened,
+  not weakened); `storage_migrations.rs` and `storage_open_db.rs`
+  pins 1→2; `storage.rs`'s too-new test now bumps to
+  `latest_schema_version() + 1` (the `db_tests.rs` `app_schema_version`
+  posture — structural, will not rot at v3), the daily-copy schema
+  assert reads the same constant; ARCHITECTURE.md's storage paragraph
+  and the storage.rs module/`MIGRATIONS`/`migrate`/`set_of` docs (the
+  "single migration / no upgrade path" claims) updated in the same
+  change.
+
+Tests: `tests/schema_v2.rs`, 4 integration tests, all red first
+against the un-migrated schema for the right reasons (version 1≠2; the
+plan `SCAN backup_records; USE TEMP B-TREE FOR ORDER BY`; zero copies
+written): the v1→v2 upgrade over a v1 database with rows (project,
+settings and five records verbatim after — every column of every row,
+not a key subset — three `ok` of the pair including a same-stamp pair
+for the id tiebreak, one `pruned` seeded NEWER than the newest `ok`,
+one other project's — and `last_checked` answers the newest `ok` on
+the upgraded database, tiebreak included); the fresh bootstrap reaches
+`user_version` 2 with the index's columns pinned by `PRAGMA
+index_info` to exactly the approved set, in order (the card is the
+oracle, not the SQL); the `EXPLAIN QUERY PLAN` of the exact
+`last_checked` statement (`USING INDEX ix_backup_records_pair_lookup`,
+no `SCAN`) with the production cross-check; and the pre-migration copy
+(name shape `pre-migration-v1-<19-char UTC>`, `integrity_check` ok,
+`user_version` 1, no v2 objects, rows preserved, no `.tmp` debris).
+Mutation checks: M1 index dropped → plan/index/upgrade tests red; M2
+`created_at`→`size_bytes` in the index → the column pin red (the plan
+test stays green — SQLite still seeks the equality prefix through a
+misshapen index; the column pin is what discriminates the approved
+shape); M3 a destructive `DELETE` added to the migration → the
+preservation test red (the copy test correctly stays green: the copy
+is the pre-step state). The existing suites are untouched and green as
+moved: `backup_records` (`last_checked` correctness, the D-132
+handshake), `backup_retention`, `sync_runs`, `schema_v1` constraints,
+the storage daily-copy and migration suites, and src-tauri (whose
+too-new gate reads `latest_schema_version()` dynamically — no pin
+existed to update).
+
+Honest boundaries: the planner's choice is SQLite's — the plan test
+pins that the current planner prefers the index over a scan for this
+statement (shape-driven; production runs no ANALYZE); the same-stamp
+`id` tiebreak still pays a temp b-tree; a hypothetical "v1" database
+whose schema drifted from `0001_init.sql` is outside what the fixture
+can reproduce.
+
+Follow-ups for the board (the orchestrator cards them): pin the
+retention window's query plan the same way if its scan ever matters;
+the pre-migration copies' uncapped accumulation (D-038's known open)
+becomes observable in production with the first real upgrade wave —
+a retention owner may now be worth its card; the dangling "D-141"
+references (the never-written mock-layer loud-drift entry:
+DECISIONS.md 9649/13120, `src/ipc/mock/commands.ts:6`) need their
+entry written under a fresh `next_id` number.
+
+Numbering note: task-id-mcp first issued 141 for this entry; 141
+collides with those legacy hand-made references (no D-141 entry
+exists), so per the counter policy the entry took the next issued
+number, 142 — the counter is never corrected, nothing was renumbered.
+
+Round-1 review addendum (D-142, same task; report
+`.opencode/reviews/t256-round1.md`, deepseek-v4.1-flash — no P0/P1):
+P2-1 (taken) is the numbering note above — the collision was the
+reviewer's find, verified by grep before acting. P2-2 (taken): the
+mirror cross-check's claim was stronger than the fixture — the
+terminal row was the pair's OLDEST stamp, so dropping
+`status = 'ok'` from either text kept the answer (and the suite)
+green; the fixture now seeds the `pruned` row NEWER than the newest
+`ok` (dropping the predicate changes the answer, verified red) plus a
+same-stamp second `ok` row, so the upgraded-database `last_checked`
+literal also exercises the D-122 id tiebreak end to end; the module
+doc and this entry's mirror-residual sentence now state exactly what
+the cross-check proves. P3-1/P3-3/P3-5 (taken): the module doc cited
+D-133 for the follow-up (it is D-132's round-1 addendum), the
+migration header cited D-002 for append-only (the rule is spec
+DB-004's forward-only), and a broken `seed_v1_database` doc link —
+all fixed. P3-2 (taken): the "single migration" sweep had missed
+`storage.rs`'s broken-step comment, `benches/eunomia-load`'s
+fresh-database comment, and `storage_migrations.rs`'s "v0 → v1"
+wording — rephrased to set-relative wording. P3-4 (taken): "keeps
+every row verbatim" is now literally what the test asserts — the
+record comparison covers every column of every row, not
+`(id, status)`. P3-6 (declined, recorded): splitting the duplicated
+index pin (the exhaustive list in `schema_v1.rs` vs `index_info` in
+`schema_v2.rs`) is a design idea for a future task, not a defect —
+both pins serve different contracts ("no index appears unnoticed" vs
+"this version's own shape"), and the follow-up card above can carry
+it if the list ever churns.
+
+Round-2 review addendum (D-142, same task; report
+`.opencode/reviews/t256-round2.md`, hy4-flash-free — no P0/P1/P2):
+the reviewer verified every round-1 fix in place (the renumbering and
+the dangling legacy references, the fixture's pruned-newer and
+same-stamp rows, the rephrased comments, the DB-004 citation, the
+exact index list, the plan discrimination reproduced standalone with
+`sqlite3`, the append-only diff, the D-038 copy semantics, dynamic
+consumers) and confirmed the mirror residual is now honestly stated.
+P3-1 (taken): "every column of every row" still compared only six of
+the nine `backup_records` columns — the comparison now selects all
+nine (`project_id`, `sync_run_id` — NULL in every seed row, compared
+as that literal via COALESCE — and `source_path` joined the tuple),
+so the sentence is literally true. P3-2 was the outstanding commit
+step itself, not a finding.
+
+Orchestrator addendum (merge, 2026-11-22): the follow-ups paragraph
+above is tracked — five cards created in the board's INBOX for owner
+triage, titled "Follow-up T-256: …" (dangling D-141 references;
+retention-window plan pin; pre-migration copies retention; the
+version-agnostic index inventory; alternative index shapes). The
+cards are the tracking unit; this note only records their existence.

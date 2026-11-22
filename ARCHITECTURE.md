@@ -286,10 +286,17 @@ database (`user_version > 0`), a `VACUUM INTO` safety copy
 directory (`db-backups/`; D-038). Schema version 1 — the eleven
 §6.2 tables with their full constraint set — lives in
 `migrations/0001_init.sql` (see DECISIONS.md D-036 for the two
-strengthened constraints and the testing contract). Tests run against
-in-memory SQLite and file-backed databases through the public API; the
-multi-step upgrade paths, unreachable through the single-migration
-embedded set, go through a private seam with synthetic migration sets
+strengthened constraints and the testing contract); version 2
+(`migrations/0002_backup_records_pair_index.sql`, T-256) appends the
+index-only `ix_backup_records_pair_lookup` over `backup_records
+(project_id, source_path, status, created_at)` — the owner-approved
+column set serving the per-pair `last_checked` dedup lookup (§9.4
+phase 2), which previously scanned the table once per project per
+sync run (D-132's follow-up). Tests run against in-memory SQLite and
+file-backed databases through the public API, including the real
+v1→v2 upgrade path (`tests/schema_v2.rs` builds a v1 database from
+the real 0001 SQL); the multi-step and broken-step paths beyond it go
+through a private seam with synthetic migration sets
 (D-038).
 
 The app side of that storage is `src-tauri/src/db.rs` (DECISIONS.md
