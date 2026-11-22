@@ -8,11 +8,13 @@
 //! pipeline (`not_started` at phase 0, then `written` / `unchanged` /
 //! `skipped` / `failed` as phases 1–4 decide). This module is the
 //! store's writer for the phase-0 shape (`create_running`: the
-//! `running` run with its `not_started` rows) **and phase 1's
-//! transitions** (`mark_project_skipped`, `mark_project_unchanged`,
-//! `abort_run`: preflight's per-project verdicts and the
-//! `E_DISK_FULL` abort), plus the reads the later phases and the
-//! history UI will consume. The remaining transitions — the phase 3
+//! `running` run with its `not_started` rows), phase 1's transitions
+//! (`mark_project_skipped`, `mark_project_unchanged`, `abort_run`:
+//! preflight's per-project verdicts and the `E_DISK_FULL` abort), and
+//! phase 2's abort reset (`reset_projects_not_started`: §9.4 phase 2
+//! step 2's "`not_started` except `skipped`"), plus the reads the
+//! later phases and the history UI will consume. The remaining
+//! transitions — the phase 3
 //! `written`/`failed` writers, phase 4's counters and
 //! success/partial/failed verdicts, the startup `interrupted`
 //! recovery — belong to the phase tasks that cause them, exactly the
@@ -629,8 +631,9 @@ pub fn mark_project_unchanged(
 /// phase wrote (phase 1 does not reset rows: nothing was written, so
 /// no row claims otherwise). Phase 2's `E_BACKUP_FAILED` abort shares
 /// the `aborted` row shape but adds its own per-project reset
-/// ("`not_started` except `skipped`", §9.4 phase 2 step 2) — that
-/// writer belongs to the phase-2 task, not this function.
+/// ("`not_started` except `skipped`", §9.4 phase 2 step 2) —
+/// [`reset_projects_not_started`], applied by the phase-2 pipeline in
+/// the same transaction as this function.
 ///
 /// `finished_at` is the **caller's** timestamp (the
 /// [`create_running`]/`started_at` contract: the app layer captures the
@@ -661,6 +664,53 @@ pub fn abort_run(
         return Err(SyncRunsError::Sql(rusqlite::Error::QueryReturnedNoRows));
     }
     Ok(())
+}
+
+/// Phase 2's per-project reset (§9.4 phase 2 step 2, the
+/// `E_BACKUP_FAILED` abort): every row of the run that is neither
+/// `not_started` nor `skipped` goes back to `not_started`, with both
+/// error columns cleared — the verdicts the run earned before its
+/// backups failed must not survive into the aborted run's summary
+/// ("the last sync of every project stays unchanged" is the same
+/// sentence read over `sync_run_projects`). At phase 2's call site
+/// the only such rows are phase 1's `unchanged` verdicts (`written`/
+/// `failed` are phase 3's, later than this reset can ever run), so
+/// the statement is the general sweep over the vocabulary for the
+/// same reason `abort_run` is: one owner of the shape, every phase
+/// sharing it.
+///
+/// `skipped` rows are deliberately untouched (§9.4's own "except
+/// `skipped`"): a skipped project's refusal explains a build that
+/// happened and a file nobody tried to write — the verdict survives
+/// the abort. The row's `target_path`/`build_hash` fingerprint stays
+/// as-is on every path (the fingerprint is phase 0's fact, not a
+/// verdict).
+///
+/// A bulk sweep, not a state-machine edge: unlike
+/// [`mark_project_skipped`] a run with nothing to reset (every row
+/// `ready`-shaped `not_started` or `skipped`) matches zero rows and
+/// that is a legitimate `Ok(0)`, not a caller bug — the abort fires
+/// whatever the run's verdict mix is, and a run whose backups all
+/// came after creation-case projects may have no `unchanged` row at
+/// all. Returns how many rows went back to `not_started`.
+///
+/// Joins the caller's transaction (D-037/D-051); phase 2 applies it
+/// in the SAME transaction as [`abort_run`], so the aborted run and
+/// its reset verdicts commit or vanish as one set.
+///
+/// # Errors
+///
+/// Returns [`SyncRunsError::Sql`] when the statement fails — an
+/// unknown `run_id` is `Ok(0)`, not an error (the sweep's zero-row
+/// ruling above).
+pub fn reset_projects_not_started(conn: &Connection, run_id: &str) -> Result<usize, SyncRunsError> {
+    let changed = conn.execute(
+        "UPDATE sync_run_projects \
+         SET status = 'not_started', error_code = NULL, error_message = NULL \
+         WHERE sync_run_id = ?1 AND status NOT IN ('not_started', 'skipped')",
+        rusqlite::params![run_id],
+    )?;
+    Ok(changed)
 }
 
 /// The zero-rows-changed refusal shared by the per-project writers: an

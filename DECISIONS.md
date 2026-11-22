@@ -11629,3 +11629,258 @@ the inventory summed one short); P3-3 the FIFO test gained a 60 s
 watchdog (a worker thread + bounded channel receive) so a gate
 regression fails the test loudly instead of hanging the suite to the
 CI timeout.
+
+### D-132 — T-115: sync phase 2 (backups) over Phase1Outcome — the store's `backup_records` writer, the BKP-010 dedup ruling under the UNIQUE column, and the E_BACKUP_FAILED abort — 2026-11-21
+
+Problem: T-115 turns §9.4 phase 2 into code: for every project the
+run will write whose target file exists, copy the file into the
+§5.5 backups tree (BKP-010 size + SHA-256 check inside the fs
+operation), record it, and on ANY error abort the run with
+`E_BACKUP_FAILED` — this run's copies deleted (`discarded`), the
+per-project rows reset (`not_started` except `skipped`), no target
+byte moved. Eight points were open: what the `backup_records` writer
+looks like and how it stays compatible with T-114's shipped reader
+(D-122); what a dedup decision writes when the schema's UNIQUE
+`backup_path` forbids a second row over the same file; how the abort
+sweep orders file deletion against record marks; which timestamps the
+records carry (D-061); where the failure injections live when the fs
+crate's `fault-injection` feature is release-off; what BKP-005's
+field list means for the envelope vs the run row under SEC-008; what
+the phase-2 reset looks like in `sync_runs`; and how the phase
+composes (transactions, blocking pool).
+
+Solution: `eunomia_store::backup_records` (new repository) +
+`eunomia_store::sync_runs::reset_projects_not_started` (the step-2
+reset) + `src-tauri/src/sync_phase2.rs` (the phase), with `lib.rs`
+mod blocks (the D-130 boundary judgment, same anchor).
+
+- _The writer and the D-122 handshake._ `insert(conn, &NewBackupRecord)`
+  takes the typed status (the full CHECK vocabulary owned here;
+  phase 2 is the only v1 producer of `ok`-at-insert and
+  `discarded`-at-insert), generates the UUIDv7 id inside the joined
+  transaction, and stores exactly the conventions D-122 fixed:
+  `source_path` = the §9.4 phase-1 RESOLVED path text (one stable
+  spelling per file), `backup_path` = the §5.5 relative layout string
+  the core builders spell, `sha256` = the full canonical digest.
+  `last_checked(conn, project_id, source_path)` answers the pair's
+  newest `ok` copy by `created_at DESC, id DESC` — the same "newest"
+  the retention window uses — terminal statuses invisible. The
+  integration suite pins the handshake end to end: rows written
+  through THIS writer over real files are pruned by
+  `backup_retention::apply` exactly the way T-114's seeded fixtures
+  were.
+- _The dedup ruling (round of the UNIQUE column)._ BKP-010's "the
+  record points to the existing one" cannot mean a second row: the
+  schema's UNIQUE `backup_path` is one row per copy, and a dedup
+  decision creates no copy. The ruling: the EXISTING `ok` row stays
+  the pair's one record (its own run, its own stamp), the phase
+  writes NO row for a dedup decision, and the outcome carries the
+  `Deduplicated { size, sha256_hex, backup_path }` fact so the run's
+  log and phase 4 see where the pair's backup lives. First spelled
+  the other way (a second row pointing at the same path), the
+  integration run refused it with the UNIQUE constraint — the schema
+  itself corrected the reading, and the test now pins it.
+- _The composition, D-130-shaped._ ONE read transaction (each
+  eligible project's name/scheme/base_name from the projects table —
+  the D-131 second-home ruling — plus the dedup digest), the copy
+  loop on `spawn_blocking` after it (SYS-001, the D-096 ordering),
+  and ONE write transaction on success (every created copy's record
+  `ok`, one `created_at` for the run). Eligibility is §9.4 step 1's
+  two conditions off `Phase1Outcome`: `ready` AND `existing_size =
+Some` (OUT-005's creation case, `unchanged`, `skipped` — nothing);
+  an empty eligible list copies nothing, writes nothing, and the run
+  continues (zero copies cannot fail). `now: jiff::Timestamp` is the
+  run's ONE backup instant (D-061): it resolves into the `BackupTime`
+  of every copy name, the DB-002 `created_at` of every record, and
+  the aborted run's `finished_at` — record and name cannot disagree
+  (the DB-002 spelling and the civil fields are pinned against
+  literals in the module's unit tests; jiff 1.0's API is
+  `to_zoned_datetime(TimeZone::UTC)`).
+- _The abort path (§9.4 phase 2 step 2)._ Files first, marks second —
+  D-122's delete-first order applied to `discarded` (a `discarded`
+  record over a live file is the lying mark the prune ruling exists
+  to avoid): the copies this run created are deleted on the blocking
+  pool (NotFound = converged, D-091), then ONE write transaction
+  writes the whole verdict — the deleted copies' records born
+  terminal (`discarded` at insert: insert-`ok`-then-mark spends a
+  transaction to reach the same cells), a deletion the filesystem
+  REFUSES keeps that record `ok` over the live verified file (the
+  never-lying-mark rule; the next run's dedup may even claim it),
+  `abort_run` finishes the run `aborted`/`E_BACKUP_FAILED`, and the
+  new `reset_projects_not_started` returns every non-`skipped`
+  verdict to `not_started` with the error columns cleared (at this
+  point in the pipeline only `unchanged` rows exist to reset; the
+  sweep is over the whole vocabulary because `abort_run` is). The
+  reset is a bulk sweep, not a state-machine edge: zero matched rows
+  is `Ok(0)` (an all-creation-case backup failure legitimately has
+  nothing to reset), unlike `mark_project_*`'s zero-row refusal.
+- _The injections and the envelope._ The `backup` parameter is the
+  copy operation (production passes `backup_target_file` itself; the
+  D-089 seam) — the fs crate's `fault-injection` feature is
+  non-default and stays release-off, so the app layer's seam is the
+  honest injector: tests delegate to the real operation until the
+  failing call, so the copies the abort sweep must delete are real
+  files on disk. The typed `E_BACKUP_FAILED` envelope carries
+  BKP-005's whole field list in `details`: project NAME (the one
+  §10 message the spec explicitly demands it in — the recorded
+  exception to the class-only default), source path, backups folder
+  (the project's §5.5 folder via the pure builder), OS code
+  (`os_code`) and error type (`os_kind`), cause (`BackupError`'s
+  Display), and §10's recommendation. The run ROW's `details` stay
+  class-only (project id + the error's paths/OS facts, no stored
+  name text — SEC-008; the split is the envelope-vs-row ruling).
+- _Store-failure postures._ A failed record transaction on the
+  success path deletes the orphaned copies best-effort (the D-091
+  sweep posture) and propagates the store error — the run row stays
+  `running`, the crash-recovery rule's case (the D-131 posture);
+  same for a failed abort transaction (files already gone, rows
+  untouched). A process death between the deletions and the abort
+  transaction leaves deleted files, no records, a `running` row —
+  the startup `interrupted` recovery's case, the same window D-122
+  recorded for its order.
+- _Idempotence by convergence._ A retried run after an abort starts
+  phase 0 anew; the aborted run's rows are history, and a copy that
+  survived a refused deletion is simply the pair's newest checked
+  copy — the retry's dedup lookup points at it. Nothing needs to
+  recognize a previous attempt's state.
+
+Tests: store — 3 unit (vocabulary round trip incl. the CHECK
+literals, the corrupt-cell refusal, error Display) + 10 integration
+in `tests/backup_records.rs` (the ok and discarded row shapes
+verbatim with the UUIDv7 id pin, the UNIQUE/both-FK refusals, the
+newest-`ok` lookup with the same-stamp id tiebreak, terminal
+statuses invisible, per-pair scoping, the empty-table None, and the
+T-114 handshake: three writer-made copies pruned by the shipped
+retention at keep 1) + 2 integration in `tests/sync_runs.rs` for the
+reset (the four-verdict mix with the `failed` row planted in plain
+SQL — phase 3's writer is T-116+'s — pinning skipped-survives,
+error-columns-cleared, fingerprints-intact, idempotence, and the
+`Ok(0)` zero-match ruling); src-tauri — 3 inline in
+`sync_phase2.rs` (the DB-002 stamp incl. truncation, the BKP-001
+civil fields, the error-kind table) + 6 in `sync_phase2_tests.rs`
+on the mock-app harness with real repo folders and a real §5.5
+tree: the success path (builder-spelled names pinned as literals,
+FIPS-oracle digests, resolved source_path, the run's one stamp, run
+row `running`, targets verbatim), the dedup (a seeded `ok` record +
+real earlier copy → no second file, no new row, the pair's record
+intact), the card's criterion with the full verdict mix (healthy
+copy swept + `discarded` history, failing project, skipped survives,
+unchanged reset, every BKP-005 field asserted by name, targets
+verbatim, `last_synced` untouched for all four), the size and digest
+mismatches (aborted, VerifyFailed kind, no records, target
+verbatim), the refused deletion (read-only backup folder, non-root:
+record stays `ok` over the live copy, run still aborted), and the
+empty-eligible run (creation case + unchanged + skipped: no copies,
+no records, no folders, run continues). Mutation check: M1 dedup
+input ignored — the dedup test red; M2 reset dropped — the unchanged
+row stayed `Unchanged`; M3 deletion sweep dropped — the swept-copies
+assertion red; all green after revert.
+
+Round-1 review addendum (D-132, same task; report
+`.opencode/reviews/t115-round1.md`, deepseek-v4.1-flash — no P0; 2×P1,
+4×P2, P3s): findings fixed here —
+
+- P1-1 (taken): BKP-005's field list reached only
+  `details.os_message`, which the frozen error UI keeps inside the
+  collapsed Details envelope (`AppErrorAlert.vue` renders the
+  "Where" row from `params.path`/`params.project` only). The envelope
+  now carries BOTH halves: `params` (`project`, `path` — UI-011's
+  Where row) and the composed diagnostic line in `details`
+  (folder, OS code + kind, cause, recommendation). The abort test
+  asserts the params and every `os_message` field by name.
+- P1-2 (taken): the dedup decision trusted the record and never
+  checked the copy it points at still exists. The copy loop now
+  verifies the recorded copy's file on the blocking pool before
+  handing the digest to the fs operation; a vanished copy loses its
+  dedup claim and a fresh copy is made (BKP-005's "no forced write
+  without a backup" — the ruling is in the module docs and this
+  entry). Pinned by `a_vanished_recorded_copy_does_not_dedup`.
+- P2-1 (taken): the failed copy's own leftover partial bytes
+  (`cleanup: Some`, the fs operation's retrier handshake, D-091) are
+  now swept with the run — `lingering_copy_path` feeds the same
+  blocking deletion pass. Pinned by
+  `the_failed_copies_leftover_bytes_are_swept_with_the_run` (a real
+  staged partial under a final-name shape).
+- P2-2 (taken): the abort sweep's removals now run §9.5's
+  transient-hold ladder (100/300/900 ms on sharing violation / access
+  denied — os 32/5, the same gate `storage::retry_transient_hold`
+  uses; the helper is `pub(crate)`, and `storage.rs` is outside this
+  task's allowed list, so the ladder is mirrored in the phase with
+  the same gate and pauses, documented).
+- P2-3 (taken): the success-path transaction comment still claimed
+  dedup claims write rows — corrected to the UNIQUE ruling.
+- P2-4 (taken): (a) the record-transaction failure branch is now
+  pinned (`a_record_transaction_failure_cleans_the_copies_and_
+leaves_the_run_running`: a stale record claiming the run's exact
+  §5.5 name under a historic source spelling → the copy is made, the
+  insert hits UNIQUE, the orphan is swept, the store error
+  propagates, the run row stays `running`); (b) the abort test also
+  asserts the run row's details do NOT contain the project name (the
+  SEC-008 split, now verified, not just documented).
+- P3-3 (taken): a refused deletion is now a class-only count in the
+  abort details ("N copy(ies) of this run could not be deleted").
+- P3-9 (taken): the store constraint tests pin the constraint itself
+  (`SqliteFailure { code: ConstraintViolation }` + the UNIQUE/FOREIGN
+  KEY message) instead of `matches!(Sql(_))`, and the discarded-row
+  test asserts the full verbatim shape.
+- P3-1 (declined, recorded): `finished_at` stays the run's one
+  injected instant — §6.2 pins no abort-stamp accuracy, a second
+  clock parameter breaks the determinism the fixed instant buys, and
+  in production both stamps come from the same real clock within one
+  run; the phase-1 abort reads `now_utc()` because phase 1 owns no
+  instant of its own.
+- P3-2 (superseded by P1-1): the name now rides `params` for the UI;
+  the composed `os_message` keeps it too (the acceptance criterion
+  reads over the whole envelope).
+- P3-4 (declined, recorded): the `db002_stamp` mirror stays (the
+  store's helper reads the real clock; `values.rs` is outside this
+  task's allowed list) — the unit test pins the literal, the D-130
+  mirror posture.
+- P3-5 (declined, recorded): the `expect` on a dedup outcome without
+  a lookup names the INJECTED operation's contract — production's
+  `backup_target_file` returns `Deduplicated` only for a digest it
+  was handed, so the arm is unreachable outside a lying injector.
+- P3-6/P3-7/P3-8 → follow-up cards for the board (below).
+
+Follow-ups for the board (the orchestrator cards them): consolidate
+the three `sync_runs_to_app_error` spellings (+ the new
+`backup_records` mapper) when `commands.rs` unfreezes; the
+`backup_records` index for the per-pair lookup (D-122's future schema
+task, now N lookups per sync); an owner for pre-existing orphan `.bak`
+debris (D-091's hand-off — neither retention nor this sweep knows
+copies no record references); ARCHITECTURE.md rows for
+`sync_phase2`/`backup_records` (outside this task's allowed list, the
+D-130 precedent).
+
+Round-2 review addendum (D-132, same task; report
+`.opencode/reviews/t115-round2.md`, hy4-flash-free — no P0/P1): the
+reviewer verified every round-1 fix in place and correct (the params
+split, the dedup existence gate, the leftover sweep, the ladder's
+gate and pauses against `storage::retry_transient_hold`, the
+refused-deletion count), the spec/compat claims (eligibility, BKP-010
+ordering, the abort verdict, the T-114 handshake, SEC-008, frozen
+zones), and re-ran the suites. Findings fixed here —
+
+- P2-1 (taken): the refused-deletion count now has its test — the
+  refused-deletion test asserts the phrase in the run row's details,
+  and the normal abort test asserts its ABSENCE (a fully swept run
+  carries no refusal note).
+- P2-2 (taken): the ladder is pinned through an injectable seam
+  (`remove_copy_with(remove, path)`, the production wrapper closing
+  over `std::fs::remove_file`): two transient holds (os 32) then
+  success = three attempts; a non-transient refusal (os 28) = one
+  attempt with the code preserved; NotFound = converged; an eternal
+  hold (os 5) surfaces after the bounded ladder.
+- P2-3 (taken): the dedup TOCTOU the round-1 gate left open — the
+  recorded copy can vanish BETWEEN the pre-call gate and the digest
+  decision (the source-hash window). A dedup answer is now
+  re-checked against the disk; a vanished copy re-copies with no
+  digest (`rebackup_without_digest`), so the write keeps its restore
+  point. Pinned by
+  `a_copy_vanishing_inside_the_hash_window_is_made_fresh` (the
+  injector deletes the recorded copy and answers `Deduplicated` —
+  the phase answers with a real copy).
+
+The round-2 non-findings confirm the recorded rulings (the UNIQUE
+dedup ruling, `finished_at`, the mirror, the expect posture) and the
+follow-up list below.

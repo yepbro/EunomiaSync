@@ -26,6 +26,11 @@
 //!   status, `abort_run` finishes the run `aborted` without touching
 //!   the counters or the per-project rows — and an update that
 //!   matches no row is the typed refusal, never a silent success;
+//! * phase 2's abort reset (T-115): `reset_projects_not_started`
+//!   returns every verdict but `skipped` to `not_started` with the
+//!   error columns cleared and the fingerprints intact — a bulk
+//!   sweep whose zero-row answer is `Ok(0)`, not the per-project
+//!   writers' refusal;
 //! * the corrupt-cell policy (D-039): a `status` cell tampered
 //!   outside the CHECK vocabulary surfaces as the typed `Member`
 //!   refusal at the read, never as a guess.
@@ -39,6 +44,7 @@ use eunomia_store::storage::{open_db, run_migrations};
 use eunomia_store::sync_runs::{
     NewSyncRunProject, SyncRunProjectStatus, SyncRunStatus, SyncRunsError, abort_run,
     create_running, get, list_projects, mark_project_skipped, mark_project_unchanged,
+    reset_projects_not_started,
 };
 use rusqlite::Connection;
 
@@ -603,4 +609,106 @@ fn a_tampered_status_cell_is_the_typed_member_refusal() {
             found: "queued".to_owned(),
         })
     );
+}
+
+// ---- phase 2's abort reset (T-115) -----------------------------------
+
+#[test]
+fn reset_projects_not_started_returns_every_verdict_except_skipped() {
+    // §9.4 phase 2 step 2 (the E_BACKUP_FAILED abort): the rows a
+    // run earned before its backups failed go back to `not_started`
+    // with their error columns cleared, while `skipped` keeps its
+    // refusal (the spec's own "except `skipped`") and every row's
+    // phase-0 fingerprint (target_path/build_hash) survives. The
+    // `failed` row is planted with plain SQL — its store writer is
+    // phase 3's (T-116+); the CHECK accepts the member, so no
+    // constraint is bypassed, and the reset's sweep must cover the
+    // whole vocabulary, not just the states today's writers produce.
+    let (conn, _guard) = runs_db("reset");
+    let skipped = seed_project(&conn, 1);
+    let unchanged = seed_project(&conn, 2);
+    let failed = seed_project(&conn, 3);
+    let untouched = seed_project(&conn, 4);
+    let run = create_running(
+        &conn,
+        STARTED_AT,
+        &[
+            run_project(&skipped, 1),
+            run_project(&unchanged, 2),
+            run_project(&failed, 3),
+            run_project(&untouched, 4),
+        ],
+    )
+    .expect("creating the run should work");
+    mark_project_skipped(
+        &conn,
+        &run.id,
+        &skipped,
+        "E_PROJECT_UNAVAILABLE",
+        "folder is gone",
+    )
+    .expect("the skip verdict should work");
+    mark_project_unchanged(&conn, &run.id, &unchanged).expect("the unchanged verdict should work");
+    conn.execute(
+        "UPDATE sync_run_projects SET status = 'failed', error_code = 'E_WRITE_FAILED', \
+         error_message = 'disk fell off' \
+         WHERE sync_run_id = ?1 AND project_id = ?2",
+        rusqlite::params![run.id, failed],
+    )
+    .expect("planting the phase-3 verdict should work");
+
+    let changed = reset_projects_not_started(&conn, &run.id).expect("the reset should work");
+
+    assert_eq!(changed, 2, "exactly the unchanged and failed rows reset");
+    let rows = list_projects(&conn, &run.id).expect("reading the rows should work");
+    // `skipped` survives verbatim — refusal and all.
+    assert_eq!(rows[0].status, SyncRunProjectStatus::Skipped);
+    assert_eq!(rows[0].error_code.as_deref(), Some("E_PROJECT_UNAVAILABLE"));
+    assert_eq!(rows[0].error_message.as_deref(), Some("folder is gone"));
+    // The reset rows: back to `not_started`, error columns cleared,
+    // fingerprint intact (the row still names what phase 0 built).
+    for row in &rows[1..3] {
+        assert_eq!(row.status, SyncRunProjectStatus::NotStarted);
+        assert_eq!(row.error_code, None);
+        assert_eq!(row.error_message, None);
+        assert!(row.target_path.is_some());
+        assert!(row.build_hash.is_some());
+    }
+    // A row that was already `not_started` never matched the sweep.
+    assert_eq!(rows[3].status, SyncRunProjectStatus::NotStarted);
+
+    // Idempotent: a second sweep finds nothing left to reset.
+    assert_eq!(
+        reset_projects_not_started(&conn, &run.id).expect("the second sweep should work"),
+        0
+    );
+}
+
+#[test]
+fn reset_projects_not_started_answers_zero_where_nothing_matches() {
+    // The bulk-sweep ruling: a run whose every row is `not_started`
+    // or `skipped` (an all-creation-case backup failure) has nothing
+    // to reset, and that is `Ok(0)` — never the per-project writers'
+    // zero-row refusal, because the abort fires whatever the run's
+    // verdict mix is. An unknown run id is the same honest zero.
+    let (conn, _guard) = runs_db("reset-zero");
+    let project = seed_project(&conn, 1);
+    let run = create_running(&conn, STARTED_AT, &[run_project(&project, 1)])
+        .expect("creating the run should work");
+
+    assert_eq!(
+        reset_projects_not_started(&conn, &run.id).expect("the sweep should work"),
+        0
+    );
+    assert_eq!(
+        reset_projects_not_started(&conn, "no-such-run").expect("the sweep should work"),
+        0
+    );
+    // The run row is the sweep's own business only through the
+    // caller's `abort_run` — the reset never finishes a run.
+    let row = get(&conn, &run.id)
+        .expect("reading the run should work")
+        .expect("the run must persist");
+    assert_eq!(row.status, SyncRunStatus::Running);
+    assert_eq!(row.finished_at, None);
 }

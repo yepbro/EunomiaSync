@@ -6,6 +6,7 @@
 //! tested independently of the UI layer (see DECISIONS.md D-010).
 
 pub mod action_log;
+pub mod backup_records;
 pub mod backup_retention;
 pub mod build_snapshot;
 pub mod data_sets;

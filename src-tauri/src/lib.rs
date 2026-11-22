@@ -97,6 +97,19 @@ pub(crate) mod sync_phase0;
 // the outcome).
 pub(crate) mod sync_phase1;
 
+// The sync pipeline's phase 2 — backups (spec §9.4 phase 2, §7.6
+// BKP-001…011 through eunomia-fs's verified copy, §10's
+// E_BACKUP_FAILED row, OUT-006/OUT-019; T-115): for every `ready`
+// project whose target file exists, one copy into the §5.5 backups
+// tree (size + SHA-256 checked, BKP-010) and one `backup_records`
+// row through the new store writer; any error aborts the run before
+// a single target byte moves — this run's copies deleted with
+// `discarded` history rows, the per-project rows reset to
+// `not_started` (except `skipped`), and the typed envelope carrying
+// BKP-005's field list. After this phase succeeds the run cannot be
+// canceled (§9.4 phase 2 step 3).
+pub(crate) mod sync_phase2;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -545,6 +558,9 @@ mod sync_phase0_tests;
 
 #[cfg(test)]
 mod sync_phase1_tests;
+
+#[cfg(test)]
+mod sync_phase2_tests;
 
 #[cfg(test)]
 mod tests {
