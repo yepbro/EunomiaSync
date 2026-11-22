@@ -51,7 +51,12 @@
 //!   leaving every status untouched (the files already removed stay
 //!   removed — the filesystem has no rollback), and the next run
 //!   converges;
-//! * an empty table and pairs within the limit are no-ops.
+//! * an empty table and pairs within the limit are no-ops;
+//! * the retention window's `EXPLAIN QUERY PLAN` walks the pair index
+//!   `ix_backup_records_pair_lookup` rather than the table — the
+//!   T-272 plan pin, with the window's selection cross-checked
+//!   against what `apply` marks (the D-142 `tests/schema_v2.rs`
+//!   posture).
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1098,5 +1103,293 @@ fn an_empty_table_and_pairs_within_the_limit_change_nothing() {
             .map(|row| row.1.as_str())
             .collect::<Vec<_>>(),
         vec!["ok", "ok", "ok"]
+    );
+}
+
+/// The repo's `ix_<table>_<purpose>` name of the schema v2 index —
+/// the same value `tests/schema_v2.rs` pins its plan test to. The
+/// retention window reads the pair/stamp columns that index was
+/// approved for, so its pin discriminates on the index's name too.
+const PAIR_INDEX: &str = "ix_backup_records_pair_lookup";
+
+/// The exact statement `backup_retention::apply` runs to select the
+/// prunable rows (crates/eunomia-store/src/backup_retention.rs, spelled
+/// inside the function body), mirrored here BYTE FOR BYTE — the same
+/// whitespace — so a future edit to either text can be diffed
+/// mechanically against the other. `EXPLAIN QUERY PLAN` needs the
+/// statement text and the module keeps it private — the D-142
+/// `LAST_CHECKED_SQL` mirror posture of `tests/schema_v2.rs`. The
+/// cross-check below makes a semantic drift fail the suite: on this
+/// fixture the mirrored selection must be exactly the set of rows
+/// `apply` marks `pruned`. Three drifts each change the answer on
+/// this data and were verified red before the pin landed: dropping
+/// the `status = 'ok'` predicate (the terminal row is seeded NEWER
+/// than every `ok` row of its pair, so it would consume a window rank
+/// and push the newest `ok` copy into the prune set), dropping the
+/// `PARTITION BY` (the second project's within-limit copy then ranks
+/// globally into the prune set, alongside pair one's newest copy),
+/// and flipping the `id DESC` tiebreak (the
+/// same-stamp pair swaps its survivor). Drifts that keep the answer
+/// on this data — a purely syntactic rewrite, or the outer
+/// `ORDER BY backup_path`, which orders the walk, not the selection —
+/// are the mirror's residual, the same honesty D-142 records for its
+/// own mirror.
+const PRUNABLE_ROWS_SQL: &str = "WITH ranked AS (
+                 SELECT id, backup_path,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY project_id, source_path
+                            ORDER BY created_at DESC, id DESC
+                        ) AS rn
+                   FROM backup_records
+                  WHERE status = 'ok'
+             )
+             SELECT id, backup_path
+               FROM ranked
+              WHERE rn > ?1
+              ORDER BY backup_path";
+
+/// The retention window's plan pin (T-272, the D-142 follow-up):
+/// `apply` reads the same pair/stamp columns schema v2's index was
+/// approved for (`ix_backup_records_pair_lookup` over `(project_id,
+/// source_path, status, created_at)`), and the window's plan must go
+/// through that index — a regression to a bare table scan cannot land
+/// unnoticed.
+///
+/// The pinned truth, read off a migrated database before the pin was
+/// written: the window has no equality terms (it must visit every
+/// pair's `ok` rows), so the planner cannot seek — the `tests/
+/// schema_v2.rs` pin's shape (`SEARCH backup_records USING INDEX …`,
+/// banning `SCAN backup_records`) does not transplant literally. The
+/// plan reads `SCAN backup_records USING INDEX
+/// ix_backup_records_pair_lookup`: still a walk over every row, but
+/// through the narrow, pair-ordered index instead of the table, the
+/// `status` filter riding the walk and the partition grouping coming
+/// free from the index order. The discriminating assertion is
+/// therefore the fragment itself: on a v1 database without the index
+/// the same statement plans as a bare `SCAN backup_records` and the
+/// pin goes red (verified before pinning). The temp b-trees the plan
+/// still pays — for the window's `created_at DESC, id DESC` and the
+/// outer `ORDER BY backup_path` — are today's observed bookkeeping,
+/// left unpinned: their spelling is the planner's (D-142's phrasing
+/// boundary), and an index shape that could remove them is T-274's
+/// owner decision, not this pin's.
+#[test]
+fn the_retention_window_plan_walks_the_pair_index() {
+    let (conn, _guard, data_dir) = retention_db("plan-pin");
+    let project_one = seed_project(&conn, 1);
+    let project_two = seed_project(&conn, 2);
+    let agents_source = "/repos/repo-1/AGENTS.md";
+    let claude_source = "/repos/repo-1/CLAUDE.md";
+
+    // Pair one: three `ok` copies plus a terminal row seeded NEWER
+    // than every `ok` — the `status = 'ok'` predicate's discriminator.
+    seed_record(
+        &conn,
+        "rec-a1",
+        1,
+        &project_one,
+        "Project 1",
+        agents_source,
+        BaseName::AgentsMd,
+        "ok",
+    );
+    seed_record(
+        &conn,
+        "rec-a2",
+        2,
+        &project_one,
+        "Project 1",
+        agents_source,
+        BaseName::AgentsMd,
+        "ok",
+    );
+    seed_record(
+        &conn,
+        "rec-a3",
+        3,
+        &project_one,
+        "Project 1",
+        agents_source,
+        BaseName::AgentsMd,
+        "ok",
+    );
+    seed_record(
+        &conn,
+        "rec-a4",
+        4,
+        &project_one,
+        "Project 1",
+        agents_source,
+        BaseName::AgentsMd,
+        "pruned",
+    );
+
+    // Pair two, same project: a same-stamp tie — the `id DESC`
+    // tiebreak's discriminator. Two real UUIDv7 ids from the store's
+    // own generator: strictly increasing within one process (D-031),
+    // so `older_id` predates `newer_id` by construction. Same stamp,
+    // distinct digests (else the builders would spell one name for
+    // both rows against the UNIQUE column).
+    let older_id = new_id();
+    let newer_id = new_id();
+    assert!(
+        older_id < newer_id,
+        "new_id must be strictly increasing in one process (D-031)"
+    );
+    let older_digest = "ab".repeat(32);
+    let newer_digest = "cd".repeat(32);
+    let older_path = backup_relative_path(
+        &ProjectId::new(project_one.clone()),
+        "Project 1",
+        CoreScheme::A,
+        CoreBaseName::ClaudeMd,
+        fixture_time(5),
+        &older_digest,
+    )
+    .expect("the fixture's builder inputs are valid by construction");
+    let newer_path = backup_relative_path(
+        &ProjectId::new(project_one.clone()),
+        "Project 1",
+        CoreScheme::A,
+        CoreBaseName::ClaudeMd,
+        fixture_time(5),
+        &newer_digest,
+    )
+    .expect("the fixture's builder inputs are valid by construction");
+    seed_record_with_path(
+        &conn,
+        &older_id,
+        &project_one,
+        claude_source,
+        &older_path,
+        "ok",
+        &stamp(5),
+        &older_digest,
+    );
+    seed_record_with_path(
+        &conn,
+        &newer_id,
+        &project_one,
+        claude_source,
+        &newer_path,
+        "ok",
+        &stamp(5),
+        &newer_digest,
+    );
+
+    // Pair three, second project: a single copy inside its pair's
+    // limit — the `PARTITION BY`'s discriminator (dropped, it ranks
+    // globally and enters the prune set). Its stamp is deliberately
+    // an OLD one, not the table's newest: the globally newest row
+    // would take the one global keep slot and survive, so this row
+    // would not witness the drift (the other pairs' newest copies
+    // falling into the prune set would still turn the suite red, but
+    // the row seeded for this discriminator must demonstrate exactly
+    // its own mechanism).
+    seed_record(
+        &conn,
+        "rec-b1",
+        1,
+        &project_two,
+        "Project 2",
+        "/repos/repo-2/AGENTS.md",
+        BaseName::AgentsMd,
+        "ok",
+    );
+
+    // The pin: the window's plan must walk the pair index, not scan
+    // the table (see the doc comment for the pin's shape and its v1
+    // red). The whole plan rides in the failure message, so a
+    // regression is diagnosed from the assertion alone.
+    let details: Vec<String> = {
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {PRUNABLE_ROWS_SQL}"))
+            .expect("the plan statement should prepare");
+        let rows = stmt
+            .query_map([1_i64], |row| row.get::<_, String>(3))
+            .expect("plan rows should be readable");
+        rows.map(|row| row.expect("every plan row should decode"))
+            .collect()
+    };
+    let plan = details.join("; ");
+    assert!(
+        plan.contains(&format!("SCAN backup_records USING INDEX {PAIR_INDEX}")),
+        "the retention window must walk the pair index, got: {plan}"
+    );
+    // Exactly one SCAN of the table — the single indexed walk: a
+    // plan that gains a second bare scan of `backup_records` (an
+    // answer-preserving rewrite that re-reads the table) is a
+    // slowdown the pin exists to catch, not today's shape.
+    assert_eq!(
+        plan.matches("SCAN backup_records").count(),
+        1,
+        "the window must read the table exactly once, through the index, got: {plan}"
+    );
+
+    // The mirror cross-check, half one: the mirrored statement's
+    // selection on this fixture is the requirement's answer, spelled
+    // as literals — the pair's two oldest `ok` copies past the
+    // keep-1 window (the newest `rec-a3` and the terminal `rec-a4`
+    // stay outside), the tie's older id (the newer id survives),
+    // nothing from the within-limit pair.
+    let via_mirror: Vec<String> = {
+        let mut stmt = conn
+            .prepare(PRUNABLE_ROWS_SQL)
+            .expect("the mirrored statement should prepare");
+        let rows = stmt
+            .query_map([1_i64], |row| row.get::<_, String>(0))
+            .expect("the mirror rows should be readable");
+        rows.map(|row| row.expect("every mirror row should decode"))
+            .collect()
+    };
+    let mut expected = vec!["rec-a1".to_owned(), "rec-a2".to_owned(), older_id.clone()];
+    expected.sort();
+    let mut mirror = via_mirror;
+    mirror.sort();
+    assert_eq!(
+        mirror, expected,
+        "the mirrored selection is the prunable set the window semantics spell"
+    );
+
+    // Half two: the production selection agrees. `apply` at keep = 1
+    // over a fixture that writes NO copy files: every prunable row's
+    // removal converges on NotFound (the D-091 posture) and the
+    // record is marked, so the set of rows the run marks is exactly
+    // the set the window selected.
+    let outcome = backup_retention::apply(&conn, &data_dir, 1)
+        .expect("retention over the plan fixture should succeed");
+    assert_eq!(outcome.pruned, 3, "exactly the mirrored rows get marked");
+    assert!(
+        outcome.failures.is_empty(),
+        "every removal converges: the fixture writes no copy files"
+    );
+
+    // And the table reads back exactly that: the three window-past
+    // rows `pruned`, the survivors `ok`, and the seeded terminal row
+    // still `pruned` — untouched, a terminal row is never rewritten.
+    let mut statuses: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT id, status FROM backup_records")
+            .expect("the status read-back should prepare");
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("the status rows should be readable");
+        rows.map(|row| row.expect("every status row should decode"))
+            .collect()
+    };
+    statuses.sort();
+    let mut expected_statuses: Vec<(String, String)> = vec![
+        ("rec-a1".to_owned(), "pruned".to_owned()),
+        ("rec-a2".to_owned(), "pruned".to_owned()),
+        ("rec-a3".to_owned(), "ok".to_owned()),
+        ("rec-a4".to_owned(), "pruned".to_owned()),
+        (older_id, "pruned".to_owned()),
+        (newer_id, "ok".to_owned()),
+        ("rec-b1".to_owned(), "ok".to_owned()),
+    ];
+    expected_statuses.sort();
+    assert_eq!(
+        statuses, expected_statuses,
+        "the window-past rows are marked, every survivor keeps its ok"
     );
 }

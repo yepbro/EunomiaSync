@@ -13503,6 +13503,65 @@ retention-window plan pin; pre-migration copies retention; the
 version-agnostic index inventory; alternative index shapes). The
 cards are the tracking unit; this note only records their existence.
 
+Follow-up addendum (T-272, this entry's own "retention-window plan
+pin" card; the owner ruled "pin it now" by moving the card into the
+dev cycle): the retention window's plan is pinned in
+`tests/backup_retention.rs`
+(`the_retention_window_plan_walks_the_pair_index`). The reading, taken
+by hand through `open_db` + `run_migrations` before the pin was
+written: the window has no equality terms (it must visit every pair's
+`ok` rows), so the planner cannot seek — the plan reads
+`SCAN backup_records USING INDEX ix_backup_records_pair_lookup`: a
+full walk, but through the pair-ordered index instead of the table,
+the `status = 'ok'` filter riding the walk and the partition grouping
+coming free from the index order (the entry's "likely secondary
+beneficiary, noted without a claim" is now a pinned fact). The pin
+therefore does not transplant the `LAST_CHECKED_SQL` plan test's shape
+(`SEARCH …` plus banning `SCAN backup_records`): here the walk IS a
+scan and `SCAN backup_records` is a prefix of the wanted fragment, so
+the discriminating assertion is the whole fragment — on a v1 database
+without the index the same statement plans as a bare `SCAN
+backup_records` and the pin goes red (M1, run as a throwaway probe
+against the real `0001_init.sql` fixture, never committed). The
+statement text lives inside `apply`'s body, so the mirror posture
+carries over (`PRUNABLE_ROWS_SQL`) with `apply`-specific mechanics:
+the mirrored selection must equal the set of rows `apply` marks
+`pruned` on the same fixture (keep = 1, no copy files written — every
+removal converges on NotFound and the record is marked, the D-091
+posture), and the fixture carries three discriminators, each verified
+red against a drifted mirror before pinning (throwaway probes,
+removed): the terminal row seeded NEWER than every `ok` of its pair
+(dropping `status = 'ok'` pushes the newest `ok` into the prune set),
+a same-stamp tie on `new_id()` ids (flipping `id DESC` swaps the
+survivor), and a second project's within-limit pair seeded at an OLD
+stamp (dropping `PARTITION BY` ranks it globally into the prune set —
+an old stamp, because the globally newest row would take the one
+global keep slot and survive instead). Left unpinned on purpose: the
+plan's temp b-trees (the window's `created_at DESC, id DESC`; the
+outer `ORDER BY backup_path`) — planner-spelled bookkeeping under the
+same phrasing boundary as the entry above, and an index shape that
+could remove them is the alternative-shapes card T-274's owner
+decision; the outer `ORDER BY backup_path` orders the walk, not the
+selection, so no answer-preserving fixture can discriminate it — it
+joins the mirror's recorded residual. The same boundary covers the
+asserted fragment itself: `SCAN … USING INDEX …` is the bundled
+SQLite's spelling, so a `libsqlite3-sys` bump can turn the pin red
+with no project regression — that red is a re-read-and-re-pin event,
+not a bug. The mirror is byte-identical to the production literal
+(same whitespace), so the pair can be diffed mechanically. No
+production code changed. Honest staleness recorded:
+`backup_retention.rs`'s module doc still says the window "scans that
+whole history each run" and defers the index as a future "schema
+task" (written before this index existed); src/ was outside this
+task's allowed surfaces (tests/** + this addendum), so the sentence
+is reported for a docs-surface follow-up card (the orchestrator cards
+it — executor subagents do not create board cards), not silently.
+
+Orchestrator addendum (merge, 2026-11-22): that card now exists —
+"Follow-up T-272: модуль-док backup_retention.rs …" in the board's
+INBOX for owner triage. The card is the tracking unit; this note
+only records its existence.
+
 ### D-143 — T-255: the file log's size half — a custom daily+10 MB writer with same-day parts; the Windows eprintln exposure retired — 2026-11-22
 
 Problem: the owner's 2026-11-21 ruling "ротация 5 файлов × 10 МБ
