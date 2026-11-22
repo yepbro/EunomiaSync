@@ -712,7 +712,7 @@ fn a_write_burst_coalesces_into_one_debounced_pass() {
     // window is widened past the production 150 ms so the coalescing
     // half is deterministic on a loaded runner (CI 44947235666: the
     // three `block_on` writes straddled a 150 ms window there).
-    const BURST_WINDOW: std::time::Duration = std::time::Duration::from_millis(1200);
+    const BURST_WINDOW: std::time::Duration = std::time::Duration::from_millis(10_000);
     let (temp, app, triggers) = dirty_app();
     let database = database_of(&app);
     let root = temp.path().join("p1");

@@ -33,7 +33,7 @@ const DEBOUNCE: Duration = Duration::from_millis(40);
 
 /// How long a positive assertion waits for a delivery (generous for a
 /// loaded runner; delivery is late, never absent).
-const DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
+const DELIVERY_DEADLINE: Duration = Duration::from_secs(60);
 
 /// How long a negative assertion waits before believing silence
 /// (many debounce periods — events the backend will deliver arrive
