@@ -240,11 +240,15 @@ pub fn run() {
     // Tauri plugins (spec §5.3 table, SEC-001): all four are invoked from
     // Rust only — the webview gets neither their JavaScript packages nor
     // any `opener:`/`dialog:`/`updater:` permission, so their commands are
-    // unreachable from the UI. `capabilities/default.json` stays
-    // plugin-free and only application commands (`dialog_pick_folder`,
-    // `app_open_data_folder`, later `update_*`) cross the
-    // IPC boundary. `config_tests.rs` pins the exact plugin set and the
-    // registration order below.
+    // unreachable from the UI. `capabilities/default.json` carries one
+    // conscious grant, the event-subscription pair
+    // `core:event:allow-listen`/`-unlisten` (T-246/D-116); application
+    // commands are not capability-gated, §7.10 events cross the IPC
+    // boundary as Rust-emitted notifications the webview may subscribe
+    // to, and only application commands (`dialog_pick_folder`,
+    // `app_open_data_folder`, later `update_*`) cross it as calls.
+    // `config_tests.rs` pins the exact plugin set and the registration
+    // order below.
     let tauri_builder = tauri::Builder::default();
 
     // `single-instance` (SYS-006: a second launch must not start a second

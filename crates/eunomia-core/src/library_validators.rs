@@ -182,8 +182,10 @@
 //! # Errors
 //!
 //! Every failure is a typed [`LibraryFieldError`] variant naming the
-//! field and the broken rule — never a string (the D-062/D-071/D-072/
-//! D-075 precedent of typed errors at core boundaries). The
+//! field and the broken rule — never a string (the D-062/D-075
+//! precedent of typed errors at core boundaries; D-071/D-072 joined
+//! that precedent's group and were dropped from DECISIONS.md —
+//! D-151). The
 //! command layer maps the length, line-break and NUL failures to
 //! `E_VALIDATION` (§8) and [`LibraryFieldError::ReservedContent`] to
 //! `E_CONTENT_RESERVED` (§7.10's registry, D-034) in a later task —

@@ -989,6 +989,8 @@ has no size rotation, so the ruling's per-file 10 MB half is honestly
 unenforced). The decision, its boundaries and the tests live in D-129;
 this entry's rotation/name claims stand as recorded.
 
+_(Numbering note: D-033 has no entry and no trace in this file's history — consistent with a number spent in a parallel task whose entry never landed; the gap is recorded here, nothing renumbered.)_
+
 ### D-034 — AppError: the §7.10 wire DTO with a 20-code registry, exported via `Builder::typ` — 2026-11-18
 
 Problem: T-013 turns §7.10's `AppError` (every command returns
@@ -4344,6 +4346,8 @@ absence, verbatim body splicing, and the five panic postures (B,
 empty marker, marker with `\n`, marker with `\r`, body with a framing
 break) — plus doc tests.
 
+_(Numbering note: D-066 has no entry and no trace in this file's history — consistent with a number spent in a parallel task whose entry never landed; the gap is recorded here, nothing renumbered.)_
+
 ### D-067 — The ALG-033 existing-file comparison: byte-exact drop of the last marker line's full span — 2026-11-19
 
 Task T-043 (depends on T-038's marker format). Problem: ALG-033/D-24
@@ -4665,8 +4669,11 @@ with the LIB-032 warning icon. The card names "ALG-063 (§9.7)", but
 §9.7 ends at ALG-062 and no ALG-063 exists in docs/spec.md — the
 rule's canon is the §7.3 acceptance row LIB-032/034/MAIN-018,019:
 "Skipping a level (for example, `##` then `####`) is allowed and
-marked with a warning icon" (the same sentence D-072 cites for "the
-icon is UI, not validation"). Left open: whether a skip reads
+marked with a warning icon" (the same sentence the D-072 entry cited
+for "the icon is UI, not validation" — the entry was written by its
+task and later dropped from this file by the parallel T-241 docs
+commit, `ee15a9b`; the ruling survives in that commit's history and
+in this quotation). Left open: whether a skip reads
 branches or adjacent headings, what one report covers when several
 levels are skipped at once, and which facts the DTO carries.
 
@@ -4692,7 +4699,10 @@ report per offending edge however many levels it skips (H2 → H5 is
 one skip, not two). Not skips: closes and siblings (level L or
 higher closes, ALG-060), the first heading (no pair), the end of
 the list (no pair), instruction-only and empty lists. The function
-rejects nothing — skips are legal input (D-072); it supplies facts.
+rejects nothing — skips are legal input (the LIB-032 row quoted above;
+the D-072 entry recording that reading was dropped from this file by
+the T-241 docs commit — D-151); it supplies
+facts.
 
 The DTO is the minimal fact a warning icon needs: `from_index` (the
 parent), `to_index` (the row the icon marks — the heading that
@@ -4724,8 +4734,9 @@ where the adjacent and parent-edge readings split (`H2, H5, H4` and
 `H2, H4, H4`: the closing/sibling heading under a gap is NOT
 re-reported) and `expected_level` saturating for a hand-built
 degenerate pair. Four proptest properties (256 cases, fixed
-seed 48 — the D-053/D-070/D-071/D-072 run policy, which this entry
-joins): the reports equal the independently recomputed too-deep
+seed 48 — the D-053/D-070 run policy (the D-071/D-072 entries joined
+the group and were dropped from this file by the T-241 docs commit —
+D-151), which this entry joins): the reports equal the independently recomputed too-deep
 adjacent-heading pairs; every report is a real parent edge; interleaved
 instructions change only the indices; determinism.
 
@@ -4870,7 +4881,9 @@ character }` — the index counts code points, the module's unit —
 `DescriptionTooLong { length }`, `UnknownColor
 { value }`, `UnknownFileName { value }`) — never a string — so the
 command layer can map any of them to `E_VALIDATION` (§8) on the
-D-062/D-071/D-072 precedent of typed errors at core boundaries.
+D-062 precedent of typed errors at core boundaries (the D-071/D-072
+entries joined that precedent's group and were dropped from this file
+by the T-241 docs commit — D-151).
 
 Tests: the DoD as boundary pins — name 0-after-trim (empty, spaces,
 Unicode whitespace mixes) / 1 / 100 / 101, trim-before-count (100
@@ -5407,6 +5420,8 @@ hostile-name end-to-end path, the whole hostile battery run
 through the path builder (three `Normal` components each), and
 the length bounds (file = `<file>.19.8.bak` + 3 dots; dir ≤
 36+2+40).
+
+_(Numbering note: D-081 has no entry and no trace in this file's history — consistent with a number spent in a parallel task whose entry never landed; the gap is recorded here, nothing renumbered.)_
 
 ### D-082 — Version snapshots and hashes: hand-rolled canonical JSON under the allow-list, exclusion by construction — 2026-11-19
 
@@ -12570,6 +12585,10 @@ rationale (the config belongs to no tsconfig project); the count
 interpolates through the composer's `n()` ("1,000 projects tracked",
 pinned). Declined: reconciling spec §12's dangling NFR-004…006 IDs —
 `docs/spec.md` is outside this task's file scope (a docs card material).
+(T-250 reconciliation: the IDs are now defined — spec §12.5; the
+requirement is the §7 error envelope and UI-020's `message_key` +
+`params`, the catalog above serves it, and the first consumer landed
+as D-113.)
 Round 2 (hy4-flash-free): no P0/P1/P2; 4 × P3, all applied. The
 submit-input `value` check compared the element's source-cased
 `rawName` (an uppercase `<INPUT type="submit">` slipped by) — it now
@@ -15171,3 +15190,166 @@ the IPC-contract prose's 8-vs-16 command list; the backup_retention
 module-doc staleness; the paths.rs planned-responsibility header).
 The cards are the tracking unit; this note only records their
 existence.
+
+### D-151 — T-250: the docs-pass package — the stale-claim census closed against the current code, the burned D-071/D-072 references re-anchored, the D-033/D-066/D-081 gaps annotated, NFR-004…006 defined, and REL-001 brought to the CI fact — 2026-11-22
+
+Problem: the 2026-11-21 DECISIONS audit
+(`.opencode/audits/decisions-open-items-2026-11-21.md`, owner-local)
+left one accepted package (T-250): a docs pass over the stale-claim
+backlog (cluster C plus the D-116 deferral bullet), the two dangling
+D-numbers, the unexplained numbering gaps, the dangling NFR IDs D-110
+declined to reconcile, and the REL-001 Ubuntu drift D-060 flagged for
+"a future spec revision" — this entry is that revision. Rule 11
+posture: every rewritten claim was verified against the current
+code/CI before rewriting; claims that turned out already true were
+left alone and are listed as such.
+
+Solution, per item of the card:
+
+- _Item 1, the stale claims — four spec/app spots were still lying,
+  fixed; one audit claim was still open, closed in this commit._
+  `src-tauri/src/lib.rs`'s plugin comment ("`capabilities/default.json`
+  stays plugin-free and only application commands … cross the IPC
+  boundary"), `src-tauri/src/recovery_tests.rs`'s "The empty-capability
+  contract" comment, spec §5.6 SEC-001's "capabilities lists only the
+  app commands", and ARCHITECTURE.md's "the capability grants it no
+  permissions at all (`permissions: []`, DECISIONS.md D-024)" — all
+  four now state the truth the capability file has carried since
+  T-246: the file grants exactly `core:event:allow-listen` plus
+  `core:event:allow-unlisten` (pinned by
+  `config_tests.rs::capability_grants_the_webview_only_event_listening`),
+  application commands are not capability-gated and need no grant,
+  plugins are granted nothing, emits stay Rust-only. The audit's core
+  `lib.rs` module-list claim was still open (25 `pub mod`s, 14 `//!`
+  bullets, ending at `library_validators` — round-1 review P1-2 caught
+  this entry's first-draft "complete today" as false): the eleven
+  missing bullets are added in this commit, each phrased from the
+  module's own docs and the T-266-verified ARCHITECTURE.md rows; the
+  store crate keeps its bare `pub mod` block as the list (no `//!`
+  prose list exists there to reconcile) and the fs list was already
+  complete ("Every module listed is implemented"). The core doc
+  comments that still cited the dropped D-071/D-072 entries as live
+  (`gaps.rs`, `levels.rs`, `library_validators.rs`,
+  `project_validators.rs` — review P2-5) now carry the drop note
+  instead of dangling silently. Already true, left alone (verified,
+  not trusted): spec §5.2's core row already names `jiff` beside
+  serde/sha2/thiserror (the D-104 claim was closed by a later spec
+  edit); ARCHITECTURE.md's workspace trees were rebuilt by T-266/D-150.
+  Still stale, outside this task's file scope: `src-tauri/src/commands.rs`
+  line 314 ("`capabilities/default.json` stays empty") and line 3954
+  ("stays plugin-free", mirrored into the generated `src/bindings.ts`),
+  and `src/ipc/index.ts` lines 20–22 ("`src/bindings.ts` generates
+  none yet" / "the facade serves commands only today" — both false
+  since T-246's generated event bindings); plus the half-stale
+  skeleton-era comment in `crates/eunomia-fs/Cargo.toml`
+  ("`walkdir`/`tempfile` … stay intentionally idle" — `tempfile` is
+  used across the crate today, `walkdir` still is not). Follow-up
+  cards for the orchestrator.
+- _Item 2, D-071/D-072 — the drop story, not a burn story._ These are
+  not unwritten numbers: both entries existed and were dropped.
+  D-071 (the ALG-061 move) was added by T-046 (`51c6524`), D-072 (the
+  ALG-062 level operations) by T-047 (`c5a662d`); the parallel T-241
+  docs commit `ee15a9b` deleted both from this file (adding D-074
+  elsewhere in the same edit) — the audit's "lost entries,
+  T-046/T-047" reading is history-confirmed, not hypothesis. The
+  first draft of this entry claimed "never appeared in the file's git
+  history"; that was wrong (its author's `git log -S` had only been
+  run for D-033/D-066/D-081, where it is genuinely empty) — round-1
+  review P1-1 caught it, and every "never written" note was rewritten
+  to the drop story. The four D-073/D-075 citations are re-anchored to
+  what surviving records say: the "icon is UI, not validation"
+  sentence keeps the citation marked as pointing at the dropped entry
+  (no current entry records the ruling; it survives in `ee15a9b`'s
+  history, in this quotation, and in the code doc comments); "skips
+  are legal input" points at the LIB-032 row D-073 itself quotes; the
+  proptest run policy reads "the D-053/D-070 run policy"; the
+  typed-errors precedent reads "the D-062 precedent". Restoring the
+  dropped entries into this file is an owner decision (recoverable
+  from `ee15a9b^`); this package marks and re-anchors, it does not
+  restore.
+- _Item 3, the gaps._ D-033, D-066, D-081: one-line numbering notes at
+  each gap position ("no entry and no trace in this file's history —
+  consistent with a number spent in a parallel task whose entry never
+  landed; the gap is recorded here, nothing renumbered" — `git log
+-S` over the file's history is empty for all three, so only the
+  consistency, not the cause, is assertable). D-123 needs nothing:
+  the entry landed (the global `sync_running` flag, 2026-11-21) after
+  the audit's snapshot had counted it missing.
+- _Item 4, NFR-004…006 — bound, not stripped._ The IDs are referenced
+  twice (the §7 error-envelope sentence and UI-020) and defined
+  nowhere: the content exists, the IDs hang. A new spec §12.5
+  Localization defines them as the `message_key` + `params` envelope
+  the two reference sites already state; D-110's declined-reconciliation
+  line carries a one-line addendum (the requirement is real, and the
+  first `message_key` consumer had landed as D-113). The neighbors
+  stay untouched, with the two facts kept apart (review P2-4):
+  NFR-018 is referenced but undefined, and NFR-014 does not appear in
+  the spec at all — neither is this card's list; follow-up material
+  for the owner.
+- _Item 5, REL-001._ The workflow truth is `runs-on: ubuntu-latest`
+  (`.github/workflows/ci.yml`, the test-matrix and build matrix legs,
+  unchanged since D-060); the spec row now says "Ubuntu (the
+  `ubuntu-latest` runner image; 26.04 at the time of writing — the
+  label migrated from 24.04 in November 2026, and GitHub's 22.04
+  images are deprecated)" (round-2 review P2 caught the first draft
+  saying "24.04 at the time of writing": runner-images #14748
+  completed the `ubuntu-latest` 24.04→26.04 migration on 2026-11-19,
+  so the version qualifier was stale the day it was written).
+  NFR-001…003's "Ubuntu 22.04 and newer" (and §1's D-26 platform row,
+  its source) is a platform-support claim, not a CI claim, and stays;
+  §15's risk-table row ("testing on Ubuntu 22.04 and 24.04") is a
+  mitigation plan, also untouched.
+- _Item 6, spec §6.9._ One line under the validation table: "A name
+  field also rejects `NUL` — project name, instruction name, variant
+  name, heading name — an extension stricter than the rows above,
+  which ban it only in variant text." The implementation has been
+  stricter since D-126; the spec catches up. No cross-file citation
+  is added to the spec line.
+- _Item 7, OPEN — recorded, not decided._ The owner question is kept
+  alive verbatim: NUL is not forbidden in the project DESCRIPTION
+  (inert for the target file, but breaks SQLite `length()`) — forbid
+  it, or leave it as is? D-126 deliberately left the description
+  without a NUL rule; nothing in this package changes that. The answer
+  lands in a future owner-ruled entry, not here; the orchestrator
+  escalates.
+- _Items 8–12 — verified present (T-266/D-150), no edits._ The
+  ARCHITECTURE.md workspace tree carries all the rows the card names:
+  `sync_phase0`…`sync_phase4` in the src-tauri tree, `sync_runs` and
+  `backup_records` in the store tree; every row's file exists
+  (`src-tauri/src/sync_phase{0..4}.rs` with their `_tests` siblings,
+  `crates/eunomia-store/src/sync_runs.rs`, `backup_records.rs`).
+
+Checks: `pnpm exec prettier --check .` and `pnpm run format:check`
+green; the card's acceptance greps (each old wording per item) return
+nothing but historical quotations inside DECISIONS.md records;
+`CARGO_BUILD_JOBS=2 cargo clippy --workspace --all-targets --
+-D warnings` green (seven `.rs` files touched, all comment-only —
+review round 2 corrected this count from the first draft's "two").
+Reviews, two rounds on two models (reports in
+`.opencode/reviews/t250-round1.md` / `t250-round2.md`, owner-local).
+Round 1 (deepseek-v4.1-flash): request-changes — P1-1 (this entry's
+false "never appeared in history" claim: the entries were dropped by
+`ee15a9b`, not never written) and P1-2 (the false "core `//!` list
+complete" claim) plus P2-3/P2-4/P2-5 and five P3s — all fixed: the
+true drop story above, the eleven added core bullets, SEC-001's grant
+wording corrected (plugins are granted nothing; application commands
+are ungated), NFR-014 stated absent (not dangling), the core
+doc-comment citations annotated, the §12.5 bullet narrowed (UI-011's
+clause removed — it previews NFR-018's content), the §6.9 line
+reworded against the "as well" misreading, the gap notes hedged to
+what is provable. Round 2 (hy4-flash-free): request-changes, three
+findings, all fixed — P2 (the REL-001 rewrite's "24.04 at the time of
+writing" was stale on arrival: `ubuntu-latest` migrated to 26.04 by
+2026-11-19, verified against runner-images #14748; the row now says
+26.04), P3 (the one bare D-071 cite left in `levels.rs`'s purity
+section now carries the drop note too), P3 (the touched-`.rs`-files
+count above). No finding was refused.
+
+Orchestrator addendum (merge, 2026-11-22): the follow-ups are
+tracked — five cards in the board's INBOX ("Follow-up T-250: …" —
+the D-116 stragglers in commands.rs/bindings.ts; the ipc/index.ts
+claims; the eunomia-fs manifest comment; the NFR-018/NFR-014 spec
+sweep; the §15 risk-row CI truth) and two owner-decision cards
+escalated per the escalation rule ("РЕШЕНИЕ: …" — the item-7 NUL
+question, p1; the D-071/D-072 restoration). The cards are the
+tracking unit; this note only records their existence.

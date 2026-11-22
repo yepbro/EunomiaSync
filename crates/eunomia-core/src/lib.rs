@@ -54,6 +54,25 @@
 //!   and the DB-042 default label derived from a project's name
 //! - [`library_validators`] — the §6.9 rules of the editable library
 //!   fields: instruction and heading names, variant name and text
+//! - [`assembly_b`] — Scheme-B assembly: a block spliced into the
+//!   user's markers (ALG-031)
+//! - [`backup_name`] — the backup path grammar, the pure string half
+//!   of §7.6/§5.5
+//! - [`compare`] — the ALG-033 existing-file comparison: file vs
+//!   build, the unchanged verdict
+//! - [`dirty`] — the DB-021 dirty predicate: build hash vs stored
+//! - [`extra_files`] — scheme-A extra-file reading lines,
+//!   position-split
+//! - [`hash`] — the DB-020 build hash (SHA-256)
+//! - [`marker`] — the creation-marker line format (ALG-032)
+//! - [`marker_clock`] — the once-per-run clock seam: instant + zone
+//!   capture (the D-104 environment-read exemption)
+//! - [`markers`] — the Scheme-B marker parser: finds exactly one
+//!   BEGIN/END marker pair
+//! - [`target_file`] — the ALG-030 managed-text seam and the
+//!   whole-file content for schemes A and C
+//! - [`version_snapshot`] — the ALG-070 version snapshots of
+//!   instructions/variants with SHA-256 hashes
 
 pub mod assembly_b;
 pub mod assignment;

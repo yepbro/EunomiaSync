@@ -220,9 +220,11 @@ the Rust side:
 
 - The webview gets no plugin JavaScript packages (`package.json` carries
   only `@tauri-apps/api`, pinned by a `config_tests.rs` test) and the
-  capability grants it no permissions at all (`permissions: []`,
-  DECISIONS.md D-024) — application commands are not capability-gated, so
-  this leaves the UI exactly its typed command surface.
+  capability grants it exactly one conscious extension, the
+  event-subscription pair `core:event:allow-listen`/`-unlisten` (the
+  T-246/D-116 follow-up to D-024's original empty grant) — application
+  commands are not capability-gated, so apart from subscribing to
+  backend events this leaves the UI exactly its typed command surface.
 - `dialog`, `opener`, and `updater` are invoked from Rust behind the app
   commands (`app_open_data_folder` since T-024 opens the data directory
   through the opener's Rust API; `dialog_pick_folder` and `update_*` are

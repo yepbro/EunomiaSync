@@ -976,7 +976,7 @@ fn the_data_folder_opens_through_the_opener_plugin_from_rust() {
         commands.contains("open_path("),
         "the opener call must be `open_path` (a folder in the file manager)"
     );
-    // The empty-capability contract this command must not disturb.
+    // The capability contract (no `opener:` grant) this command must not disturb.
     let capabilities = include_str!("../capabilities/default.json");
     assert!(
         !capabilities.contains("opener:"),

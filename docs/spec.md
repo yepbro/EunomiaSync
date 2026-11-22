@@ -191,7 +191,7 @@ Tip: if the user deletes the data, the app starts with an empty DB and says so (
 
 ### 5.6. Shell Security
 
-- **SEC-001 (P0).** The frontend does not get the `fs` and `shell` plugins. `capabilities` lists only the app commands: the updater, dialog, and opener plugins are invoked from Rust (`update_*`, `dialog_pick_folder`, `app_open_data_folder`), never from the webview. This is also what lets SEC-003 track paths picked in the system dialog.
+- **SEC-001 (P0).** The frontend does not get the `fs` and `shell` plugins. `capabilities` grants plugins nothing except one conscious extension — the event-subscription pair `core:event:allow-listen`/`core:event:allow-unlisten`, so the webview can subscribe to §7.10 events (application commands are not capability-gated and need no grant); the updater, dialog, and opener plugins are invoked from Rust (`update_*`, `dialog_pick_folder`, `app_open_data_folder`), never from the webview, and emitting events is Rust-only as well. This is also what lets SEC-003 track paths picked in the system dialog.
 - **SEC-002 (P0).** CSP: `default-src 'self'`; external scripts, styles, and images are blocked; DevTools are off in the release build.
 - **SEC-003 (P0).** All paths that come from the UI are checked in Rust: a path must be a registered project or must have been picked in the system dialog in this session.
 
@@ -427,6 +427,8 @@ Changing `default.*` does not affect existing projects (DEF-005).
 | Heading name                       | 1–200 characters, one line                                         | Level 2–6                                                                                    |
 | File name                          | A value from the list                                              | Path and extension are not typed in                                                          |
 | Backup limit                       | Integer 1–200                                                      | Zero is not allowed: writing without a backup is forbidden (BKP-005)                         |
+
+A name field also rejects `NUL` — project name, instruction name, variant name, heading name — an extension stricter than the rows above, which ban it only in variant text.
 
 Validation errors are shown at the field or in a general message. An entity is never saved partly: the whole operation runs in one transaction.
 
@@ -864,6 +866,10 @@ Maximum supported scale for v1: 2000 projects, 5000 library items.
 
 - **NFR-019, 020, 022 (P0).** The target is WCAG 2.1 AA for the main scenarios. The matrix is `role=grid` with `aria-rowindex` and `aria-colindex`; each cell has a text label (11.2). The tap target size is at least 24 px. Color is never the only sign of a state.
 
+### 12.5. Localization
+
+- **NFR-004…006 (P0).** Backend error texts reach the UI as `message_key` and `params` (§7.10's error envelope) and are rendered localized from the frontend catalog (UI-020).
+
 ## 13. Security and Privacy
 
 Requirements SEC-001…003 are in 5.6. In addition:
@@ -886,7 +892,7 @@ Requirements SEC-001…003 are in 5.6. In addition:
 | macOS    | `.dmg`, `.app` for arm64 and x64                                           | Installers are not signed or notarized for now (P1). Until then, the app must be opened by hand through the context menu |
 | Linux    | `.deb` and `.AppImage`                                                     | Depends on `webkit2gtk-4.1`. The `.rpm` format is optional                                                               |
 
-- **REL-001 (P0).** CI (GitHub Actions) on Windows, macOS (arm64 and x64), and Ubuntu 22.04: formatting, `clippy -D warnings`, `cargo test`, `cargo-deny`, frontend linter and type check, Vitest, e2e, artifact build, signing of update artifacts, a release draft with `latest.json`.
+- **REL-001 (P0).** CI (GitHub Actions) on Windows, macOS (arm64 and x64), and Ubuntu (the `ubuntu-latest` runner image; 26.04 at the time of writing — the label migrated from 24.04 in November 2026, and GitHub's 22.04 images are deprecated): formatting, `clippy -D warnings`, `cargo test`, `cargo-deny`, frontend linter and type check, Vitest, e2e, artifact build, signing of update artifacts, a release draft with `latest.json`.
 - **REL-002 (P0).** Versioning follows SemVer. Release notes come from `CHANGELOG.md` and are shown in the update dialog (UPD-002).
 - **REL-003 (P0).** Uninstalling the app does not delete the data directory. The Windows installer offers a "Remove user data" checkbox (off by default).
 - **REL-004 (P0).** There is one update channel (stable). Project license: dual license, MIT License and Apache License, Version 2.0. Repository, releases, and updates: https://github.com/yepbro/EunomiaSync. Author: Den Brooks, denis@yepbro.pro. App identifier (bundle ID): `pro.yepbro.eunomiasync`. The "About" window shows the list of dependency licenses.
