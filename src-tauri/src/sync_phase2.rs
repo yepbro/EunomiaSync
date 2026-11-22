@@ -160,7 +160,6 @@ use crate::sync_phase1::{Phase1Outcome, PreflightVerdict};
 const BACKUPS_DIR: &str = "backups";
 
 /// The phase's product for one backed-up project.
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BackupFact {
     /// A new copy exists under the §5.5 layout and passed the
@@ -183,7 +182,14 @@ pub(crate) enum BackupFact {
 
 /// What phase 2 hands the pipeline: the run's id and one fact per
 /// backed-up project, in the snapshot's `sort_order`.
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
+///
+/// The fact list has no production reader yet — the run's summary
+/// reads the committed rows back, and the future consumers (the P1
+/// `backups_list` screen, run diagnostics) are not this card's; the
+/// behavior suite reads it today (the D-130 tested-today/consumed-
+/// later posture, updated by T-118: the sync-run command composes
+/// the phase but not this outcome).
+#[allow(dead_code)] // the fact list's consumers are future cards; tested today
 #[derive(Debug)]
 pub(crate) struct Phase2Outcome {
     /// The run these backups belong to (the `sync_runs` id).
@@ -277,7 +283,6 @@ struct NewRecordInput {
 ///   transaction leaves the run row `running` — the crash-recovery
 ///   rule's case; the copies such a failure orphaned are deleted
 ///   best-effort on the way out).
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 pub(crate) async fn run<R, B>(
     app: &AppHandle<R>,
     phase1: &Phase1Outcome,

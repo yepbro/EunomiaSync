@@ -187,6 +187,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::projects_reorder::<tauri::Wry>,
             commands::settings_get::<tauri::Wry>,
             commands::settings_set::<tauri::Wry>,
+            commands::sync_run::<tauri::Wry>,
         ])
         // The registered §7.10 events: `state://project-availability`
         // (T-079, D-09/DB-032), `state://dirty` (T-101,

@@ -7044,3 +7044,1140 @@ fn the_file_changed_event_and_its_wiring_are_registered_with_the_specta_builder(
          recheck is spawned — the session's first verdicts cannot miss it"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `sync_run` (T-118, §7.10 Sync module, §9.4 the pipeline, D-25,
+// SYS-004/SYS-005, MAIN-024/030)
+// ---------------------------------------------------------------------------
+
+/// A mock app in the healthy state the whole pipeline serves: the
+/// command registered over the mock runtime, a fresh database in a
+/// temp root, and every managed state the run's seams read — the flag
+/// (SYS-004), `DataRoot` (the §5.5 tree phases 1/2/4 write into), the
+/// availability cache (the DB-032 checkpoint inside the run), the
+/// dirty cache (the after-commit pass), and the watch state (the
+/// after-sync refresh). The watch bus's RECEIVING half is dropped on
+/// purpose: with no service spawned the refresh answers its honest
+/// `FileWatchGone` refusal immediately (never a hang), which every
+/// test here reads as the never-fatal aftermath it is — the one test
+/// that wants a converging refresh spawns the real service itself.
+fn sync_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::sync_run])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    app.manage(data_dirs::DataRoot(temp.path().to_path_buf()));
+    app.manage(crate::sync_running::SyncRunning::new());
+    app.manage(crate::availability::AvailabilityState::new());
+    app.manage(crate::dirty_recalc::DirtyState::new().0);
+    let (watch_state, _no_service) = crate::file_watch::FileWatchState::new();
+    app.manage(watch_state);
+    tauri_specta::Builder::<tauri::test::MockRuntime>::new()
+        .events(tauri_specta::collect_events![
+            crate::availability::ProjectAvailabilityEvent,
+            crate::dirty_recalc::DirtyEvent,
+            crate::file_watch::FileChangedEvent,
+        ])
+        .mount_events(&app);
+    (temp, app)
+}
+
+/// The ALG-032 example marker, verbatim — the old-run fixture shape the
+/// `unchanged` comparisons recognize (the timestamp never decides).
+const SYNC_MARKER: &str =
+    "<!-- Created by EunomiaSync 2026-11-17 14:03:22 Europe/Prague +01:00 -->";
+
+/// The managed database handle.
+fn sync_database_of(app: &tauri::App<tauri::test::MockRuntime>) -> crate::db::Db {
+    use tauri::Manager;
+    app.state::<crate::db::Db>().inner().clone()
+}
+
+/// Creates a real repository folder (`repos/repo-<n>` with a `.git`
+/// directory) and seeds its project row with the canonical path (the
+/// `sync_phase1_tests.rs` shape: the DB-030 posture the target-path
+/// resolution contracts on). Returns `(project_id, repo_path)`.
+fn sync_repo_project(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    repos: &std::path::Path,
+    n: usize,
+    scheme: eunomia_store::settings::Scheme,
+    base_name: eunomia_store::settings::BaseName,
+) -> (String, std::path::PathBuf) {
+    use eunomia_store::projects::{AddedVia, NewProject};
+    let repo = repos.join(format!("repo-{n}"));
+    std::fs::create_dir(&repo).expect("the repository folder must be creatable");
+    std::fs::create_dir(repo.join(".git")).expect("the .git directory must be creatable");
+    let canonical = std::fs::canonicalize(&repo).expect("canonicalizing the fresh repo must work");
+    let path = Box::leak(canonical.to_string_lossy().into_owned().into_boxed_str());
+    let id = tauri::async_runtime::block_on(sync_database_of(app).run(move |tx| {
+        eunomia_store::projects::create(
+            tx,
+            &NewProject {
+                path,
+                path_key: path,
+                name: Box::leak(format!("Project {n}").into_boxed_str()),
+                label: Box::leak(format!("P{n}").into_boxed_str()),
+                color: "blue",
+                description: "",
+                added_via: AddedVia::Manual,
+                scheme,
+                base_name,
+                extra_local: eunomia_store::settings::ExtraFile {
+                    enabled: false,
+                    position: eunomia_store::settings::Position::End,
+                },
+                extra_project: eunomia_store::settings::ExtraFile {
+                    enabled: false,
+                    position: eunomia_store::settings::Position::End,
+                },
+            },
+        )
+        .map(|project| project.id)
+        .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("seeding a project through the repository must work");
+    (id, canonical)
+}
+
+/// Seeds one active instruction with its main variant and assigns it
+/// to the project (the `sync_phase1_tests.rs` shape): the project's
+/// built managed text is then `content` verbatim. The title carries a
+/// process-wide counter — visible titles are unique in the library.
+fn sync_seed_instruction(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    project_id: &str,
+    content: &'static str,
+) {
+    static SEEDED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seeded = SEEDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let title: &'static str = Box::leak(format!("Be brief {seeded}").into_boxed_str());
+    let project_id = project_id.to_owned();
+    tauri::async_runtime::block_on(sync_database_of(app).run(move |tx| {
+        let item = eunomia_store::library::create_item(
+            tx,
+            &eunomia_store::library::NewLibraryItem::Instruction { title },
+        )
+        .map_err(sync_library_seed_error)?;
+        let variant = eunomia_store::library::create_variant(
+            tx,
+            &eunomia_store::library::NewVariant {
+                instruction_id: &item.id,
+                name: "Main",
+                content,
+                is_main: true,
+            },
+        )
+        .map_err(sync_library_seed_error)?;
+        eunomia_store::library::assign(
+            tx,
+            &eunomia_store::library::NewAssignment {
+                project_id: &project_id,
+                instruction_id: &item.id,
+                variant_id: &variant.id,
+            },
+        )
+        .map_err(sync_library_seed_error)?;
+        Ok(())
+    }))
+    .expect("seeding the assigned instruction must work");
+}
+
+/// Maps a library seeding failure onto the wire shape the executor
+/// needs (the D-093 fallback family).
+fn sync_library_seed_error(error: eunomia_store::library::LibraryError) -> crate::errors::AppError {
+    match error {
+        eunomia_store::library::LibraryError::Sql(sql) => crate::db::sqlite_error_to_app_error(sql),
+        other => {
+            let mut app_error = crate::errors::AppError::new(crate::errors::ErrorCode::DbLocked);
+            app_error.details = Some(crate::errors::ErrorDetails {
+                os_code: None,
+                os_kind: Some("LibrarySeed".to_owned()),
+                os_message: Some(other.to_string()),
+            });
+            app_error
+        }
+    }
+}
+
+/// Maps a run-repository read failure onto the wire shape the executor
+/// needs (the `sync_phase1_tests.rs` assertion-side shape).
+fn sync_runs_read_error(error: eunomia_store::sync_runs::SyncRunsError) -> crate::errors::AppError {
+    match error {
+        eunomia_store::sync_runs::SyncRunsError::Sql(sql) => {
+            crate::db::sqlite_error_to_app_error(sql)
+        }
+        other => {
+            let mut app_error = crate::errors::AppError::new(crate::errors::ErrorCode::DbLocked);
+            app_error.details = Some(crate::errors::ErrorDetails {
+                os_code: None,
+                os_kind: Some("SyncRunsRead".to_owned()),
+                os_message: Some(other.to_string()),
+            });
+            app_error
+        }
+    }
+}
+
+/// The run row through the app's database (the assertion-side read).
+fn sync_run_row(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    run_id: &str,
+) -> eunomia_store::sync_runs::SyncRun {
+    let database = sync_database_of(app);
+    let run_id = run_id.to_owned();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::sync_runs::get(tx, &run_id)
+            .map_err(sync_runs_read_error)
+            .map(|row| row.expect("the run row must persist"))
+    }))
+    .expect("reading the run row must work")
+}
+
+/// The run's per-project rows, in `sort_order`.
+fn sync_run_rows(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    run_id: &str,
+) -> Vec<eunomia_store::sync_runs::SyncRunProject> {
+    let database = sync_database_of(app);
+    let run_id = run_id.to_owned();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::sync_runs::list_projects(tx, &run_id).map_err(sync_runs_read_error)
+    }))
+    .expect("reading the run's rows must work")
+}
+
+/// Every run row's `(id, status)` pair, seeded-date order.
+fn sync_all_runs(app: &tauri::App<tauri::test::MockRuntime>) -> Vec<(String, String)> {
+    let database = sync_database_of(app);
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        let mut statement = tx
+            .prepare("SELECT id, status FROM sync_runs ORDER BY started_at, id")
+            .map_err(crate::db::sqlite_error_to_app_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(crate::db::sqlite_error_to_app_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::db::sqlite_error_to_app_error)?;
+        Ok(rows)
+    }))
+    .expect("reading the runs must work")
+}
+
+/// One project's `last_synced_*` cells — OUT-020's observable.
+fn sync_project_stamps(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    project_id: &str,
+) -> (Option<String>, Option<String>) {
+    let database = sync_database_of(app);
+    let project_id = project_id.to_owned();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.query_row(
+            "SELECT last_synced_at, last_synced_hash FROM projects WHERE id = ?1",
+            rusqlite::params![project_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("reading the project's stamps must work")
+}
+
+/// The number of journal entries a run wrote (§7.7's per-project plus
+/// summary shapes, D-051).
+fn sync_journal_count(app: &tauri::App<tauri::test::MockRuntime>, run_id: &str) -> i64 {
+    let database = sync_database_of(app);
+    let run_id = run_id.to_owned();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.query_row(
+            "SELECT COUNT(*) FROM action_log WHERE sync_run_id = ?1",
+            rusqlite::params![run_id],
+            |row| row.get(0),
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("counting the run's journal entries must work")
+}
+
+/// Every file under the data root's `backups/` tree, recursively — the
+/// OUT-019 observable (empty when no copy survived).
+fn sync_backup_files(temp: &std::path::Path) -> Vec<std::path::PathBuf> {
+    fn walk(folder: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(folder).expect("the backups tree must be listable") {
+            let path = entry.expect("every entry must be readable").path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else {
+                found.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(&temp.join("backups"), &mut found);
+    found.sort();
+    found
+}
+
+/// Invokes `sync_run` with the given `confirmEmpty` wire value
+/// (`null`/`false` omitted the flag, `true` confirmed), deserializing
+/// the success payload into the typed DTO.
+fn invoke_sync_run(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    confirm_empty: serde_json::Value,
+) -> Result<crate::commands::SyncRunOutcome, serde_json::Value> {
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request(
+            "sync_run",
+            serde_json::json!({ "confirmEmpty": confirm_empty }),
+        ),
+    );
+    match response {
+        Ok(payload) => Ok(payload
+            .deserialize::<crate::commands::SyncRunOutcome>()
+            .expect("the success payload must deserialize into the DTO")),
+        Err(error) => Err(error),
+    }
+}
+
+/// Drives the pipeline through the body seam with the caller's cancel
+/// token and seams (the `dialog_pick_folder_with` split's test half).
+fn run_sync_with(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    confirm_empty: Option<bool>,
+    cancel: crate::commands::CancelToken,
+    seams: crate::commands::SyncRunSeams,
+) -> Result<crate::commands::SyncRunOutcome, crate::errors::AppError> {
+    let handle = app.app_handle().clone();
+    tauri::async_runtime::block_on(crate::commands::sync_run_with(
+        handle,
+        confirm_empty,
+        cancel,
+        seams,
+    ))
+}
+
+#[test]
+fn sync_run_without_confirm_returns_needs_confirmation_and_changes_nothing() {
+    // The card's criterion (§9.4 phase 1 step 6, D-25): an empty build
+    // over a non-empty file, called without the flag, answers the
+    // confirmation LIST and changes nothing — the target files byte
+    // for byte, no backup, no stamp, the flag free — and the run row
+    // is terminal (D-138's reading of "changes nothing": §9.4's phrase
+    // is about the files; a `running` row behind a released flag
+    // would lie until the next restart). Two such projects pin the
+    // list's `sort_order` and the stop row's no-code literal.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (first, first_repo) = sync_repo_project(
+        &app,
+        &repos,
+        1,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    let (second, second_repo) = sync_repo_project(
+        &app,
+        &repos,
+        13,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    // NO assignments — the builds are empty — over non-empty files.
+    let first_target = first_repo.join("AGENTS.md");
+    let second_target = second_repo.join("AGENTS.md");
+    std::fs::write(&first_target, b"precious old bytes").expect("the fixture must be writable");
+    std::fs::write(&second_target, b"other old bytes").expect("the fixture must be writable");
+    let webview = main_webview(&app);
+
+    let outcome = invoke_sync_run(&webview, serde_json::json!(null))
+        .expect("the unconfirmed call must answer, not fail");
+
+    // The answer IS the list, in `sort_order`.
+    let crate::commands::SyncRunOutcome::NeedsConfirmation { projects } = &outcome else {
+        panic!("the unconfirmed call must ask for confirmation, got {outcome:?}");
+    };
+    assert_eq!(
+        projects,
+        &[first.clone(), second.clone()],
+        "the D-25 list, by id, in sort_order"
+    );
+    // …and nothing changed: the files, the backups tree, the stamps.
+    assert_eq!(
+        std::fs::read(&first_target).expect("the target must be readable"),
+        b"precious old bytes",
+        "not one target byte moved"
+    );
+    assert_eq!(
+        std::fs::read(&second_target).expect("the target must be readable"),
+        b"other old bytes"
+    );
+    assert!(
+        sync_backup_files(temp.path()).is_empty(),
+        "no backup was made"
+    );
+    assert_eq!(
+        sync_project_stamps(&app, &first),
+        (None, None),
+        "OUT-020: an unconfirmed stop stamps nothing"
+    );
+    assert!(
+        !app.state::<crate::sync_running::SyncRunning>().is_running(),
+        "the flag is free the moment the command answered (RAII)"
+    );
+    // The run row is terminal: `aborted`, the D-131 tail shape — its
+    // rows keep phase 1's verdicts, here the untouched `not_started`,
+    // and the no-code literal sits in `error_code` (the store's
+    // writer takes `&str`; "" is the no-code spelling, D-138).
+    let runs = sync_all_runs(&app);
+    assert_eq!(runs.len(), 1, "exactly one run was recorded");
+    assert_eq!(runs[0].1, "aborted", "the asking run is terminal");
+    let row = sync_run_row(&app, &runs[0].0);
+    assert_eq!(row.error_code.as_deref(), Some(""));
+    assert!(
+        row.details
+            .as_deref()
+            .is_some_and(|details| details.contains("awaiting the empty-build confirmation")),
+        "the class-only stop line, got: {:?}",
+        row.details
+    );
+    assert!(
+        sync_run_rows(&app, &runs[0].0)
+            .iter()
+            .all(|project| project.status.as_str() == "not_started"),
+        "both asking rows are untouched"
+    );
+    // Windows teardown rule: the app's managed `Db` closes first.
+    drop(app);
+    drop(temp);
+}
+#[test]
+fn sync_run_with_confirm_empty_empties_the_file_through_the_full_pipeline() {
+    // The confirmed re-call (§9.4: "the UI calls the command again
+    // with confirm_empty=true") is a FULL NEW RUN: the asking run's
+    // row stays aborted in history, the confirmed run records its own,
+    // and the destructive case D-25 guards — an emptied file — lands
+    // with a backup of the overwritten bytes behind it.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        2,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    let target = repo.join("AGENTS.md");
+    std::fs::write(&target, b"precious old bytes").expect("writing the fixture must work");
+    let webview = main_webview(&app);
+    let asking = invoke_sync_run(&webview, serde_json::json!(null))
+        .expect("the unconfirmed call must answer");
+    assert!(matches!(
+        asking,
+        crate::commands::SyncRunOutcome::NeedsConfirmation { .. }
+    ));
+
+    let outcome = invoke_sync_run(&webview, serde_json::json!(true))
+        .expect("the confirmed call must run the pipeline");
+
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the confirmed call must complete, not ask again");
+    };
+    assert_eq!(summary.verdict, "success");
+    assert_eq!(summary.projects_total, 1);
+    assert_eq!(summary.projects_written, 1);
+    // The emptied file: the marker and its break alone (ALG-030's
+    // empty-build form), around the run's real clock.
+    let written = std::fs::read_to_string(&target).expect("the emptied file must be readable");
+    let marker = written.trim_end_matches('\n');
+    assert!(
+        marker.starts_with("<!-- Created by EunomiaSync ") && marker.ends_with(" -->"),
+        "the file is the marker line alone, got: {written:?}"
+    );
+    assert_eq!(written, format!("{marker}\n"));
+    // The overwritten bytes are restorable: one verified copy (BKP-…
+    // through phase 2), and the project is stamped (OUT-020).
+    let backups = sync_backup_files(temp.path());
+    assert_eq!(backups.len(), 1, "the non-empty target was backed up");
+    assert_eq!(
+        std::fs::read(&backups[0]).expect("the copy must be readable"),
+        b"precious old bytes",
+        "the backup holds the overwritten bytes"
+    );
+    let (stamped_at, stamped_hash) = sync_project_stamps(&app, &project);
+    assert!(stamped_at.is_some(), "the emptied project is synced");
+    assert!(stamped_hash.is_some());
+    // History keeps BOTH runs: the aborted ask and the confirmed run.
+    let runs = sync_all_runs(&app);
+    assert_eq!(
+        runs.iter()
+            .map(|(_, status)| status.as_str())
+            .collect::<Vec<_>>(),
+        ["aborted", "success"],
+        "the confirmed re-call is a full new run"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_second_sync_run_while_one_runs_is_refused_with_e_sync_running() {
+    // SYS-004 through the real pipeline: while one run is parked
+    // inside its write phase (the injected seam holds it between the
+    // atomic write's steps — the flag is up, §9.4 phase 3), a second
+    // `sync_run` over the real IPC path meets the §7.10
+    // `E_SYNC_RUNNING` envelope and writes nothing; the moment the
+    // first run finishes, the flag is free.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, _repo) = sync_repo_project(
+        &app,
+        &repos,
+        4,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let webview = main_webview(&app);
+    // The parked write seam: signal entry, hold until released, then
+    // perform the real §9.5 write. The release receiver rides a Mutex
+    // because the seam must be `Sync` (phase 3 shares it over an Arc).
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let seams = crate::commands::SyncRunSeams {
+        backup: crate::commands::SyncRunSeams::production().backup,
+        write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
+            entered_tx
+                .send(target.to_path_buf())
+                .expect("the test must live to receive the entry signal");
+            release_rx
+                .lock()
+                .expect("the release lock must not be poisoned")
+                .recv()
+                .expect("the test must live to release the parked write");
+            crate::sync_phase3::production_write(target, contents)
+        }),
+    };
+    let handle = app.app_handle().clone();
+    let running = tauri::async_runtime::spawn(async move {
+        crate::commands::sync_run_with(handle, None, crate::commands::CancelToken::new(), seams)
+            .await
+    });
+    let _parked = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the pipeline must reach its write phase");
+
+    let error = invoke_sync_run(&webview, serde_json::json!(null))
+        .expect_err("a second start while one runs must be refused");
+    assert_eq!(error, sync_running_envelope(), "the §10 refusal envelope");
+    assert_eq!(
+        sync_all_runs(&app).len(),
+        1,
+        "the refused start recorded no run of its own"
+    );
+
+    release_tx
+        .send(())
+        .expect("the parked write must be released");
+    let outcome = tauri::async_runtime::block_on(running)
+        .expect("the parked run must join")
+        .expect("the parked run must finish");
+    assert!(
+        matches!(
+            outcome,
+            crate::commands::SyncRunOutcome::Completed { ref summary } if summary.verdict == "success"
+        ),
+        "the first run finished cleanly, got {outcome:?}"
+    );
+    assert!(
+        !app.state::<crate::sync_running::SyncRunning>().is_running(),
+        "the flag freed with the run's end"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_cancelled_token_stops_the_run_before_the_backups() {
+    // The cancel seam's one check point (§9.4: cancel is possible
+    // before the backups, impossible after phase 2): a latched token
+    // stops the run after preflight — the D-131 tail shape (the row
+    // `aborted`, phase 1's verdicts stay: the `unchanged` project
+    // keeps its honest row), no file moves, no backup, no stamp, and
+    // the answer is the aborted summary, not an error (the user asked
+    // for this).
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (written, written_repo) = sync_repo_project(
+        &app,
+        &repos,
+        5,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &written, "Be brief.");
+    let target = written_repo.join("AGENTS.md");
+    std::fs::write(&target, format!("Be brief.\n\n{SYNC_MARKER}\n"))
+        .expect("writing the matching fixture must work");
+    let cancel = crate::commands::CancelToken::new();
+    cancel.cancel();
+
+    let outcome = run_sync_with(
+        &app,
+        None,
+        cancel,
+        crate::commands::SyncRunSeams::production(),
+    )
+    .expect("a cancelled run is an outcome, not an error");
+
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the cancelled run answers its summary");
+    };
+    assert_eq!(summary.verdict, "aborted");
+    assert_eq!(
+        std::fs::read(&target).expect("the target must be readable"),
+        format!("Be brief.\n\n{SYNC_MARKER}\n").into_bytes(),
+        "not one target byte moved"
+    );
+    assert!(sync_backup_files(temp.path()).is_empty(), "no backup");
+    assert_eq!(
+        sync_project_stamps(&app, &written),
+        (None, None),
+        "OUT-020: a cancelled run stamps nothing"
+    );
+    // The D-131 tail shape: phase 1's `unchanged` verdict survives the
+    // stop (it claims no write), the ready row stays `not_started`.
+    let rows = sync_run_rows(&app, &summary.run_id);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.status.as_str())
+            .collect::<Vec<_>>(),
+        ["unchanged"],
+        "the verdicts phase 1 wrote stay"
+    );
+    let row = sync_run_row(&app, &summary.run_id);
+    assert_eq!(row.error_code.as_deref(), Some(""));
+    assert_eq!(
+        row.details.as_deref(),
+        Some("cancelled by the user before the backups"),
+        "the stop row's no-code literal and class-only line"
+    );
+    assert!(
+        !app.state::<crate::sync_running::SyncRunning>().is_running(),
+        "the flag freed with the stop"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn sync_run_completes_over_the_real_phases_and_serves_the_summary() {
+    // The full happy path through the REAL phases (MAIN-024's summary
+    // chips): a scheme-A project whose differing file is backed up and
+    // rewritten around the run's one marker, and a scheme-C creation
+    // case (OUT-005: no target yet, nothing to back up) — the verdict
+    // `success`, the counters, the per-project rows in `sort_order`,
+    // the §7.7 journal, the stamps — and the flag free afterwards.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (alpha, alpha_repo) = sync_repo_project(
+        &app,
+        &repos,
+        6,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &alpha, "Be brief.");
+    let alpha_target = alpha_repo.join("AGENTS.md");
+    std::fs::write(&alpha_target, b"stale bytes").expect("the fixture must be writable");
+    let (gamma, gamma_repo) = sync_repo_project(
+        &app,
+        &repos,
+        7,
+        eunomia_store::settings::Scheme::C,
+        eunomia_store::settings::BaseName::ClaudeMd,
+    );
+    sync_seed_instruction(&app, &gamma, "Run the tests.");
+    let gamma_target = gamma_repo.join("CLAUDE.project.md");
+    let webview = main_webview(&app);
+
+    let outcome =
+        invoke_sync_run(&webview, serde_json::json!(null)).expect("the run must complete");
+
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("a healthy run completes");
+    };
+    assert_eq!(summary.verdict, "success");
+    assert_eq!(summary.projects_total, 2);
+    assert_eq!(summary.projects_written, 2);
+    assert_eq!(summary.projects_skipped, 0);
+    assert_eq!(summary.projects_failed, 0);
+    assert!(summary.finished_at.is_some(), "phase 4 stamped the end");
+    // The per-project rows, in `sort_order`, with their paths.
+    assert_eq!(
+        summary
+            .projects
+            .iter()
+            .map(|entry| (entry.project_id.as_str(), entry.status.as_str()))
+            .collect::<Vec<_>>(),
+        [(alpha.as_str(), "written"), (gamma.as_str(), "written")],
+    );
+    assert_eq!(
+        summary.projects[0].target_path.as_deref(),
+        Some(alpha_target.to_str().expect("the path is UTF-8")),
+    );
+    // The byte-exact files: ALG-030 around the run's one marker.
+    let written = std::fs::read_to_string(&alpha_target).expect("the file must be readable");
+    let marker = written
+        .trim_end_matches('\n')
+        .rsplit_once("\n\n")
+        .unwrap()
+        .1;
+    assert!(
+        marker.starts_with("<!-- Created by EunomiaSync ") && marker.ends_with(" -->"),
+        "the marker's ALG-032 shape, got: {marker:?}"
+    );
+    assert_eq!(written, format!("Be brief.\n\n{marker}\n"));
+    let created = std::fs::read_to_string(&gamma_target)
+        .expect("the scheme-C creation case writes the target");
+    assert_eq!(created, format!("Run the tests.\n\n{marker}\n"));
+    // One backup (the differing file), none for the creation case.
+    let backups = sync_backup_files(temp.path());
+    assert_eq!(backups.len(), 1, "only the overwritten file was backed up");
+    assert_eq!(
+        std::fs::read(&backups[0]).expect("the copy must be readable"),
+        b"stale bytes"
+    );
+    // OUT-020 stamps, the §7.7 journal (two project results + the
+    // summary), and the free flag.
+    assert!(sync_project_stamps(&app, &alpha).0.is_some());
+    assert!(sync_project_stamps(&app, &gamma).0.is_some());
+    assert_eq!(
+        sync_journal_count(&app, &summary.run_id),
+        3,
+        "D-051's per-project entries plus the run summary"
+    );
+    assert!(
+        !app.state::<crate::sync_running::SyncRunning>().is_running(),
+        "§9.4 phase 4 step 5 freed the flag"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_failing_backup_aborts_the_run_with_the_typed_envelope() {
+    // §9.4 phase 2 step 2 / S10 through the command: a refusing copy
+    // aborts the whole run — the typed `E_BACKUP_FAILED` envelope with
+    // BKP-005's fields, the run row `aborted` (written by the phase
+    // itself; the command's wrapper recognizes the code and does not
+    // abort twice), and not one target byte moved.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        8,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let target = repo.join("AGENTS.md");
+    std::fs::write(&target, b"old bytes").expect("the fixture must be writable");
+    let seams = crate::commands::SyncRunSeams {
+        backup: std::sync::Arc::new(|_target: &eunomia_fs::backup::BackupTarget<'_>| {
+            Err(eunomia_fs::backup::BackupError::FolderCreateFailed {
+                path: std::path::PathBuf::from("/data/backups"),
+                source: std::io::Error::from_raw_os_error(13),
+            })
+        }),
+        write: crate::commands::SyncRunSeams::production().write,
+    };
+
+    let error = run_sync_with(&app, None, crate::commands::CancelToken::new(), seams)
+        .expect_err("the failing copy must abort the run");
+
+    assert_eq!(error.code.as_str(), "E_BACKUP_FAILED");
+    assert_eq!(
+        error.params.get("project").map(String::as_str),
+        Some("Project 8"),
+        "BKP-005's project field"
+    );
+    assert_eq!(
+        error.params.get("path").map(String::as_str),
+        Some(target.to_str().expect("the path is UTF-8")),
+        "BKP-005's path field (the resolved source)"
+    );
+    let details = error.details.expect("the envelope carries the details");
+    assert_eq!(details.os_kind.as_deref(), Some("FolderCreateFailed"));
+    assert_eq!(details.os_code, Some(13), "§10's first-class OS code");
+    // The verdict: aborted by the phase, untouched by the wrapper.
+    let runs = sync_all_runs(&app);
+    assert_eq!(runs[0].1, "aborted");
+    assert_eq!(
+        sync_run_row(&app, &runs[0].0).error_code.as_deref(),
+        Some("E_BACKUP_FAILED"),
+        "the phase's own abort wrote the row"
+    );
+    assert_eq!(
+        std::fs::read(&target).expect("the target must be readable"),
+        b"old bytes",
+        "no target file was touched"
+    );
+    assert!(
+        sync_backup_files(temp.path()).is_empty(),
+        "the run's copies were discarded"
+    );
+    assert!(
+        !app.state::<crate::sync_running::SyncRunning>().is_running(),
+        "the flag freed with the abort"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_phase_three_store_failure_aborts_the_run_and_a_retry_converges() {
+    // The P3-4 ruling through the command (D-133's recorded follow-up,
+    // resolved in D-138): a phase-level `Err` after the run row exists
+    // leaves NO `running` corpse — the wrapper writes the terminal
+    // `aborted` row with the error's own code — and §10's idempotence
+    // promise holds: the retried run converges over what the failed
+    // run already wrote. The store failure is forced the honest way:
+    // while the write seam parks mid-phase, the ready row is planted
+    // into `failed`, so the success verdict's `not_started`-scoped
+    // UPDATE matches no row (the store's wrong-state refusal).
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        9,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let target = repo.join("AGENTS.md");
+    std::fs::write(&target, b"old bytes").expect("the fixture must be writable");
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    // The seam must be `Sync` (phase 3 shares it over an Arc), so the
+    // release receiver rides a Mutex.
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let seams = crate::commands::SyncRunSeams {
+        backup: crate::commands::SyncRunSeams::production().backup,
+        write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
+            entered_tx
+                .send(target.to_path_buf())
+                .expect("the test must live to receive the entry signal");
+            release_rx
+                .lock()
+                .expect("the release lock must not be poisoned")
+                .recv()
+                .expect("the test must live to release the parked write");
+            crate::sync_phase3::production_write(target, contents)
+        }),
+    };
+    let handle = app.app_handle().clone();
+    let running = tauri::async_runtime::spawn(async move {
+        crate::commands::sync_run_with(handle, None, crate::commands::CancelToken::new(), seams)
+            .await
+    });
+    let parked = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the pipeline must reach its write phase");
+    let database = sync_database_of(&app);
+    let parked_text = parked.to_string_lossy().into_owned();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.execute(
+            "UPDATE sync_run_projects SET status = 'failed', \
+             error_code = 'E_FILE_LOCKED', error_message = 'planted' \
+             WHERE sync_run_id = (SELECT id FROM sync_runs WHERE status = 'running') \
+             AND target_path = ?1",
+            rusqlite::params![parked_text],
+        )
+        .map(|_| ())
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("planting the stale row state must work");
+    release_tx
+        .send(())
+        .expect("the parked write must be released");
+
+    let error = tauri::async_runtime::block_on(running)
+        .expect("the parked run must join")
+        .expect_err("the planted row must refuse the verdict transaction");
+    assert_eq!(
+        error.code.as_str(),
+        "E_DB_LOCKED",
+        "the store's wrong-state refusal through the base classifier"
+    );
+    // The terminal row: aborted with the error's own literal — the
+    // P3-4 answer. The FILE the failed run already wrote stays
+    // (§9.5's old-or-new; D-133's recorded residual window).
+    let runs = sync_all_runs(&app);
+    assert_eq!(runs[0].1, "aborted", "no running corpse stays behind");
+    assert_eq!(
+        sync_run_row(&app, &runs[0].0).error_code.as_deref(),
+        Some("E_DB_LOCKED"),
+        "the wrapper aborts with the error's own §10 literal"
+    );
+    let written = std::fs::read_to_string(&target).expect("the written file stays");
+    assert!(
+        written.starts_with("Be brief.\n\n<!-- Created by EunomiaSync "),
+        "the file is wholly the new content, got: {written:?}"
+    );
+    assert!(
+        !app.state::<crate::sync_running::SyncRunning>().is_running(),
+        "the flag freed with the refusal"
+    );
+
+    // §10's idempotence: a retried sync over what the failed run
+    // wrote converges — the file matches the build, so `unchanged`.
+    let webview = main_webview(&app);
+    let outcome = invoke_sync_run(&webview, serde_json::json!(null)).expect("the retry must run");
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the retried run completes");
+    };
+    assert_eq!(summary.verdict, "success", "the retry converges");
+    assert_eq!(summary.projects_unchanged, 1);
+    assert!(
+        sync_project_stamps(&app, &project).0.is_some(),
+        "the converged run stamps the project"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_classifier_shaped_disk_full_error_still_aborts_the_running_row() {
+    // The round-1 P1 fix's pin: `pipeline_refusal` decides by the
+    // ROW's state, never by the error's code. The shared SQL
+    // classifier maps `SQLITE_FULL` to `E_DISK_FULL` from ANY phase's
+    // transaction (db.rs `sqlite_error_to_app_error`) — an error shape
+    // that looks exactly like phase 1's in-phase free-space tail but
+    // leaves the row `running` — so the code-skip the first cut used
+    // would leave a corpse. Here the classifier-shaped error meets a
+    // `running` row: the wrapper aborts it with the error's own
+    // literal; the same error over the terminal row changes nothing
+    // (the in-phase aborts arrive exactly that way).
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (_project, _repo) = sync_repo_project(
+        &app,
+        &repos,
+        12,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    let phase0 = tauri::async_runtime::block_on(crate::sync_phase0::run(app.handle()))
+        .expect("phase 0 must record the running row");
+    let run_id = phase0.run.id.clone();
+    // The guard goes here: the wrapper owns no flag, and the flag must
+    // not outlive the test's run.
+    drop(phase0);
+    assert_eq!(sync_run_row(&app, &run_id).status.as_str(), "running");
+
+    // The classifier-shaped tail look-alike over a running row: the
+    // abort MUST land (the first cut returned it untouched).
+    let answered = tauri::async_runtime::block_on(crate::commands::pipeline_refusal(
+        app.handle(),
+        &run_id,
+        "the write phase",
+        crate::errors::AppError::new(crate::errors::ErrorCode::DiskFull),
+    ));
+    assert_eq!(
+        answered.code.as_str(),
+        "E_DISK_FULL",
+        "the original error returns"
+    );
+    let row = sync_run_row(&app, &run_id);
+    assert_eq!(row.status.as_str(), "aborted", "no running corpse");
+    assert_eq!(row.error_code.as_deref(), Some("E_DISK_FULL"));
+    assert!(
+        row.details
+            .as_deref()
+            .is_some_and(|details| details.contains("the run stopped at the write phase")),
+        "the class-only stage line, got: {:?}",
+        row.details
+    );
+
+    // The same wrapper over the now-terminal row: a no-op — the row
+    // keeps the FIRST verdict (this is how phase 1's in-phase tail and
+    // phase 2's backup abort arrive at the wrapper).
+    let first = sync_run_row(&app, &run_id);
+    let answered = tauri::async_runtime::block_on(crate::commands::pipeline_refusal(
+        app.handle(),
+        &run_id,
+        "the backups",
+        crate::errors::AppError::new(crate::errors::ErrorCode::BackupFailed),
+    ));
+    assert_eq!(answered.code.as_str(), "E_BACKUP_FAILED");
+    let after = sync_run_row(&app, &run_id);
+    assert_eq!(
+        (
+            after.status.as_str(),
+            after.error_code.as_deref(),
+            after.finished_at
+        ),
+        (
+            first.status.as_str(),
+            first.error_code.as_deref(),
+            first.finished_at
+        ),
+        "the terminal row is never rewritten"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_summary_carries_the_skip_and_failure_codes_by_name() {
+    // §10's codes reach the summary by name (MAIN-024: "skip and error
+    // rows carry their `E_*` code"): a scheme-B target without markers
+    // skips as `E_MARKERS_INVALID` (§9.4 phase 1 step 4), and a
+    // refused write lands `E_FILE_LOCKED` (the §10 table's locked
+    // file row) while the run itself stays `failed` (nothing was
+    // written or left unchanged).
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (beta, beta_repo) = sync_repo_project(
+        &app,
+        &repos,
+        10,
+        eunomia_store::settings::Scheme::B,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &beta, "Be brief.");
+    std::fs::write(beta_repo.join("AGENTS.md"), b"no markers at all\n")
+        .expect("the markerless fixture must be writable");
+    let (alpha, alpha_repo) = sync_repo_project(
+        &app,
+        &repos,
+        11,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &alpha, "Be brief.");
+    let alpha_target = alpha_repo.join("AGENTS.md");
+    std::fs::write(&alpha_target, b"old bytes").expect("the fixture must be writable");
+    let seams = crate::commands::SyncRunSeams {
+        backup: crate::commands::SyncRunSeams::production().backup,
+        write: std::sync::Arc::new(|target: &std::path::Path, _contents: &[u8]| {
+            Err::<eunomia_fs::atomic::WrittenFile, _>(
+                eunomia_fs::atomic::AtomicWriteError::FileLocked(
+                    eunomia_fs::atomic::FileLockedFailure {
+                        step: eunomia_fs::atomic::WriteStep::Replace,
+                        path: target.to_path_buf(),
+                        retries: 3,
+                        source: std::io::Error::from_raw_os_error(32),
+                        cleanup: None,
+                    },
+                ),
+            )
+        }),
+    };
+
+    let outcome = run_sync_with(&app, None, crate::commands::CancelToken::new(), seams)
+        .expect("the run itself completes over its rows");
+
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("a run with per-project refusals still completes");
+    };
+    assert_eq!(summary.verdict, "failed");
+    assert_eq!(summary.projects_skipped, 1);
+    assert_eq!(summary.projects_failed, 1);
+    assert_eq!(
+        summary
+            .projects
+            .iter()
+            .map(|entry| (
+                entry.status.as_str(),
+                entry.error_code.as_deref(),
+                entry.error_message.is_some()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("skipped", Some("E_MARKERS_INVALID"), true),
+            ("failed", Some("E_FILE_LOCKED"), true),
+        ],
+        "the §10 literals, by name, with their class-only messages"
+    );
+    assert_eq!(
+        std::fs::read(&alpha_target).expect("the target must be readable"),
+        b"old bytes",
+        "the refused write moved nothing (§9.5's old-or-new)"
+    );
+    assert_eq!(
+        sync_project_stamps(&app, &alpha),
+        (None, None),
+        "OUT-020: the failed project keeps its previous sync state"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn sync_run_answers_honestly_without_a_database() {
+    // Recovery mode (the `managed_db` honesty every database command
+    // shares): no `Db` managed — the honest `NoDatabase` refusal, and
+    // the flag the start took is RAII-released on the way out, so the
+    // refusal cannot wedge SYS-004's state.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::sync_run])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(data_dirs::DataRoot(temp.path().to_path_buf()));
+    app.manage(crate::sync_running::SyncRunning::new());
+    let webview = main_webview(&app);
+
+    let error = invoke_sync_run(&webview, serde_json::json!(null))
+        .expect_err("a database-less sync must fail honestly");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("NoDatabase"),
+        "the honest recovery-mode answer"
+    );
+    assert!(
+        !app.state::<crate::sync_running::SyncRunning>().is_running(),
+        "the refused start left the flag down"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_sync_run_command_is_registered_with_the_specta_builder() {
+    // The §7.10 Sync-module name, registered exactly once — the D-034
+    // wiring-pin rationale: without this pin, dropping the
+    // registration would leave `export_bindings_are_up_to_date` green
+    // while it silently rewrote the committed bindings without the
+    // command.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("commands::sync_run").count(),
+        1,
+        "lib.rs must register the `sync_run` command exactly once (§7.10, T-118)"
+    );
+}

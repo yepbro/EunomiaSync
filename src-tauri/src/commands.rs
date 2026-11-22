@@ -6,13 +6,14 @@
 //! `projects_list` (T-072), the System module's
 //! `dialog_pick_folder` (T-073), the Projects module's
 //! `project_add_manual` (T-074), the Projects module's
-//! `exclusions_list`/`exclusion_remove` (T-078) and the Projects
-//! module's `projects_reorder` (T-080):
-//! `app_open_data_folder`, `db_backups_list`, `db_restore_backup`,
-//! `db_recreate`, `activity_list`, `settings_get`, `settings_set`,
-//! `app_info`, `markdown_preview`, `projects_list`,
-//! `dialog_pick_folder`, `project_add_manual`, `exclusions_list`,
-//! `exclusion_remove`, `projects_reorder`.
+//! `exclusions_list`/`exclusion_remove` (T-078), the Projects
+//! module's `projects_reorder` (T-080) and the Sync module's
+//! `sync_run` (T-118): `app_open_data_folder`, `db_backups_list`,
+//! `db_restore_backup`, `db_recreate`, `activity_list`,
+//! `settings_get`, `settings_set`, `app_info`, `markdown_preview`,
+//! `projects_list`, `dialog_pick_folder`, `project_add_manual`,
+//! `exclusions_list`, `exclusion_remove`, `projects_reorder`,
+//! `sync_run`.
 //!
 //! Since T-105 the three project-*changing* commands
 //! (`project_add_manual`, `exclusion_remove`, `projects_reorder`)
@@ -70,22 +71,32 @@
 //! blocking I/O and never run on the async workers.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, Manager, Runtime};
 
+use crate::availability;
 use crate::data_dirs;
 use crate::db::{self, Db};
 use crate::dirty_recalc::DirtyState;
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
+use crate::file_watch;
 use crate::logging;
 use crate::markdown;
 use crate::recovery::{self, DbBackupInfo};
 use crate::session_paths;
+use crate::sync_phase0;
+use crate::sync_phase1;
+use crate::sync_phase2;
+use crate::sync_phase3;
+use crate::sync_phase4;
 use crate::sync_running;
 
 use eunomia_core::project::{Color, ProjectId};
+use eunomia_fs::atomic::{AtomicWriteError, WrittenFile};
+use eunomia_fs::backup::{BackupError, BackupOutcome, BackupTarget};
 use eunomia_fs::paths::NotARepoError;
 use eunomia_fs::write_access::WriteAccessError;
 use eunomia_store::action_log::{
@@ -95,6 +106,7 @@ use eunomia_store::action_log::{
 use eunomia_store::projects::{ListScope, ProjectState, ProjectsError};
 use eunomia_store::settings::{SettingKey, SettingValue, SettingsError};
 use eunomia_store::storage::StorageError;
+use eunomia_store::sync_runs::{SyncRunsError, abort_run};
 
 /// Serializes the two destructive recovery commands against each
 /// other: both end in `app.manage(database)`, and tauri's `manage`
@@ -625,6 +637,662 @@ fn reject_during_sync<R: Runtime>(app: &AppHandle<R>) -> Result<(), AppError> {
         return Err(sync_running_refusal());
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `sync_run` (T-118, §7.10 Sync module, §9.4 the pipeline, D-25/D-130…D-134)
+// ---------------------------------------------------------------------------
+
+/// The `sync_run` command's wire answer (§7.10 Sync module, §9.4 phase 1
+/// step 6 and phase 4 step 5): either the D-25 confirmation request, or
+/// the finished run's summary.
+///
+/// The two variants are the command's only outcomes besides `Err`:
+/// a run that reaches phase 2 cannot be stopped (§9.4 phase 2 step 3),
+/// so there is no "cancelled while writing" member — a cancel lands
+/// before the backups and comes back as the `aborted` verdict of
+/// [`SyncRunOutcome::Completed`], the same verdict a `success`/
+/// `partial`/`failed` run answers with (the store's §6.2 vocabulary
+/// literal, read back from the run row).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
+pub(crate) enum SyncRunOutcome {
+    /// §9.4 phase 1 step 6 (D-25): the build is empty over a non-empty
+    /// file for at least one project, `confirm_empty` was not `true`,
+    /// and the run stopped before the backups — nothing was written,
+    /// no backup was made, the flag is free, and the UI re-calls the
+    /// command with `confirm_empty=true` after the user confirms (a
+    /// full new run) or simply does not (declining cancels the whole
+    /// run — this run's row is already terminal).
+    NeedsConfirmation {
+        /// The ids of the projects awaiting confirmation, in
+        /// `sort_order` — [`Phase1Outcome::needs_confirmation`]'s
+        /// list. Ids, not names: the dialog maps them through the
+        /// projects the matrix already renders, so no project name
+        /// text rides the wire twice.
+        projects: Vec<String>,
+    },
+    /// The run reached a terminal status (`success`/`partial`/`failed`
+    /// — phase 4's counted verdict — or `aborted` — a stop before the
+    /// backups), and the summary is the committed rows read back.
+    Completed { summary: SyncRunSummary },
+}
+
+/// One finished (or stopped) sync run's summary — §9.4's verdict with
+/// MAIN-024's counter chips and per-project rows, read back from the
+/// run's committed rows (the same counted truth [`finish_run`] wrote)
+/// so the answer cannot disagree with the database.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct SyncRunSummary {
+    /// The run row's id (UUIDv7 TEXT, DB-002).
+    pub(crate) run_id: String,
+    /// The run's verdict — the store's §6.2 status literal
+    /// (`success`/`partial`/`failed`/`aborted`).
+    pub(crate) verdict: String,
+    /// When the run started (DB-002), the flag-take moment phase 0
+    /// recorded.
+    pub(crate) started_at: String,
+    /// When the run reached its terminal status (DB-002); `None` never
+    /// reaches this DTO (a terminal row always carries it).
+    pub(crate) finished_at: Option<String>,
+    /// The per-status counters, exactly the row's cells: MAIN-024's
+    /// "Written", "Unchanged", "Skipped", "Failed" chips. `i32` on the
+    /// wire (specta forbids BigInt-style types); the store's i64
+    /// counts of projects always fit.
+    pub(crate) projects_total: i32,
+    pub(crate) projects_written: i32,
+    pub(crate) projects_unchanged: i32,
+    pub(crate) projects_skipped: i32,
+    pub(crate) projects_failed: i32,
+    /// The run row's free-text `details` cell — the §9.4 empty-run
+    /// message on a `success` over no active projects; the abort
+    /// lines this command writes on its stopped-run paths.
+    pub(crate) details: Option<String>,
+    /// Every project's outcome, in `sort_order` — the skip and error
+    /// rows MAIN-024 renders with their `E_*` code.
+    pub(crate) projects: Vec<SyncRunProjectEntry>,
+}
+
+/// One project's outcome inside the summary — the `sync_run_projects`
+/// row's cells on the wire (§6.2 status literal + the §10 code of a
+/// refusal).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct SyncRunProjectEntry {
+    /// The project row id.
+    pub(crate) project_id: String,
+    /// The row's status literal (`written`/`unchanged`/`skipped`/
+    /// `failed`/`not_started`).
+    pub(crate) status: String,
+    /// The target path phase 0 built for (§9.4 phase 1 step 2's
+    /// spelling, before symlink resolution).
+    pub(crate) target_path: Option<String>,
+    /// The §10 code of a `skipped`/`failed` outcome.
+    pub(crate) error_code: Option<String>,
+    /// The short, class-only message of a refusal (paths and codes
+    /// only, never file content — SEC-008).
+    pub(crate) error_message: Option<String>,
+}
+
+/// The cooperative cancel seam (§9.4's "declining cancels the whole
+/// run" and the `sync_cancel` entry of §7.10): a shared atomic flag the
+/// pipeline consults at its ONE cancellation point — after the D-25
+/// gate, before phase 2 ("After phase 2 succeeds, the run cannot be
+/// canceled", §9.4 phase 2 step 3). Minimal by the card's ruling: a
+/// bool, not a channel — the phases between the check and phase 2 are
+/// already running, and everything after phase 2 is uncancellable by
+/// spec, so a latched flag checked once is the whole policy.
+///
+/// The public command constructs a fresh token nobody can reach yet;
+/// publishing the running run's token for the future `sync_cancel`
+/// command (a managed slot in `lib.rs`'s setup) is the recorded
+/// follow-up — the check point and the abort shape it triggers land
+/// here, tested through [`sync_run_with`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CancelToken {
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CancelToken {
+    /// A token nobody has cancelled.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Latches the cancel request (Release: the pipeline's check must
+    /// not read it early).
+    #[allow(dead_code)] // consumed by the future sync_cancel command's task; tested today
+    pub(crate) fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether a cancel was requested before the check point (Acquire,
+    /// the flag seam's own ordering pair).
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// The injected pipeline operations of [`sync_run_with`] — the
+/// phase-2/3 `D-089 injector pattern` bundled for one call site:
+/// production closes over the real `eunomia-fs` operations, the tests
+/// substitute the fault points of spec 15.1 (a failing copy, a parked
+/// or refusing write). The other phase seams (free space, the marker
+/// clock, the dirty pass) stay un-injected here: their fault behavior
+/// is pinned by the phases' own suites, and no command-level test in
+/// this task needs to reach through them.
+pub(crate) struct SyncRunSeams {
+    /// Phase 2's copy operation — production
+    /// [`backup_target_file`](eunomia_fs::backup::backup_target_file).
+    pub(crate) backup: BackupOp,
+    /// Phase 3's §9.5 write operation — production
+    /// [`sync_phase3::production_write`].
+    pub(crate) write: WriteOp,
+}
+
+/// Phase 2's injected copy operation (the `SyncRunSeams::backup` arm).
+type BackupOp = Arc<dyn Fn(&BackupTarget<'_>) -> Result<BackupOutcome, BackupError> + Send + Sync>;
+
+/// Phase 3's injected §9.5 write operation (the `SyncRunSeams::write`
+/// arm) — `Sync` because phase 3 shares it over an `Arc` across the
+/// per-project blocking closures.
+type WriteOp = Arc<dyn Fn(&Path, &[u8]) -> Result<WrittenFile, AtomicWriteError> + Send + Sync>;
+
+impl SyncRunSeams {
+    /// The production seams over the real `eunomia-fs` operations.
+    pub(crate) fn production() -> Self {
+        Self {
+            backup: Arc::new(eunomia_fs::backup::backup_target_file),
+            write: Arc::new(crate::sync_phase3::production_write),
+        }
+    }
+}
+
+/// Serves the "Run sync" button (§7.10 Sync module `sync_run`, §9.4 the
+/// pipeline): the whole run — flag, snapshot build, preflight, the
+/// D-25 gate, backups, atomic writes, the finish — through the
+/// production seams, with §10's every-error rule served by the
+/// [`logging::sync_run_failed`] edge.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn sync_run<R: Runtime>(
+    app: AppHandle<R>,
+    confirm_empty: Option<bool>,
+) -> Result<SyncRunOutcome, AppError> {
+    sync_run_with(
+        app,
+        confirm_empty,
+        CancelToken::new(),
+        SyncRunSeams::production(),
+    )
+    .await
+    .inspect_err(logging::sync_run_failed)
+}
+
+/// The body of [`sync_run`], split the `dialog_pick_folder_with` way so
+/// the one logging edge covers every failure path and the tests drive
+/// the pipeline with their own cancel token and seams.
+///
+/// **The composition, §9.4's own order.**
+///
+/// 1. Phase 0 ([`sync_phase0::run`]) — the flag-guarded start: a
+///    second run meets the typed `E_SYNC_RUNNING` refusal here, the
+///    snapshot is built in one read transaction, and the `running` row
+///    is recorded. The outcome (the [`sync_running::SyncGuard`]
+///    included) is held for the run: whatever path this function takes
+///    out — confirmation, cancel, error, finish — the guard's RAII
+///    drop is §9.4 phase 4 step 5's "Reset `sync_running`"
+///    (D-123's contract, `Phase0Outcome`'s field), and on the finish
+///    path the drop is explicit at phase 4's own end, BEFORE the
+///    never-fatal aftermath, so an after-run seam that never returns
+///    cannot wedge SYS-004 behind a finished run (the round-1 P2-2
+///    fix).
+/// 2. DB-032's "before a sync" availability checkpoint
+///    ([`availability::recheck_and_emit`]) — after the flag, before
+///    phase 1: the mutations are gated, so the pass reads a stable
+///    project list; its diff is the event's business (phase 1's
+///    per-project probes stay the run's own gate), its failure refuses
+///    the run.
+/// 3. Phase 1 — preflight, over the built content; then the D-25 gate:
+///    a non-empty [`Phase1Outcome::needs_confirmation`] list without
+///    `confirm_empty=true` answers
+///    [`SyncRunOutcome::NeedsConfirmation`] with the list, the run row
+///    terminal `aborted`, and nothing else changed (no file, no
+///    backup, no stamp) — the UI's confirm re-calls the command as a
+///    full new run.
+/// 4. The cancel check point — the one place the token is consulted,
+///    before phase 2; a latched token aborts the run (the D-131
+///    `E_DISK_FULL` tail shape: the row goes `aborted`, phase 1's
+///    verdicts stay) and answers the `aborted` summary.
+/// 5. Phases 2 → 3 → 4 — backups, the per-project writes, the finish;
+///    after phase 2 no stop exists (§9.4's own point of no return).
+/// 6. The watcher's after-sync refresh
+///    ([`file_watch::refresh_after_sync`], SYS-008) and the finish's
+///    never-fatal reports (D-134): reported through
+///    [`logging::sync_run_degraded`], never `Err` — the verdict is
+///    committed, and the next trigger retries everything that refused.
+/// 7. The summary — the committed rows read back ([`summary_of`]).
+///
+/// **The error wrapper (the P3-4 ruling, D-133's recorded follow-up).**
+/// An `Err` after phase 0 whose run row is still `running` gets its
+/// terminal status: [`abort_run`] with the error's own §10 literal and
+/// a class-only stage line, decided by the ROW's state inside the one
+/// transaction — never by the error's code, which proves nothing about
+/// the row (the shared SQL classifier maps `SQLITE_FULL` to
+/// `E_DISK_FULL` from any phase's transaction; the round-1 P1 fix).
+/// The abort is best-effort — a refused abort (the store that just
+/// failed failing again) leaves the row `running`, is logged through
+/// the degraded edge, and returns the ORIGINAL error; that row is
+/// exactly what the startup `interrupted` recovery exists for. No
+/// per-project reset rides these aborts: the phase-2 reset belongs to
+/// the backup abort's own transaction (§9.4 phase 2 step 2), and a
+/// `written`/`unchanged` row claims what actually happened (the
+/// D-131 tail posture, spelled for every stop point).
+pub(crate) async fn sync_run_with<R: Runtime>(
+    app: AppHandle<R>,
+    confirm_empty: Option<bool>,
+    cancel: CancelToken,
+    seams: SyncRunSeams,
+) -> Result<SyncRunOutcome, AppError> {
+    // The data-directory root phases 1 (free space) and 2/4 (the §5.5
+    // tree) need — resolved before the flag so a missing `DataRoot`
+    // (an uninitialized-app bug) does not churn the flag at all.
+    let data_dir = data_root(&app)?;
+
+    // Step 1 — phase 0. An `Err` here leaves no run row (the flag is
+    // RAII-released inside the phase), so there is nothing to abort.
+    let phase0 = sync_phase0::run(&app).await?;
+    let run_id = phase0.run.id.clone();
+
+    // Step 2 — DB-032's "before a sync" checkpoint. The diff is the
+    // event's business; a refusal stops the run (a pass that could not
+    // see the project list cannot be "before a sync").
+    if let Err(error) = availability::recheck_and_emit(&app).await {
+        return Err(pipeline_refusal(&app, &run_id, "the availability checkpoint", error).await);
+    }
+
+    // Step 3 — phase 1 over the built content. The free-space seam is
+    // the production closure the phase's docs prescribe.
+    let free_probe = {
+        let dir = data_dir.clone();
+        move || eunomia_fs::free_space::free_bytes(&dir)
+    };
+    let phase1 =
+        match sync_phase1::run(&app, &phase0, free_probe, std::time::SystemTime::now()).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Err(pipeline_refusal(&app, &run_id, "the preflight", error).await);
+            }
+        };
+
+    // §10's per-project skip lines over the outcome's structured OS
+    // facts (the store row has no column for them — D-131's round-1
+    // P3-5 added the details for exactly this consumption), logged
+    // HERE — right after the phase — so every later exit (the D-25
+    // gate, the cancel stop, a phase-2/3 `Err`) still carries them:
+    // phase 4 journals only finished runs (the round-2 P3 fix).
+    for (_project_id, verdict) in &phase1.projects {
+        if let crate::sync_phase1::PreflightVerdict::Skipped {
+            code,
+            message,
+            details,
+            ..
+        } = verdict
+        {
+            logging::sync_project_refused(
+                false,
+                code.as_str(),
+                details.as_ref().and_then(|facts| facts.os_code),
+                details.as_ref().and_then(|facts| facts.os_kind.as_deref()),
+                message,
+            );
+        }
+    }
+
+    // Phase 1 froze everything it read into its own outcome, so the
+    // built snapshot's memory goes here; the guard is the only half
+    // the rest of the run needs (the round-1 P3-4 finding).
+    let sync_phase0::Phase0Outcome {
+        guard, projects, ..
+    } = phase0;
+    drop(projects);
+
+    // The D-25 gate (§9.4 phase 1 step 6): a non-empty confirmation
+    // list without the flag answers the list and stops the run — the
+    // aborted row is this command's recorded reading of "changes
+    // nothing": §9.4's phrase is about the target files (phase 1's
+    // own header), while a `running` row behind a released flag would
+    // lie about the app's state until the next restart.
+    let confirmation = phase1.needs_confirmation();
+    if !confirmation.is_empty() && confirm_empty != Some(true) {
+        stop_run(
+            &app,
+            &run_id,
+            "",
+            &format!(
+                "awaiting the empty-build confirmation for {} project(s) (D-25)",
+                confirmation.len()
+            ),
+        )
+        .await?;
+        logging::sync_run_aborted("awaiting the empty-build confirmation");
+        return Ok(SyncRunOutcome::NeedsConfirmation {
+            projects: confirmation.iter().map(|id| (*id).to_owned()).collect(),
+        });
+    }
+
+    // Step 4 — the cancel check point: the one consultation, before
+    // phase 2 (§9.4 phase 2 step 3's point of no return). The stop is
+    // the D-131 tail shape — the row `aborted`, the verdicts phase 1
+    // wrote stay — and the answer is the `aborted` summary, not an
+    // `Err`: the user asked for this.
+    if cancel.is_cancelled() {
+        stop_run(
+            &app,
+            &run_id,
+            "",
+            "cancelled by the user before the backups",
+        )
+        .await?;
+        logging::sync_run_aborted("cancelled by the user before the backups");
+        let summary = summary_of(&app, &run_id).await?;
+        return Ok(SyncRunOutcome::Completed { summary });
+    }
+
+    // Step 5 — phases 2 → 3 → 4, each refusing through the wrapper.
+    let backup = Arc::clone(&seams.backup);
+    if let Err(error) = sync_phase2::run(
+        &app,
+        &phase1,
+        &data_dir,
+        move |target| backup(target),
+        jiff::Timestamp::now(),
+    )
+    .await
+    {
+        return Err(pipeline_refusal(&app, &run_id, "the backups", error).await);
+    }
+
+    let write = Arc::clone(&seams.write);
+    let phase3 = match sync_phase3::run(
+        &app,
+        &phase1,
+        move |target, contents| write(target, contents),
+        eunomia_core::marker_clock::now_marker_clock,
+        jiff::Timestamp::now(),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Err(pipeline_refusal(&app, &run_id, "the write phase", error).await);
+        }
+    };
+
+    // §10's per-project failure lines (the skip loop already ran right
+    // after phase 1 — the two loops read disjoint sets: phase 3
+    // processes only `ready` projects).
+    for (_project_id, outcome) in &phase3.results {
+        if let crate::sync_phase3::WriteOutcome::Failed {
+            code,
+            message,
+            details,
+            ..
+        } = outcome
+        {
+            logging::sync_project_refused(
+                true,
+                code.as_str(),
+                details.as_ref().and_then(|facts| facts.os_code),
+                details.as_ref().and_then(|facts| facts.os_kind.as_deref()),
+                message,
+            );
+        }
+    }
+
+    // The dirty seam through a closure that owns its handle (the
+    // higher-ranked bound: a bare fn item's returned future borrows the
+    // argument, so the phase's `FnOnce(&AppHandle<R>) -> F` wants the
+    // cloned-handle shape the phase tests use).
+    let dirty_seam = |app: &AppHandle<R>| {
+        let app = app.clone();
+        async move { crate::sync_phase4::production_dirty(&app).await }
+    };
+    let phase4 = match sync_phase4::run(
+        &app,
+        &phase3,
+        &data_dir,
+        jiff::Timestamp::now(),
+        dirty_seam,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Err(pipeline_refusal(&app, &run_id, "the finish", error).await);
+        }
+    };
+
+    // §9.4 phase 4 step 5's reset happens HERE, at the run's own end:
+    // the guard leaves the pipeline before the never-fatal aftermath
+    // (SYS-008's refresh) and the summary read, so a seam that never
+    // returns cannot wedge SYS-004 behind a finished run (the round-1
+    // P2-2 fix). An `Err` above unwinds through the guard's Drop, the
+    // same release.
+    drop(guard);
+
+    // Step 6 — the never-fatal aftermath: the watcher's after-sync
+    // refresh (SYS-008; its class-only §10 code is all that rides the
+    // line — SEC-008) and the finish's three reports (D-134).
+    let watch_failure = match file_watch::refresh_after_sync(&app).await {
+        Ok(_) => None,
+        Err(error) => Some(error.code.as_str().to_owned()),
+    };
+    if !phase4.retention.failures.is_empty()
+        || !phase4.journal.failures.is_empty()
+        || phase4.dirty.failure.is_some()
+        || watch_failure.is_some()
+    {
+        logging::sync_run_degraded(
+            &phase4.retention.failures,
+            &phase4.journal.failures,
+            phase4.dirty.failure.as_deref(),
+            watch_failure.as_deref(),
+        );
+    }
+
+    // Step 7 — the summary off the committed rows.
+    let summary = summary_of(&app, &run_id).await?;
+    Ok(SyncRunOutcome::Completed { summary })
+}
+
+/// The P3-4 error wrapper (see [`sync_run_with`]'s docs): give a
+/// post-phase-0 `Err` its terminal run row when the run is not
+/// already terminal, then hand the ORIGINAL error back — the store's
+/// refusal of the abort itself is reported, never swapped in (the
+/// first error names the cause; the second only compounds it).
+///
+/// **The decision is the row's state, never the error's code** (the
+/// round-1 P1 fix): a code like `E_DISK_FULL` proves nothing about the
+/// row — the shared SQL classifier maps `SQLITE_FULL` to it from ANY
+/// phase's transaction, all of which leave the row `running`. The two
+/// phases that DO write their terminal row before returning an error
+/// (phase 1's free-space tail, phase 2's backup abort) are recognized
+/// by exactly that row state inside the abort transaction, so a
+/// second abort can never meet the store's wrong-state refusal.
+/// `pub(crate)`: the behavior suite drives it directly (the
+/// classifier-shaped `E_DISK_FULL` over a `running` row).
+pub(crate) async fn pipeline_refusal<R: Runtime>(
+    app: &AppHandle<R>,
+    run_id: &str,
+    stage: &str,
+    error: AppError,
+) -> AppError {
+    let code = error.code.as_str();
+    match stop_run_if_running(
+        app,
+        run_id,
+        code,
+        &format!("the run stopped at {stage}: {code}"),
+    )
+    .await
+    {
+        Ok(_) => error,
+        Err(abort_error) => {
+            // The best-effort half: the row stays `running` — the
+            // startup `interrupted` recovery's case — and BOTH facts
+            // reach the log (the command edge logs the original; this
+            // line names the abort that could not land, its own edge
+            // because the run did NOT finish — the round-2 P2 fix).
+            logging::sync_run_abort_refused(abort_error.code.as_str());
+            error
+        }
+    }
+}
+
+/// The run repository's counter on the wire's integer — the store's
+/// i64 count of projects into specta-safe i32 (BigInt types are
+/// forbidden on the wire to avoid precision loss). A run cannot hold
+/// `i32::MAX` projects; the reasoned-panic posture over that bound
+/// (the phase-2 `size_bytes` shape).
+fn wire_count(count: i64) -> i32 {
+    i32::try_from(count).expect("a run's project count fits the wire's i32")
+}
+
+/// Writes a user-shaped stop's terminal row: `aborted` with the DB-002
+/// now and a class-only details line. The `code` is the §10 literal of
+/// what stopped the run where one exists (the P3-4 wrapper passes the
+/// error's own code); the two user-shaped stops — the D-25 gate, the
+/// cancel point — are decisions, not §10 situations, and pass the
+/// empty literal: the store's writer takes `&str` (NULL is not an
+/// input it offers), so "" is the no-code spelling and the first run
+/// reader (`sync_last_result`) must treat it so — the obligation
+/// recorded in D-138's follow-ups.
+async fn stop_run<R: Runtime>(
+    app: &AppHandle<R>,
+    run_id: &str,
+    code: &str,
+    details: &str,
+) -> Result<(), AppError> {
+    let run_id = run_id.to_owned();
+    let code = code.to_owned();
+    let details = details.to_owned();
+    let finished_at = eunomia_store::values::now_utc();
+    managed_db(app)?
+        .run(move |tx| {
+            abort_run(tx, &run_id, &finished_at, &code, &details).map_err(runs_to_app_error)
+        })
+        .await
+}
+
+/// The P3-4 wrapper's abort: [`stop_run`]'s row write, decided by the
+/// ROW's state inside the one transaction — a row no longer
+/// `running` (a phase's own in-phase abort, a finish that raced)
+/// answers `Ok(false)` untouched; only a still-`running` corpse is
+/// aborted. Returns whether the abort landed.
+async fn stop_run_if_running<R: Runtime>(
+    app: &AppHandle<R>,
+    run_id: &str,
+    code: &str,
+    details: &str,
+) -> Result<bool, AppError> {
+    let run_id = run_id.to_owned();
+    let code = code.to_owned();
+    let details = details.to_owned();
+    let finished_at = eunomia_store::values::now_utc();
+    managed_db(app)?
+        .run(move |tx| {
+            let running = eunomia_store::sync_runs::get(tx, &run_id)
+                .map_err(runs_to_app_error)?
+                .is_some_and(|row| row.status == eunomia_store::sync_runs::SyncRunStatus::Running);
+            if !running {
+                return Ok(false);
+            }
+            abort_run(tx, &run_id, &finished_at, &code, &details).map_err(runs_to_app_error)?;
+            Ok(true)
+        })
+        .await
+}
+/// Reads one run's committed truth back as the wire summary — the
+/// verdict and counters `finish_run` wrote (or the abort this command
+/// wrote), and every per-project row in `sort_order`. Called only over
+/// terminal rows (the finish, the cancel stop), so a missing row here
+/// names a broken invariant, not a data state.
+async fn summary_of<R: Runtime>(
+    app: &AppHandle<R>,
+    run_id: &str,
+) -> Result<SyncRunSummary, AppError> {
+    let run_id = run_id.to_owned();
+    managed_db(app)?
+        .run(move |tx| {
+            let run = eunomia_store::sync_runs::get(tx, &run_id)
+                .map_err(runs_to_app_error)?
+                .ok_or_else(run_row_missing_refusal)?;
+            let rows =
+                eunomia_store::sync_runs::list_projects(tx, &run_id).map_err(runs_to_app_error)?;
+            Ok(SyncRunSummary {
+                run_id: run.id,
+                verdict: run.status.as_str().to_owned(),
+                started_at: run.started_at,
+                finished_at: run.finished_at,
+                // The store's i64 counts of projects on the wire's
+                // i32 — a run cannot hold two billion projects; the
+                // reasoned-panic posture over that bound, the
+                // `size_bytes` shape.
+                projects_total: wire_count(run.projects_total),
+                projects_written: wire_count(run.projects_written),
+                projects_unchanged: wire_count(run.projects_unchanged),
+                projects_skipped: wire_count(run.projects_skipped),
+                projects_failed: wire_count(run.projects_failed),
+                details: run.details,
+                projects: rows
+                    .into_iter()
+                    .map(|row| SyncRunProjectEntry {
+                        project_id: row.project_id,
+                        status: row.status.as_str().to_owned(),
+                        target_path: row.target_path,
+                        error_code: row.error_code,
+                        error_message: row.error_message,
+                    })
+                    .collect(),
+            })
+        })
+        .await
+}
+
+/// The class-only refusal for a run row that vanished between its
+/// terminal write and the summary read (the FK keeps the row alive;
+/// a miss names a broken invariant — the phase-1
+/// `project_missing_refusal` family).
+fn run_row_missing_refusal() -> AppError {
+    let mut error = AppError::new(ErrorCode::DbLocked);
+    error.details = Some(ErrorDetails {
+        os_code: None,
+        os_kind: Some("SyncRunRowMissing".to_owned()),
+        os_message: Some(
+            "the run row the summary was about is missing from the sync_runs table".to_owned(),
+        ),
+    });
+    error
+}
+
+/// Maps the run repository's failures onto the §7.10 wire (the D-130
+/// mapper family, spelled once more because each module owns its own):
+/// SQLite through the shared base classifier, a corrupt vocabulary
+/// cell as the class-only fallback (SEC-008).
+fn runs_to_app_error(error: SyncRunsError) -> AppError {
+    match error {
+        SyncRunsError::Sql(source) => db::sqlite_error_to_app_error(source),
+        SyncRunsError::Member { column, .. } => {
+            let mut error = AppError::new(ErrorCode::DbLocked);
+            error.details = Some(ErrorDetails {
+                os_code: None,
+                os_kind: Some("SyncRunsCorrupt".to_owned()),
+                os_message: Some(format!("a stored {column} cell is outside its vocabulary")),
+            });
+            error
+        }
+    }
 }
 
 /// The body of [`activity_list`], split from the command wrapper the

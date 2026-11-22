@@ -167,7 +167,6 @@ use crate::sync_phase0::{Phase0Outcome, PreparedProject};
 
 /// The phase's product for one project: what §9.4 phase 1 decided and
 /// everything phases 2–3 need to act on it.
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PreflightVerdict {
     /// §9.4 phase 1 refused the project: the §10 code of the refusal
@@ -197,7 +196,6 @@ pub(crate) enum PreflightVerdict {
 /// Phase 3's write recipe for one `ready` project: everything the
 /// write phase needs to lay down the final bytes once the run's
 /// marker line exists (ALG-032 stamps it at the write phase's start).
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WritePlan {
     /// Schemes A and C — the whole-file rebuild: the final bytes are
@@ -227,7 +225,6 @@ pub(crate) enum WritePlan {
 /// One `ready` project's preflight product (§9.4 phase 1 step 4's
 /// "build the final bytes", in the markerless form the module docs
 /// explain).
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReadyProject {
     /// The resolved write path (D-092): the real file behind any
@@ -257,7 +254,6 @@ pub(crate) struct ReadyProject {
 /// What phase 1 hands the pipeline: the run's id and every project's
 /// verdict, in the snapshot's `sort_order` (§9.4 phase 1's "for each
 /// active project, in order").
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug)]
 pub(crate) struct Phase1Outcome {
     /// The run these verdicts belong to (the `sync_runs` id phase 0
@@ -273,7 +269,6 @@ impl Phase1Outcome {
     /// is empty over a non-empty existing file, in `sort_order` —
     /// the list §9.4 phase 1 step 6 says the `sync_run` command
     /// returns with `NeedsConfirmation` (T-118's gate).
-    #[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
     pub(crate) fn needs_confirmation(&self) -> Vec<&str> {
         self.projects
             .iter()
@@ -312,7 +307,6 @@ impl Phase1Outcome {
 ///   classified store errors of the transactions — a failed
 ///   preflight leaves the run row `running`, the crash-recovery
 ///   rule's case.
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 pub(crate) async fn run<R, S>(
     app: &AppHandle<R>,
     phase0: &Phase0Outcome,

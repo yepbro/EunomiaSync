@@ -947,6 +947,137 @@ pub(crate) fn projects_list_failed(error: &AppError) {
     );
 }
 
+/// The `sync_run` command failed (T-118, §9.4, §10's every-error rule):
+/// the `projects_list_failed` shape over the Sync target. The reachable
+/// §10 answers are the `E_SYNC_RUNNING` SYS-004 refusal of a second
+/// start (§9.4 phase 0 step 1), the honest `NoDatabase` fallback
+/// (recovery mode), the typed `E_DISK_FULL`/`E_BACKUP_FAILED` envelopes
+/// of the two in-phase aborts (their run rows carry the verdicts —
+/// phase 1's tail rule, phase 2's step 2), and the classified store
+/// errors of any phase's transactions — each of those last ones leaves
+/// a terminal `aborted` row behind (the P3-4 ruling, D-138), so the
+/// line and the row agree, with ONE carve-out: a refused abort leaves
+/// the row `running` and takes the [`sync_run_abort_refused`] line
+/// beside this one. Per-project outcomes never reach this edge:
+/// `skipped`/`failed` projects are rows of a finished run, journaled by
+/// phase 4 (D-051) and carried by [`sync_project_refused`] — a line
+/// here would double the §7.7 record.
+pub(crate) fn sync_run_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::sync",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "running a sync failed"
+    );
+}
+
+/// The best-effort abort of a failed run was itself refused (T-118,
+/// the P3-4 wrapper's degraded half): the run row stays `running` with
+/// the flag already released — the startup `interrupted` recovery's
+/// case — and this line is the only record of WHY no terminal row
+/// exists. `error` level: the next reader of `sync_runs` meets a
+/// running row that will never finish on its own; the original error
+/// (`sync_run_failed`'s line, the same call) names the cause that
+/// stopped the run, this one names the abort that could not land —
+/// two facts, two lines, neither pretending the run finished.
+pub(crate) fn sync_run_abort_refused(code: &str) {
+    tracing::error!(
+        target: "eunomia::sync",
+        code,
+        "writing the failed run's aborted row was refused; the run row stays running"
+    );
+}
+
+/// A sync run stopped by its user before the backups (T-118): the D-25
+/// gate's answer (`NeedsConfirmation` — the UI re-calls with
+/// `confirm_empty=true` or declines) and the cancel point's (§9.4's
+/// "declining cancels the whole run"; after phase 2 no stop exists).
+/// `info` + the fixed class-only `reason`: the stop is a decision, not
+/// a failure, and the run row's `aborted` details cell carries the same
+/// sentence — the §7.7 journal of the run itself is phase 4's (an
+/// aborted run writes no journal entries; the store's action
+/// vocabulary has no cancel member — recorded in D-138).
+pub(crate) fn sync_run_aborted(reason: &str) {
+    tracing::info!(
+        target: "eunomia::sync",
+        reason,
+        "the sync run was stopped before the backups"
+    );
+}
+
+/// One per-project refusal of a finished run (T-118, §10's every-error
+/// rule: "every error is written to the log with its code, project,
+/// path, and OS code"): the §10 code travels as the code literal, the
+/// OS facts ride `details` when an OS call produced the refusal (the
+/// row has no column for them — D-131's round-1 P3-5 and D-133 added
+/// them to the outcomes FOR this line), and the message is the
+/// refusal's own class-only Display (paths and codes, never file
+/// content — SEC-008 holds at the producers). `failed` picks the
+/// level: a skip is the deliberate warn of a project the run walked
+/// past, a failure the error of a write that refused. The §7.7 journal
+/// entries are phase 4's (D-051); this is the file log's half.
+pub(crate) fn sync_project_refused(
+    failed: bool,
+    code: &str,
+    os_code: Option<i32>,
+    os_kind: Option<&str>,
+    message: &str,
+) {
+    // `tracing::event!` takes its level as a macro-time constant, so
+    // the two levels are two spelled events over the one payload.
+    if failed {
+        tracing::error!(
+            target: "eunomia::sync",
+            code,
+            os_code = ?os_code,
+            os_kind = ?os_kind,
+            message,
+            "a project's write of the run was refused"
+        );
+    } else {
+        tracing::warn!(
+            target: "eunomia::sync",
+            code,
+            os_code = ?os_code,
+            os_kind = ?os_kind,
+            message,
+            "a project of the run was skipped"
+        );
+    }
+}
+
+/// The never-fatal aftermath of a finished run (T-118, D-134's
+/// follow-up: "T-118's log lines consume RetentionReport/
+/// JournalReport/DirtyReport"): the retention sweep's, the journal's
+/// and the after-commit dirty pass's reported refusals, plus the
+/// watcher's after-sync refresh (SYS-008) — counted and carried as
+/// their own class-only lines (the reports are Display strings the
+/// services built; SEC-008 holds at their producers). `warn`: the
+/// verdict is committed, the summary was served, and the next trigger
+/// retries everything that refused (D-122/D-121's at-least-once). The
+/// `watch` param is the §10 code literal of the refresh refusal — the
+/// class-only fact, never the error's params.
+pub(crate) fn sync_run_degraded(
+    retention: &[String],
+    journal: &[String],
+    dirty: Option<&str>,
+    watch: Option<&str>,
+) {
+    tracing::warn!(
+        target: "eunomia::sync",
+        retention_failures = retention.len(),
+        journal_failures = journal.len(),
+        dirty_failure = dirty,
+        watch_failure = watch,
+        retention_lines = ?retention,
+        journal_lines = ?journal,
+        "the finished sync's housekeeping reported failures; the verdict stands"
+    );
+}
+
 /// The availability recheck failed (T-079, D-09/DB-032, §10's
 /// every-error rule): the payload is the error's own §7.10 vocabulary,
 /// in the `activity_list_failed` shape. Logged by the fire-and-forget

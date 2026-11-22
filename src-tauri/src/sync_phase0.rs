@@ -131,7 +131,6 @@ use crate::sync_running::SyncGuard;
 /// basis, the DB-020 hash input): the marker is a per-run wall-clock
 /// line (ALG-032) phase 3 stamps once for all projects, so it
 /// deliberately does not exist yet.
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedProject {
     /// The project row id (UUIDv7 TEXT, DB-002), from the snapshot.
@@ -160,7 +159,6 @@ pub(crate) struct PreparedProject {
 /// the flag for phases 1–4 by holding this value, and whatever path
 /// the pipeline takes to its end, the guard's `Drop` performs §9.4
 /// phase 4 step 5.
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug)]
 pub(crate) struct Phase0Outcome {
     /// The RAII lease on `sync_running` — §9.4 phase 4 step 5 happens
@@ -198,7 +196,6 @@ const MINI_SNAPSHOT_PROJECTS: usize = 25;
 /// read and the run insert ([`build_snapshot_to_app_error`],
 /// [`sync_runs_to_app_error`]); and the blocking-join failure of the
 /// build step.
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 pub(crate) async fn run<R: Runtime>(app: &AppHandle<R>) -> Result<Phase0Outcome, AppError> {
     // Step 1 — §9.4 phase 0 step 1. The guard local is the run's
     // lease from here on: every `?` below releases it on the way

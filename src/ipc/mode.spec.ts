@@ -37,6 +37,7 @@ describe('the mock command surface', () => {
       'projectsReorder',
       'settingsGet',
       'settingsSet',
+      'syncRun',
     ])
   })
 })

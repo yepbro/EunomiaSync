@@ -34,6 +34,7 @@ import type {
   ProjectAddResultWire,
   SettingChange,
 } from '../contract'
+import type { SyncRunOutcome_Serialize } from '../../bindings'
 import { version as appVersion } from '../../../package.json'
 import { defaultLabel, pathKeyOf } from '../fixtures/domain'
 import { ACTION_MEMBERS, PALETTE } from '../fixtures/generator'
@@ -594,6 +595,82 @@ export const mockCommands: IpcCommands = {
   /** `markdown_preview` (§7.10, SEC-005/D-15): sanitized HTML + warnings. */
   async markdownPreview(text) {
     return renderMarkdownPreview(text)
+  },
+
+  /**
+   * `sync_run` (§7.10, §9.4; T-118): a stand-in over the mock state,
+   * not a pipeline mirror (D-108's limits posture): no library or
+   * assignment state exists here, so no build is possible — every
+   * AVAILABLE active project is `written` (its `dirty` flag clears
+   * and `lastSyncedAt` stamps, readable back through `projectsList`),
+   * every UNAVAILABLE one skips with `E_PROJECT_UNAVAILABLE` (D-09:
+   * skipped, never stopping the run), and the run journals one
+   * `sync.project_result` per project plus the `sync.run_finished`
+   * summary (the helper's `sync_run_id` stays null — the mock journal
+   * has no run link, a documented approximation). The D-25
+   * `needsConfirmation` arm and the `E_SYNC_RUNNING` refusal are not
+   * modelled (no builds, no flag state): the `confirmEmpty` argument
+   * is accepted and ignored (hence no named parameter).
+   */
+  async syncRun(): Promise<SyncRunOutcome_Serialize> {
+    const state = mockState()
+    const rows = [...state.projects]
+      .filter((row) => row.state === 'active')
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+    const now = new Date().toISOString()
+    const runId = freshRowId()
+    const projects = rows.map((row) => {
+      const fileName =
+        row.scheme === 'C' ? row.baseName.replace(/\.md$/, '.project.md') : row.baseName
+      const target = `${row.path.replace(/\/$/, '')}/${fileName}`
+      if (!row.available) {
+        journal('sync.project_result', {
+          level: 'warn',
+          result: 'skipped',
+          projectId: row.id,
+        })
+        return {
+          project_id: row.id,
+          status: 'skipped',
+          target_path: target,
+          error_code: 'E_PROJECT_UNAVAILABLE',
+          error_message: 'the mock row is marked unavailable',
+        }
+      }
+      row.dirty = false
+      row.lastSyncedAt = now
+      journal('sync.project_result', { projectId: row.id })
+      return {
+        project_id: row.id,
+        status: 'written',
+        target_path: target,
+        error_code: null,
+        error_message: null,
+      }
+    })
+    const written = projects.filter((entry) => entry.status === 'written').length
+    const skipped = projects.filter((entry) => entry.status === 'skipped').length
+    const verdict = skipped === 0 ? 'success' : written > 0 ? 'partial' : 'failed'
+    journal('sync.run_finished', {
+      level: verdict === 'success' ? 'info' : 'warn',
+      result: verdict === 'success' ? 'ok' : 'skipped',
+    })
+    return {
+      outcome: 'completed',
+      summary: {
+        run_id: runId,
+        verdict,
+        started_at: now,
+        finished_at: now,
+        projects_total: projects.length,
+        projects_written: written,
+        projects_unchanged: 0,
+        projects_skipped: skipped,
+        projects_failed: 0,
+        details: projects.length === 0 ? 'no active projects to synchronize' : null,
+        projects,
+      },
+    }
   },
 }
 

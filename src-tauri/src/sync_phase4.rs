@@ -144,12 +144,15 @@ use crate::sync_phase3::Phase3Outcome;
 /// three never-fatal reports (retention, journal, dirty) T-118's log
 /// lines read. The flag is deliberately absent — the guard stays
 /// with the caller's `Phase0Outcome` (the module docs' contract).
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug)]
 pub(crate) struct Phase4Outcome {
     /// The finished run row: the §9.4 verdict, `finished_at`, the
     /// counted per-status counters, and the empty-run message in
-    /// `details` when the run had no active projects.
+    /// `details` when the run had no active projects. No production
+    /// reader: the sync summary reads the committed row back
+    /// (`commands::summary_of`), so this copy rides the outcome for
+    /// the tests and the future `sync_last_result` diagnostics.
+    #[allow(dead_code)] // `summary_of` reads the committed row; tested today
     pub(crate) run: SyncRun,
     /// The BKP-003 retention sweep's report (never fatal — the
     /// module docs' ruling).
@@ -166,7 +169,6 @@ pub(crate) struct Phase4Outcome {
 /// The retention sweep's never-fatal report (BKP-003/§7.7; D-122's
 /// report-not-raise posture, extended to the service's own
 /// refusals).
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug, Default)]
 pub(crate) struct RetentionReport {
     /// Records marked `pruned` by this run (their files removed now
@@ -180,7 +182,6 @@ pub(crate) struct RetentionReport {
 }
 
 /// The run journal's never-fatal report (§7.7).
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug, Default)]
 pub(crate) struct JournalReport {
     /// How many entries (per-project plus the run summary) landed.
@@ -192,11 +193,15 @@ pub(crate) struct JournalReport {
 
 /// The after-commit dirty seam's outcome (§9.4 phase 4 step 5's send
 /// half).
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug, Default)]
 pub(crate) struct DirtyReport {
     /// The changes the pass emitted (empty — nothing to tell the UI;
-    /// a pass that emitted nothing is not a failure).
+    /// a pass that emitted nothing is not a failure). The command
+    /// logs only the refusal below; the changes themselves rode the
+    /// `state://dirty` event and have no further reader — future
+    /// cards (diagnostics, the unsynced dialog's after-sync refresh)
+    /// are the consumers.
+    #[allow(dead_code)] // the event carried the payload; consumers are future cards
     pub(crate) changes: Vec<ProjectDirtyChange>,
     /// The class-only reason the seam refused, when it did: the
     /// at-least-once contract (D-121) leaves the recalculation to
@@ -233,7 +238,6 @@ pub(crate) struct DirtyReport {
 /// - NEVER a statement-class retention or journal refusal, and never
 ///   the dirty seam's: those are the outcome's reports (the module
 ///   docs' ruling, with the fatal-class carve-out above).
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 pub(crate) async fn run<R, D, F>(
     app: &AppHandle<R>,
     phase3: &Phase3Outcome,
@@ -459,7 +463,6 @@ where
 /// phase 4 step 5's "send `state://dirty`" and the 150 ms-debounced
 /// trigger share every line of the computation. `pub(crate)`: the
 /// `sync_run` command (T-118) passes it.
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 pub(crate) async fn production_dirty<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<ProjectDirtyChange>, AppError> {

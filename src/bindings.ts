@@ -433,6 +433,14 @@ export const commands = {
 	 *  line (the info+user+ok mirror policy, D-051).
 	 */
 	settingsSet: (changes: SettingChange[], options?: InvokeOptions) => __TAURI_INVOKE<SettingItem[]>("settings_set", { changes }, options),
+	/**
+	 *  Serves the "Run sync" button (§7.10 Sync module `sync_run`, §9.4 the
+	 *  pipeline): the whole run — flag, snapshot build, preflight, the
+	 *  D-25 gate, backups, atomic writes, the finish — through the
+	 *  production seams, with §10's every-error rule served by the
+	 *  [`logging::sync_run_failed`] edge.
+	 */
+	syncRun: (confirmEmpty: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<SyncRunOutcome_Serialize>("sync_run", { confirmEmpty }, options),
 };
 
 /** Events */
@@ -1784,6 +1792,264 @@ export type SettingItem = {
 	 *  re-read (§6.5: values live in the `value` column as JSON).
 	 */
 	value: string,
+};
+
+/**
+ *  The `sync_run` command's wire answer (§7.10 Sync module, §9.4 phase 1
+ *  step 6 and phase 4 step 5): either the D-25 confirmation request, or
+ *  the finished run's summary.
+ * 
+ *  The two variants are the command's only outcomes besides `Err`:
+ *  a run that reaches phase 2 cannot be stopped (§9.4 phase 2 step 3),
+ *  so there is no "cancelled while writing" member — a cancel lands
+ *  before the backups and comes back as the `aborted` verdict of
+ *  [`SyncRunOutcome::Completed`], the same verdict a `success`/
+ *  `partial`/`failed` run answers with (the store's §6.2 vocabulary
+ *  literal, read back from the run row).
+ */
+export type SyncRunOutcome = SyncRunOutcome_Serialize | SyncRunOutcome_Deserialize;
+
+/**
+ *  The `sync_run` command's wire answer (§7.10 Sync module, §9.4 phase 1
+ *  step 6 and phase 4 step 5): either the D-25 confirmation request, or
+ *  the finished run's summary.
+ * 
+ *  The two variants are the command's only outcomes besides `Err`:
+ *  a run that reaches phase 2 cannot be stopped (§9.4 phase 2 step 3),
+ *  so there is no "cancelled while writing" member — a cancel lands
+ *  before the backups and comes back as the `aborted` verdict of
+ *  [`SyncRunOutcome::Completed`], the same verdict a `success`/
+ *  `partial`/`failed` run answers with (the store's §6.2 vocabulary
+ *  literal, read back from the run row).
+ */
+export type SyncRunOutcome_Deserialize = 
+/**
+ *  §9.4 phase 1 step 6 (D-25): the build is empty over a non-empty
+ *  file for at least one project, `confirm_empty` was not `true`,
+ *  and the run stopped before the backups — nothing was written,
+ *  no backup was made, the flag is free, and the UI re-calls the
+ *  command with `confirm_empty=true` after the user confirms (a
+ *  full new run) or simply does not (declining cancels the whole
+ *  run — this run's row is already terminal).
+ */
+{ outcome: "needsConfirmation"; 
+/**
+ *  The ids of the projects awaiting confirmation, in
+ *  `sort_order` — [`Phase1Outcome::needs_confirmation`]'s
+ *  list. Ids, not names: the dialog maps them through the
+ *  projects the matrix already renders, so no project name
+ *  text rides the wire twice.
+ */
+projects: string[] } | 
+/**
+ *  The run reached a terminal status (`success`/`partial`/`failed`
+ *  — phase 4's counted verdict — or `aborted` — a stop before the
+ *  backups), and the summary is the committed rows read back.
+ */
+{ outcome: "completed"; summary: SyncRunSummary_Deserialize };
+
+/**
+ *  The `sync_run` command's wire answer (§7.10 Sync module, §9.4 phase 1
+ *  step 6 and phase 4 step 5): either the D-25 confirmation request, or
+ *  the finished run's summary.
+ * 
+ *  The two variants are the command's only outcomes besides `Err`:
+ *  a run that reaches phase 2 cannot be stopped (§9.4 phase 2 step 3),
+ *  so there is no "cancelled while writing" member — a cancel lands
+ *  before the backups and comes back as the `aborted` verdict of
+ *  [`SyncRunOutcome::Completed`], the same verdict a `success`/
+ *  `partial`/`failed` run answers with (the store's §6.2 vocabulary
+ *  literal, read back from the run row).
+ */
+export type SyncRunOutcome_Serialize = 
+/**
+ *  §9.4 phase 1 step 6 (D-25): the build is empty over a non-empty
+ *  file for at least one project, `confirm_empty` was not `true`,
+ *  and the run stopped before the backups — nothing was written,
+ *  no backup was made, the flag is free, and the UI re-calls the
+ *  command with `confirm_empty=true` after the user confirms (a
+ *  full new run) or simply does not (declining cancels the whole
+ *  run — this run's row is already terminal).
+ */
+{ outcome: "needsConfirmation"; 
+/**
+ *  The ids of the projects awaiting confirmation, in
+ *  `sort_order` — [`Phase1Outcome::needs_confirmation`]'s
+ *  list. Ids, not names: the dialog maps them through the
+ *  projects the matrix already renders, so no project name
+ *  text rides the wire twice.
+ */
+projects: string[] } | 
+/**
+ *  The run reached a terminal status (`success`/`partial`/`failed`
+ *  — phase 4's counted verdict — or `aborted` — a stop before the
+ *  backups), and the summary is the committed rows read back.
+ */
+{ outcome: "completed"; summary: SyncRunSummary_Serialize };
+
+/**
+ *  One project's outcome inside the summary — the `sync_run_projects`
+ *  row's cells on the wire (§6.2 status literal + the §10 code of a
+ *  refusal).
+ */
+export type SyncRunProjectEntry = SyncRunProjectEntry_Serialize | SyncRunProjectEntry_Deserialize;
+
+/**
+ *  One project's outcome inside the summary — the `sync_run_projects`
+ *  row's cells on the wire (§6.2 status literal + the §10 code of a
+ *  refusal).
+ */
+export type SyncRunProjectEntry_Deserialize = {
+	/**  The project row id. */
+	project_id: string,
+	/**
+	 *  The row's status literal (`written`/`unchanged`/`skipped`/
+	 *  `failed`/`not_started`).
+	 */
+	status: string,
+	/**
+	 *  The target path phase 0 built for (§9.4 phase 1 step 2's
+	 *  spelling, before symlink resolution).
+	 */
+	target_path?: string | null,
+	/**  The §10 code of a `skipped`/`failed` outcome. */
+	error_code?: string | null,
+	/**
+	 *  The short, class-only message of a refusal (paths and codes
+	 *  only, never file content — SEC-008).
+	 */
+	error_message?: string | null,
+};
+
+/**
+ *  One project's outcome inside the summary — the `sync_run_projects`
+ *  row's cells on the wire (§6.2 status literal + the §10 code of a
+ *  refusal).
+ */
+export type SyncRunProjectEntry_Serialize = {
+	/**  The project row id. */
+	project_id: string,
+	/**
+	 *  The row's status literal (`written`/`unchanged`/`skipped`/
+	 *  `failed`/`not_started`).
+	 */
+	status: string,
+	/**
+	 *  The target path phase 0 built for (§9.4 phase 1 step 2's
+	 *  spelling, before symlink resolution).
+	 */
+	target_path: string | null,
+	/**  The §10 code of a `skipped`/`failed` outcome. */
+	error_code: string | null,
+	/**
+	 *  The short, class-only message of a refusal (paths and codes
+	 *  only, never file content — SEC-008).
+	 */
+	error_message: string | null,
+};
+
+/**
+ *  One finished (or stopped) sync run's summary — §9.4's verdict with
+ *  MAIN-024's counter chips and per-project rows, read back from the
+ *  run's committed rows (the same counted truth [`finish_run`] wrote)
+ *  so the answer cannot disagree with the database.
+ */
+export type SyncRunSummary = SyncRunSummary_Serialize | SyncRunSummary_Deserialize;
+
+/**
+ *  One finished (or stopped) sync run's summary — §9.4's verdict with
+ *  MAIN-024's counter chips and per-project rows, read back from the
+ *  run's committed rows (the same counted truth [`finish_run`] wrote)
+ *  so the answer cannot disagree with the database.
+ */
+export type SyncRunSummary_Deserialize = {
+	/**  The run row's id (UUIDv7 TEXT, DB-002). */
+	run_id: string,
+	/**
+	 *  The run's verdict — the store's §6.2 status literal
+	 *  (`success`/`partial`/`failed`/`aborted`).
+	 */
+	verdict: string,
+	/**
+	 *  When the run started (DB-002), the flag-take moment phase 0
+	 *  recorded.
+	 */
+	started_at: string,
+	/**
+	 *  When the run reached its terminal status (DB-002); `None` never
+	 *  reaches this DTO (a terminal row always carries it).
+	 */
+	finished_at?: string | null,
+	/**
+	 *  The per-status counters, exactly the row's cells: MAIN-024's
+	 *  "Written", "Unchanged", "Skipped", "Failed" chips. `i32` on the
+	 *  wire (specta forbids BigInt-style types); the store's i64
+	 *  counts of projects always fit.
+	 */
+	projects_total: number,
+	projects_written: number,
+	projects_unchanged: number,
+	projects_skipped: number,
+	projects_failed: number,
+	/**
+	 *  The run row's free-text `details` cell — the §9.4 empty-run
+	 *  message on a `success` over no active projects; the abort
+	 *  lines this command writes on its stopped-run paths.
+	 */
+	details?: string | null,
+	/**
+	 *  Every project's outcome, in `sort_order` — the skip and error
+	 *  rows MAIN-024 renders with their `E_*` code.
+	 */
+	projects: SyncRunProjectEntry_Deserialize[],
+};
+
+/**
+ *  One finished (or stopped) sync run's summary — §9.4's verdict with
+ *  MAIN-024's counter chips and per-project rows, read back from the
+ *  run's committed rows (the same counted truth [`finish_run`] wrote)
+ *  so the answer cannot disagree with the database.
+ */
+export type SyncRunSummary_Serialize = {
+	/**  The run row's id (UUIDv7 TEXT, DB-002). */
+	run_id: string,
+	/**
+	 *  The run's verdict — the store's §6.2 status literal
+	 *  (`success`/`partial`/`failed`/`aborted`).
+	 */
+	verdict: string,
+	/**
+	 *  When the run started (DB-002), the flag-take moment phase 0
+	 *  recorded.
+	 */
+	started_at: string,
+	/**
+	 *  When the run reached its terminal status (DB-002); `None` never
+	 *  reaches this DTO (a terminal row always carries it).
+	 */
+	finished_at: string | null,
+	/**
+	 *  The per-status counters, exactly the row's cells: MAIN-024's
+	 *  "Written", "Unchanged", "Skipped", "Failed" chips. `i32` on the
+	 *  wire (specta forbids BigInt-style types); the store's i64
+	 *  counts of projects always fit.
+	 */
+	projects_total: number,
+	projects_written: number,
+	projects_unchanged: number,
+	projects_skipped: number,
+	projects_failed: number,
+	/**
+	 *  The run row's free-text `details` cell — the §9.4 empty-run
+	 *  message on a `success` over no active projects; the abort
+	 *  lines this command writes on its stopped-run paths.
+	 */
+	details: string | null,
+	/**
+	 *  Every project's outcome, in `sort_order` — the skip and error
+	 *  rows MAIN-024 renders with their `E_*` code.
+	 */
+	projects: SyncRunProjectEntry_Serialize[],
 };
 
 /* Tauri Specta runtime */

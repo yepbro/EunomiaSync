@@ -132,7 +132,6 @@ use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use crate::sync_phase1::{Phase1Outcome, PreflightVerdict, WritePlan};
 
 /// The phase's product for one written or failed project.
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WriteOutcome {
     /// §9.4 phase 3 step 2: the file on disk holds the final bytes
@@ -168,7 +167,6 @@ pub(crate) enum WriteOutcome {
 /// What phase 3 hands the pipeline: the run's id and one outcome per
 /// `ready` project, in the snapshot's `sort_order` (§9.4 phase 3's
 /// "projects are processed one by one, in order").
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 #[derive(Debug)]
 pub(crate) struct Phase3Outcome {
     /// The run these outcomes belong to (the `sync_runs` id).
@@ -206,7 +204,6 @@ pub(crate) struct Phase3Outcome {
 ///   the already-written FILE stays, wholly the new content).
 /// - NEVER a per-project write refusal: §9.4 phase 3 step 3 makes
 ///   those `failed` rows the run walks past, carried in the outcome.
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 pub(crate) async fn run<R, W, C>(
     app: &AppHandle<R>,
     phase1: &Phase1Outcome,
@@ -387,7 +384,6 @@ where
 /// half): [`write_target_file`] itself with the real free-space probe
 /// of the target's folder — the D-089 closure shape `atomic`'s docs
 /// prescribe. `pub(crate)`: the `sync_run` command (T-118) passes it.
-#[allow(dead_code)] // consumed by the sync-run command task (T-118); tested today
 pub(crate) fn production_write(
     target: &Path,
     contents: &[u8],

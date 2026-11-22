@@ -13001,3 +13001,245 @@ approve: no P0/P1/P2; 2×P3), findings processed here:
   and audited the tests clean: oracles exact and independent, no
   evasion, the single no-panic test acceptable with its documented
   falsifiability.
+
+### D-138 — T-118: the `sync_run` command — the D-25 gate as a terminal stop, the one cancel point, and the P3-4 terminal row for every post-phase-0 `Err` — 2026-11-21
+
+Problem: T-118 composes the finished phases (D-130…D-134) into the
+§7.10 `sync_run` command over §9.4's whole pipeline. Seven points were
+open: what §9.4 phase 1 step 6's "changes nothing" means for the run
+row phase 0 already recorded when the D-25 gate fires; where the
+cooperative cancel point sits and how minimal the token is (§9.4 phase
+2 step 3: "After phase 2 succeeds, the run cannot be canceled"); the
+terminal state of a `running` row behind a phase-level `Err` — the
+P3-4 follow-up D-133 recorded for this task; where DB-032's
+"before a sync" availability checkpoint runs relative to the flag; the
+command's answer shape over `Phase4Outcome`; and which §10 mappings the
+command itself owns by name (`E_MARKERS_INVALID`/`E_CONTENT_RESERVED`/
+`BackupNameError`).
+
+Solution: `commands.rs`'s `sync_run` section — the command
+(`Result<SyncRunOutcome, AppError>`), the `sync_run_with` body
+(`dialog_pick_folder_with`'s split: the one `logging::sync_run_failed`
+edge covers every failure; tests drive the body with their own token
+and seams), `CancelToken`, `SyncRunSeams` (phase 2's copy + phase 3's
+§9.5 write behind `Arc<dyn Fn>` aliases — the D-089 injector pattern
+bundled for one call site), `stop_run`, `pipeline_refusal`,
+`summary_of` — plus three facade edges (`sync_run_failed` error,
+`sync_run_aborted` info, `sync_run_degraded` warn), one
+`collect_commands!` line in `lib.rs`, the regenerated
+`src/bindings.ts`, and the `ipc_tests.rs` section.
+
+- _The composition._ Phase 0 (the flag inside, `E_SYNC_RUNNING` for a
+  second start) → `availability::recheck_and_emit` → phase 1 → the
+  D-25 gate → the cancel check → phases 2/3/4 → the watcher's
+  `refresh_after_sync` → the summary. The `Phase0Outcome` (guard
+  included) is held for the whole run — every exit is §9.4 phase 4
+  step 5's reset by RAII (D-123). The availability seam runs AFTER
+  the flag, BEFORE phase 1: the SYS-005 gate freezes the project list
+  the pass reads, and its refusal stops the run (a pass that cannot
+  see the list cannot be "before a sync") — `recheck_and_emit`'s own
+  docs name this as T-118's entry.
+- _The D-25 gate is a terminal stop._ "Changes nothing" is §9.4
+  phase 1's own header phrase — about the TARGET files (the one
+  housekeeping exception is phase 1's own step-7 sweep of the app's
+  stale tmp files, §9.4's own rule, not a target-file change). The run row
+  phase 0 recorded cannot stay `running` behind a released flag (it
+  would lie until the next restart), and the confirm re-call is a
+  FULL NEW RUN (phase 0 records its own row), so the asking run ends:
+  `abort_run` with the DB-002 now, the empty `error_code` literal (no
+  §10 code names a user decision; readers treat "" as "no code"),
+  and the class-only "awaiting the empty-build confirmation for N
+  project(s)" details. The answer is `NeedsConfirmation` with the
+  ids in `sort_order` — ids, not names: the dialog maps them through
+  the columns the matrix already renders. Pinned: files byte-equal,
+  no backup, no stamp, flag free, row `aborted`, rows `not_started`;
+  the confirmed re-call answers `success` over its own row while
+  history keeps both.
+- _The cancel point and the token._ One consultation, after the gate,
+  before phase 2 — §9.4's own point of no return; the token is a
+  latched `Arc<AtomicBool>` (`cancel`/`is_cancelled`, Release/Acquire)
+  because everything between the check and phase 2 is already running
+  and everything after phase 2 is uncancellable, so a channel buys
+  nothing. A latched token stops the run the D-131 `E_DISK_FULL`-tail
+  way: the row `aborted`, phase 1's verdicts stay (an `unchanged` row
+  claims no write; the phase-2 per-project reset belongs to the
+  backup abort's own transaction), and the answer is the `aborted`
+  SUMMARY, not an `Err` — the user asked for this. The public command
+  constructs a token nobody can reach; publishing the running run's
+  token for the future `sync_cancel` command (a managed slot in
+  `lib.rs`'s setup, outside this card's one-line allowance) is the
+  recorded follow-up.
+- _The P3-4 ruling (every post-phase-0 `Err` gets a terminal row)._
+  `pipeline_refusal` wraps the availability seam and phases 1–4 with a
+  best-effort `abort_run` carrying the error's own §10 literal and a
+  class-only stage line ("the run stopped at the write phase:
+  E_DB_LOCKED"), decided by the ROW's state inside the one transaction
+  (`stop_run_if_running`: a row no longer `running` answers untouched)
+  — never by the error's code: the shared SQL classifier maps
+  `SQLITE_FULL` to `E_DISK_FULL` from ANY phase's transaction, an
+  error shape indistinguishable from phase 1's in-phase free-space
+  tail, so the first cut's code-skip would have left exactly the
+  corpse this ruling exists to prevent (the round-1 P1 fix). No per-project reset rides these aborts: a
+  `written`/`failed`/`unchanged` row claims what actually happened
+  (D-131's posture, spelled for every stop point). A refused abort
+  (the store that just failed failing again) leaves the row
+  `running` — the startup `interrupted` recovery's case — logs one
+  degraded line, and returns the ORIGINAL error (the first error
+  names the cause; the second only compounds it). Pinned through a
+  planted wrong-state row refusing phase 3's success transaction
+  mid-loop (the parked write seam): the command answers the store
+  error, the row is `aborted`/`E_DB_LOCKED`, the already-written file
+  stays (§9.5's old-or-new, D-133's residual window), and the
+  §10-idempotence tail converges — the retried run reads the file
+  `unchanged` and stamps it.
+- _The answer shape._ `SyncRunOutcome` (serde-tagged
+  `{"outcome": "needsConfirmation"|"completed"}`) — no "cancelled"
+  member exists because a cancel cannot land after phase 2. The
+  summary is the COMMITTED rows read back (`get` + `list_projects`):
+  verdict and statuses as the store's §6.2 literals, MAIN-024's
+  counter chips (as `i32` — specta forbids BigInt-style types on the
+  wire; `wire_count` is the reasoned-panic conversion), the §9.4
+  empty-run details cell, and one entry per project with its §10
+  code. The finish's never-fatal reports (D-134) and the watcher's
+  refresh refusal never reach the wire or fail the command:
+  `sync_run_degraded` warn-carries them (the D-134 follow-up "T-118's
+  log lines consume the reports", closed).
+- _The mappings by name._ The command carries the phases' codes; it
+  maps nothing new. Pinned on the wire: `E_MARKERS_INVALID` (the
+  scheme-B skip) and `E_FILE_LOCKED` (the refused write) as
+  per-project literals with class-only messages, `E_BACKUP_FAILED`
+  as the abort envelope with BKP-005's `project`/`path` params and
+  the OS facts, `E_SYNC_RUNNING` as the second-start envelope.
+  `E_CONTENT_RESERVED` and `BackupNameError` are unreachable through
+  this command by construction — the reserved-line check is the
+  library-save boundary (no instruction text enters the pipeline
+  except through stored variants, and phase 0 builds them verbatim),
+  and the backup-name validation folds into phase 2's
+  `NameFailed`→`E_BACKUP_FAILED` envelope (D-132's table, pinned by
+  its suite); recorded here as the checklist's "by name" audit.
+- _The mock-layer deviation (rule 10)._ D-141's loud-drift layer
+  (`src/ipc/mock/commands.ts`, typed by the generated `IpcCommands`)
+  fails `pnpm typecheck` until every new command has a mock — the
+  card froze `src/**`, but a red typecheck is not a shippable
+  alternative, so the minimal stand-in landed: one `syncRun` member
+  (available actives `written` with `dirty` cleared and
+  `lastSyncedAt` stamped, unavailable ones skipped
+  `E_PROJECT_UNAVAILABLE`, one journal entry per project plus the
+  summary; D-25 and `E_SYNC_RUNNING` not modelled — no builds, no
+  flag state) and the D-108 pin's one-line list extension in
+  `src/ipc/mode.spec.ts`. Two files, one member each — the frozen
+  Vue UI was not touched.
+
+Tests: `ipc_tests.rs` — 10 through the real IPC path or the body
+seam: the D-25 criterion (list + nothing-changed + terminal row),
+the confirmed re-call (new run in history, emptied file, backup of
+the overwritten bytes), the parked-write second start
+(`E_SYNC_RUNNING`, refused start records no row), the cancelled
+token (aborted summary, D-131-tail verdicts, no backup/stamp), the
+full happy path over the real phases (A rewrite + C creation, one
+marker, one backup, 3 journal entries, stamps, free flag), the
+failing backup (typed envelope + params + OS code, in-phase aborted
+row untouched by the wrapper), the phase-3 store failure + retry
+convergence (P3-4), the by-name codes (`E_MARKERS_INVALID` +
+`E_FILE_LOCKED`, verdict `failed`), the recovery-mode honesty
+(`NoDatabase`, flag down), and the registration pin. Mutation
+check: M1 gate disabled → the criterion red; M2 cancel check
+disabled → the cancel test red; M3 wrapper disabled → the terminal
+row red ("running" vs "aborted"); M4 the gate's stop dropped → the
+terminal-row pin red — all green after revert; `cargo test
+--workspace` green (33 binaries), clippy `-D warnings` green, the
+frontend quartet green.
+
+Round-1 review addendum (D-138, same task; report
+`.opencode/reviews/t118-round1.md`, deepseek-v4.1-flash — 1×P1,
+2×P2, 6×P3): findings processed here —
+
+- P1-1 (taken): the wrapper's skip-by-code treated `E_DISK_FULL` as
+  proof of phase 1's in-phase tail, but the shared SQL classifier
+  maps `SQLITE_FULL` to that code from every phase's transaction —
+  a full-volume store failure left the promised `running` corpse
+  without even attempting the abort. The wrapper now decides by the
+  row's state (`stop_run_if_running`: `get` + `abort_run` in one
+  transaction, `Ok(false)` over a terminal row), the code-skip is
+  gone entirely, and the new pin drives the classifier-shaped error
+  over a real `running` row (aborted with the literal) and over the
+  terminal row (a no-op, the in-phase aborts' arrival shape).
+- P2-1 (taken as pins; the store widening declined): `abort_run`
+  takes `&str`, and the store is a frozen zone — NULL is not an
+  input the sanctioned writer offers, so "" stays the no-code
+  spelling. The tests now pin the literal on both user-shaped stops
+  (the gate and the cancel rows assert `error_code == Some("")`), and
+  the follow-up below names the first reader's obligation.
+- P2-2 (taken): the guard's drop is now EXPLICIT at phase 4's own
+  end (the outcome is destructured after phase 1 — the built
+  snapshot's memory goes there, the round-1 P3-4 finding folded in),
+  BEFORE the never-fatal aftermath: SYS-008's refresh admits a
+  reasoned-away never-returning branch, and a wedged after-run seam
+  must not weld SYS-004 behind a finished run. §9.4 phase 4 step 5's
+  reset at the phase's end is the spec's own spelling.
+- P3-1 (taken): the stale "consumed by the sync-run command task"
+  `#[allow(dead_code)]` markers are gone from `sync_phase*.rs` — the
+  ones whose items now have their consumer compile without them, and
+  the three still-unread facts (`Phase2Outcome`'s fact list,
+  `Phase4Outcome::run`, `DirtyReport::changes`) carry new allows with
+  the TRUE reason (the summary reads committed rows; the fact list's
+  consumers are future cards). The D-131/D-133 promise that the
+  outcomes' structured OS details are "T-118's log line's" source is
+  now honored literally: `logging::sync_project_refused` (warn per
+  skip, error per failure — §10's code, OS code, class-only message)
+  reads `PreflightVerdict::Skipped`'s and `WriteOutcome::Failed`'s
+  details after phase 3. `file_watch.rs`'s twin marker stays (a
+  frozen zone this window; its follow-up card exists).
+- P3-2 (taken): D-138's "changes nothing" now names phase 1's own
+  step-7 stale-tmp sweep as the one housekeeping exception.
+- P3-3 (taken): the gate test seeds TWO empty-build projects (the
+  list's `sort_order` pinned) and both stop rows assert
+  `error_code`/`details`.
+- P3-5 (declined, recorded): a latched cancel token with an
+  unconfirmed D-25 list still answers `NeedsConfirmation` — the gate
+  runs first BY DESIGN: D-25 is the destructive-wipe protection and
+  must never be bypassed by a non-confirmation path, the run is
+  stopped either way (the row is terminal before the answer), and a
+  confirm after a cancel is a fresh user decision over a fresh run.
+- P3-6 (taken): the mock's empty-run details now matches the store's
+  `EMPTY_RUN_DETAILS` literal ("no active projects to synchronize").
+
+Round-2 review addendum (D-138, same task; report
+`.opencode/reviews/t118-round2.md`, opencode-go/hy4-flash-free —
+APPROVE, no P0/P1; 1×P2, 2×P3): findings processed here —
+
+- R2-P2 (taken): the refused abort's degraded line rode
+  `sync_run_degraded`'s `watch` arm — a line whose message says "the
+  finished sync's housekeeping reported failures; the verdict stands",
+  the exact opposite of a run that did NOT finish and whose verdict
+  could not land. The refused abort now has its own edge
+  (`sync_run_abort_refused`, error level, naming the stay-`running`
+  row), and `sync_run_failed`'s doc carries the carve-out ("the line
+  and the row agree, with ONE exception").
+- R2-P3-1 (taken): `DirtyReport::changes`'s restored allow said
+  "tested today" — no test reads the field. The comment now names the
+  true posture (the event carried the payload; consumers are future
+  cards).
+- R2-P3-2 (taken): the per-project SKIP lines moved from after phase
+  3 to right after phase 1 — a phase-2/3 `Err`, the D-25 gate and the
+  cancel stop now still carry §10's per-skip facts (phase 4 journals
+  only finished runs). The failure lines stay after phase 3 (their
+  outcome exists only there); a phase-3 `Err` mid-loop loses the
+  earlier failures' log lines — the rows are committed and the next
+  run's skip lines cover the projects still refused, recorded here as
+  the loop-shaped residual.
+- The round also verified every round-1 fix in place and
+  discriminating (the DiskFull pin against a code-based skip; the
+  explicit `drop(guard)` at phase 4's end; the destructure's
+  `drop(projects)`; the three restored allows' readers), re-answered
+  all six focus questions with file:line evidence, and confirmed both
+  round-1 declinations without new arguments.
+
+Follow-ups for the board (the orchestrator cards them): the
+`sync_cancel` command needs the running run's token published (a
+managed slot in `lib.rs`'s setup plus its §7.10 registration — the
+check point, abort shape and tests are this entry's); the startup
+`interrupted` recovery pass stays its own card (D-131's list — a
+`running` row now only survives a refused abort or a process death);
+ARCHITECTURE.md rows for the command section (the D-132/D-133
+precedent).
