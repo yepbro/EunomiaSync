@@ -56,9 +56,11 @@ fn watcher() -> (TargetWatcher, Receiver<WatchEvent>) {
     (watcher, receiver)
 }
 
-/// Collects everything that arrives within `wait`, panicking on a
-/// backend error (a `Backend` event is a watcher failure the suite
-/// must not paper over by ignoring it).
+/// Collects everything that arrives within `wait`, panicking on the
+/// backend's lost-events signal: a `Backend` event covers both of
+/// D-139's shapes (the overflow rescan batch riding an ordinary
+/// `Ok` batch, the stream-error batch) — events were lost, and the
+/// suite must not paper over that by ignoring it.
 fn events_within(receiver: &Receiver<WatchEvent>, wait: Duration) -> Vec<WatchEvent> {
     let deadline = Instant::now() + wait;
     let mut collected = Vec::new();
