@@ -159,8 +159,9 @@ Rust commands are registered through `tauri-specta`:
    over `R: Runtime` — the documented tauri-specta shape — and the
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in `src-tauri/src/lib.rs`.
-   The registered set is the recovery-screen group of the System
-   module (spec §7.10/D-009): `app_open_data_folder`,
+   The registered set is eighteen commands — the §7.10 names that
+   are implemented so far. It comprises the recovery-screen group of
+   the System module (spec §7.10/D-009): `app_open_data_folder`,
    `db_backups_list`, `db_restore_backup`, `db_recreate` — plus the
    History module's `activity_list` (T-027): the "Activity" window's
    filtered, paginated journal query over the `Db::run` executor, with
@@ -178,7 +179,38 @@ Rust commands are registered through `tauri-specta`:
    the effective uid through a pure `is_root` seam — `false` on every
    platform but Linux, where the spec scopes the warning), a
    non-database command that answers from compile-time constants and
-   managed state in any mode, recovery included — and the Sync
+   managed state in any mode, recovery included — the Library
+   module's `markdown_preview` (T-056): the editor's live preview,
+   Markdown rendered into sanitized HTML (SEC-005) with the D-15
+   warnings computed in the same parse pass — a stateless,
+   non-database command reading no managed state, hence the bare
+   non-generic form in the registration — the Projects module's
+   `projects_list` (T-072): the matrix columns read (an optional
+   archived include) whose per-row availability and staleness
+   verdicts double as the cold-start carrier for the events a fresh
+   webview never received — the Projects module's
+   `project_add_manual` (T-074): the SEC-003-gated hand add of a
+   project (a path that neither canonicalizes onto a registered
+   project nor onto a folder picked this session is refused before
+   anything runs) whose post-add watch refresh is never-fatal
+   aftermath — the Projects module's
+   `exclusions_list`/`exclusion_remove` (T-078): the §6.4
+   path-exclusion read in the repository's stable oldest-first order
+   and the by-id removal journaled in its own transaction — the
+   Projects module's `projects_reorder` (T-080): the drag reorder
+   whose full-list validation refuses before the first write and
+   which refuses with `E_SYNC_RUNNING` while a sync holds the flag
+   (SYS-005) — the Projects module's `scan_start`/`scan_cancel`
+   (T-076, `src-tauri/src/scan.rs`): the PRJ-002 scan that validates
+   the root through SEC-003 and walks the tree on the blocking pool
+   with the throttled `scan://progress` events, answering the found
+   candidate set that persists nothing (nothing writes the scan's
+   findings until T-077's `scan_commit` lands), and the token latch
+   that cancels it — an idempotent no-op when no scan is live — and
+   the System module's `dialog_pick_folder` (T-073): the native
+   folder picker invoked from Rust, its canonical picked path
+   remembered in the SEC-003 session allowlist (`None` on cancel,
+   nothing remembered) — and the Sync
    module's `sync_run` (T-118, DECISIONS.md D-138): the §9.4 pipeline
    over the finished phase modules — phase 0's flag-guarded start (a
    second start refuses with `E_SYNC_RUNNING`; the flag resets by

@@ -18263,3 +18263,69 @@ Follow-up for the board (main session creates the card): item-level
 later task)"; the flows landed without it (commands.rs composes
 validate_ui_path → find_git_root → path_key; the composition's only
 callers are tests).
+
+### D-165 — T-292: the IPC contract's registered-command inventory brought to the actual surface (9 names → 18; the card's own 8/16 numbers were approximations), docs/spec.md §7.10 deliberately left alone as the normative full-surface table, not an inventory — 2026-11-23
+
+Problem: D-150's round-1 P2 (deferred as a foreign zone, its card
+landed as T-292) — ARCHITECTURE.md's "IPC contract" item 2 opened
+with "The registered set is …" and then enumerated only part of what
+`collect_commands![...]` in `src-tauri/src/lib.rs` registers; the doc
+lied about the command surface (Rule 11). The card's own numbers were
+also approximations: it said "8 listed / 16 registered", while the
+old prose actually named 9 commands (in 5 groups) and the
+registration lists 18 — verified by enumerating `collect_commands!`
+(and cross-checked: 18 `#[tauri::command]` definitions, 16 in
+`commands.rs` + 2 in `scan.rs`, all registered, so the set is also
+the whole defined surface).
+
+Decision: the inventory is brought to the code, not the card's
+numbers — the section now states the count ("The registered set is
+eighteen commands — the §7.10 names that are implemented so far"),
+then chains all twelve module groups with the nine previously missing
+commands annotated from their own `#[tauri::command]` doc comments
+(`markdown_preview` T-056, `projects_list` T-072,
+`project_add_manual` T-074, `exclusions_list`/`exclusion_remove`
+T-078, `projects_reorder` T-080, `scan_start`/`scan_cancel` T-076
+with the `src-tauri/src/scan.rs` location, `dialog_pick_folder`
+T-073). Two judgment calls recorded here:
+
+- docs/spec.md §7.10 is NOT updated by this task: its table is the
+  normative full-surface contract (55 command names, including the
+  37 not yet registered and the P1 batch), a different form from
+  ARCHITECTURE.md's inventory of what is registered today — it makes
+  no "registered" claim, so it cannot lie the way the prose did. The
+  distinction (requirements table vs. implementation inventory)
+  governs future follow-ups of this kind: stale inventory → fix the
+  architecture doc; changed contract → fix the spec.
+- The count is stated in words and is part of the same update
+  obligation the registration comment (lib.rs ~180) already puts on
+  every command task: the next command task updates BOTH the list
+  and the "eighteen". The hardcoded number is deliberate — it makes
+  drift greppable instead of silent.
+
+Round-1 review addendum (D-165, same task; report
+`.opencode/reviews/t292-round1.md`, deepseek-v4.1-flash — PASS, no
+P0/P1/P2; 3×P3, all taken in the amend): P3-1/P3-2 — the split
+sentence lost its verb and "the §7.10 names implemented so far" read
+as "all §7.10 names are implemented"; fixed to "It comprises the
+recovery-screen group …" and "the §7.10 names that are implemented
+so far". P3-3 — this entry itself (the corrected numbers and the
+§7.10 non-edit ruling existed only in the commit message).
+
+Checks: md-only change — ARCHITECTURE.md (the IPC contract section)
+and DECISIONS.md (this entry) are the only files in the diff; nothing
+compile-bearing changed, so no cargo run (the md-only exception,
+which in this batch coincides with the batch regime: suites are not
+run — the orchestrator runs them centrally when the flash batch
+closes). The inventory was verified by enumeration against
+`collect_commands!`, and every new annotation clause was checked
+against the command's own doc comment or spec §7.10's command notes;
+`pnpm run format:check` exit 0; the pre-commit hook gates the commit;
+ONE review round per the batch regime.
+
+Honest boundaries: the tests were not run in this batch, so nothing
+here is proven by execution; "eighteen" is asserted from the
+registration listing and the command-definition grep at the time of
+writing, and the cited lib.rs/commands.rs line numbers move as the
+files evolve — the RULE (enumerate from `collect_commands!`, not
+from memory) is the durable content, not the line numbers.
