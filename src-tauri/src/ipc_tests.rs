@@ -6310,48 +6310,90 @@ fn wait_for_watch_passes(app: &tauri::App<tauri::test::MockRuntime>, at_least: u
 }
 
 /// Converges the startup's watcher state before the act (CI
-/// 45235995817, D-181): the fixtures write the target BEFORE
-/// `spawn_service`, and FSEvents — macOS — can still deliver those
-/// writes AFTER the stream started. The stream is bounded by
-/// `kFSEventStreamEventIdSinceNow` (notify 8.2.2 `src/fsevent.rs:289`)
-/// — the greatest event id the daemon has ASSIGNED at creation, not
-/// the wall clock of the write — and the daemon assigns an id when it
-/// processes the change, so a write that completed just before the
-/// stream's birth can carry a later id and land as a post-startup
-/// debounced pass (`latency: 0.0` + `NoDefer`, `src/fsevent.rs:290-291`,
-/// only make the delivery prompt, never earlier). inotify — Linux —
-/// structurally cannot do it (the kernel queues an event only after
-/// the watch attaches), which is why "pre-spawn writes are invisible"
-/// never failed an ubuntu leg or a local run. The late pass is
-/// harmless to every verdict — it re-reads the same state — but it
-/// breaks the tests that index passes absolutely (`wait_for(2)` for
-/// the act's own pass) or assert none ran after the premise.
+/// 45235995817, D-181; hardened after CI 45245718226): the fixtures
+/// write the target BEFORE `spawn_service`, and FSEvents — macOS —
+/// can still deliver those writes AFTER the stream started. The
+/// stream is bounded by `kFSEventStreamEventIdSinceNow` (notify 8.2.2
+/// `src/fsevent.rs:289`) — the greatest event id the daemon has
+/// ASSIGNED at creation, not the wall clock of the write — and the
+/// daemon assigns an id when it processes the change, so a write that
+/// completed just before the stream's birth can carry a later id and
+/// land as a post-startup debounced pass (`latency: 0.0` +
+/// `NoDefer`, `src/fsevent.rs:290-291`, only make the delivery
+/// prompt, never earlier). inotify — Linux — structurally cannot do
+/// it (the kernel queues an event only after the watch attaches),
+/// which is why "pre-spawn writes are invisible" never failed an
+/// ubuntu leg or a local run. The late pass is harmless to every
+/// verdict — it re-reads the same state — but it breaks the tests
+/// that index passes absolutely (`wait_for(2)` for the act's own
+/// pass) or assert none ran after the premise.
 ///
-/// The convergence is CAUSAL, not temporal: the helper rewrites the
-/// target with its own current bytes (read here, so the two can never
-/// drift) and waits for the partial pass that rewrite itself
-/// provokes. The settle write is issued strictly after the stream's
-/// birth, and a stream delivers in event-id order, so by the time the
-/// settle pass runs, every earlier fixture event has been delivered —
-/// before the settle's own event or coalesced into its debounced
-/// batch — leaving the service in the settled state the return value
-/// names. The rewrite changes no verdict (same bytes — the diff
-/// contract stays silent) and is the TEST's fixture hand, not the
-/// service's (OUT-014's "a watch event never writes a file" is about
-/// the service, and stays pinned). Returns the settled pass count —
+/// The convergence is a DRAINING probe, not one rewrite-and-wait:
+/// the first iteration of that simpler shape failed the intel leg of
+/// 45245718226 (`left: 3, right: 2`), because waiting for "one more
+/// pass" after the rewrite proves only that A pass ran — not that it
+/// was the rewrite's OWN. A pending fixture delivery can satisfy the
+/// wait first, and the probe's pass (or a further leftover) then
+/// lands after the baseline was read, inside the act window — plain
+/// in-order delivery, no out-of-order daemon behavior required. So
+/// each round rewrites the target with its own just-read bytes (read
+/// here, so the two can never drift), waits for the next pass, and
+/// then holds a [`QUIESCENCE`] window: any further pass inside it is
+/// a straggler — absorbed, and the round restarts with a fresh
+/// probe. The baseline is returned only after a full window in which
+/// NO pass ran at all: quiescent, not merely moved. Rounds are
+/// bounded ([`MAX_DRAIN_ROUNDS`]); a watcher that never goes quiet
+/// is a pathology to panic about by name, not to wait away. The
+/// rewrites change no verdict (same bytes — the diff contract stays
+/// silent) and are the TEST's fixture hand, not the service's
+/// (OUT-014's "a watch event never writes a file" is about the
+/// service, and stays pinned). Returns the quiescent pass count —
 /// the baseline the act-window deltas below assert against.
 fn converge_startup_watch(
     app: &tauri::App<tauri::test::MockRuntime>,
     target: &std::path::Path,
 ) -> u64 {
-    let before = app
-        .state::<crate::file_watch::FileWatchState>()
-        .pass_count();
-    let bytes = std::fs::read(target).expect("the settle read must work");
-    std::fs::write(target, bytes).expect("the settle rewrite must work");
-    wait_for_watch_passes(app, before + 1);
-    app.state::<crate::file_watch::FileWatchState>()
-        .pass_count()
+    /// The quiescence window: no further pass for this long after the
+    /// last observed one means the startup's pending deliveries have
+    /// drained. The file's canonical settle span (the idempotence
+    /// drains below use the same 300 ms); at 7 × the 40 ms test
+    /// debounce it is deep enough that a delivery still pending
+    /// behind it is a pathology the bound catches, not noise.
+    const QUIESCENCE: std::time::Duration = std::time::Duration::from_millis(300);
+
+    /// The drain bound: each round absorbs every delivery that lands
+    /// inside its window and re-arms the probe; more rounds than this
+    /// without a quiet window is not fixture noise but a
+    /// self-generating pass source — named loudly, never waited out.
+    const MAX_DRAIN_ROUNDS: u32 = 5;
+
+    let mut last_observed = 0;
+    for _ in 0..MAX_DRAIN_ROUNDS {
+        let before = app
+            .state::<crate::file_watch::FileWatchState>()
+            .pass_count();
+        let bytes = std::fs::read(target).expect("the settle read must work");
+        std::fs::write(target, bytes).expect("the settle rewrite must work");
+        wait_for_watch_passes(app, before + 1);
+        std::thread::sleep(QUIESCENCE);
+        let after = app
+            .state::<crate::file_watch::FileWatchState>()
+            .pass_count();
+        if after == before + 1 {
+            return after;
+        }
+        // A straggler landed inside the window: absorbed by the round
+        // that observed it — drain again with a fresh probe.
+        last_observed = after;
+    }
+    panic!(
+        "the startup watch state never reached quiescence within \
+         {MAX_DRAIN_ROUNDS} drain rounds (the last ended at \
+         {last_observed} passes) — passes kept arriving while no \
+         test-side write explained them; this is a watcher \
+         pathology, not the fixture leftovers the drain exists to \
+         absorb (D-181's iteration-2 note)"
+    );
 }
 
 /// Collects the next change-carrying report with a deadline — this
@@ -6612,8 +6654,8 @@ fn an_external_edit_marks_the_project_externally_modified_without_writing_anythi
     // The startup convergence (CI 45235995817): on macOS the pre-spawn
     // fixture write can arrive as a late debounced pass and silently
     // occupy the "second" pass slot the edit below waits for — the
-    // `Empty` failure of the red run. The settle pass re-reads a
-    // matching file, so the wire stays silent through it.
+    // `Empty` failure of the red run. The drain's settle passes
+    // re-read a matching file, so the wire stays silent through them.
     let settled = converge_startup_watch(&app, &target);
     // A clean startup: the file matches the build — no event.
     assert!(events.try_recv().is_err(), "a matching file emits nothing");
@@ -6750,8 +6792,8 @@ fn deleting_a_synced_target_file_reports_target_deleted_a_never_synced_one_repor
     // The startup convergence (CI 45235995817's class): the pre-spawn
     // fixture write to the synced target can surface as a late
     // debounced pass on macOS and take the deletion's pass slot —
-    // converge before the act. The settle pass reads the matching
-    // file: silent, like the startup one.
+    // converge before the act. The drain's settle passes read the
+    // matching file: silent, like the startup one.
     let settled = converge_startup_watch(&app, &synced_target);
     // Startup over a missing-but-never-synced file: silent.
     assert!(
@@ -6961,10 +7003,10 @@ fn an_archived_row_never_carries_watch_flags_even_from_a_stale_cache_entry() {
     // The startup convergence (CI 45235995817): on macOS the pre-spawn
     // external edit can arrive as a late debounced pass after this
     // point — the `left: 2` failure of the red run, which read the
-    // extra pass as a premise violation. Converge first: the settle
-    // pass re-checks the still-active project and records the SAME
-    // external-modification verdict, so the premise survives it
-    // intact and the baseline names the settled count.
+    // extra pass as a premise violation. Converge first: the drain's
+    // settle passes re-check the still-active project and record the
+    // SAME external-modification verdict, so the premise survives
+    // them intact and the baseline names the quiescent count.
     let settled = converge_startup_watch(&app, &target);
     // The stale-window premise, verified: the cache holds the
     // modified verdict for the still-active project.
@@ -7072,10 +7114,14 @@ fn an_unavailable_row_never_carries_watch_flags_even_from_a_stale_cache_entry() 
         .expect("the watcher must start");
     let _events = listen_file_changed(&app);
     wait_for_watch_passes(&app, 1);
-    // The startup convergence (CI 45235995817) — the archived-row
-    // sibling's note, same failure (`left: 2`, this time on the intel
-    // leg): converge the pre-spawn edit's possible late FSEvents
-    // delivery into the baseline before the window under test opens.
+    // The startup convergence (CI 45235995817, hardened by its
+    // iteration 2 — CI 45245718226): the archived-row sibling's note,
+    // same failure — and THIS test is the one that went red on the intel
+    // leg twice: first `left: 2` (a leftover landed before the
+    // baseline), then `left: 3` (a leftover satisfied v1's wait and
+    // the probe's own pass landed after the baseline was read). The
+    // drain absorbs both interleave orders before the window under
+    // test opens: the baseline it returns is quiescent.
     let settled = converge_startup_watch(&app, &target);
     // The stale-window premise, verified: the cache holds the
     // modified verdict for the still-available project.

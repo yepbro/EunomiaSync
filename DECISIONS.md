@@ -20021,3 +20021,61 @@ Checks: `CARGO_BUILD_JOBS=2 cargo fmt --check`,
 suites; the src-tauri lib suite: 562 passed, 0 failed) and
 `pnpm run format:check` — all green on ubuntu. The two macOS legs
 are CI's to confirm on the merge push.
+
+Iteration-2 addendum (CI 45245718226, same dedicated subagent,
+2026-11-23): the merge push turned the macos-15 (arm) leg green —
+and every other leg and job — but macos-15-intel failed the SAME
+`an_unavailable_row…` test at the post-fix ipc_tests.rs:7114 with
+`left: 3, right: 2`: the residual this entry's boundaries named, in
+its likeliest concrete shape. v1's `wait_for_watch_passes(before +
+1)` proves only that A pass ran after the rewrite — not that it was
+the rewrite's OWN: a pending fixture delivery can satisfy the wait
+first, and the probe's own pass (or a further leftover) then lands
+after the baseline was read, inside the act window. Plain in-order
+stream delivery suffices — no out-of-order daemon behavior
+required; the arm leg simply never drew that interleave, the slower
+virtualized intel runner did.
+
+Hardening: `converge_startup_watch` is now a DRAINING convergence
+loop. Each round rewrites the target with its own just-read bytes
+(verdict-neutral as before), waits for the next pass, and then holds
+a 300 ms quiescence window (the file's canonical settle span, 7 ×
+the 40 ms test debounce); ANY further pass inside the window is a
+straggler — absorbed, and the round restarts with a fresh probe.
+The baseline is returned only after a window in which NO pass ran at
+all: quiescent, not merely moved. Rounds are bounded (5); exceeding
+the bound panics naming the last observed count — a watcher that
+never goes quiet is a pathology to hear about, not to wait away.
+Every call site shares the hardened helper: the exact-count
+premises (the archived/unavailable stale-cache tests — the ones that
+actually need quiescence) get it directly; the event-asserting
+batteries (external edit, deletion, scheme B, the conformance site)
+were already tolerant — a straggler can shift which pass a
+`wait_for` observes, but `next_flagged_changes`' 5 s conditional
+window still collects the event — so no per-site change beyond the
+shared helper and the comments it made plural.
+
+Falsifiability, iteration 2 (all mutations observed, then reverted):
+a deterministic straggler injected right after v1's baseline read
+(`FilesChanged` for the target through the state's own trigger —
+the same interleave the intel leg drew) reproduces the production
+failure on ubuntu exactly — `left: 3, right: 2` on the same assert;
+the SAME straggler injected inside the hardened drain's first round
+is absorbed (round 2 re-arms, the test passes with a quiescent
+baseline); injecting it every round exhausts the bound and panics
+with the named count (11 passes at round 5). The differential
+(v1+straggler red vs drain+straggler green) is the fix's local
+proof.
+
+Tightened boundary: after the drain, the failure requires a
+delivery that out-lates the LAST 300 ms quiet window and lands
+inside the act window, while every physical write it could carry is
+at least the drain's full span old (≥ 300 ms–1.5 s behind a daemon
+that otherwise delivered five quiet rounds' worth promptly). The
+observed intel stragglers landed within sub-second windows of their
+writes — the population the drain can still miss is, on the
+evidence, empty — and the bound keeps that claim falsifiable
+instead of infinitely patient. Checks re-run green on ubuntu:
+fmt, clippy `--workspace --all-targets -D warnings`, `cargo test
+--workspace` (37 suites), `format:check`. The macOS legs are CI's
+to confirm on the second merge push.
