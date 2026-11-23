@@ -2,7 +2,7 @@
 name = "eunomia-load"
 version.workspace = true
 edition.workspace = true
-description = "Load benchmarks for EunomiaSync (spec 12.2, criterion): building one project up to 1000 items, recalculating dirty over data set L, and saving an assignment toggle on set L, on the generated data sets of D-109. A local tool: CI runs the crate's tests but never the benchmarks."
+description = "Load benchmarks for EunomiaSync (spec 12.2, criterion): building one project up to 1000 items, recalculating dirty over data set L, saving an assignment toggle on set L, the sync pipeline over 100 ten-KB projects, and the scan walk over 100k folders, on the generated data sets of D-109. A local tool: CI runs the crate's tests but never the benchmarks."
 license.workspace = true
 publish = false
 
@@ -58,4 +58,12 @@ harness = false
 
 [[bench]]
 name = "assignment_toggle"
+harness = false
+
+[[bench]]
+name = "sync_pipeline"
+harness = false
+
+[[bench]]
+name = "scan_walk"
 harness = false

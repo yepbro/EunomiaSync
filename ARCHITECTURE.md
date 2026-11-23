@@ -75,8 +75,8 @@ crates/
     migrations/                #   Embedded SQL migration files
 benches/
   eunomia-load/           # §12.2 load benchmarks (criterion; local tool — CI runs its tests, never the benches)
-    src/lib.rs            #   Fixtures (TempRepos + data_sets) + the reads + the parallel bench substrate + the assignment toggle
-    benches/              #   project_build, dirty_recalc, assignment_toggle (the three §12.2 budget rows)
+    src/lib.rs            #   Fixtures (TempRepos + data_sets) + the reads + the parallel bench substrate + the assignment toggle + the composed §9.4 sync pass + the scan tree
+    benches/              #   project_build, dirty_recalc, assignment_toggle, sync_pipeline, scan_walk (the five §12.2 budget rows)
 src-tauri/
   src/availability.rs      # Availability service: re-probes + state://project-availability (working)
   src/commands.rs          # IPC commands, the §7.10 registered set (working)
@@ -857,15 +857,15 @@ updater is part of the MVP scope (spec 7.9).
 
 ## Testing strategy
 
-| Level       | Scope                                                      | Tooling / command                                                    |
-| ----------- | ---------------------------------------------------------- | -------------------------------------------------------------------- |
-| Unit        | Rust crates and Vue components                             | `cargo test --workspace` / `pnpm run test` (Vitest)                  |
-| Integration | `eunomia-store` storage & migrations                       | `cargo test -p eunomia-store` (in-memory + file DB)                  |
-| API         | Tauri runtime behavior (updater init, wiring)              | `cargo test -p eunomia-sync` (`tauri::test` mocks)                   |
-| Executor    | DB transaction/rollback/runtime paths                      | `cargo test -p eunomia-sync` (`db_tests.rs`)                         |
-| Load        | Spec §12.2 budgets on generated data (set L today; M open) | `cargo bench -p eunomia-load` (criterion; local, DECISIONS.md D-135) |
-| E2E         | Browser scenarios against Vite server                      | `pnpm run e2e` (Playwright, DECISIONS.md D-007)                      |
-| Smoke       | App builds on all three platforms                          | CI `build` matrix: `tauri build --debug --no-bundle`                 |
+| Level       | Scope                                                                                                                 | Tooling / command                                                           |
+| ----------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Unit        | Rust crates and Vue components                                                                                        | `cargo test --workspace` / `pnpm run test` (Vitest)                         |
+| Integration | `eunomia-store` storage & migrations                                                                                  | `cargo test -p eunomia-store` (in-memory + file DB)                         |
+| API         | Tauri runtime behavior (updater init, wiring)                                                                         | `cargo test -p eunomia-sync` (`tauri::test` mocks)                          |
+| Executor    | DB transaction/rollback/runtime paths                                                                                 | `cargo test -p eunomia-sync` (`db_tests.rs`)                                |
+| Load        | Spec §12.2 budgets on generated data (five rows: build, dirty, toggle, sync pipeline, scan walk; set L today; M open) | `cargo bench -p eunomia-load` (criterion; local, DECISIONS.md D-135, D-159) |
+| E2E         | Browser scenarios against Vite server                                                                                 | `pnpm run e2e` (Playwright, DECISIONS.md D-007)                             |
+| Smoke       | App builds on all three platforms                                                                                     | CI `build` matrix: `tauri build --debug --no-bundle`                        |
 
 ## CI
 

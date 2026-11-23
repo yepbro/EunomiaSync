@@ -17434,3 +17434,257 @@ block with its second assert deliberately STRONGER (nothing at all
 follows, not just no clearings), and M3's observed red was the
 drain's first assert ("the clearing arrives exactly once", zero
 arrivals) — as recorded above, the observed output.
+
+### D-159 — T-139: the sync-pipeline and scan benchmarks — §12.2's two missing budget rows measured through the real seams (the composed §9.4 core over 100 ten-KB projects; the walk engine over a 101 100-folder tree) — 2026-11-22
+
+Problem: T-139 turns §15.1's Load row toward the two §12.2 budget
+rows no bench measures yet — "Sync of 100 projects, files up to
+10 KB, SSD: no more than 10 s" and "Scan of 100,000 folders on an
+SSD: no more than 30 s; UI input response no more than 100 ms".
+Rule 1, the mapping recorded before coding: of §12.2's eight rows,
+three are already owned by this crate — the build row (D-135
+`project_build`), the dirty row (D-135 `dirty_recalc`), the toggle
+row (D-157 `assignment_toggle`) — and are NOT duplicated; four are
+not criterion-benchable at all (startup-to-window, matrix scrolling,
+RSS, and the scan row's "UI input response" half: UI/e2e-script
+territory, §15.1's other half); the two NEW rows are the sync
+pipeline's and the scan walk's. The open points: what the sync row
+can even measure without the app shell (the §9.4 phase machinery
+lives in src-tauri, and the bench crate cannot depend on the app
+crate — D-145's recorded fact); what keeps a sync iteration off the
+no-op path (a second sync with no changes is all-`unchanged`, D-24);
+what the scan row's honest fixture is (no generator produces a
+100 000-folder tree — D-109's `TempRepos` maxes out at the project
+count); and which scan settings the walk runs under.
+
+Solution: two new bench targets in `benches/eunomia-load`
+(`sync_pipeline`, `scan_walk`), no new dependencies (criterion
+`=0.8.2` minimal already pinned), the harness measuring real code
+only — every per-step mechanic is the production seam function the
+src-tauri phases call.
+
+- _The sync row's measurable core._ The src-tauri phases orchestrate
+  store transactions and app state AROUND per-step work that lives in
+  `eunomia-fs`/`eunomia-core`; the bench composes that per-step work
+  in §9.4's own phase order: phase 0's pure half (one ALG-001
+  snapshot read transaction + `content_build::build_projects`), then
+  per project in `sort_order` the seven preflight steps
+  (`check_project_available`, `resolve_target_path`, the regular-file
+  gate, `check_write_access`, the existing file's read, the scheme
+  branch, `remove_stale_tmp_files`), the free-space tail
+  (`check_backup_space` over `free_bytes(data_dir)`), phase 2's
+  `backup_target_file` per ready project with an existing file, and
+  phase 3's `write_target_file` (§9.5's whole pipeline: staging file,
+  fsync, rename, directory fsync, re-read, digest verify, with
+  production's own free-space closure over the target's folder). The
+  scheme branch is honest per scheme: A/C compare through
+  `contents_match` against the markerless whole-file basis; B splices
+  the NEW managed text into the file just read through the REAL
+  `assembly_b::splice` — the written bytes and the comparison basis
+  in one builder (the file is unchanged when the resplice reproduces
+  its bytes: a decision identical to phase 1's markerless ALG-033
+  rule on this fixture, whose marker line is a constant, and
+  STRICTER in general — a differently-stamped marker would take the
+  write path, so the formulation cannot understate the row), so no
+  `splice_without_marker` mirror is needed
+  (src-tauri's phase 1 has one; this composition does not). TWO
+  ALG-030 spellings the pass DOES mirror over an already-built
+  managed text — the whole-file tail (production `sync_phase3`'s own
+  `whole_file`, pinned against the real `build_content` builder's
+  output, the D-130 pattern) and the markerless comparison basis
+  (pinned behaviourally by the all-unchanged second pass). Cut and
+  documented (the crate docs'
+  seam list): the run bookkeeping — `sync_runs`/`sync_run_projects`
+  rows, the `sync_running` flag, phase 3's per-project `last_synced`
+  commit (a store UPDATE at D-157's measured ~65 µs; hundredths of a
+  percent of the row's 10 s), the `backup_records` rows and the
+  BKP-010 dedup lookup (the alternation makes every copy a fresh
+  digest, so `Created` is the outcome either way), §9.4 phase 1
+  step 6's D-25 confirmation list (the fixture's builds are never
+  empty — the branch is unreachable and costless), and phase 4 whole
+  (retention, journal, verdicts) — with the per-iteration backup
+  sweep standing in for retention so copies do not accumulate.
+- _The alternation (iteration reading)._ One measured iteration is
+  one full pipeline pass; the no-op path exists and would poison it,
+  so the harness flips ONE assignment per project between iterations
+  — project `p`'s `k = 0` pair by D-109's closed form (instruction
+  `(37·p) mod I`, variant `p mod V` → sibling), the D-157 trick
+  scaled to every project — inside criterion's `iter_batched` SETUP
+  (excluded from timing), together with the backups sweep. The
+  premise is verified per project at fixture construction through
+  the store's own read (typed `TogglePremise` refusals) and pinned
+  recomputed-by-hand. The `fs_phases_100_projects` diagnostic runs
+  the same pass over setup-built content, splitting the row's cost
+  between the store/build half and the fs half (the D-121/D-135
+  breakdown pattern).
+- _The fixture._ `SYNC_100_PROJECTS_10KB`: 100 projects at set L's
+  density (200 assignments each over L's library shape) — the
+  generator's §12.2 sizing builds each managed text at ≈10 KB (the
+  row's "files up to 10 KB"; the pin's band is 8–12 KB, the exact
+  sizes deterministic). Scheme-B targets start as hand-planted
+  marker-pair seed files (SYS-009: a missing B target is a skip, not
+  a creation — pinned), so the B branch splices into a real marked
+  file; one unmeasured priming pass then writes every target. The
+  ALG-032 marker line is a fixture constant (the comparison drops
+  it); each pass's `BackupTime` advances one second (fresh
+  `create_new` copy names — a collision would be a `CopyFailed`).
+- _The scan row._ `scan_repositories` itself — the ALG-050..054
+  walker with its per-entry cancel checks, its `.git` probe, its
+  exclude-name skips, `min(4, cores)` threads — over a generated
+  tree (`ScanTree`): a pyramid of 100 groups × 10 subgroups × 10
+  leaves × 9 children = 101 100 folders below the root (≥ the row's
+  100 000 floor), the 1 000 subgroups planted as repositories (a
+  `.git` directory each — the probe's form), depth 4 within the
+  §6.5 default `max_depth` of 6, walked under the §6.5 default
+  settings — wired from the SETTINGS REPOSITORY's own
+  `SettingKey::default_value()` (the spec table's seven-name
+  exclusion list with `.git` on it, pinned against the spec
+  literals: exclusion stops descent, not detection, so the 1 000
+  `.git` folders surface as excluded skips while their parents are
+  found — 102 101 events, every directory exactly one). The walk is
+  read-only: every iteration does identical full work — no no-op
+  path, no alternation needed (the honest difference from the sync
+  pass, stated in the bench docs). The callback only counts
+  (checked/found); the surroundings cut are the command layer's —
+  the `scan://progress` throttle (its per-event mutex and clock
+  check), the cancel slot, the SEC-003 root gate, and the ALG-053
+  classification of found repositories
+  (`scan_classify::classify_entry`, T-075's module with its own
+  tests) — D-153's layer, measured there by its own tests.
+- _Measurements (bench profile, this 8-core box, ~20 GiB available,
+  fixture DB and tree under tmpfs — D-135's standing condition; the
+  programmatic settings — sample size 10, 1 s warm-up, 20 s
+  measurement per benchmark — override criterion's CLI flags, so
+  the check run WAS the full measurement, the D-157 posture; the
+  numbers below are the FINAL-TREE run, after every round-1 fix)._
+  `sync_pipeline/full_pass_100_projects`: **149.95 ms** [141.29,
+  158.63], 10 samples, 165 collected iterations — inside the
+  ≤ 10 s budget by ~67×. `sync_pipeline/fs_phases_100_projects`:
+  **25.634 ms** [24.191, 26.428] — the fs half (preflight + backups
+  - atomic writes) is ~17 % of the pass; the store/build half
+    (snapshot read + `build_projects` over 100 projects/20 000
+    assignments) owns ~124 ms, the same attribution D-121/D-135 made
+    for the read-side rows. `scan_walk/walk_100k_folders`:
+    **336.81 ms** [330.72, 344.33], 10 samples, 110 collected
+    iterations — inside the ≤ 30 s budget by ~89×. Run-to-run spread
+    on this non-isolated box across the task's three full runs:
+    the full pass 150–162 ms, the fs half 22.5–25.6 ms, the walk
+    337–412 ms — every budget verdict unchanged throughout (the
+    spread, not a code change, is why the walk once read 412 ms;
+    criterion's own change detection calls the final-vs-first walk
+    delta "improved" and the full-pass delta "no change"). The row's
+    "SSD" premise versus the tmpfs fixture is the standing honest
+    condition: fsync-backed costs on a real SSD run higher, and the
+    §15.5 reference-machine rerun (D-135's open gate) now covers all
+    five rows this crate measures. No optimization was needed or
+    performed.
+
+Testing: nine new pins join the crate's suite in `cargo test
+--workspace` (1724 passed workspace-wide, zero failures). The six
+sync pins (`tests/sync_pipeline_pins.rs`): the premise recomputed
+by hand through the store's read; the row profile's ≈10 KB sizes;
+the alternation flip-and-restore (build hashes, every project);
+D-24's acceptance through the composed pass (a no-flip second pass
+is all-unchanged, zero copies — the no-op path the alternation
+exists to exclude); the flipped pass's shape (all ready, all backed
+up, all written, and the written bytes equal the REAL builders'
+output — `build_content` over an independently built body for A/C,
+the seed literal's preserved outside plus the built managed text
+for B); and SYS-009 (a missing B target skipped, not created). The
+three scan pins (`tests/scan_walk_pins.rs`): the builder's
+arithmetic against an independent `std::fs` directory census; the
+real scan of a small tree (completion, every planted repository,
+the exact event count); and the row tree's floor/shape/default
+literals. All mutation-verified red-then-green: the closed form
+drifted (→ premise refused, pin red), the alternation no-op'd (→
+red), the whole-file tail's blank line dropped (→ the
+`build_content` oracle red), the missing-B arm fabricating a seed
+(→ red), the tree's `.git` not planted (→ census and found-count
+red), the folder arithmetic off by one (→ all three scan pins red).
+Frozen zones untouched (`src-tauri/src/commands.rs`, `logging.rs`,
+`file_watch.rs`, `crates/eunomia-fs/tests/watcher.rs`); no
+production code changed at all — the whole diff lives in the bench
+crate, DECISIONS.md and ARCHITECTURE.md.
+
+Follow-ups: the §15.5 reference-machine rerun now covers five rows;
+the sync row's store half would move if the `assignment_set`/run
+bookkeeping composition ever lands in a benchable layer (T-097's
+card already carries the neighbouring note from D-157); the scan
+row's "UI input response ≤ 100 ms" half stays with the e2e scripts
+(§15.1's other half, untouched by any task so far).
+
+Round-1 review addendum (D-159, same task; report
+`.opencode/reviews/t139-round1.md`, deepseek-v4.1-flash — verdict
+APPROVE, no P0/P1; 2×P2 + 8×P3, all taken here; the reviewer
+independently re-ran fmt/clippy/the crate suite and both benches,
+verified the quoted figures against the recorded criterion
+artifacts, and audited the composition step by step against the
+real src-tauri phases):
+
+- P2-1 (taken): the §6.5 scan defaults were a harness re-spelling
+  (`DEFAULT_SCAN_MAX_DEPTH`/`DEFAULT_EXCLUDE_NAMES`) whose pin
+  checked only the length and one member. The constants are
+  DELETED; `default_scan_options()` now wires
+  `SettingKey::ScanMaxDepth`/`ScanExcludeNames.default_value()` —
+  the settings repository's own defaults, the code production reads
+  — and the pin asserts the wired depth and the full seven-name
+  list against the spec table's literals (mutation-verified red on
+  a wiring drift, green after revert).
+- P2-2 (taken): the scheme-B "unchanged" equivalence claim was
+  unconditional; the resplice-equality formulation is STRICTER than
+  phase 1's markerless ALG-033 rule (a differently-stamped marker
+  takes the write path) and identical here only because the
+  fixture's marker line is a constant. Qualified in the
+  `SyncFixture` docs, the `run_pass` comment and this entry — with
+  the direction stated: stricter cannot understate the row.
+- P3-1 (taken): `ScanTreeSpec::folder_count`'s doc claimed equality
+  with the walk's `checked` count; it now says what is true — the
+  non-`.git` count, with `checked` being `dir_count()` (this number
+  plus the `.git` skip events).
+- P3-2 (taken): "the ONE three-line mirror" was two; the crate
+  docs and this entry now name both ALG-030 spellings (`whole_file`,
+  pinned against `build_content`; `markerless_whole`, pinned
+  behaviourally by the all-unchanged second pass).
+- P3-3 (taken): the scan cut sentence now names everything cut —
+  the throttle's per-event mutex/clock, the cancel slot, SEC-003,
+  and the ALG-053 classification (`scan_classify::classify_entry`)
+  the counting callback does not perform.
+- P3-4 (taken): the pass made two extra `metadata` probes
+  production does not (free-space sizing, phase-2 eligibility) and
+  probed unconditionally on an empty copy list. `Ready` now carries
+  `existing_len` captured at step 4 (production's `existing_size`
+  shape, no second stat), phase 2's eligibility is
+  `existing_len.is_some()`, and an empty copy list skips the probe
+  (phase 1's own zero-bytes rule).
+- P3-5 (taken): §9.4 phase 1 step 6's D-25 confirmation list is now
+  in the cut list (the fixture's builds are never empty — the
+  branch is unreachable and costless), in the crate docs and this
+  entry.
+- P3-6 (taken): `run_pass`'s error doc misattributed per-project
+  isolation to the command layer; it now states the truth (a
+  fixture cannot refuse a seam; production turns the same refusal
+  into a per-project skip at that step — phase 1's own rule).
+- P3-7 (taken): the entry's figures predated a formatting-only
+  write; the Measurements bullet now carries the FINAL-TREE run
+  (149.95 / 25.634 / 336.81 ms) with the across-run spread recorded
+  and criterion's own change verdicts quoted.
+- P3-8 (taken): the scheme-B pin's managed-block assertion is now
+  exact equality (`managed + "\n\n" + marker + "\n"`), not
+  starts_with/ends_with halves.
+
+Round-2 review addendum (D-159, same task; report
+`.opencode/reviews/t139-round2.md`, hy4-flash-free — verdict
+APPROVE, no P0/P1/P2, 1×P3 taken here; the round re-verified with
+fresh eyes that all eight round-1 fixes are real against the
+current files — the settings wiring against the store's own
+kind/default pins, `existing_len` against production's
+`existing_size` expression, the exact B-block equality against
+`assembly_b::build_block`'s rejoined-lines shape, the figures
+against the criterion artifacts (which postdate every source
+write) — re-ran fmt/clippy/the crate suite, and found no new
+problems from the fixes. The one finding: the bench file
+`scan_walk.rs`'s own doc still carried the pre-fix cut wording
+(throttle/cancel/SEC-003 without the classification); the sentence
+now names `classify_entry` and the tracker's per-event costs, or
+points at the harness docs' complete list. The review phase is
+complete after this round (no third round).
