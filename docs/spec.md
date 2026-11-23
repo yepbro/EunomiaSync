@@ -564,7 +564,8 @@ The algorithms are described in section 9. This section has the requirements and
 - **UPD-003, 006, D-27 (P0).** `tauri-plugin-updater` is used; artifact signatures are checked with a public key built into the app. Download and install start only after confirmation. Installing is not available during a sync.
 - **UPD-004 (P0).** Rolling back an installed version is not automated. If the new version could not run a migration, the app does not change the database and says that the previous version must be installed, pointing to the `db-backups/pre-migration-*` copy.
 - **UPD-005 (P0).** "About" window: version, app identifier (`pro.yepbro.eunomiasync`), author (Den Brooks, denis@yepbro.pro), license (dual license: MIT License and Apache License, Version 2.0), repository link (https://github.com/yepbro/EunomiaSync). The brand line carries the version chip; an "Update channel: stable — signed updates via the Tauri updater (D-27)" line is shown, and the dependency licenses are a collapsible section (REL-004).
-- **NFR-013 (P0).** The app's only network request is the update check. It contains no project or instruction data and runs in a separate module.
+- **NFR-012 (P0).** The app's only network use is checking for updates and downloading the signed artifact (UPD-003). There is no telemetry, automatic error reporting, analytics or any other outbound connection (§1.3, D-28); the request's content and module isolation are NFR-013 (SEC-004).
+- **NFR-013 (P0).** The only network requests are the update check and the artifact download (NFR-012). Neither contains project or instruction data, and both run in a separate module.
 
 ### 7.10. IPC Contract
 
@@ -823,7 +824,7 @@ Matrix focus is a roving tabindex over the assignment cells: exactly one cell ha
 
 ### 11.4. Confirmations and Messages
 
-- **UI-010 (P0).** A confirmation that explains what will happen is required for: archiving a project (typing the name), hiding an instruction, deleting a heading (the dialog says: "The section's instructions stay in place and become part of the previous section"), deleting a variant, an empty sync result, bulk actions on 10 or more assignments (NFR-021), restoring an archived project, deleting an excluded path, and deleting per-project custom text (MAIN-007). In P1, the same is required for restoring a file from a backup, restoring a version, and import.
+- **UI-010 (P0).** A confirmation that explains what will happen (NFR-021) is required for: archiving a project (typing the name), hiding an instruction, deleting a heading (the dialog says: "The section's instructions stay in place and become part of the previous section"), deleting a variant, an empty sync result, bulk actions on 10 or more assignments, restoring an archived project, deleting an excluded path, and deleting per-project custom text (MAIN-007). In P1, the same is required for restoring a file from a backup, restoring a version, and import.
 - **UI-011 (P0).** An error message answers four questions: what happened, where (path, project), why (code and OS reason), and what to do (NFR-018). Technical details are collapsed into a "Technical details" section with a copy button.
 - **UI-012 (P0).** Empty states: no projects ("Add project" and "Scan folder" buttons), no instructions ("New instruction"), empty search.
 
@@ -843,6 +844,7 @@ Numbering note: the NFR numbering skips two numbers — no requirement was ever 
 
 - **NFR-001…003 (P0).** Windows 10 22H2 and newer (x64, arm64), macOS 12 and newer (arm64, x64), Ubuntu 24.04 and newer (x64; arm64 if possible). File system work (rights, paths, atomic replace, symlinks) is tested separately on each platform (section 15).
 - **NFR-023 (P0).** Windows: long path support is turned on through the manifest. Linux: running as root shows a warning, because the created files will be owned by root.
+- **NFR-011 (P0).** The app runs with user rights and does not ask for elevation on any platform. On Windows the manifest pins `requestedExecutionLevel level="asInvoker" uiAccess="false"`, so the process starts with the launching user's token (SEC-012).
 
 ### 12.2. Performance
 
@@ -877,6 +879,10 @@ Maximum supported scale for v1: 2000 projects, 5000 library items.
 ### 12.6. Error Presentation
 
 - **NFR-018 (P0).** Every error message answers four questions: what happened, where (path, project), why (code and OS reason), and what to do. The content comes from the §7.10 error envelope (`code`, `message_key`, `params`, `details`) and is localized by `message_key` (NFR-004…006); technical details are collapsed into a "Technical details" section with a copy button (UI-011).
+
+### 12.7. Safety
+
+- **NFR-021 (P0).** A destructive UI action never executes without an explicit confirmation that explains what will happen. UI-010 enumerates the actions that require this confirmation, with their dialogs and the P1 extensions.
 
 ## 13. Security and Privacy
 

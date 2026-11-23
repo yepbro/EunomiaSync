@@ -18666,3 +18666,115 @@ land on either side of the file switch (async queue); the criterion
 says to grep both. P3-3 — the header no longer attributes all three
 items to the no-stderr exposure; the real clock and the worker-thread
 path are named. None refused.
+
+### D-170 — T-303: the D-167 danglers defined — NFR-011 in §12.1 (no-elevation), NFR-012 in §7.9 (updater-only network use), NFR-021 in new §12.7 Safety (destructive-action confirmations); re-pointing declined for all three — 2026-11-23
+
+Problem: D-167's census left three referenced-but-undefined NFR IDs as
+follow-up cards (its "NFR-011/012/021 reported, not fixed" bullet).
+All three dangle since spec v1.0 (`ae89176`): `git log -S` over the
+whole history finds each number's first appearance as a bare citation
+in v1.0 and no definition anywhere before this commit — nothing was
+dropped, dangling from day one (the same state D-167 proved for
+NFR-018).
+
+Solution (D-167's play repeated; one census and one reading per
+number):
+
+- _Census first (Rule 2)._ NFR-011: the spec cite at SEC-012 (§13);
+  the content spread with T-009 (`c7ad647`) into
+  `src-tauri/windows/app.manifest` (header and trustInfo comments),
+  `src-tauri/build.rs`, `src-tauri/src/config_tests.rs` (the module
+  doc, one inline comment and four assertion messages) and
+  ARCHITECTURE.md's Windows platform
+  note; DECISIONS.md's T-009-era entries mention it too. NFR-012: one
+  cite, SEC-004's "(NFR-012, NFR-013)" (§13). NFR-021: two cites, §10's
+  general rules and UI-010 (on the bulk-actions list item). No other
+  requirement cites any of the three.
+- _NFR-011 — defined in §12.1 Platforms, beside NFR-023_ (the other
+  manifest-sourced requirement). The content is the no-elevation
+  contract: user rights, no elevation request, on any platform; the
+  Windows mechanism is the manifest's pinned
+  `requestedExecutionLevel level="asInvoker" uiAccess="false"` — the
+  exact element `windows_manifest_never_requests_elevation` pins
+  (`config_tests.rs:1523`), including the banned spellings
+  (`requireAdministrator`, `highestAvailable`, `uiAccess="true"`,
+  `autoElevate`). Re-pointing declined: SEC-012 — the citing
+  site — is the only statement of the content in the spec, so the only
+  re-point target would be a self-citation (D-167's NFR-018 lesson).
+  The new definition cites SEC-012; SEC-012's pre-existing NFR-011
+  cite closes the pair two-way. ARCHITECTURE.md and the manifest,
+  build.rs and test comments needed no change — their cites resolve to
+  §12.1 now.
+- _NFR-012 — defined in §7.9, immediately before its sibling NFR-013_
+  (the file's precedent of NFRs defined where their subject lives:
+  NFR-013 there, NFR-015 in §7.1's row, NFR-017/022 in §7.4's row).
+  The content: the app's only network use is checking for updates and
+  downloading the signed artifact (UPD-003); no telemetry, analytics,
+  crash reporting or any other outbound connection — grounded in the
+  spec's own v1 out-of-scope line (§1) and §3.2's D-28 row ("Telemetry
+  (43) … Not doing these"). Re-pointing to NFR-013 declined: NFR-013
+  (v1.0's wording) stated "the app's only network request is the update
+  check" —
+  narrower than SEC-004's "checking for and downloading updates" (the
+  artifact download is a separate request under UPD-003) and silent on
+  the no-other-use rule; pinning the use restriction to it would
+  repeat D-167's declined-NFR-006 defect. SEC-004's two cites now
+  decompose cleanly: NFR-012 = the use restriction, NFR-013 = request
+  content and module isolation. The new definition cites NFR-013 and
+  SEC-004; SEC-004's cite stays as written.
+- _NFR-021 — defined in new §12.7 Safety_ (one bullet, the §12.6
+  shape): a destructive UI action never executes without an explicit
+  confirmation explaining what will happen; UI-010 enumerates the
+  actions that require this confirmation, with their dialogs and the
+  P1 extensions. Re-pointing declined: at UI-010's inner cite the only
+  statement of the content is UI-010 itself — a self-citation;
+  re-pointing §10's cite to UI-010 would still leave UI-010's own cite
+  dangling. Defining one requirement resolves both sites, two-way
+  (UI-010 and §10 already cite NFR-021).
+
+The §12 numbering note (NFR-014/016) stays untouched: after this
+change every NFR-001…024 token in the spec is either defined or
+gap-noted (the range spellings NFR-001…003 and NFR-004…006 cover
+002/003/005 per D-167's settled reading), so the note's claim remains
+exactly true and the numbering is now fully accounted for.
+
+Checks: md-only diff (`docs/spec.md`, this file); prettier green;
+batch regime (owner instruction 2026-11-23) — tests not run, the
+orchestrator runs the suite centrally after the flash batch; one
+review round per the md-only exception.
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t303-round1.md`, deepseek-v4.1-flash):
+request-changes — two P1s, three P2s, three P3s; all taken in the
+amend. P1-1: NFR-021's exclusivity sentence ("confirmations only in
+§10's two cases … nothing else interrupts the work with prompts")
+contradicted UI-010's own non-destructive confirmations (archiving,
+PRJ-013…018 — the folder is not touched; hiding, LIB-005…007 —
+restorable), the updater's install confirmation (UPD-001/003), UI-003's
+unsaved-changes confirmation and the sync-exit confirmation — the
+sentence is dropped and the enumeration claim scoped to "the actions
+that require this confirmation". §10's own pre-existing two-cases
+sentence is left as v1.0 wrote it; its app-wide tension with UI-010's
+list is reported as a follow-up, not fixed here. P1-2: NFR-013's v1.0
+exclusivity ("the app's only network request is the update check")
+contradicted the download UPD-001/003 require and the sibling NFR-012 —
+NFR-013 amended to "The only network requests are the update check and
+the artifact download (NFR-012). Neither contains project or
+instruction data, and both run in a separate module" (its only cites —
+SEC-004 and NFR-012 — verified by grep). P2-1: UI-010's inner NFR-021
+cite moved to the leading clause ("A confirmation that explains what
+will happen (NFR-021) is required for: …") — the cite now names the
+class, not a reversible bulk item. P2-2: the enumeration's
+completeness claim dropped — the recovery screen's
+`db_recreate`/`db_restore_backup` pair (ARCHITECTURE.md calls it the
+destructive pair; §7.10 preserves a `pre-recovery-<UTC>` copy) stays
+outside UI-010 by design, and adding dialogs there would be requirement
+authoring beyond this card. P2-3: the history claim scoped to "no
+definition anywhere before this commit" (D-167's round-1 P2-2
+repeated). P3-1: the census's config_tests.rs count corrected to the
+module doc, one inline comment and four assertion messages. P3-2:
+"nothing else in the repository cites" narrowed to "no other
+requirement cites". P3-3: the telemetry sentence's citation corrected
+to (§1.3, D-28) — D-28's row names telemetry only, §1.3's out-of-scope
+line adds automatic error reports — and the wording brought to the
+sourced terms. None refused.
