@@ -17843,3 +17843,115 @@ canonicalize independently — now "is the canonical one"); the
 wrapped identifiers' rendered embedded space (both test
 identifiers now single lines). The review phase is complete after
 this round (no third round).
+
+### D-161 — T-288: the store-mapper family's second-copy rule — any member's duplicate triggers a family revisit, a member is consolidated only on its own second copy, the trigger a review finding one — 2026-11-23
+
+Problem: D-149's second follow-up card (that entry's orchestrator
+addendum tracked two cards; this is the store-mapper-family one,
+follow-up T-264). T-264 consolidated the sync-run error mapper
+family only; the honest-boundaries ruling deliberately left the
+other store-table mappers where they live. D-149 recorded the
+deferral and the trigger only as prose inside its own entry —
+nothing operative: no rule statement a review is bound to and no
+mechanism — so the deferral lives or dies with a reader's attention
+to one paragraph, and a future task or review could still read
+D-149 as "the family awaits consolidation" and finish the job over
+members no duplication justifies — premature consolidation is
+speculation (structure for structure's sake, the same doctrine
+that kept D-149 from creating a two-entry mapper module).
+
+Census (verified before writing, Rule 2; grep census over this
+worktree at this commit; every other occurrence of these names is
+an import, a call site or a doc cross-reference, and no test-side
+re-definition of any of them exists): each member has exactly ONE
+production definition today — `projects_store_to_app_error`
+(src-tauri/src/commands.rs:2512), `activity_log_to_app_error`
+(commands.rs:1644), the settings pair `settings_write_to_app_error`
+(commands.rs:1995) and `settings_cell_to_app_error`
+(commands.rs:2023) — two distinct mappers, not two copies of one —
+and the library mapping inside `build_snapshot_to_app_error`
+(src-tauri/src/dirty_recalc.rs:556, the `BuildSnapshotError::Library`
+arm; its doc at :546-551 states the library read has no
+command-layer mapper yet). Test-side seeding helpers that map
+`LibraryError` (eight sites: `library_seed_error` in
+`dirty_recalc_tests.rs:170` and the five `sync_phase*_tests.rs`,
+`sync_library_seed_error` and `library_watch_seed_error` in
+`ipc_tests.rs`) are plumbing by D-149's test-side ruling, not
+copies of the library member — the rule below does not fire on
+them.
+
+Solution (recorded as a rule future tasks and reviews apply):
+
+- The family's membership is the census list: the command-reachable
+  wire mapper per store table — projects, activity-log, settings
+  write, settings read, library (via the snapshot read's arm) —
+  today. A private module-local mapper serving one internal seam
+  (e.g. retention's `storage_to_app_error`, retention.rs:535) is
+  NOT a member, however similar its `StorageError → AppError` shape
+  looks.
+- A member of the store-mapper family is consolidated only when a
+  second copy of THAT member appears; a still-single-copy member
+  stays where it is, however many of its siblings consolidate.
+- Premature consolidation is speculation: no proactive
+  finish-the-family pass, no shared mapper module created ahead of
+  a duplicate.
+- The trigger is a REVIEW finding a duplicate (or equivalent
+  duplicate evidence verified in another task's fact-gathering);
+  the consolidation then follows T-264's own shape — one spelling,
+  the migration map, the union pin at the survivor.
+
+Reading note (Rule 1): the card's title ("revision only when a
+second copy appears at ANY member") and its rule line ("a member is
+consolidated only when IT gains a second copy") admit a collapsed
+single-trigger reading; the composed reading recorded here is
+two-clause: ANY member's duplication triggers a REVISIT of the
+family (a look), while a member is CONSOLIDATED only on its OWN
+second copy — a revisit never moves a member still single-copy.
+
+Checks: md-only change — DECISIONS.md is the only file in the diff;
+nothing compile-bearing changed, so no cargo run (the md-only
+exception, which in this batch coincides with the batch regime:
+suites are not run). `pnpm exec prettier --check DECISIONS.md` and
+`pnpm run format:check` exit 0; the pre-commit hook gates the
+commit. The census above is point-in-time: the cited lines move as
+the files evolve — the RULE is the durable content, not the line
+numbers.
+
+Honest boundaries: this entry encodes a policy, not a mechanism —
+no CI job or hook detects a second mapper copy; enforcement lives
+in this file and in reviewers' briefs carrying D-149's doctrine,
+i.e. it is human. The single-copy census is asserted from grep,
+not pinned by a test, and is correct only as of this commit.
+
+Round-1 review addendum (D-161, same task; report
+`.opencode/reviews/t288-round1.md`, deepseek-v4.1-flash —
+request-changes, no P0/P1; 2×P2, 3×P3, all taken in the amend):
+the round re-verified the census (all five definition lines
+exact), the settings-pair and library-arm characterizations,
+D-149's follow-up fidelity and the md-only scope, and audited that
+no tests were touched. Findings fixed —
+
+- P2-1 (taken): the heading (and the commit subject) said "a
+  member is revisited only when it gains a second copy" — a third
+  rule neither the card, nor D-149's follow-up, nor this entry's
+  own reading note states; the heading and subject now carry the
+  two-clause rule (any member's duplicate → family revisit; a
+  member consolidates only on its own second copy).
+- P2-2 (taken): "nothing in the repository encoded that deferral"
+  overclaimed — D-149 records the deferral and the trigger as prose
+  in its own entry; the Problem now scopes the absence to what is
+  true (nothing operative: no rule statement a review is bound to,
+  no mechanism).
+- P3-1 (taken): the section labels now match the file's house
+  style — `Census:` for the facts paragraph, `Solution` for the
+  ruling (`Ruling`/`Facts verified` had no precedent in this
+  file).
+- P3-2 (taken): the Solution now defines the family's membership
+  (the command-reachable wire mapper per store table) and excludes
+  private seam-local mappers, naming `retention.rs:535`'s
+  `storage_to_app_error` — the closest false-positive candidate a
+  future reviewer would meet.
+- P3-3 (taken): the Census now names the eight test-side
+  `LibraryError` seeding helpers as plumbing by D-149's test-side
+  ruling, so a literal "second copy" reading does not fire on
+  them.
