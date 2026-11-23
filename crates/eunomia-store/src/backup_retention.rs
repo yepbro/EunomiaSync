@@ -285,13 +285,17 @@ pub fn apply(
 /// Marks one record `pruned` (§6.4), only if it is still the
 /// `ok` row the selection snapshot saw — the status guard makes the
 /// module's "a terminal row is never rewritten" promise structural
-/// rather than snapshot-dependent (today's single-writer executor,
-/// D-037, cannot race the two apart; the `missing` detection of §10
-/// and BKP-005's discarded sweep are future second writers on this
-/// table). Runs on the caller's connection — atomic only inside the
-/// caller's transaction. Returns whether this call changed the row:
-/// `false` is a converged no-op (the record already left `ok`), not
-/// a failure.
+/// rather than snapshot-dependent (the one-connection executor,
+/// D-037, serializes every writer behind its mutex and cannot race
+/// the two apart; BKP-005's discarded sweep has landed as a
+/// producer on this table — src-tauri's `sync_phase2` inserts the
+/// `E_BACKUP_FAILED` abort sweep's history rows, `discarded` per
+/// deleted copy and `ok` where the deletion was refused (the
+/// sync-phase-2 task, T-115) — and §10's `missing` detection is
+/// still to come). Runs on the caller's connection — atomic only
+/// inside the caller's transaction. Returns whether this call
+/// changed the row: `false` is a converged no-op (the record
+/// already left `ok`), not a failure.
 fn mark_pruned(conn: &Connection, record_id: &str) -> Result<bool, StorageError> {
     let marked = conn.execute(
         "UPDATE backup_records SET status = 'pruned' WHERE id = ?1 AND status = 'ok'",
