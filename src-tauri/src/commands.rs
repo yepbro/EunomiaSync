@@ -15,9 +15,18 @@
 //! `exclusions_list`, `exclusion_remove`, `projects_reorder`,
 //! `sync_run`.
 //!
-//! Since T-105 the three project-*changing* commands
-//! (`project_add_manual`, `exclusion_remove`, `projects_reorder`)
-//! run the SYS-005 gate first: while a sync holds the global
+//! This module also owns the rules a NEW project row is built by —
+//! the derived §6.9 fields, the PRJ-012 copy of the `default.*`
+//! settings, D-29's color and the `project.added` journal entry
+//! ([`ProjectFields`], [`WriteDefaults`], [`ColorOccupancy`],
+//! [`register_project`]) — since T-077: `project_add_manual` and the
+//! scan module's `scan_commit` (PRJ-002's "Add selected", `scan.rs`)
+//! both call that ONE implementation, so the two add flows cannot
+//! drift apart (D-179).
+//!
+//! Since T-105 the project-*changing* commands (`project_add_manual`,
+//! `exclusion_remove`, `projects_reorder`, and `scan_commit` since
+//! T-077) run the SYS-005 gate first: while a sync holds the global
 //! `sync_running` flag (SYS-004, `sync_running.rs`), they answer the
 //! typed `E_SYNC_RUNNING` refusal and write nothing — see
 //! [`reject_during_sync`].
@@ -629,8 +638,9 @@ pub(crate) fn begin_sync<R: Runtime>(
 /// (SYS-004), the command answers the typed `E_SYNC_RUNNING`
 /// refusal instead of mutating — "commands that change projects …
 /// return `E_SYNC_RUNNING` during a sync". Today that is
-/// [`project_add_manual`], [`exclusion_remove`] and
-/// [`projects_reorder`] (the mutation commands that exist); the
+/// [`project_add_manual`], [`exclusion_remove`],
+/// [`projects_reorder`] and — since T-077, it creates project rows —
+/// `scan_commit` (`scan.rs`): the mutation commands that exist; the
 /// spec's `project_update`/`project_remove`/`project_relink` and P1
 /// `backup_restore` join this gate as they land. Reads are never
 /// gated (SYS-005 names the changing commands only).
@@ -647,7 +657,10 @@ pub(crate) fn begin_sync<R: Runtime>(
 /// just before a sync starts commits cleanly on either side of the
 /// snapshot: the D-037 executor serializes it against the snapshot
 /// read on the one connection.
-fn reject_during_sync<R: Runtime>(app: &AppHandle<R>) -> Result<(), AppError> {
+///
+/// `pub(crate)`: the scan commit (`scan.rs`) runs the same gate as
+/// its first act.
+pub(crate) fn reject_during_sync<R: Runtime>(app: &AppHandle<R>) -> Result<(), AppError> {
     if managed_sync_flag(app)?.is_running() {
         return Err(sync_running_refusal());
     }
@@ -2639,12 +2652,7 @@ impl ProjectAddResult {
             .to_owned(),
             project: None,
             offered_root: None,
-            existing: Some(ExistingProject {
-                id: existing.id.clone(),
-                name: existing.name.clone(),
-                path: existing.path.clone(),
-                state: existing.state.as_str().to_owned(),
-            }),
+            existing: Some(ExistingProject::of(existing)),
         }
     }
 }
@@ -2656,7 +2664,8 @@ impl ProjectAddResult {
 /// because PRJ-008 shows it read-only there. No store type crosses the
 /// boundary (the `ProjectColumnEntry` rule): the closed vocabularies
 /// travel in their stored spellings (`"A"`, `"AGENTS.md"`,
-/// `"manual"`).
+/// `"manual"`). The same DTO is the `"added"` entry's payload of the
+/// scan commit (T-077, `scan.rs`) — one wire shape for one created row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub(crate) struct AddedProject {
     /// The row id — the identity every later project command
@@ -2674,8 +2683,8 @@ pub(crate) struct AddedProject {
     pub(crate) label: String,
     /// The palette member picked by D-29 (stored spelling).
     pub(crate) color: String,
-    /// How the project was registered — always `"manual"` here
-    /// (§6.2; the scan commit is `scan_commit`'s spelling).
+    /// How the project was registered (§6.2): `"manual"` from
+    /// `project_add_manual`, `"scan"` from `scan_commit`.
     pub(crate) added_via: String,
     /// The appended position (DB-005: `MAX(sort_order) + 1` over the
     /// whole table, the repository's own append), saturated at
@@ -2712,8 +2721,12 @@ pub(crate) struct AddedProject {
 
 impl AddedProject {
     /// Shapes a stored row into its wire form around the probe's
-    /// warning.
-    fn from_store(project: &eunomia_store::projects::Project, warning: Option<String>) -> Self {
+    /// warning. `pub(crate)` for the scan commit's `"added"` entries
+    /// (T-077): both add flows serve one created row the same way.
+    pub(crate) fn from_store(
+        project: &eunomia_store::projects::Project,
+        warning: Option<String>,
+    ) -> Self {
         AddedProject {
             id: project.id.clone(),
             path: project.path.clone(),
@@ -2736,7 +2749,8 @@ impl AddedProject {
 /// The already-registered project of the two duplicate arms (PRJ-001,
 /// DB-015): what the message names, and the id the archived arm's
 /// restore offer (the future `project_restore`, T-109) calls back
-/// with.
+/// with. The scan commit's `"already_added"`/`"archived"` entries
+/// carry the same view (T-077).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub(crate) struct ExistingProject {
     /// The existing row's id.
@@ -2747,6 +2761,20 @@ pub(crate) struct ExistingProject {
     pub(crate) path: String,
     /// `active` or `archived` — which duplicate arm this is.
     pub(crate) state: String,
+}
+
+impl ExistingProject {
+    /// The wire view of one already-registered row — the constructor
+    /// behind both duplicate arms of the manual add and the scan
+    /// commit's non-add entries (T-077).
+    pub(crate) fn of(project: &eunomia_store::projects::Project) -> Self {
+        ExistingProject {
+            id: project.id.clone(),
+            name: project.name.clone(),
+            path: project.path.clone(),
+            state: project.state.as_str().to_owned(),
+        }
+    }
 }
 
 /// Registers the folder the user picked in the system dialog as a
@@ -2787,26 +2815,32 @@ pub(crate) struct ExistingProject {
 ///    the same picked path with the flag; the root is re-derived
 ///    (idempotent converge), so SEC-003's allowlist is never widened
 ///    with an app-derived path (D-100).
-/// 3. **Fields** (§6.9): the name defaults to the root's folder name
-///    (`validate_name`) and the label to DB-042's derivation of it
-///    (`default_label`, then `validate_label` — the recorded edge
-///    where a control-character prefix derives an unstorable label is
-///    an `E_VALIDATION` naming the field, not a panic). The
-///    description enters as the empty constant (the add flow collects
-///    none, §7.1) through `validate_description` — the D-151 NUL
-///    addendum's save boundary: the stored value is validator-passed
-///    by construction, the silent `U+0000` strip included.
+/// 3. **Fields** (§6.9), through the shared
+///    [`ProjectFields::derive`] — the one implementation the scan
+///    commit (T-077) calls too: the name defaults to the root's
+///    folder name (`validate_name`) and the label to DB-042's
+///    derivation of it (`default_label`, then `validate_label` — the
+///    recorded edge where a control-character prefix derives an
+///    unstorable label is an `E_VALIDATION` naming the field, not a
+///    panic). The description enters as the empty constant (the add
+///    flow collects none, §7.1) through `validate_description` — the
+///    D-151 NUL addendum's save boundary: the stored value is
+///    validator-passed by construction, the silent `U+0000` strip
+///    included.
 /// 4. **One transaction** (D-037, D-051, §6.9 "the whole operation
 ///    runs in one transaction"): the DB-015 duplicate check
 ///    (`find_by_path_key`, either state — active answers the
 ///    `"duplicate_active"` message, archived the
 ///    `"archived_duplicate"` restore offer; both typed answers, no
-///    error, nothing written); the four write settings copied from
-///    `default.*` (PRJ-012/DEF-005); the D-29 color over the ACTIVE
-///    projects' colors; `create` (the repository appends `sort_order`);
-///    and the `project.added` journal entry (LOG-001…004,
-///    info/user/ok, entity project) **inside the same transaction** —
-///    a rolled-back add leaves no entry claiming it happened. The
+///    error, nothing written); then the shared [`register_project`]
+///    — the four write settings copied from `default.*`
+///    (PRJ-012/DEF-005, read inside the transaction so a concurrent
+///    `settings_set` cannot split the copy from the create); the D-29
+///    color over the ACTIVE projects' colors; `create` (the
+///    repository appends `sort_order`); and the `project.added`
+///    journal entry (LOG-001…004, info/user/ok, entity project)
+///    **inside the same transaction** — a rolled-back add leaves no
+///    entry claiming it happened. The
 ///    SYS-005 sync gate runs before the whole flow (the command's
 ///    first act above): during a sync the add answers
 ///    `E_SYNC_RUNNING` and nothing is written; the spec's own
@@ -2904,40 +2938,14 @@ pub(crate) async fn project_add_manual_impl<R: Runtime>(
     if root != picked && accept_repo_root != Some(true) {
         return Ok(ProjectAddResult::repo_root_offered(&root));
     }
-    let name = derived_name(&root)?;
-    let label_default = eunomia_core::project_validators::default_label(&name);
-    let label = eunomia_core::project_validators::validate_label(&label_default)
-        .map_err(|source| rejected_field("label", &label_default, &source.to_string()))?
-        .to_owned();
-    // The description crosses the same save boundary even though the
-    // add flow collects none (§7.1): the value stored today is the
-    // constant empty string — the PRJ-008 modal's edit path lands
-    // with `project_update` (T-279) — routed through the validator so
-    // every description THIS COMMAND stores is validator-passed by
-    // construction (the store itself does not enforce it — store-level
-    // writers must route through the validator, the D-151 NUL
-    // addendum's seam): the silent `U+0000` strip included (a NUL
-    // never reaches the column; the save never rejects one either).
-    let description = eunomia_core::project_validators::validate_description("")
-        .map_err(|source| rejected_field("description", "", &source.to_string()))?;
-
-    // The D-086 addendum seam: find_git_root's canonicalization
-    // already refused a non-UTF-8 root, so the stored path TEXT and
-    // the key are the same lossless conversion of that canonical
-    // form — these two arms keep the guarantee typed instead of
-    // assumed (the honest-refusal shape the fs seam itself answers;
-    // unreachable except through a tree that changes between the walk
-    // and here).
-    let root_key = eunomia_fs::paths::path_key(&root)
-        .map_err(|source| rejected_non_utf8_path(source.path()))?;
-    let path_text = root
-        .to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| rejected_non_utf8_path(&root.to_string_lossy()))?;
+    // The §6.9 fields plus the identity — the shared "Fields" step
+    // (see the command docs, step 3); the rejection of an unstorable
+    // derived field is the `E_VALIDATION` envelope naming the field.
+    let fields = ProjectFields::derive(&root)?;
 
     // The transaction half: everything the operation writes happens in
-    // one `Db::run` (D-037). The moved values are what `NewProject`
-    // borrows; the probe keeps its own copies outside.
+    // one `Db::run` (D-037). The probe keeps its own copy of the root
+    // outside.
     let probe_root = root.clone();
     let outcome = database
         .run(move |transaction| {
@@ -2947,112 +2955,41 @@ pub(crate) async fn project_add_manual_impl<R: Runtime>(
             // D-037 gives every writer, so the create below cannot
             // race past it.
             if let Some(existing) =
-                eunomia_store::projects::find_by_path_key(transaction, &root_key)
+                eunomia_store::projects::find_by_path_key(transaction, &fields.path_key)
                     .map_err(projects_store_to_app_error)?
             {
                 return Ok(AddOutcome::Refused(ProjectAddResult::duplicate_of(
                     &existing,
                 )));
             }
-            // PRJ-012: the write settings a new project copies from
-            // `default.*` — read here, inside the transaction, so the
-            // copy is atomic with the create (a concurrent
-            // `settings_set` cannot split them).
-            let scheme = match stored_default(transaction, SettingKey::DefaultScheme)? {
-                SettingValue::Scheme(scheme) => scheme,
-                _ => return Err(unpaired_setting(SettingKey::DefaultScheme)),
-            };
-            let base_name = match stored_default(transaction, SettingKey::DefaultBaseName)? {
-                SettingValue::BaseName(base_name) => base_name,
-                _ => return Err(unpaired_setting(SettingKey::DefaultBaseName)),
-            };
-            let extra_local = match stored_default(transaction, SettingKey::DefaultExtraLocal)? {
-                SettingValue::ExtraFile(extra) => extra,
-                _ => return Err(unpaired_setting(SettingKey::DefaultExtraLocal)),
-            };
-            let extra_project = match stored_default(transaction, SettingKey::DefaultExtraProject)?
-            {
-                SettingValue::ExtraFile(extra) => extra,
-                _ => return Err(unpaired_setting(SettingKey::DefaultExtraProject)),
-            };
-            // D-29/DB-041: the least-used palette color among ACTIVE
-            // projects, tie-broken by a fresh UUIDv7's hash. The row's
-            // own id is minted inside `create` and cannot be known
-            // before the color is chosen; the store is frozen for this
-            // task, so the tie-break hashes a pre-generated sibling
-            // id — both are fresh UUIDv7s at decision time, which is
-            // the determinism D-29's parenthetical asks of a decision
-            // point (recorded in the task's DECISIONS.md entry).
-            let occupied = occupied_colors(transaction)?;
-            let tie_break_id = eunomia_store::values::new_id();
-            let color =
-                eunomia_core::color_pick::pick_color(&occupied, &ProjectId::new(tie_break_id));
-            // The stored path is the verbatim canonicalize output
-            // (DB-030) — and, by the D-086 addendum, always valid
-            // UTF-8: the gate above refused anything else, so the
-            // TEXT-column boundary between the row and the key is
-            // lossless.
-            let new = eunomia_store::projects::NewProject {
-                path: &path_text,
-                path_key: &root_key,
-                name: &name,
-                label: &label,
-                color: color.as_str(),
-                description: &description,
-                added_via: eunomia_store::projects::AddedVia::Manual,
-                scheme,
-                base_name,
-                extra_local,
-                extra_project,
-            };
-            // The create: a `DuplicatePathKey` here is the one write
-            // race the in-transaction check above cannot produce (one
-            // connection serializes every writer, D-037) — and if it
-            // ever fires anyway, the honest answer is the SAME typed
-            // duplicate outcome, not the read-command fallback whose
-            // diagnostic would misname the flow and whose
-            // `E_DB_LOCKED` code would invite a retry (the round-1
-            // review finding). Convergence, never a masked conflict.
-            let created = match eunomia_store::projects::create(transaction, &new) {
-                Ok(created) => created,
-                Err(ProjectsError::DuplicatePathKey { .. }) => {
-                    let existing =
-                        eunomia_store::projects::find_by_path_key(transaction, &root_key)
-                            .map_err(projects_store_to_app_error)?
-                            .ok_or_else(|| {
-                                projects_fallback(
-                                    "ProjectsError",
-                                    "a duplicate path key conflict vanished on the re-read",
-                                )
-                            })?;
-                    return Ok(AddOutcome::Refused(ProjectAddResult::duplicate_of(
-                        &existing,
-                    )));
-                }
-                Err(other) => return Err(projects_store_to_app_error(other)),
-            };
-            // LOG-001…004 ("adding … projects") inside the operation's
-            // own transaction (D-051): entity and project carry the
-            // new id; no details — the row itself holds the path
-            // (this flow writes no file; the one non-file-write
-            // `File` detail the app produces is `exclusion_remove`'s,
-            // recorded in D-106).
-            let mut entry = LogEntry::new(
-                Action::ProjectAdded,
-                Level::Info,
-                Visibility::User,
-                Outcome::Ok,
-            );
-            entry.entity = Some(Entity {
-                kind: EntityType::Project,
-                id: created.id.as_str(),
-            });
-            entry.project_id = Some(created.id.as_str());
-            insert(transaction, &entry).map_err(activity_log_to_app_error)?;
-            // The D-051 mirror contract: one call per written entry
-            // (info+user+ok is the unmirrored shape today).
-            logging::action_logged(&entry);
-            Ok(AddOutcome::Created(created))
+            // The shared create step (see the command docs, step 4):
+            // the PRJ-012 copy and D-29's input are read HERE, inside
+            // the transaction, so the copy is atomic with the create
+            // (a concurrent `settings_set` cannot split them).
+            let defaults = WriteDefaults::load(transaction)?;
+            let mut occupancy = ColorOccupancy::load(transaction)?;
+            Ok(
+                match register_project(
+                    transaction,
+                    &fields,
+                    eunomia_store::projects::AddedVia::Manual,
+                    &defaults,
+                    &mut occupancy,
+                )? {
+                    Registered::Created(created) => AddOutcome::Created(created),
+                    // The one write race the check above cannot
+                    // produce (one connection serializes every writer,
+                    // D-037) — and if it ever fires anyway, the honest
+                    // answer is the SAME typed duplicate outcome, not
+                    // the read-command fallback whose diagnostic would
+                    // misname the flow and whose `E_DB_LOCKED` code
+                    // would invite a retry (the round-1 review finding
+                    // of D-103). Convergence, never a masked conflict.
+                    Registered::Existing(existing) => {
+                        AddOutcome::Refused(ProjectAddResult::duplicate_of(&existing))
+                    }
+                },
+            )
         })
         .await?;
     match outcome {
@@ -3127,6 +3064,340 @@ enum AddOutcome {
     Refused(ProjectAddResult),
 }
 
+// ---------------------------------------------------------------------------
+// The new-project rules both add flows share (T-077, D-179): §6.9,
+// DB-030, DB-042, PRJ-012, D-29, LOG-001…004, D-051
+//
+// ONE implementation of "how a repository root becomes a project row".
+// `project_add_manual` (S1) and the scan commit (PRJ-002's "Add
+// selected", `scan.rs`) both call the four items below, so a change to
+// an add rule — a new `default.*` key, a new derivation — lands in one
+// place and cannot leave the two flows disagreeing.
+// ---------------------------------------------------------------------------
+
+/// Everything a new project row derives from its canonical repository
+/// root before the store is involved: S1's "Fields" step (§6.9) plus
+/// the row's identity (DB-030).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectFields {
+    /// The root's folder name, `validate_name`-passed (§6.9: 1–100
+    /// characters after trimming).
+    pub(crate) name: String,
+    /// DB-042's derivation of the name (`default_label`, then
+    /// `validate_label`: 1–6 visible characters).
+    pub(crate) label: String,
+    /// The add flows collect no description (§7.1): the constant empty
+    /// text, `validate_description`-passed (the D-151 NUL addendum's
+    /// save boundary — a NUL never reaches the column).
+    pub(crate) description: String,
+    /// The registered identity of the root — the key `find_by_path_key`
+    /// answers and `create` stores (DB-030/DB-031).
+    pub(crate) path_key: String,
+    /// The stored `projects.path`: the canonical root's verbatim UTF-8
+    /// text (DB-030; the D-086 addendum keeps keys and stored paths
+    /// lossless).
+    pub(crate) path: String,
+}
+
+impl ProjectFields {
+    /// S1's "Fields" step over a canonical repository root. Pure over
+    /// the path text — no I/O: `root` is the canonical form the caller
+    /// already resolved.
+    ///
+    /// # Errors
+    ///
+    /// `E_VALIDATION` naming the failed field: the folder name the
+    /// name validator refuses (the filesystem root itself has none —
+    /// the app cannot register a nameless row the schema CHECKs would
+    /// reject), and the recorded D-079 edge where a legal name's DB-042
+    /// derivation is a label §6.9 cannot store (a control-character
+    /// prefix). A root whose canonical text is not valid UTF-8 answers
+    /// the D-086 encoding rejection — unreachable past a caller that
+    /// went through `canonicalize` (its own gate refused), typed
+    /// instead of assumed.
+    pub(crate) fn derive(root: &Path) -> Result<Self, AppError> {
+        let name = derived_name(root)?;
+        let label_default = eunomia_core::project_validators::default_label(&name);
+        let label = eunomia_core::project_validators::validate_label(&label_default)
+            .map_err(|source| rejected_field("label", &label_default, &source.to_string()))?
+            .to_owned();
+        // The description crosses the same save boundary even though
+        // the add flows collect none (§7.1): the value stored today is
+        // the constant empty string — the PRJ-008 modal's edit path
+        // lands with `project_update` (T-279) — routed through the
+        // validator so every description THESE FLOWS store is
+        // validator-passed by construction (the store itself does not
+        // enforce it — store-level writers must route through the
+        // validator, the D-151 NUL addendum's seam).
+        let description = eunomia_core::project_validators::validate_description("")
+            .map_err(|source| rejected_field("description", "", &source.to_string()))?;
+        let path_key = eunomia_fs::paths::path_key(root)
+            .map_err(|source| rejected_non_utf8_path(source.path()))?;
+        let path = root
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| rejected_non_utf8_path(&root.to_string_lossy()))?;
+        Ok(Self {
+            name,
+            label,
+            description,
+            path_key,
+            path,
+        })
+    }
+}
+
+/// The PRJ-012 copy: the four write settings a new project takes from
+/// the `default.*` keys at its creation. The copy is a copy — later
+/// default changes never reach the row (DEF-005).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WriteDefaults {
+    /// `default.scheme` → `projects.scheme`.
+    pub(crate) scheme: eunomia_store::settings::Scheme,
+    /// `default.base_name` → `projects.base_name`.
+    pub(crate) base_name: eunomia_store::settings::BaseName,
+    /// `default.extra_local` → the `AGENTS.local.md` hint columns.
+    pub(crate) extra_local: eunomia_store::settings::ExtraFile,
+    /// `default.extra_project` → the `AGENTS.project.md` hint columns.
+    pub(crate) extra_project: eunomia_store::settings::ExtraFile,
+}
+
+impl WriteDefaults {
+    /// Reads the four keys through the store's single read path
+    /// (D-039) inside the caller's transaction — so the copy is atomic
+    /// with the create that consumes it (a concurrent `settings_set`
+    /// cannot split them). A missing row answers the §6.5 default; a
+    /// corrupt cell answers the settings corrupt fallback
+    /// ([`settings_cell_to_app_error`], never `E_VALIDATION` — the
+    /// T-027 round-2 rule: corruption is not the caller's input).
+    ///
+    /// # Errors
+    ///
+    /// The settings corrupt fallback for a cell that cannot be read,
+    /// and the recorded D-037 fallback for a value of the wrong variant
+    /// (unreachable: `get` re-parses through the key's §6.5 contract).
+    pub(crate) fn load(transaction: &rusqlite::Transaction<'_>) -> Result<Self, AppError> {
+        let scheme = match stored_default(transaction, SettingKey::DefaultScheme)? {
+            SettingValue::Scheme(scheme) => scheme,
+            _ => return Err(unpaired_setting(SettingKey::DefaultScheme)),
+        };
+        let base_name = match stored_default(transaction, SettingKey::DefaultBaseName)? {
+            SettingValue::BaseName(base_name) => base_name,
+            _ => return Err(unpaired_setting(SettingKey::DefaultBaseName)),
+        };
+        let extra_local = match stored_default(transaction, SettingKey::DefaultExtraLocal)? {
+            SettingValue::ExtraFile(extra) => extra,
+            _ => return Err(unpaired_setting(SettingKey::DefaultExtraLocal)),
+        };
+        let extra_project = match stored_default(transaction, SettingKey::DefaultExtraProject)? {
+            SettingValue::ExtraFile(extra) => extra,
+            _ => return Err(unpaired_setting(SettingKey::DefaultExtraProject)),
+        };
+        Ok(Self {
+            scheme,
+            base_name,
+            extra_local,
+            extra_project,
+        })
+    }
+}
+
+/// D-29's input over ONE transaction: how many ACTIVE projects hold
+/// each palette color, read once when the transaction starts and kept
+/// current by [`record`](Self::record) as the transaction creates rows
+/// — so the Nth row of a batch is colored against the active set as it
+/// stands at that moment, earlier rows of the same batch included
+/// (exactly what the manual add's per-add read gives a sequence of
+/// single adds).
+///
+/// `pick_color` (core, the rule's one owner) takes the occupied colors
+/// as a multiset slice and reads only the counts RELATIVE to the
+/// least-used member: the least count selects the candidates and the
+/// candidate count indexes the tie-break. Subtracting that minimum from
+/// every count changes neither — so this type hands `pick_color` the
+/// reduced multiset (one entry per unit above the minimum), whose size
+/// is bounded by the active set that existed when the transaction
+/// began and never grows with the batch. A batch is therefore linear
+/// in its rows; re-listing the table per row would be quadratic (and a
+/// growing full multiset would re-count it per row).
+#[derive(Debug)]
+pub(crate) struct ColorOccupancy {
+    /// One count per palette member, in `Color::ALL` order.
+    counts: [usize; Color::ALL.len()],
+}
+
+impl ColorOccupancy {
+    /// The occupancy of a multiset of colors, one entry per ACTIVE
+    /// project (the `occupied_colors` shape).
+    pub(crate) fn from_colors(occupied: impl IntoIterator<Item = Color>) -> Self {
+        let mut counts = [0usize; Color::ALL.len()];
+        for color in occupied {
+            counts[color_index(color)] += 1;
+        }
+        Self { counts }
+    }
+
+    /// The D-29 input: the colors held by the ACTIVE projects, read
+    /// through the projects repository inside the caller's
+    /// transaction. The `color` column has no schema CHECK (§6.2), so a
+    /// stored cell outside the palette can only be corruption or a
+    /// newer app version — the D-096 corrupt-cells fallback with a
+    /// class-only diagnostic, never a guess.
+    ///
+    /// # Errors
+    ///
+    /// The store fallbacks of the active list read
+    /// ([`projects_store_to_app_error`]) and of a stored color outside
+    /// the palette (`ProjectsCorrupt`).
+    pub(crate) fn load(transaction: &rusqlite::Transaction<'_>) -> Result<Self, AppError> {
+        Ok(Self::from_colors(occupied_colors(transaction)?))
+    }
+
+    /// The color the next created row takes by D-29 over the counts as
+    /// they stand: the least-used palette member, ties broken by the
+    /// SHA-256 of `tie_break` (core's `pick_color`, the rule's one
+    /// owner). Pure — [`record`](Self::record) the answer once the row
+    /// exists.
+    pub(crate) fn pick(&self, tie_break: &ProjectId) -> Color {
+        // The reduced multiset (see the type docs): the minimum
+        // exists — the palette is never empty.
+        let least = *self
+            .counts
+            .iter()
+            .min()
+            .expect("the palette is never empty");
+        let mut reduced: Vec<Color> = Vec::new();
+        for (color, count) in Color::ALL.iter().zip(self.counts.iter()) {
+            for _ in least..*count {
+                reduced.push(*color);
+            }
+        }
+        eunomia_core::color_pick::pick_color(&reduced, tie_break)
+    }
+
+    /// Records that an ACTIVE project now holds `color` — called once
+    /// per created row, so the rest of the transaction sees it.
+    pub(crate) fn record(&mut self, color: Color) {
+        self.counts[color_index(color)] += 1;
+    }
+}
+
+/// The palette position of a member — an invariant, not an input
+/// check: `Color` has no value outside `Color::ALL`.
+fn color_index(color: Color) -> usize {
+    Color::ALL
+        .iter()
+        .position(|member| *member == color)
+        .expect("every Color is a palette member")
+}
+
+/// What [`register_project`] answered.
+#[derive(Debug)]
+pub(crate) enum Registered {
+    /// The row was created and journaled; the caller's `Db::run`
+    /// commits it.
+    Created(eunomia_store::projects::Project),
+    /// `create` met the `path_key` UNIQUE constraint and the re-read
+    /// found the row that holds the key — nothing was written by this
+    /// call. Reachable only when no duplicate check preceded the call
+    /// in the same transaction (one connection serializes every
+    /// writer, D-037); the honest answer is still the existing row,
+    /// never a masked conflict.
+    Existing(eunomia_store::projects::Project),
+}
+
+/// The in-transaction create step both add flows share: D-29's color
+/// over the occupancy, the store's `create` (the repository appends
+/// `sort_order`), and the `project.added` journal entry (LOG-001…004,
+/// info/user/ok, entity and project naming the new row) inside the
+/// SAME transaction (D-051) — a rolled-back operation leaves no entry
+/// claiming it happened.
+///
+/// The caller owns the duplicate check ([`eunomia_store::projects::
+/// find_by_path_key`], DB-015) and maps its typed answer; this step
+/// only converges if `create` reports the conflict anyway.
+///
+/// # Errors
+///
+/// `E_DB_LOCKED`-coded store fallbacks: a `create` the SQLite CHECKs
+/// refused or the database could not carry (through
+/// [`projects_store_to_app_error`]), the base classifier's verdict for
+/// a failed journal insert ([`activity_log_to_app_error`]), and the
+/// D-037 fallback when a duplicate conflict vanishes on the re-read.
+pub(crate) fn register_project(
+    transaction: &rusqlite::Transaction<'_>,
+    fields: &ProjectFields,
+    added_via: eunomia_store::projects::AddedVia,
+    defaults: &WriteDefaults,
+    occupancy: &mut ColorOccupancy,
+) -> Result<Registered, AppError> {
+    // D-29/DB-041: the least-used palette color among ACTIVE
+    // projects, tie-broken by a fresh UUIDv7's hash. The row's own id
+    // is minted inside `create` and cannot be known before the color
+    // is chosen; the tie-break therefore hashes a pre-generated
+    // sibling id — both are fresh UUIDv7s at decision time, which is
+    // the determinism D-29's parenthetical asks of a decision point
+    // (D-103).
+    let color = occupancy.pick(&ProjectId::new(eunomia_store::values::new_id()));
+    // The stored path is the verbatim canonicalize output (DB-030) —
+    // and, by the D-086 addendum, always valid UTF-8 (`ProjectFields`
+    // refused anything else), so the TEXT-column boundary between the
+    // row and the key is lossless.
+    let new = eunomia_store::projects::NewProject {
+        path: &fields.path,
+        path_key: &fields.path_key,
+        name: &fields.name,
+        label: &fields.label,
+        color: color.as_str(),
+        description: &fields.description,
+        added_via,
+        scheme: defaults.scheme,
+        base_name: defaults.base_name,
+        extra_local: defaults.extra_local,
+        extra_project: defaults.extra_project,
+    };
+    let created = match eunomia_store::projects::create(transaction, &new) {
+        Ok(created) => created,
+        Err(ProjectsError::DuplicatePathKey { .. }) => {
+            let existing = eunomia_store::projects::find_by_path_key(transaction, &fields.path_key)
+                .map_err(projects_store_to_app_error)?
+                .ok_or_else(|| {
+                    projects_fallback(
+                        "ProjectsError",
+                        "a duplicate path key conflict vanished on the re-read",
+                    )
+                })?;
+            return Ok(Registered::Existing(existing));
+        }
+        Err(other) => return Err(projects_store_to_app_error(other)),
+    };
+    // LOG-001…004 ("adding … projects") inside the operation's own
+    // transaction (D-051): entity and project carry the new id; no
+    // details — the row itself holds the path (these flows write no
+    // file; the one non-file-write `File` detail the app produces is
+    // `exclusion_remove`'s, recorded in D-106).
+    let mut entry = LogEntry::new(
+        Action::ProjectAdded,
+        Level::Info,
+        Visibility::User,
+        Outcome::Ok,
+    );
+    entry.entity = Some(Entity {
+        kind: EntityType::Project,
+        id: created.id.as_str(),
+    });
+    entry.project_id = Some(created.id.as_str());
+    insert(transaction, &entry).map_err(activity_log_to_app_error)?;
+    // The D-051 mirror contract: one call per written entry (info+user+ok
+    // is the unmirrored shape today).
+    logging::action_logged(&entry);
+    // The row and its entry both exist (uncommitted): its color is
+    // occupied from here on — recorded only now, so every recorded
+    // color belongs to a fully written row whatever failed earlier.
+    occupancy.record(color);
+    Ok(Registered::Created(created))
+}
+
 /// The D-086-addendum encoding rejection (owner ruling 2026-11-20,
 /// escalation variant 2): a path whose text is not valid UTF-8 can
 /// never become a registered identity — keys and stored paths are
@@ -3165,7 +3436,9 @@ pub(crate) fn rejected_non_utf8_path(path: &str) -> AppError {
 /// boundaries answer, so it gets the same typed envelope. The walked
 /// path travels in `params` (SEC-008: paths may) and the OS refusal,
 /// when there is one, in `details` (§10's first-class log fact).
-fn repo_lookup_failed(source: &NotARepoError) -> AppError {
+/// `pub(crate)` for the scan commit (T-077), whose canonicalization
+/// and root checks fail the same two ways.
+pub(crate) fn repo_lookup_failed(source: &NotARepoError) -> AppError {
     let code = match source {
         NotARepoError::NoGitEntry { .. } => ErrorCode::NotARepo,
         NotARepoError::Canonicalize {
@@ -3262,7 +3535,8 @@ fn occupied_colors(transaction: &rusqlite::Transaction<'_>) -> Result<Vec<Color>
 /// vocabulary twins are converted member-by-member — both enums carry
 /// the same schema literals, and the match is compile-checked on both
 /// sides, so a new member of either cannot drift silently.
-fn probe_target_name(
+/// `pub(crate)` for the scan commit's per-row probe (T-077).
+pub(crate) fn probe_target_name(
     scheme: eunomia_store::settings::Scheme,
     base_name: eunomia_store::settings::BaseName,
 ) -> &'static str {
@@ -3284,8 +3558,9 @@ fn probe_target_name(
 /// — "could not check" is not "no rights" (the D-090 split), the
 /// project is added without a warning, and the sync preflight (where
 /// the same probe's failure is an `E_NO_WRITE_ACCESS` skip, §9.4)
-/// re-checks before any write.
-fn write_access_warning(source: &WriteAccessError) -> Option<String> {
+/// re-checks before any write. `pub(crate)` for the scan commit's
+/// per-row probe (T-077).
+pub(crate) fn write_access_warning(source: &WriteAccessError) -> Option<String> {
     match source {
         WriteAccessError::FolderNotWritable { .. } => Some("folder_not_writable".to_owned()),
         WriteAccessError::FileReadOnly { .. } => Some("file_read_only".to_owned()),
@@ -4997,6 +5272,141 @@ mod tests {
             source: std::io::Error::other("vanished mid-probe"),
         };
         assert_eq!(write_access_warning(&refused), None);
+    }
+
+    // ---- The shared new-project rules (T-077, D-179) ---------------------
+
+    #[test]
+    fn project_fields_carry_the_derived_name_label_and_the_root_identity() {
+        // S1's "Fields" step in one value: the root's folder name, its
+        // DB-042 label (the first six characters, upper case), the
+        // empty validator-passed description, and the identity the
+        // store keys and stores (DB-030: the key of the canonical text
+        // — the platform's own rule, compared through `path_key` itself
+        // so the test holds on every OS — and the verbatim path text).
+        let root = Path::new("/home/user/eunomia-repo");
+        let fields = ProjectFields::derive(root).expect("a plain repository root derives");
+
+        assert_eq!(fields.name, "eunomia-repo");
+        assert_eq!(fields.label, "EUNOMI", "DB-042: the first six upper-cased");
+        assert_eq!(fields.description, "", "the add flows collect none (§7.1)");
+        assert_eq!(
+            fields.path_key,
+            eunomia_fs::paths::path_key(root).expect("UTF-8 text keys"),
+            "the key is DB-030's own key of the canonical text"
+        );
+        assert_eq!(
+            fields.path, "/home/user/eunomia-repo",
+            "the stored path is verbatim"
+        );
+    }
+
+    #[test]
+    fn an_unstorable_derived_label_is_rejected_naming_the_label() {
+        // D-079's counterexample at the shared seam: a legal repository
+        // name with a control-character prefix derives a label §6.9
+        // cannot store ("\u{7}REPO") — the honest answer is the
+        // E_VALIDATION envelope naming the LABEL field with the derived
+        // spelling (the manual add's own edge, now the scan commit's
+        // too). Pure over the path text, so no fixture is needed.
+        let error = ProjectFields::derive(Path::new("/home/user/\u{7}repo"))
+            .expect_err("an unstorable derived label must be rejected");
+
+        assert_eq!(error.code, ErrorCode::Validation);
+        assert_eq!(
+            error.params.get("field").map(String::as_str),
+            Some("label"),
+            "the failed field is the derived label, not the name"
+        );
+        assert_eq!(
+            error.params.get("value").map(String::as_str),
+            Some("\u{7}REPO"),
+            "the offending value is the derivation itself"
+        );
+    }
+
+    #[test]
+    fn the_color_occupancy_picks_what_the_full_multiset_picks() {
+        // The equivalence the reduced-multiset trick rests on (the
+        // `ColorOccupancy` docs): D-29 reads only the counts RELATIVE
+        // to the least-used member, so the occupancy's pick over its
+        // counts must equal core's own `pick_color` over the FULL
+        // multiset — the independent oracle, computed without the
+        // reduction. Swept over deterministic pseudo-random occupancy
+        // vectors (an LCG: no RNG crate, reproducible everywhere) and
+        // several tie-break ids, including the all-equal and all-zero
+        // shapes where the reduction empties the slice.
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % bound
+        };
+        let ids: Vec<ProjectId> = (0..7)
+            .map(|n| ProjectId::new(format!("0193f1a0-0000-7000-8000-{n:012x}")))
+            .collect();
+
+        for round in 0..400u32 {
+            let mut counts = [0usize; Color::ALL.len()];
+            match round % 4 {
+                0 => {}              // all zero: the first-ever project's shape
+                1 => counts.fill(3), // all equal: the reduction empties
+                _ => {
+                    for count in &mut counts {
+                        *count = (next(40)) as usize;
+                    }
+                }
+            }
+            let full: Vec<Color> = Color::ALL
+                .iter()
+                .zip(counts)
+                .flat_map(|(&color, count)| std::iter::repeat_n(color, count))
+                .collect();
+            let occupancy = ColorOccupancy::from_colors(full.iter().copied());
+            for id in &ids {
+                assert_eq!(
+                    occupancy.pick(id),
+                    eunomia_core::color_pick::pick_color(&full, id),
+                    "counts {counts:?}: the reduced pick must equal the full-multiset pick"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_batch_of_twelve_rows_takes_twelve_distinct_colors() {
+        // PRJ-010's criterion at the shared seam, inside ONE batch: the
+        // occupancy is updated per created row (`record`), so a
+        // still-unused color always wins and twelve rows from an empty
+        // library take twelve distinct colors; the thirteenth lands on
+        // a used one (the tie-break's legal repeat, DB-041). The
+        // rule's first half is what the criterion pins — not WHICH
+        // color each row takes (that is D-29's hash, D-077).
+        let mut occupancy = ColorOccupancy::from_colors(std::iter::empty());
+        let mut taken: Vec<Color> = Vec::new();
+        for n in 0..12 {
+            let color =
+                occupancy.pick(&ProjectId::new(format!("0193f1a0-0000-7000-8000-{n:012x}")));
+            assert!(
+                !taken.contains(&color),
+                "row {n} must take a still-unused color; taken so far: {taken:?}"
+            );
+            taken.push(color);
+            occupancy.record(color);
+        }
+        assert_eq!(
+            taken.len(),
+            Color::ALL.len(),
+            "twelve rows, the whole palette"
+        );
+        let thirteenth = occupancy.pick(&ProjectId::new(
+            "0193f1a0-6d6d-7cce-a3c0-1a2b3c4d5e6d".to_owned(),
+        ));
+        assert!(
+            taken.contains(&thirteenth),
+            "with the palette full the thirteenth row repeats a color (DB-041)"
+        );
     }
 
     // ---- `app_info` field-source pins (T-031) --------------------------

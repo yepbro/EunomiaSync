@@ -90,7 +90,7 @@ src-tauri/
   src/markdown.rs          # Markdown preview renderer (pulldown-cmark; preview only) (working)
   src/recovery.rs          # Recovery-screen file mechanics       (working)
   src/retention.rs         # LOG-006 retention task: journal/runs prune daily (working)
-  src/scan.rs              # scan_start/scan_cancel commands, scan://progress (working)
+  src/scan.rs              # scan_start/scan_cancel/scan_commit commands, scan://progress (working)
   src/session_paths.rs     # SEC-003 session allowlist + UI path check (working)
   src/single_instance.rs   # Single-instance handoff: restore + focus (SYS-006) (working)
   src/sync_phase0.rs       # Sync phase 0: flag, run record, built content (working)
@@ -201,14 +201,20 @@ Rust commands are registered through `tauri-specta`:
    Projects module's `projects_reorder` (T-080): the drag reorder
    whose full-list validation refuses before the first write and
    which refuses with `E_SYNC_RUNNING` while a sync holds the flag
-   (SYS-005) — the Projects module's `scan_start`/`scan_cancel`
-   (T-076, `src-tauri/src/scan.rs`): the PRJ-002 scan that validates
-   the root through SEC-003 and walks the tree on the blocking pool
-   with the throttled `scan://progress` events, answering the found
-   candidate set that persists nothing (nothing writes the scan's
-   findings until T-077's `scan_commit` lands), and the token latch
-   that cancels it — an idempotent no-op when no scan is live — and
-   the System module's `dialog_pick_folder` (T-073): the native
+   (SYS-005) — the Projects module's
+   `scan_start`/`scan_cancel`/`scan_commit` (T-076/T-077,
+   `src-tauri/src/scan.rs`): the PRJ-002 scan that validates the
+   root through SEC-003 and walks the tree on the blocking pool with
+   the throttled `scan://progress` events, answering the found
+   candidate set that persists nothing (a COMPLETED scan publishes
+   its reported keys into the session's discovered set — the SEC-003
+   rule the commit admits against, DECISIONS.md D-179), the token
+   latch that cancels it — an idempotent no-op when no scan is live —
+   and the commit that adds the checked repositories in ONE
+   transaction through the new-project rules `commands.rs` shares
+   with `project_add_manual` (typed outcomes for paths already
+   registered or excluded; any error rolls back the whole batch) —
+   and the System module's `dialog_pick_folder` (T-073): the native
    folder picker invoked from Rust, its canonical picked path
    remembered in the SEC-003 session allowlist (`None` on cancel,
    nothing remembered) — and the Sync

@@ -244,26 +244,32 @@ export const commands = {
 	 *     the same picked path with the flag; the root is re-derived
 	 *     (idempotent converge), so SEC-003's allowlist is never widened
 	 *     with an app-derived path (D-100).
-	 *  3. **Fields** (§6.9): the name defaults to the root's folder name
-	 *     (`validate_name`) and the label to DB-042's derivation of it
-	 *     (`default_label`, then `validate_label` — the recorded edge
-	 *     where a control-character prefix derives an unstorable label is
-	 *     an `E_VALIDATION` naming the field, not a panic). The
-	 *     description enters as the empty constant (the add flow collects
-	 *     none, §7.1) through `validate_description` — the D-151 NUL
-	 *     addendum's save boundary: the stored value is validator-passed
-	 *     by construction, the silent `U+0000` strip included.
+	 *  3. **Fields** (§6.9), through the shared
+	 *     [`ProjectFields::derive`] — the one implementation the scan
+	 *     commit (T-077) calls too: the name defaults to the root's
+	 *     folder name (`validate_name`) and the label to DB-042's
+	 *     derivation of it (`default_label`, then `validate_label` — the
+	 *     recorded edge where a control-character prefix derives an
+	 *     unstorable label is an `E_VALIDATION` naming the field, not a
+	 *     panic). The description enters as the empty constant (the add
+	 *     flow collects none, §7.1) through `validate_description` — the
+	 *     D-151 NUL addendum's save boundary: the stored value is
+	 *     validator-passed by construction, the silent `U+0000` strip
+	 *     included.
 	 *  4. **One transaction** (D-037, D-051, §6.9 "the whole operation
 	 *     runs in one transaction"): the DB-015 duplicate check
 	 *     (`find_by_path_key`, either state — active answers the
 	 *     `"duplicate_active"` message, archived the
 	 *     `"archived_duplicate"` restore offer; both typed answers, no
-	 *     error, nothing written); the four write settings copied from
-	 *     `default.*` (PRJ-012/DEF-005); the D-29 color over the ACTIVE
-	 *     projects' colors; `create` (the repository appends `sort_order`);
-	 *     and the `project.added` journal entry (LOG-001…004,
-	 *     info/user/ok, entity project) **inside the same transaction** —
-	 *     a rolled-back add leaves no entry claiming it happened. The
+	 *     error, nothing written); then the shared [`register_project`]
+	 *     — the four write settings copied from `default.*`
+	 *     (PRJ-012/DEF-005, read inside the transaction so a concurrent
+	 *     `settings_set` cannot split the copy from the create); the D-29
+	 *     color over the ACTIVE projects' colors; `create` (the
+	 *     repository appends `sort_order`); and the `project.added`
+	 *     journal entry (LOG-001…004, info/user/ok, entity project)
+	 *     **inside the same transaction** — a rolled-back add leaves no
+	 *     entry claiming it happened. The
 	 *     SYS-005 sync gate runs before the whole flow (the command's
 	 *     first act above): during a sync the add answers
 	 *     `E_SYNC_RUNNING` and nothing is written; the spec's own
@@ -438,6 +444,90 @@ export const commands = {
 	 *  running" holds either way.
 	 */
 	scanCancel: (options?: InvokeOptions) => __TAURI_INVOKE<null>("scan_cancel", undefined, options),
+	/**
+	 *  Serves PRJ-002's "Add selected" (§7.10 `scan_commit`, T-077, D-179):
+	 *  the checked "New" repositories of a scan answer become projects in
+	 *  ONE transaction, with the rules of
+	 *  [`project_add_manual`](crate::commands::project_add_manual) and
+	 *  without duplicates.
+	 * 
+	 *  `paths` are the repository paths the `scan_start` answer carried,
+	 *  sent back by the result view. The command's first act is the SYS-005
+	 *  sync gate — while a sync holds `sync_running`, the answer is the
+	 *  typed `E_SYNC_RUNNING` refusal before anything else runs. With the
+	 *  flag down, the database is resolved (recovery mode answers its
+	 *  honest fallback before any probe), and then the gates run in this
+	 *  order; the FIRST failure in the order sent is the whole command's
+	 *  answer, and nothing is written:
+	 * 
+	 *  1. **SEC-003, the discovered-set rule.** A path is admitted iff the
+	 *     DB-030 key of its OWN text is in the session's
+	 *     [`ScanFindings`] — the keys of every repository the last
+	 *     COMPLETED `scan_start` reported. Anything else, and an empty
+	 *     entry, is the typed `E_VALIDATION` rejection of the `path`
+	 *     field, raised BEFORE any disk probe: the webview can only commit
+	 *     what Rust itself found under a root the SEC-003 gate admitted.
+	 *  2. **Canonicalization** (blocking pool): a folder that vanished
+	 *     since the scan is §10's `E_PROJECT_UNAVAILABLE` with the path
+	 *     and the OS facts ("could not check" is not "not a repo", D-090);
+	 *     a non-UTF-8 canonical form is the D-086 encoding rejection. The
+	 *     CANONICAL form's key must be in the findings too — a folder
+	 *     swapped in under a reported name resolves elsewhere and meets
+	 *     the same SEC-003 rejection. The selection is collapsed twice —
+	 *     first by the sent text's key (step 1: duplicates cost nothing
+	 *     downstream), then by the resolved identity (two spellings can
+	 *     lead to one folder) — the first occurrence's position kept both
+	 *     times, which is the append order.
+	 *  3. **The repository root** (blocking pool):
+	 *     [`find_git_root`](eunomia_fs::paths::find_git_root) must answer
+	 *     the folder ITSELF (by key) — a folder whose own `.git` is gone
+	 *     is `E_NOT_A_REPO`, §10's row and the manual add's envelope; a
+	 *     refused probe is `E_PROJECT_UNAVAILABLE`.
+	 *  4. **The §6.9 fields** of every candidate, through the shared
+	 *     [`ProjectFields::derive`] (the manual add's "Fields" step). A
+	 *     rejection names the field AND carries the repository's `path`
+	 *     param, so the result view can mark the row.
+	 *  5. **One transaction** (D-037, §6.9 "the whole operation runs in
+	 *     one transaction"), each candidate in sent order: the DB-015
+	 *     duplicate check (`find_by_path_key` — an active row answers the
+	 *     typed `"already_added"` entry, an archived row the `"archived"`
+	 *     one carrying the id of the DB-015 restore offer); the exclusion
+	 *     check (a `project_exclusions` row with no project answers the
+	 *     typed `"excluded"` entry — the scan showed it under "Skipped",
+	 *     and §6.4's removal is the way back); otherwise
+	 *     [`register_project`] with `added_via = scan` — the PRJ-012
+	 *     copy, D-29's color over the active set as it stands INSIDE the
+	 *     transaction (the batch's earlier rows count, so twelve rows
+	 *     take twelve colors), `create`, and one `project.added` journal
+	 *     entry (LOG-001…004, info/user/ok). The typed entries are
+	 *     answers about the selection, not errors: the other
+	 *     repositories are still added, and a re-sent selection
+	 *     converges. Any `Err` — a store or journal failure on ANY row —
+	 *     rolls back every row of the batch with its entries: an error on
+	 *     one project refuses the whole commit.
+	 *  6. **Write-access warnings** (§6.9, D-094): after the commit, one
+	 *     [`check_write_access`](eunomia_fs::write_access::
+	 *     check_write_access) per added row on the blocking pool — never
+	 *     inside the transaction (the D-096 probe-order rule) — riding
+	 *     the entry's `project` exactly as in the manual add.
+	 *  7. **The watch refresh** (§5.7 SYS-007, D-144): when at least one
+	 *     row was created, ONE pass through
+	 *     [`refresh_after_mutation`](crate::file_watch::
+	 *     refresh_after_mutation) — never fatal to the answer; the DB-022
+	 *     recalculation rides the commit hook.
+	 * 
+	 *  An empty selection is the typed no-op `entries: []` — nothing is
+	 *  written and nothing journaled. A live scan does NOT refuse the
+	 *  commit: the walk's registry snapshot predates it by design, so its
+	 *  answer may show a just-added repository as `new`, and the
+	 *  duplicate check inside the transaction keeps that harmless.
+	 * 
+	 *  Failures reach the log with their §10 code through the ONE edge
+	 *  [`logging::scan_commit_failed`]; the typed outcomes and the empty
+	 *  selection log nothing, and a successful commit is its own journal
+	 *  entries (the D-051 mirror policy).
+	 */
+	scanCommit: (paths: string[], options?: InvokeOptions) => __TAURI_INVOKE<ScanCommitResult_Serialize>("scan_commit", { paths }, options),
 	/**
 	 *  Serves PRJ-002's "Scan folder" (§7.10 `scan_start`): validates
 	 *  the root through SEC-003, snapshots the settings and the
@@ -766,7 +856,8 @@ export type ActivityPage_Serialize = {
  *  because PRJ-008 shows it read-only there. No store type crosses the
  *  boundary (the `ProjectColumnEntry` rule): the closed vocabularies
  *  travel in their stored spellings (`"A"`, `"AGENTS.md"`,
- *  `"manual"`).
+ *  `"manual"`). The same DTO is the `"added"` entry's payload of the
+ *  scan commit (T-077, `scan.rs`) — one wire shape for one created row.
  */
 export type AddedProject = AddedProject_Serialize | AddedProject_Deserialize;
 
@@ -778,7 +869,8 @@ export type AddedProject = AddedProject_Serialize | AddedProject_Deserialize;
  *  because PRJ-008 shows it read-only there. No store type crosses the
  *  boundary (the `ProjectColumnEntry` rule): the closed vocabularies
  *  travel in their stored spellings (`"A"`, `"AGENTS.md"`,
- *  `"manual"`).
+ *  `"manual"`). The same DTO is the `"added"` entry's payload of the
+ *  scan commit (T-077, `scan.rs`) — one wire shape for one created row.
  */
 export type AddedProject_Deserialize = {
 	/**
@@ -805,8 +897,8 @@ export type AddedProject_Deserialize = {
 	/**  The palette member picked by D-29 (stored spelling). */
 	color: string,
 	/**
-	 *  How the project was registered — always `"manual"` here
-	 *  (§6.2; the scan commit is `scan_commit`'s spelling).
+	 *  How the project was registered (§6.2): `"manual"` from
+	 *  `project_add_manual`, `"scan"` from `scan_commit`.
 	 */
 	added_via: string,
 	/**
@@ -866,7 +958,8 @@ export type AddedProject_Deserialize = {
  *  because PRJ-008 shows it read-only there. No store type crosses the
  *  boundary (the `ProjectColumnEntry` rule): the closed vocabularies
  *  travel in their stored spellings (`"A"`, `"AGENTS.md"`,
- *  `"manual"`).
+ *  `"manual"`). The same DTO is the `"added"` entry's payload of the
+ *  scan commit (T-077, `scan.rs`) — one wire shape for one created row.
  */
 export type AddedProject_Serialize = {
 	/**
@@ -893,8 +986,8 @@ export type AddedProject_Serialize = {
 	/**  The palette member picked by D-29 (stored spelling). */
 	color: string,
 	/**
-	 *  How the project was registered — always `"manual"` here
-	 *  (§6.2; the scan commit is `scan_commit`'s spelling).
+	 *  How the project was registered (§6.2): `"manual"` from
+	 *  `project_add_manual`, `"scan"` from `scan_commit`.
 	 */
 	added_via: string,
 	/**
@@ -1340,7 +1433,8 @@ export type ExclusionEntry = {
  *  The already-registered project of the two duplicate arms (PRJ-001,
  *  DB-015): what the message names, and the id the archived arm's
  *  restore offer (the future `project_restore`, T-109) calls back
- *  with.
+ *  with. The scan commit's `"already_added"`/`"archived"` entries
+ *  carry the same view (T-077).
  */
 export type ExistingProject = {
 	/**  The existing row's id. */
@@ -1887,6 +1981,107 @@ export type ScanClassWire =
 "excluded";
 
 /**
+ *  One selected repository's verdict — the `ProjectAddResult`
+ *  discriminant shape: a closed outcome string plus the one payload
+ *  arm it carries (the house form for "one response, several
+ *  meanings").
+ */
+export type ScanCommitEntry = ScanCommitEntry_Serialize | ScanCommitEntry_Deserialize;
+
+/**
+ *  One selected repository's verdict — the `ProjectAddResult`
+ *  discriminant shape: a closed outcome string plus the one payload
+ *  arm it carries (the house form for "one response, several
+ *  meanings").
+ */
+export type ScanCommitEntry_Deserialize = {
+	/**
+	 *  The repository's canonical path (DB-030) — for `"added"`, the
+	 *  stored `projects.path`.
+	 */
+	path: string,
+	/**
+	 *  What became of the repository, one of `"added"`,
+	 *  `"already_added"`, `"archived"`, `"excluded"`.
+	 */
+	outcome: string,
+	/**
+	 *  The created row with its §6.9 write-access warning — the
+	 *  `"added"` outcome only.
+	 */
+	project?: AddedProject_Deserialize | null,
+	/**
+	 *  The project row that already holds the path (DB-015) — the
+	 *  `"already_added"` and `"archived"` outcomes; for the latter the
+	 *  id is what the restore offer calls back with (PRJ-013…018).
+	 */
+	existing?: ExistingProject | null,
+};
+
+/**
+ *  One selected repository's verdict — the `ProjectAddResult`
+ *  discriminant shape: a closed outcome string plus the one payload
+ *  arm it carries (the house form for "one response, several
+ *  meanings").
+ */
+export type ScanCommitEntry_Serialize = {
+	/**
+	 *  The repository's canonical path (DB-030) — for `"added"`, the
+	 *  stored `projects.path`.
+	 */
+	path: string,
+	/**
+	 *  What became of the repository, one of `"added"`,
+	 *  `"already_added"`, `"archived"`, `"excluded"`.
+	 */
+	outcome: string,
+	/**
+	 *  The created row with its §6.9 write-access warning — the
+	 *  `"added"` outcome only.
+	 */
+	project: AddedProject_Serialize | null,
+	/**
+	 *  The project row that already holds the path (DB-015) — the
+	 *  `"already_added"` and `"archived"` outcomes; for the latter the
+	 *  id is what the restore offer calls back with (PRJ-013…018).
+	 */
+	existing: ExistingProject | null,
+};
+
+/**
+ *  The `scan_commit` answer (§7.10, PRJ-002's "Add selected"; T-077,
+ *  D-179): one entry per DISTINCT repository of the selection, in the
+ *  order the UI sent — which is also the order the rows appended in.
+ *  Only failures are `Err`: the entries are the per-repository facts
+ *  of a committed transaction (or of a selection with nothing to add).
+ */
+export type ScanCommitResult = ScanCommitResult_Serialize | ScanCommitResult_Deserialize;
+
+/**
+ *  The `scan_commit` answer (§7.10, PRJ-002's "Add selected"; T-077,
+ *  D-179): one entry per DISTINCT repository of the selection, in the
+ *  order the UI sent — which is also the order the rows appended in.
+ *  Only failures are `Err`: the entries are the per-repository facts
+ *  of a committed transaction (or of a selection with nothing to add).
+ */
+export type ScanCommitResult_Deserialize = {
+	/**  The selection's verdicts, sent order, duplicates collapsed. */
+	entries: ScanCommitEntry_Deserialize[],
+};
+
+/**
+ *  The `scan_commit` answer (§7.10, PRJ-002's "Add selected"; T-077,
+ *  D-179): one entry per DISTINCT repository of the selection, in the
+ *  order the UI sent — which is also the order the rows appended in.
+ *  Only failures are `Err`: the entries are the per-repository facts
+ *  of a committed transaction (or of a selection with nothing to add).
+ */
+export type ScanCommitResult_Serialize = {
+	/**  The selection's verdicts, sent order, duplicates collapsed. */
+	entries: ScanCommitEntry_Serialize[],
+};
+
+/**
  *  The `scan://progress` event payload (§7.10, SYS-003, PRJ-002's
  *  scan-window facts): the three live numbers the window renders
  *  while the walk runs.
@@ -1934,8 +2129,8 @@ export type ScanRunOutcome_Deserialize =
  *  The walk ran to completion: the terminal counters (the same
  *  facts the progress event carried, at their final values) and
  *  the classified result the UI groups into New / Already added
- *  / Skipped. Nothing is persisted with them — `scan_commit`
- *  (T-077) is the only writer.
+ *  / Skipped. Nothing is persisted with them — [`scan_commit`] is
+ *  the only writer.
  */
 { outcome: "completed"; 
 /**
@@ -1976,8 +2171,8 @@ export type ScanRunOutcome_Serialize =
  *  The walk ran to completion: the terminal counters (the same
  *  facts the progress event carried, at their final values) and
  *  the classified result the UI groups into New / Already added
- *  / Skipped. Nothing is persisted with them — `scan_commit`
- *  (T-077) is the only writer.
+ *  / Skipped. Nothing is persisted with them — [`scan_commit`] is
+ *  the only writer.
  */
 { outcome: "completed"; 
 /**
@@ -2094,8 +2289,9 @@ export type ScanSkip_Serialize = {
  *  "New" checkboxes, `known` the "Already added" group, and
  *  `archived`/`excluded` the "Skipped" group with the reason
  *  "archived or in exclusions" (the class IS the reason for these
- *  two); T-077's `scan_commit` consumes the user's selection from
- *  the same list.
+ *  two); [`scan_commit`] consumes the user's selection from the same
+ *  list — the `path` strings, sent back and checked against
+ *  [`ScanFindings`].
  */
 export type ScannedRepository = {
 	/**

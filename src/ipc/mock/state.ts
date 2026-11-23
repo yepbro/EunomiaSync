@@ -4,7 +4,7 @@
 //
 // One row type (`MockProjectRow`) is the single source of truth; the two
 // project DTOs the wire actually serves (`ProjectColumnEntry` from
-// `projects_list`, `AddedProject` from `project_add_manual`) are mapped from
+// `projects_list`, `AddedProject` from the two add commands) are mapped from
 // it, exactly like the Rust side maps one `projects` row onto both.
 
 import type {
@@ -85,6 +85,13 @@ export type MockState = {
   scanning: boolean
   /** The live mock scan's cancel latch (`scan_cancel` flips it). */
   scanCancelled: boolean
+  /**
+   * The last COMPLETED scan's reported repository keys (§7.10
+   * `scan_commit`'s SEC-003 rule, T-077/D-179): the only paths
+   * `scanCommit` admits. Replaced by every completed mock walk; a
+   * cancelled walk leaves it untouched (ERR-002).
+   */
+  scanFindings: string[]
 }
 
 /** Maps a store row to the `projects_list` wire shape (MAIN-028 fields). */
@@ -356,6 +363,9 @@ export function resetMockState(profile: FixtureProfile): MockState {
     nextActivityId: 1_000_000,
     scanning: false,
     scanCancelled: false,
+    // A fresh world is a fresh session: no scan completed yet, so the
+    // commit admits nothing.
+    scanFindings: [],
   }
   // A fresh world is a fresh session: no project has been probed yet, so
   // the availability cache restarts from the D-112 baseline.

@@ -36,6 +36,7 @@ describe('the mock command surface', () => {
       'projectsList',
       'projectsReorder',
       'scanCancel',
+      'scanCommit',
       'scanStart',
       'settingsGet',
       'settingsSet',

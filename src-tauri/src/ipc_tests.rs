@@ -6275,7 +6275,7 @@ fn file_watch_app_with_budget(
 /// `events.stateFileChanged` mirrors, returning the receiver every
 /// emitted payload lands on. Delivery to Rust listeners is
 /// synchronous inside `emit` (the availability suite's rule).
-fn listen_file_changed(
+pub(crate) fn listen_file_changed(
     app: &tauri::App<tauri::test::MockRuntime>,
 ) -> std::sync::mpsc::Receiver<crate::file_watch::FileChangedEvent> {
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -6288,12 +6288,15 @@ fn listen_file_changed(
 /// The test debounce: a real window the backend debounces inside,
 /// short enough to keep the suite quick (SYS-007's production 300 ms
 /// is pinned by the unit test).
-const WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(40);
+/// `pub(crate)`: the scan commit's watch proofs (`scan_tests.rs`)
+/// spawn the same service and wait on the same counter.
+pub(crate) const WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(40);
 
 /// Waits until the service ran `at_least` passes, or fails after a
 /// generous deadline — the pass counter is the deterministic
 /// observable (an empty diff is silent on the wire by contract).
-fn wait_for_watch_passes(app: &tauri::App<tauri::test::MockRuntime>, at_least: u64) {
+/// `pub(crate)` for the `scan_tests.rs` watch proofs.
+pub(crate) fn wait_for_watch_passes(app: &tauri::App<tauri::test::MockRuntime>, at_least: u64) {
     let state = app.state::<crate::file_watch::FileWatchState>();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {

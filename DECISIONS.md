@@ -19791,6 +19791,426 @@ Checks: the 13 affected cards were re-titled T-288…T-300 in the
 same session; all later numbering (T-301…T-321, D-161…D-178) went
 through `.result` with zero recurrences.
 
+### D-179 — T-077: the `scan_commit` command — the discovered-set SEC-003 rule, the one-transaction batch with typed non-add outcomes, and the manual-add rules shared by construction — 2026-11-23
+
+Problem: PRJ-002's "Add selected" needs its backend (§7.10 Projects
+module `scan_commit`, §8 S2, LOG-001…004): the checked "New"
+repositories of a scan answer become projects in ONE transaction with
+the manual add's rules (defaults, color, label) and without
+duplicates. Six points were open: (1) how a path the UI sends back
+from a scan ANSWER passes SEC-003 — it is neither a registered
+project nor a folder picked in the dialog, and D-100 reserved exactly
+this rule for this task ("folders the app itself discovered inside an
+allowlisted root must not silently widen SEC-003"); (2) what "an
+error on one project rolls back everything" makes of a duplicate, a
+vanished folder and an excluded path; (3) how "the same rules as
+manual add" is kept true past this task; (4) the journal shape for a
+batch; (5) D-29's color across rows created in one transaction;
+(6) the wire answer of a batch with several per-repository outcomes.
+
+Readings chosen (Rule 1, recorded before implementation):
+
+- **SEC-003: the discovered-set rule.** `scan_start` publishes the
+  `path_key` (DB-030) of EVERY repository a COMPLETED walk reported —
+  all four ALG-053 classes — into a session-scoped managed
+  `ScanFindings` set that replaces the previous completed scan's set;
+  a cancelled or failed scan publishes nothing and clears nothing
+  (ERR-002). `scan_commit(paths)` admits a sent path iff the key of
+  its OWN text and the key of its CANONICAL form are both in that set
+  (the second check refuses a folder swapped in under a reported
+  name); anything else is the `E_VALIDATION` rejection of the `path`
+  field, raised BEFORE any disk probe. So the commit can register
+  exactly what Rust itself found under a root the SEC-003 gate
+  admitted — D-100's "the app itself discovered", nothing wider. The
+  rejected alternative was the stateless containment rule ("any
+  canonical repository root under a session pick or a registered
+  project"): it needs no state, but it also admits repositories the
+  walk skipped by ALG-051/ALG-050 (excluded names, depth) and any
+  folder a webview cares to name inside the picked tree — a wider
+  trust boundary than the feature needs. The retained set is in-memory
+  session bookkeeping of the `SessionPaths` class, not persistence:
+  T-076's "the scan writes nothing anywhere" keeps holding for the
+  database and the filesystem. Residual, recorded honestly: the set
+  lives one process; a commit is only ever sent from the result view
+  the same process answered.
+- **One transaction; what is an error and what is a typed outcome.**
+  Any `Err` refuses the WHOLE selection and writes nothing: the
+  pre-transaction gates write nothing by construction, and a failure
+  inside the transaction rolls back every earlier row of the batch
+  with its journal entries (the `Db::run` executor, D-037). Errors
+  are: a path no completed scan reported, a folder that vanished or
+  cannot be read (`E_PROJECT_UNAVAILABLE`), a folder that is no
+  longer a repository root (`E_NOT_A_REPO`), an unstorable derived
+  field (§6.9 `E_VALIDATION` naming the field), and every store or
+  journal failure. NOT errors — typed outcomes that leave the rest of
+  the selection adding: `already_added` (an active row holds the key),
+  `archived` (an archived row holds it — DB-015's restore offer, the
+  id rides the entry) and `excluded` (a `project_exclusions` row
+  holds the key and no project does), so a re-sent or stale selection
+  CONVERGES instead of failing (D-103's "typed answers, not error
+  codes"; the make-operations-idempotent rule). A vanished folder is
+  deliberately NOT §10's "Project skipped; the others continue" — that
+  is the sync's per-project rule; the card's criterion names the
+  rollback, and a result view holding a vanished row is stale as a
+  whole ("Scan again" is the user's action).
+- **The answer.** `ScanCommitResult { entries: Vec<ScanCommitEntry> }`
+  — one entry per DISTINCT repository of the selection, in the order
+  sent (which is also the `sort_order` append order). An entry is the
+  `ProjectAddResult` discriminant shape `{ path, outcome, project?, existing? }`
+  with `outcome` one of `"added"`, `"already_added"`, `"archived"`,
+  `"excluded"`. Two spellings of one repository in one selection are
+  one entry (first occurrence wins). An empty selection is the typed
+  no-op `entries: []` — nothing written, nothing journaled.
+- **"The same rules as manual add", by construction.** The per-project
+  step has ONE implementation in `commands.rs` and both add flows call
+  it: `ProjectFields::derive` (S1's "Fields" step: the folder name,
+  DB-042's label, the empty description, the key and the stored path
+  text), `WriteDefaults::load` (the PRJ-012 copy of the four
+  `default.*` keys, read inside the operation's transaction),
+  `ColorOccupancy` (D-29 over the ACTIVE projects' colors, updated as
+  rows are created) and `register_project` (color → `create` → the
+  `project.added` entry inside the same transaction; the unreachable
+  duplicate race converges to the existing row). `project_add_manual`
+  is migrated onto the same functions in this change — a second copy
+  of the rules would be the drift the card forbids. The scan commit
+  writes `added_via = "scan"` (§6.2).
+- **The journal.** ONE `project.added` entry per created row —
+  info/user/ok, entity and `project_id` naming the new row — inside
+  the transaction (D-051). Not one bulk entry: LOG-001…004's bulk
+  exception is the assignments' own parenthetical, and an added
+  project is an entity with its own id that the Activity window's
+  project filter attributes (the D-115 reorder case was ONE fact about
+  many rows; N adds are N facts). Typed non-add outcomes journal
+  nothing.
+- **D-29 across a batch.** The color is decided per created row
+  against the active set as it stands inside the transaction — the
+  batch's earlier rows count — so PRJ-010's "for 12 projects in a row,
+  colors do not repeat" holds inside ONE commit. `ColorOccupancy`
+  hands `pick_color` the counts relative to the least-used member
+  (the only thing the rule reads, so the pick is identical), which
+  keeps the batch linear in its rows instead of re-listing the table
+  per row.
+- **After the commit.** §6.9's write-access probe runs per added row
+  on the blocking pool, never inside the transaction (the D-096
+  probe-order rule), and its verdict rides the entry's
+  `write_access_warning` exactly as in the manual add; ONE watch
+  refresh through `refresh_after_mutation` (never fatal, D-144); the
+  DB-022 recalculation rides the commit hook.
+- **Gate order.** SYS-005 (`scan_commit` changes projects: the
+  `E_SYNC_RUNNING` refusal during a sync, the `project_add_manual`
+  gate) → the database (the honest no-database answer before any
+  probe) → the SEC-003 discovered set, by the sent text's key — the
+  same pass collapses the in-request duplicates, so no disk probe
+  runs twice for one repository → canonicalization (a vanished folder
+  is `E_PROJECT_UNAVAILABLE` with the OS facts; a non-UTF-8 form is
+  the D-086 encoding rejection) → the canonical-form membership and
+  the second collapse, by the resolved identity → the `.git` root
+  check (`find_git_root` must answer the folder itself) → the §6.9
+  fields (a rejection also carries the repository's `path` param, so
+  the UI can mark the row) → the transaction.
+- **Logging.** One failure edge, `logging::scan_commit_failed` (the
+  D-096 law); the typed outcomes and the empty selection log nothing.
+
+Solution (per file):
+
+- `src-tauri/src/commands.rs` — the new-project rules became four
+  shared items: `ProjectFields::derive` (S1's "Fields" step plus the
+  DB-030 key and the stored path text), `WriteDefaults::load` (the
+  PRJ-012 copy, read inside the transaction),
+  `ColorOccupancy` (`from_colors`/`load`/`pick`/`record`: D-29's
+  counts over the active set, handing `pick_color` the counts
+  relative to the least-used member so a batch is linear),
+  `register_project` (color → `create` → the `project.added` entry
+  and its D-051 mirror call; the unreachable duplicate race answers
+  `Registered::Existing`). `project_add_manual` was migrated onto
+  them in the SAME change — its transaction closure is now the DB-015
+  check plus the two shared calls — so no second copy of the rules
+  exists; its wire contract and gate order are unchanged (the ten
+  T-074 IPC tests and four unit pins pass untouched).
+  `AddedProject::from_store`, `ExistingProject::of` (new
+  constructor), `probe_target_name`, `write_access_warning`,
+  `repo_lookup_failed` and `reject_during_sync` became `pub(crate)`
+  for the scan module.
+- `src-tauri/src/scan.rs` — `ScanFindings` (the session's discovered
+  set: `publish` replaces, `contains` answers a key, `admits` composes
+  it with DB-030's key, poison recovered like the session allowlist);
+  `publish_findings` in the completed
+  arm of `scan_start_with` (the honest `ScanFindingsMissing`
+  fallback when the state is absent); the wire DTOs
+  `ScanCommitResult` (one field, `entries`) and `ScanCommitEntry`
+  (`path`, `outcome`, `project?`, `existing?`); `scan_commit` →
+  `scan_commit_impl` (the gate order above) with its helpers
+  (`CommitSlot`, the three entry builders, `is_own_root`,
+  `rejected_unreported_path`, `field_rejection_of`,
+  `managed_findings`). The per-row write-access warnings are
+  POSITIONAL — one slot per created row, a writable row's `None`
+  included — since the round-1 review (below). Module docs gained the
+  rule's section and lost the "nothing is persisted anywhere in this
+  module" sentence, which the writer made false.
+- `src-tauri/src/lib.rs` — `scan::scan_commit` registered between
+  its two siblings; `scan::ScanFindings::new()` managed beside the
+  cancel slot, in every mode.
+- `src-tauri/src/logging.rs` — the one failure edge
+  `logging::scan_commit_failed` (`eunomia::scan`, error level, the
+  `project_add_failed` shape) and its facade test.
+- `src/bindings.ts` regenerated through the pin test: `scanCommit`
+  (`paths: string[]`), `ScanCommitResult_Serialize`/
+  `ScanCommitEntry_Serialize`, and the re-mirrored doc comments of
+  the manual add's DTOs.
+- The mock chain (forced by the D-154 loud-drift rule — a
+  regenerated `bindings.ts` fails `pnpm run typecheck` until a mock
+  member with the exact signature exists; D-115 and D-153 record the
+  same forced scope): `src/ipc/mock/state.ts` gains `scanFindings`,
+  `mock/commands.ts` the `scanCommit` member and the shared
+  `appendProjectRow` step (`projectAddManual` migrated onto it, the
+  Rust refactor's mirror), `scanStart` publishing on completion;
+  `contract.ts` re-exports the two wire types; `mode.spec.ts`'s
+  shipped-set pin lists `scanCommit`; `commands.spec.ts` gains the
+  mock's suite. The mock models the discovered-set rule and the
+  typed outcomes; its header records that the filesystem gates are
+  not modelled (D-108's limits posture).
+- Docs (Rule 11): `ARCHITECTURE.md` (the module row and the command
+  paragraph no longer say the commit has not landed),
+  `docs/manual-smoke.md` (the registered-command lists; the S2
+  "Add selected" pass condition names the manual-add rules and the
+  "found by scan" origin the UI will have to show).
+
+Tests (28 Rust + 5 TS, all through public APIs; oracles are the
+spec's own literals, the store read back, and core's own
+`pick_color`):
+
+- The card's acceptance pair, in `scan_tests.rs`. The duplicates
+  test scans, commits three repositories, rescans (all `known`),
+  RE-SENDS the same selection — three `already_added` entries naming
+  the rows the first commit created, the census unchanged at
+  `(3, 0, 3)` — and finally sends the empty selection (no entries,
+  census unchanged). The rollback is proven in two staged shapes: a
+  trigger refuses the THIRD row's INSERT after two rows and two
+  entries were written inside the transaction — the census is
+  `(0, 0, 0)` afterwards, and the control shows the first two commit
+  cleanly without the third; and the SECOND row's journal insert is
+  refused — the row and the first entry are both gone. A third error
+  needs no staging (Unix): D-079's control-named repository among the
+  selection answers `E_VALIDATION` naming `label` and carrying
+  `path`, nothing is written, and the two sound repositories then
+  commit.
+- The rules: every field of the manual add read back through the
+  store (the canonical path, the folder name, literal DB-042 labels,
+  a palette member, `added_via = scan`, `sort_order` 2–4 behind a
+  seeded row, the PRJ-012 copy from CHANGED `default.*`, the stored
+  rows agreeing, three `project.added` entries in sent order naming
+  their rows); PRJ-010's literal inside ONE commit (twelve rows,
+  twelve colors; the thirteenth repeats); and Rule 6's large input —
+  600 repositories through one commit: one row, entry and journal
+  line each, the DB-005 order equal to the sent order, 600 distinct
+  ids, exactly 50 rows per palette color (no timing assertion) — the
+  selection sent with N ≫ R, every path five times cycled (3000 sent
+  paths for 600 reported), costing nothing observable.
+- The second collapse: two REPORTED names that resolve to one folder
+  (Unix: `beta` replaced by a symlink onto `alpha` after the scan)
+  answer one entry and one row — without the resolved-identity
+  collapse the same selection answers `added` then `already_added`
+  for one repository.
+- The typed outcomes: archived answers `archived` with the row's id,
+  excluded answers `excluded`, known answers `already_added`, and
+  the fresh repository in the same selection is added (census
+  `(3, 1, 1)`); one repository sent twice — once under its
+  trailing-separator spelling — is one entry keeping its first
+  position, while a dot segment is the SEC-003 rejection.
+- The gates: a REAL repository created after the scan under the
+  picked root is refused (`E_VALIDATION` naming the path and the
+  policy) together with the sound path in its selection; a path that
+  exists nowhere is refused the same way with NO OS fact — the text
+  gate precedes every probe; a blank entry; a cancelled scan
+  publishes nothing and clears nothing; a folder that vanished since
+  the scan answers `E_PROJECT_UNAVAILABLE` with the path and the OS
+  code; a folder whose own `.git` is gone answers `E_NOT_A_REPO`
+  even when an ancestor is still a repository; (Unix) a reported
+  name swapped for a symlink out of the root meets the SEC-003
+  rejection naming the folder it resolves to; during a sync the
+  spec-literal `E_SYNC_RUNNING` envelope, input-independent, and the
+  same selection lands after it; without a database `NoDatabase`;
+  without the findings state `ScanFindingsMissing` for the scan AND
+  the commit, while a cancelled scan needs no state.
+- After the commit: four rows whose read-only targets sit SECOND and
+  LAST, each behind a writable one, and the warning vector asserted
+  whole (`[None, Some, None, Some]`) — a warning sliding onto a
+  neighbouring row shows, which a first-row-only shape cannot (the
+  round-1 review found exactly that slide); and the
+  `add_manual_watch_app` proofs mirrored for the batch over the REAL
+  watch service — exactly one full pass for the created rows, none
+  for the typed outcomes and the empty selection.
+- Unit: the discovered set admits exactly the published keys, by
+  DB-030's rule, and each publication replaces the set (plus the
+  Unix unkeyable-probe arm) in `scan.rs`; the value of
+  `ProjectFields::derive` and its label edge, the reduced-multiset
+  pick equal to core's own `pick_color` over the UNREDUCED multiset
+  (400 deterministic occupancy vectors × 7 ids — the independent
+  oracle), and twelve rows taking twelve colors, in `commands.rs`;
+  the failure line carrying its code and payload in `logging.rs`. The
+  registration pin grew `scan::scan_commit` and
+  `scan::ScanFindings::new()`.
+- TS (`describe('scanCommit')` in `commands.spec.ts`): the discovery
+  added through the shared step with `added_via = 'scan'` and one
+  journal entry; an unreported path rejected with nothing added
+  (and nothing reported before any completed scan); the typed
+  outcomes plus a converging re-send; duplicate spellings collapsed
+  and the empty selection; a cancelled scan publishing nothing.
+
+Mutation checks (19, scripted apply-run-restore on the committed
+tree, ONE mutation per run; each run executes the 46 tests of the
+scan and shared-rules suites and prints how many it ran, so a result
+parser that misses failures cannot pass for a kill). 17 die, each by
+the tests meant to catch it:
+
+- a failed row swallowed as a typed outcome → both rollback tests;
+- a created row's color never recorded, and the pick over an empty
+  multiset → the two color tests and the large selection (the latter
+  mutation also the equivalence unit test);
+- the SEC-003 text gate dropped → the unreported-path test (a path
+  that exists nowhere is answered as unavailable once a probe runs)
+  and the dot-segment arm;
+- the canonical-form gate dropped → the swapped-folder test;
+- a cancelled scan publishing an empty set → the cancelled-scan test
+  and the missing-state test;
+- the exclusion check dropped → the typed-outcomes test;
+  `added_via = manual` → four tests;
+- the own-root gate dropped → the lost-`.git` test; the SYS-005 gate
+  dropped → the during-sync test;
+- the resolved-identity collapse dropped → the two-names-one-folder
+  test;
+- a field rejection without `path` → the label test; a duplicate
+  answered as an error → the re-send, the typed-outcome test and the
+  no-row watch proof;
+- the write-access probe skipped → the warning test; the watch
+  refresh dropped → the one-pass proof;
+- the created row's journal entry skipped → ten tests; a completed
+  scan publishing nothing → twenty.
+
+Two survive BY NATURE, recorded rather than hidden: the text-key
+collapse dropped alone changes only COST (the second collapse still
+converges every outcome; no probe-count seam exists to observe it —
+the bound holds by construction, every admitted key being in the
+findings), and the color recorded before the journal insert changes
+nothing observable (any earlier failure aborts the transaction) —
+which is exactly why that record is structural.
+
+Two harness lessons from this matrix, recorded because each bit once.
+The first run under-reported: its result parser missed failures with
+single-digit ordinals (`( 1/43)`), which made two unit tests look
+surviving under a mutation that directly killed them. And a mutation
+must disable an `if cond { push }` with `true ||` — `false ||` is a
+NO-OP (`false || x` still evaluates `x`), which silently turned a
+"collapse dropped" mutation into the identity and made one run
+report a one-test kill where thirty should have failed; a restart
+mid-run also leaves the mutated file behind unless the tree is
+committed first and restored with `git checkout` — both happened.
+A kill matrix is only evidence if the harness itself is checked.
+
+Checks by exit code — `cargo fmt --all -- --check` 0,
+`cargo clippy --workspace --all-targets -- -D warnings` 0,
+`cargo nextest run --workspace --no-fail-fast --test-threads=4` 0
+(1667 tests across 32 binaries, 1667 passed), `pnpm run typecheck`,
+`pnpm run lint` and `pnpm run format:check` 0, `pnpm exec vitest run`
+292 passed; `export_bindings_are_up_to_date` was red on the run that
+regenerated `src/bindings.ts` and green on the next.
+`cargo deny check` was not run: no manifest changed.
+
+Scope, recorded for the orchestrator: the brief's owned-file list was
+left in four places, each forced by a recorded rule rather than
+chosen — `logging.rs` (the D-032 pin keeps every tracing event in
+that module: a command's failure edge cannot live elsewhere), the
+mock chain (D-154, the D-115/D-153 precedent), the two docs (Rule
+11), and `ipc_tests.rs` (three watch helpers made `pub(crate)` for
+the sibling suite instead of being copied). `session_paths.rs` was
+deliberately NOT touched: its module docs stay true, and the commit's
+rule is recorded here and in `scan.rs`'s own docs. No crate, feature,
+`unsafe` block or `deny.toml` ignore was added.
+
+Honest boundaries and follow-ups for the board: (1) the discovered
+set is one process wide and the LAST completed scan's — a UI that
+ever kept two result views alive could only commit from the newest
+(the single scan modal of UI-002 never does); (2) the post-commit
+write-access probes run sequentially in one blocking closure — a
+dead mount delays the answer exactly as in the manual add, never the
+transaction; (3) `"archived"` entries carry the restore offer's id,
+but `project_restore` (T-109) does not exist yet; (4) pre-existing
+drift noticed while adding the facade test: T-076's three facade
+edges (`scan_start_failed`, `scan_cancelled`,
+`scan_progress_emit_failed`) have no facade test of their own, unlike
+every other command's edge; (5) pre-existing drift in the mock:
+`mock/state.ts`'s availability note still says "no mock command
+mutates project state yet", false since the mock's add and sync
+commands; (6) the `"excluded"` outcome is a typed answer — whether a
+commit should instead REMOVE the exclusion the way a manual re-add
+never does is a product question this task did not take; (7) a
+blocking-pool JOIN failure of the post-commit probes (a panic inside
+the probe or a runtime shutdown) surfaces as `Err` after the
+transaction already committed — the manual add's inherited posture;
+whether a committed batch should instead answer without warnings is
+an owner judgement (round 1's open question).
+Review, round 1 (`opencode-go/deepseek-v4.1-flash`, report
+`.opencode/reviews/t077-round1.md`, owner-local): REQUEST CHANGES —
+0×P0, 1×P1, 2×P2, 1×P3; all four taken in the amend.
+
+- P1 (taken): the per-row write-access warnings were COMPACTED before
+  they were handed out positionally (`into_iter().flatten()` — the
+  writer's own fix of a compile error), so a `None` was skipped and
+  the Nth warning landed on the Nth created row: a writable row
+  before an unwritable one got the warning and the refused one none.
+  The shipped test placed the read-only target on the FIRST row — the
+  one shape the bug reproduces by coincidence. Fix: the warnings stay
+  positional (`next().flatten()` on each slot) and the test is
+  four-row with the unwritable targets second and last.
+- P2a (taken): the doc claimed disk work was bounded by the reported
+  repositories (R), but canonicalization ran over every SENT path
+  (N) before the dedupe — N copies of one reported path cost N
+  realpath calls. Fix: the text gate now collapses the selection by
+  the sent text's key (pure, before any probe), so at most one path
+  per reported key reaches the disk; the doc states exactly that, and
+  the large-selection test sends N ≫ R (five spellings per
+  repository).
+- P2b (taken, with P1): the warning test's oracle could not falsify a
+  mis-attribution — only the probe being SKIPPED turned it red. The
+  four-row shape makes a sliding warning visible.
+- P3 (taken): the color is recorded only after the journal insert
+  succeeds, so "every recorded color belongs to a fully written row"
+  is structural rather than resting on the caller's error handling.
+- Open question, recorded not acted on: a blocking-pool JOIN failure
+  of the post-commit probes surfaces as `Err` after the transaction
+  committed — the manual add's existing posture (a panic inside the
+  probe or a runtime shutdown; `panic = "abort"` ends a release
+  process first). Whether a committed BATCH should instead answer
+  without warnings is an owner judgement (follow-up).
+- The reviewer re-ran five mutations of the matrix (M4, M5, M8, M9,
+  M12) — each killed exactly the named tests — and confirmed no
+  assertion was removed, no skip added, and the registration pin only
+  strengthened.
+- Lesson, structural (Rule 4's "verify a new test by mutation" has a
+  twin): a test whose fixture sits at the one position a positional
+  bug reproduces correctly is green for the wrong reason — put the
+  discriminating fixture OFF the first position (second AND last).
+- The fixes' own mutations joined the matrix above (the compaction
+  reintroduced, the warning list shifted by one row, the
+  resolved-identity collapse dropped); the text-key collapse and the
+  record-before-insert shape are its two by-nature survivors.
+
+Review, round 2 (`opencode-go/hy4-flash-free`, report
+`.opencode/reviews/t077-round2.md`, owner-local): APPROVE — no
+findings at any level. It verified both recorded readings with line
+references, confirmed each round-1 fix (re-running the P1
+reintroduction itself: the four-row test went red with
+`[Some, Some, None, None]`), re-ran four more mutations of the matrix
+(M4, M5, M9, M12 — each killed the named tests), passed all four
+test-audit checks, and re-listed the three owner follow-ups this
+entry already records (the probe-join posture, the
+last-completed-scan set, the `excluded` product question) without
+re-flagging them. No fixes were needed; the review phase closed after
+two rounds on two models. The final matrix above was re-run on the
+final tree afterwards, since the fixes had moved two mutation
+targets (the text gate was rewritten; the old "dedupe dropped"
+mutation now lands on the resolved-identity collapse).
+
 ### D-180 — T-271: D-142's "pre-migration copies' uncapped accumulation" follow-up closed by owner ruling as already discharged — D-129/T-253's age rule governed `pre-migration-*` before the line was written (D-038's own addendum said so); D-046's "retention stays uncapped" parenthetical annotated beside it — 2026-11-23
 
 Problem: the card (source: D-142's follow-ups paragraph and D-038;

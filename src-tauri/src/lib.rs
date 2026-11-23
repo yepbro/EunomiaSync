@@ -143,13 +143,18 @@ pub(crate) mod sync_phase4;
 pub(crate) mod file_watch;
 
 // The scan commands and the `scan://progress` event (spec §7.10
-// Projects module `scan_start`/`scan_cancel`, §9.6, PRJ-002,
-// SYS-003/NFR-015, ALG-053, ERR-002; T-076): the command layer over
-// the eunomia-fs walker and classifier — the SEC-003-validated root,
-// the per-scan settings/registry snapshot, the blocking-pool walk
-// with the ≥100 ms-throttled progress events, the managed cancel
-// slot, and the found/candidate-set answer that persists nothing
-// (T-077's `scan_commit` is the only writer).
+// Projects module `scan_start`/`scan_cancel`/`scan_commit`, §9.6,
+// PRJ-002, SYS-003/NFR-015, ALG-053, ERR-002; T-076, D-153; T-077,
+// D-179): the command layer over the eunomia-fs walker and
+// classifier — the SEC-003-validated root, the per-scan
+// settings/registry snapshot, the blocking-pool walk with the
+// ≥100 ms-throttled progress events, the managed cancel slot, and the
+// found/candidate-set answer; the scan itself persists nothing. The
+// module's one WRITER is `scan_commit` (T-077): the checked
+// repositories of a completed scan's answer become project rows in
+// one transaction through the new-project rules `commands.rs` owns,
+// admitted only through the session's discovered set (the SEC-003
+// rule D-100 reserved, fixed in D-179).
 pub(crate) mod scan;
 
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
@@ -176,8 +181,9 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // `project_add_manual` (T-074), the Projects module's
         // `exclusions_list`/`exclusion_remove` (T-078), the Projects
         // module's `projects_reorder` (T-080), the Projects
-        // module's `scan_start`/`scan_cancel` (T-076) and the Sync
-        // module's `sync_run` (T-118, D-138). Every later
+        // module's `scan_start`/`scan_cancel`/`scan_commit`
+        // (T-076/T-077) and the Sync module's `sync_run` (T-118,
+        // D-138). Every later
         // command task (library, …) lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
         // commands that take an `AppHandle`), so the registration pins
@@ -198,6 +204,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::projects_list::<tauri::Wry>,
             commands::projects_reorder::<tauri::Wry>,
             scan::scan_cancel::<tauri::Wry>,
+            scan::scan_commit::<tauri::Wry>,
             scan::scan_start::<tauri::Wry>,
             commands::settings_get::<tauri::Wry>,
             commands::settings_set::<tauri::Wry>,
@@ -404,6 +411,20 @@ pub fn run() {
             // mode the slot simply stays empty (a scan refuses at the
             // settings read — no database).
             app.manage(scan::ScanCancelSlot::new());
+
+            // The session's discovered set (§7.10's `scan_commit`,
+            // T-077/D-179): every COMPLETED scan publishes the keys of
+            // the repositories it reported here, and the commit admits
+            // only those paths — SEC-003's rule for a path the UI
+            // sends back from a scan answer (D-100 reserved it). An
+            // in-memory set, never persisted; the commit's transaction
+            // is the only writer. Managed beside the cancel slot for
+            // the same reason — infallible, needed in every mode: the
+            // commit and the completed scan must FIND the state, and in
+            // recovery mode it simply stays empty (a scan refuses at
+            // the settings read — no database — before it could
+            // publish, and the commit refuses at the database).
+            app.manage(scan::ScanFindings::new());
 
             // The availability session cache (D-09/DB-032, T-079):
             // the last D-084 verdicts per active project, plus the

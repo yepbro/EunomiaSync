@@ -1,6 +1,7 @@
 //! The scan commands and the `scan://progress` event (spec §7.10
-//! Projects module `scan_start`/`scan_cancel`, §9.6, PRJ-002,
-//! SYS-003/NFR-015, ALG-053, ERR-002; T-076, D-153).
+//! Projects module `scan_start`/`scan_cancel`/`scan_commit`, §9.6,
+//! PRJ-002, SYS-003/NFR-015, ALG-053, ERR-002; T-076, D-153; T-077,
+//! D-179).
 //!
 //! This module is the COMMAND LAYER the walker's docs assigned to
 //! "T-076's plumbing": it drives
@@ -10,10 +11,32 @@
 //! against a per-scan registry snapshot, serializes the live facts
 //! into the throttled `scan://progress` event, and answers with the
 //! found/candidate set — the input PRJ-002's result view selects from
-//! and T-077's `scan_commit` will consume. Nothing is persisted
-//! anywhere in this module (ERR-002): the scan is read-only over the
-//! filesystem and the database, and a cancelled or interrupted scan
-//! answers [`ScanRunOutcome::Cancelled`] with no payload at all.
+//! and [`scan_commit`] consumes. The SCAN half persists nothing
+//! anywhere (ERR-002): `scan_start` is read-only over the filesystem
+//! and the database, and a cancelled or interrupted scan answers
+//! [`ScanRunOutcome::Cancelled`] with no payload at all. The module's
+//! ONE writer is `scan_commit` (T-077, D-179): the checked
+//! repositories of a completed scan's answer become project rows in
+//! one transaction, through the new-project rules `commands.rs` owns
+//! (`ProjectFields`, `WriteDefaults`, `ColorOccupancy`,
+//! `register_project`) and `project_add_manual` calls too.
+//!
+//! # The discovered-set rule (SEC-003, D-100's reserved rule)
+//!
+//! A path the UI sends back from a scan answer is neither a registered
+//! project nor a folder picked in the dialog — SEC-003's two halves do
+//! not cover it as worded, and D-100 reserved the rule for this
+//! command. The rule: a COMPLETED scan publishes the `path_key` of
+//! every repository it reported into the session-scoped
+//! [`ScanFindings`] (replacing the previous completed scan's set; a
+//! cancelled or failed scan publishes and clears nothing), and
+//! `scan_commit` admits a path iff the key of its own text AND of its
+//! canonical form are both in that set. The webview can therefore
+//! commit exactly what Rust itself found under a root the gate
+//! admitted — nothing under a picked tree that the walk skipped, and
+//! nothing swapped in under a reported name. The set is in-memory
+//! session bookkeeping (the `session_paths::SessionPaths` class), never
+//! persisted; see [`scan_commit`] for the commit's own gate order.
 //!
 //! # The composition, in order
 //!
@@ -59,10 +82,13 @@
 //!    [`ScanProgressEvent`] fires from there.
 //! 5. **The answer** — [`ScanOutcome::Completed`] maps to
 //!    [`ScanRunOutcome::Completed`] with the accumulated sets and the
-//!    terminal counters; [`ScanOutcome::Cancelled`] drops everything
-//!    accumulated and answers the payload-less
+//!    terminal counters, and publishes the reported repositories'
+//!    keys into [`ScanFindings`] — the discovered set `scan_commit`
+//!    admits against (the rule below); [`ScanOutcome::Cancelled`]
+//!    drops everything accumulated and answers the payload-less
 //!    [`ScanRunOutcome::Cancelled`] (ERR-002 — an interrupted scan
-//!    saves nothing, and the wire shape cannot lie about it).
+//!    saves nothing, publishes nothing, and the wire shape cannot lie
+//!    about it).
 //!
 //! # The throttle (SYS-003, ALG-053, NFR-015)
 //!
@@ -146,25 +172,38 @@
 //! the token from inside the walk, the D-147 "three deterministic
 //! tests instead of one racy one" composition), the slot lifecycle,
 //! the second-start refusal, SEC-003, the settings shaping the walk,
-//! the honest no-database answer, and the registration pins.
+//! the honest no-database answer, and the registration pins. The
+//! commit's suite (same file) pins the card's acceptance pair — a
+//! repeated scan and commit create no duplicates; an error on one
+//! project rolls back the whole batch — plus the discovered-set rule,
+//! the manual-add rules over a batch, the typed outcomes, the
+//! write-access warnings, the SYS-005 gate, and the missing-state
+//! answers.
 
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use eunomia_fs::paths::NotARepoError;
 use eunomia_fs::scan::CancelToken;
 use eunomia_fs::scan_classify::{self, ClassifiedScanEvent, ScanClass, ScanRegistry};
+use eunomia_store::projects::{AddedVia, Project, ProjectState};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_specta::Event;
 
 use crate::commands::{
-    managed_db, projects_store_to_app_error, settings_cell_to_app_error, sync_running_refusal,
+    AddedProject, ColorOccupancy, ExistingProject, ProjectFields, Registered, WriteDefaults,
+    managed_db, probe_target_name, projects_store_to_app_error, register_project,
+    reject_during_sync, rejected_field, repo_lookup_failed, settings_cell_to_app_error,
+    sync_running_refusal, write_access_warning,
 };
 use crate::db;
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
+use crate::file_watch;
 use crate::logging;
 use crate::session_paths;
 
@@ -185,8 +224,9 @@ pub(crate) const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
 /// "New" checkboxes, `known` the "Already added" group, and
 /// `archived`/`excluded` the "Skipped" group with the reason
 /// "archived or in exclusions" (the class IS the reason for these
-/// two); T-077's `scan_commit` consumes the user's selection from
-/// the same list.
+/// two); [`scan_commit`] consumes the user's selection from the same
+/// list — the `path` strings, sent back and checked against
+/// [`ScanFindings`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub(crate) struct ScannedRepository {
     /// The repository root exactly as the walk reported it (the
@@ -304,8 +344,8 @@ pub(crate) enum ScanRunOutcome {
     /// The walk ran to completion: the terminal counters (the same
     /// facts the progress event carried, at their final values) and
     /// the classified result the UI groups into New / Already added
-    /// / Skipped. Nothing is persisted with them — `scan_commit`
-    /// (T-077) is the only writer.
+    /// / Skipped. Nothing is persisted with them — [`scan_commit`] is
+    /// the only writer.
     Completed {
         /// Folders the walk made a decision about (found, plain and
         /// skipped alike — the window's "folders checked" counter's
@@ -326,6 +366,38 @@ pub(crate) enum ScanRunOutcome {
     /// written anywhere, and the answer deliberately carries no
     /// partial anything (ERR-002).
     Cancelled,
+}
+
+/// The `scan_commit` answer (§7.10, PRJ-002's "Add selected"; T-077,
+/// D-179): one entry per DISTINCT repository of the selection, in the
+/// order the UI sent — which is also the order the rows appended in.
+/// Only failures are `Err`: the entries are the per-repository facts
+/// of a committed transaction (or of a selection with nothing to add).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct ScanCommitResult {
+    /// The selection's verdicts, sent order, duplicates collapsed.
+    pub(crate) entries: Vec<ScanCommitEntry>,
+}
+
+/// One selected repository's verdict — the `ProjectAddResult`
+/// discriminant shape: a closed outcome string plus the one payload
+/// arm it carries (the house form for "one response, several
+/// meanings").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct ScanCommitEntry {
+    /// The repository's canonical path (DB-030) — for `"added"`, the
+    /// stored `projects.path`.
+    pub(crate) path: String,
+    /// What became of the repository, one of `"added"`,
+    /// `"already_added"`, `"archived"`, `"excluded"`.
+    pub(crate) outcome: String,
+    /// The created row with its §6.9 write-access warning — the
+    /// `"added"` outcome only.
+    pub(crate) project: Option<AddedProject>,
+    /// The project row that already holds the path (DB-015) — the
+    /// `"already_added"` and `"archived"` outcomes; for the latter the
+    /// id is what the restore offer calls back with (PRJ-013…018).
+    pub(crate) existing: Option<ExistingProject>,
 }
 
 /// The `scan://progress` event payload (§7.10, SYS-003, PRJ-002's
@@ -552,6 +624,84 @@ impl<R: Runtime> Drop for ScanLease<R> {
 }
 
 // ---------------------------------------------------------------------------
+// The discovered set (SEC-003's rule for `scan_commit`, D-100/D-179)
+// ---------------------------------------------------------------------------
+
+/// The repositories the session's last COMPLETED scan reported, by
+/// their DB-030 `path_key` — the only paths [`scan_commit`] admits.
+///
+/// A scan ANSWER's paths are descendants of the picked root, so
+/// SEC-003's two halves ("a registered project or a folder picked in
+/// the dialog this session") do not cover them as worded; D-100
+/// reserved the rule for the commit and D-179 fixed it: what Rust
+/// itself found under a gate-admitted root is what the commit may
+/// register. [`scan_start_with`] publishes a completed walk's
+/// repositories here — all four ALG-053 classes, because what the
+/// commit does with an already-registered or excluded one is the
+/// transaction's typed answer, not a "never scanned" rejection — and
+/// each publication REPLACES the previous set: the set is the last
+/// result view's universe, bounded by what that walk found, never a
+/// session-long union. A cancelled or failed scan publishes nothing
+/// and clears nothing (ERR-002).
+///
+/// Managed by `setup` in every mode beside the cancel slot. In-memory
+/// session bookkeeping of the [`session_paths::SessionPaths`] class —
+/// never persisted, and nothing here is a project: the commit's
+/// transaction is the only writer. A poisoned lock is recovered
+/// (`into_inner`): the set is plain data that survives a panicking
+/// caller, exactly the allowlist's posture.
+#[derive(Debug, Default)]
+pub(crate) struct ScanFindings {
+    /// `std::sync::Mutex` — each method holds the guard for one set
+    /// swap or lookup, never across an await.
+    keys: Mutex<HashSet<String>>,
+}
+
+impl ScanFindings {
+    /// The empty set — the state `setup` manages before anything that
+    /// could fail (nothing was scanned yet: the commit admits nothing).
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Makes `keys` the discovered set — the path keys of one
+    /// completed scan's reported repositories, replacing whatever the
+    /// previous completed scan left.
+    pub(crate) fn publish(&self, keys: impl IntoIterator<Item = String>) {
+        *self.locked() = keys.into_iter().collect();
+    }
+
+    /// Whether `key` is the DB-030 key of a repository the last
+    /// completed scan reported.
+    pub(crate) fn contains(&self, key: &str) -> bool {
+        self.locked().contains(key)
+    }
+
+    /// Whether `path` is a repository the last completed scan
+    /// reported: its DB-030 key — the one identity rule the session
+    /// gate and the classifier key by — is in the set. A path whose
+    /// text cannot key simply matches nothing.
+    pub(crate) fn admits(&self, path: &Path) -> bool {
+        eunomia_fs::paths::path_key(path).is_ok_and(|key| self.contains(&key))
+    }
+
+    /// How many repositories the last completed scan reported — the
+    /// size the tests assert; no production code reads it (the
+    /// `SessionPaths::len` shape).
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.locked().len()
+    }
+
+    /// The poison-recovering lock of the methods above.
+    fn locked(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The commands (§7.10 Projects module)
 // ---------------------------------------------------------------------------
 
@@ -672,22 +822,46 @@ pub(crate) async fn scan_start_with<R: Runtime>(
     .map_err(db::join_failure_to_app_error)?;
 
     // Step 5 — the answer. `Cancelled` drops everything the walk
-    // accumulated (ERR-002): the arm carries no payload to show.
+    // accumulated (ERR-002): the arm carries no payload to show and
+    // publishes nothing. `Completed` answers the accumulated sets
+    // and publishes their keys as the discovered set `scan_commit`
+    // admits against (the module docs' rule) — after the walk lock
+    // is released, so the state lookup never runs under it.
     let mut walk = walk_state
         .lock()
         .expect("the scan walk state must not be poisoned");
-    match outcome {
-        eunomia_fs::scan::ScanOutcome::Completed => Ok(ScanRunOutcome::Completed {
+    let answer = match outcome {
+        eunomia_fs::scan::ScanOutcome::Completed => ScanRunOutcome::Completed {
             checked: walk.progress.checked,
             found: walk.progress.found,
             repositories: std::mem::take(&mut walk.repositories),
             skipped: std::mem::take(&mut walk.skipped),
-        }),
+        },
         eunomia_fs::scan::ScanOutcome::Cancelled => {
             logging::scan_cancelled(walk.progress.checked);
-            Ok(ScanRunOutcome::Cancelled)
+            drop(walk);
+            return Ok(ScanRunOutcome::Cancelled);
         }
+    };
+    drop(walk);
+    publish_findings(&app, &answer)?;
+    Ok(answer)
+}
+
+/// The discovered-set publication of a completed scan (D-179): the
+/// reported repositories' keys replace [`ScanFindings`]. The missing
+/// state is the honest fallback (the `scan_slot_missing` shape): the
+/// state is managed by `setup` before anything that could fail, so its
+/// absence is an uninitialized-app bug — a refusal naming it, not a
+/// completed scan whose commit could only ever answer "not reported".
+fn publish_findings<R: Runtime>(
+    app: &AppHandle<R>,
+    answer: &ScanRunOutcome,
+) -> Result<(), AppError> {
+    if let ScanRunOutcome::Completed { repositories, .. } = answer {
+        managed_findings(app)?.publish(repositories.iter().map(|repo| repo.path_key.clone()));
     }
+    Ok(())
 }
 
 /// Serves PRJ-002's "Cancel" and NFR-015's "closing the scan window
@@ -728,6 +902,430 @@ fn scan_slot_missing() -> AppError {
         os_message: Some("the scan cancel slot was not managed at startup".to_owned()),
     });
     error
+}
+
+/// Serves PRJ-002's "Add selected" (§7.10 `scan_commit`, T-077, D-179):
+/// the checked "New" repositories of a scan answer become projects in
+/// ONE transaction, with the rules of
+/// [`project_add_manual`](crate::commands::project_add_manual) and
+/// without duplicates.
+///
+/// `paths` are the repository paths the `scan_start` answer carried,
+/// sent back by the result view. The command's first act is the SYS-005
+/// sync gate — while a sync holds `sync_running`, the answer is the
+/// typed `E_SYNC_RUNNING` refusal before anything else runs. With the
+/// flag down, the database is resolved (recovery mode answers its
+/// honest fallback before any probe), and then the gates run in this
+/// order; the FIRST failure in the order sent is the whole command's
+/// answer, and nothing is written:
+///
+/// 1. **SEC-003, the discovered-set rule.** A path is admitted iff the
+///    DB-030 key of its OWN text is in the session's
+///    [`ScanFindings`] — the keys of every repository the last
+///    COMPLETED `scan_start` reported. Anything else, and an empty
+///    entry, is the typed `E_VALIDATION` rejection of the `path`
+///    field, raised BEFORE any disk probe: the webview can only commit
+///    what Rust itself found under a root the SEC-003 gate admitted.
+/// 2. **Canonicalization** (blocking pool): a folder that vanished
+///    since the scan is §10's `E_PROJECT_UNAVAILABLE` with the path
+///    and the OS facts ("could not check" is not "not a repo", D-090);
+///    a non-UTF-8 canonical form is the D-086 encoding rejection. The
+///    CANONICAL form's key must be in the findings too — a folder
+///    swapped in under a reported name resolves elsewhere and meets
+///    the same SEC-003 rejection. The selection is collapsed twice —
+///    first by the sent text's key (step 1: duplicates cost nothing
+///    downstream), then by the resolved identity (two spellings can
+///    lead to one folder) — the first occurrence's position kept both
+///    times, which is the append order.
+/// 3. **The repository root** (blocking pool):
+///    [`find_git_root`](eunomia_fs::paths::find_git_root) must answer
+///    the folder ITSELF (by key) — a folder whose own `.git` is gone
+///    is `E_NOT_A_REPO`, §10's row and the manual add's envelope; a
+///    refused probe is `E_PROJECT_UNAVAILABLE`.
+/// 4. **The §6.9 fields** of every candidate, through the shared
+///    [`ProjectFields::derive`] (the manual add's "Fields" step). A
+///    rejection names the field AND carries the repository's `path`
+///    param, so the result view can mark the row.
+/// 5. **One transaction** (D-037, §6.9 "the whole operation runs in
+///    one transaction"), each candidate in sent order: the DB-015
+///    duplicate check (`find_by_path_key` — an active row answers the
+///    typed `"already_added"` entry, an archived row the `"archived"`
+///    one carrying the id of the DB-015 restore offer); the exclusion
+///    check (a `project_exclusions` row with no project answers the
+///    typed `"excluded"` entry — the scan showed it under "Skipped",
+///    and §6.4's removal is the way back); otherwise
+///    [`register_project`] with `added_via = scan` — the PRJ-012
+///    copy, D-29's color over the active set as it stands INSIDE the
+///    transaction (the batch's earlier rows count, so twelve rows
+///    take twelve colors), `create`, and one `project.added` journal
+///    entry (LOG-001…004, info/user/ok). The typed entries are
+///    answers about the selection, not errors: the other
+///    repositories are still added, and a re-sent selection
+///    converges. Any `Err` — a store or journal failure on ANY row —
+///    rolls back every row of the batch with its entries: an error on
+///    one project refuses the whole commit.
+/// 6. **Write-access warnings** (§6.9, D-094): after the commit, one
+///    [`check_write_access`](eunomia_fs::write_access::
+///    check_write_access) per added row on the blocking pool — never
+///    inside the transaction (the D-096 probe-order rule) — riding
+///    the entry's `project` exactly as in the manual add.
+/// 7. **The watch refresh** (§5.7 SYS-007, D-144): when at least one
+///    row was created, ONE pass through
+///    [`refresh_after_mutation`](crate::file_watch::
+///    refresh_after_mutation) — never fatal to the answer; the DB-022
+///    recalculation rides the commit hook.
+///
+/// An empty selection is the typed no-op `entries: []` — nothing is
+/// written and nothing journaled. A live scan does NOT refuse the
+/// commit: the walk's registry snapshot predates it by design, so its
+/// answer may show a just-added repository as `new`, and the
+/// duplicate check inside the transaction keeps that harmless.
+///
+/// Failures reach the log with their §10 code through the ONE edge
+/// [`logging::scan_commit_failed`]; the typed outcomes and the empty
+/// selection log nothing, and a successful commit is its own journal
+/// entries (the D-051 mirror policy).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn scan_commit<R: Runtime>(
+    app: AppHandle<R>,
+    paths: Vec<String>,
+) -> Result<ScanCommitResult, AppError> {
+    scan_commit_impl(app, paths)
+        .await
+        .inspect_err(logging::scan_commit_failed)
+}
+
+/// The body of [`scan_commit`], split the `scan_start_with` way so
+/// the one logging edge covers every failure path and the tests can
+/// drive the body directly. The gates follow the command docs' order.
+///
+/// Complexity over untrusted input (N sent paths of at most L bytes):
+/// the text gate and its dedupe are O(N·L) and touch no disk; disk
+/// work — canonicalization, the `.git` probes, the transaction, the
+/// write-access probes — runs only over the paths that survive it,
+/// at most one per key the last scan reported (R), never one per
+/// sent path: O(R) probes and statements, the color rule linear in R
+/// (D-29 over relative counts).
+pub(crate) async fn scan_commit_impl<R: Runtime>(
+    app: AppHandle<R>,
+    paths: Vec<String>,
+) -> Result<ScanCommitResult, AppError> {
+    // Gate 1 — SYS-005 (§5.4): the mode gate runs before everything —
+    // while a sync holds `sync_running`, the commit is refused with
+    // `E_SYNC_RUNNING` whatever the input is (it creates project
+    // rows, the rows the sync's snapshot was built from).
+    reject_during_sync(&app)?;
+    // The database every write needs, resolved BEFORE any probe, so
+    // recovery mode answers its honest fallback consistently.
+    let database = managed_db(&app)?;
+    // Gate 2 — SEC-003, the text half of the discovered-set rule: no
+    // disk probe for a path the last scan did not report. The same
+    // pass collapses the in-request duplicates by the sent text's key,
+    // so everything downstream — the probes, the transaction — is
+    // bounded by the distinct REPORTED paths (R), never by what the
+    // webview sent (N): every admitted key is in the findings, so at
+    // most |findings| paths survive. A text that cannot key matches
+    // nothing (the D-086 addendum's rule at this seam).
+    let findings = managed_findings(&app)?;
+    let mut admitted: Vec<String> = Vec::with_capacity(paths.len());
+    let mut seen_text: HashSet<String> = HashSet::with_capacity(paths.len());
+    for path in &paths {
+        if path.trim().is_empty() {
+            return Err(rejected_field(
+                "path",
+                path,
+                "the repository path must not be empty",
+            ));
+        }
+        match eunomia_fs::paths::path_key(Path::new(path)) {
+            Ok(key) if findings.contains(&key) => {
+                if seen_text.insert(key) {
+                    admitted.push(path.clone());
+                }
+            }
+            _ => return Err(rejected_unreported_path(path)),
+        }
+    }
+    // Gate 3 — canonicalization (SYS-001: a dead mount must not stall
+    // an async worker). The D-086 addendum seam is `canonicalize`'s
+    // own gate: a non-UTF-8 form answers the encoding rejection, any
+    // other refusal the availability error — the manual add's two
+    // mappings over the same typed failure.
+    let canonical_forms = tauri::async_runtime::spawn_blocking(move || {
+        admitted
+            .iter()
+            .map(|text| eunomia_fs::paths::canonicalize(Path::new(text)))
+            .collect::<Result<Vec<PathBuf>, _>>()
+    })
+    .await
+    .map_err(db::join_failure_to_app_error)?
+    .map_err(|source| repo_lookup_failed(&NotARepoError::Canonicalize { source }))?;
+    // The canonical-form half of the rule, then the second collapse —
+    // by the RESOLVED identity: two admitted spellings (a symlinked
+    // name inside the root, a case-folded sibling) can lead to one
+    // folder. Sent order throughout, which is the append order.
+    let mut seen: HashSet<String> = HashSet::with_capacity(canonical_forms.len());
+    let mut candidates: Vec<PathBuf> = Vec::with_capacity(canonical_forms.len());
+    for canonical in canonical_forms {
+        if !findings.admits(&canonical) {
+            return Err(rejected_unreported_path(&canonical.to_string_lossy()));
+        }
+        let key = eunomia_fs::paths::path_key(&canonical)
+            .map_err(|source| crate::commands::rejected_non_utf8_path(source.path()))?;
+        if seen.insert(key) {
+            candidates.push(canonical);
+        }
+    }
+    // Gate 4 — the repository root: the folder itself, by the one
+    // identity rule (a folder whose own `.git` is gone resolves to an
+    // ancestor's root, or to none — `E_NOT_A_REPO` either way).
+    let walked = candidates.clone();
+    let root_verdicts = tauri::async_runtime::spawn_blocking(move || {
+        walked
+            .iter()
+            .map(
+                |canonical| match eunomia_fs::paths::find_git_root(canonical) {
+                    Ok(root) if is_own_root(&root, canonical) => Ok(()),
+                    Ok(_) => Err(NotARepoError::NoGitEntry {
+                        path: canonical.to_string_lossy().into_owned(),
+                    }),
+                    Err(source) => Err(source),
+                },
+            )
+            .collect::<Vec<Result<(), NotARepoError>>>()
+    })
+    .await
+    .map_err(db::join_failure_to_app_error)?;
+    for verdict in root_verdicts {
+        verdict.map_err(|source| repo_lookup_failed(&source))?;
+    }
+    // Gate 5 — the §6.9 fields of every candidate, before anything is
+    // written: a rejection names the field and the repository.
+    let fields: Vec<ProjectFields> = candidates
+        .iter()
+        .map(|root| ProjectFields::derive(root).map_err(|error| field_rejection_of(root, error)))
+        .collect::<Result<_, _>>()?;
+
+    // The transaction: every row of the batch, its journal entries and
+    // the typed outcomes in one `Db::run` (D-037). Everything the
+    // closure reads it reads inside the transaction, so a busy retry
+    // replays it over the committed state.
+    let slots = database
+        .run(move |transaction| {
+            let defaults = WriteDefaults::load(transaction)?;
+            let mut occupancy = ColorOccupancy::load(transaction)?;
+            let mut slots: Vec<CommitSlot> = Vec::with_capacity(fields.len());
+            for candidate in &fields {
+                // DB-015: the key is unique across active AND archived
+                // rows — the same single-connection serialization the
+                // manual add relies on (D-037).
+                if let Some(existing) =
+                    eunomia_store::projects::find_by_path_key(transaction, &candidate.path_key)
+                        .map_err(projects_store_to_app_error)?
+                {
+                    slots.push(CommitSlot::Entry(duplicate_entry(
+                        &candidate.path,
+                        &existing,
+                    )));
+                    continue;
+                }
+                if eunomia_store::projects::find_exclusion_by_path_key(
+                    transaction,
+                    &candidate.path_key,
+                )
+                .map_err(projects_store_to_app_error)?
+                .is_some()
+                {
+                    slots.push(CommitSlot::Entry(excluded_entry(&candidate.path)));
+                    continue;
+                }
+                match register_project(
+                    transaction,
+                    candidate,
+                    AddedVia::Scan,
+                    &defaults,
+                    &mut occupancy,
+                )? {
+                    Registered::Created(created) => slots.push(CommitSlot::Created(created)),
+                    // Unreachable after the check above inside one
+                    // transaction; honest anyway — the same typed
+                    // duplicate answer the check would have built.
+                    Registered::Existing(existing) => slots.push(CommitSlot::Entry(
+                        duplicate_entry(&candidate.path, &existing),
+                    )),
+                }
+            }
+            Ok(slots)
+        })
+        .await?;
+
+    // Step 6 — the §6.9 write-access probe per created row, after the
+    // commit: the project IS added whatever the verdict (the manual
+    // add's step 5).
+    let created: Vec<&Project> = slots
+        .iter()
+        .filter_map(|slot| match slot {
+            CommitSlot::Created(project) => Some(project),
+            CommitSlot::Entry(_) => None,
+        })
+        .collect();
+    let mut warnings: Vec<Option<String>> = Vec::new();
+    if !created.is_empty() {
+        let targets: Vec<PathBuf> = created
+            .iter()
+            .map(|project| {
+                Path::new(&project.path).join(probe_target_name(project.scheme, project.base_name))
+            })
+            .collect();
+        warnings = tauri::async_runtime::spawn_blocking(move || {
+            targets
+                .iter()
+                .map(|target| {
+                    eunomia_fs::write_access::check_write_access(target)
+                        .err()
+                        .as_ref()
+                        .and_then(write_access_warning)
+                })
+                .collect()
+        })
+        .await
+        .map_err(db::join_failure_to_app_error)?;
+    }
+    // The warnings are positional: one slot per created row, in the
+    // order `created` collected them — the same order the
+    // `CommitSlot::Created` slots have in `slots`. A `None` is a
+    // writable row's own verdict and must not be skipped over, or the
+    // next row's warning would land on it (the round-1 review's P1).
+    let added = warnings.len();
+    let mut warnings = warnings.into_iter();
+    let entries = slots
+        .into_iter()
+        .map(|slot| match slot {
+            CommitSlot::Created(project) => added_entry(&project, warnings.next().flatten()),
+            CommitSlot::Entry(entry) => entry,
+        })
+        .collect();
+
+    // Step 7 — one watch refresh for the whole batch, never fatal
+    // (the `project_add_manual` step 6 posture: the rows ARE added
+    // whatever the pass answers, and the next anchor re-converges).
+    if added > 0
+        && let Err(refused) = file_watch::refresh_after_mutation(&app).await
+    {
+        logging::file_watch_mutation_refresh_degraded(&refused);
+    }
+    Ok(ScanCommitResult { entries })
+}
+
+/// One candidate's result inside the commit's transaction: a typed
+/// non-add entry, or the created row awaiting its post-commit probe.
+enum CommitSlot {
+    /// The repository was already registered or is excluded — the
+    /// answer is a fact about the selection, nothing was written.
+    Entry(ScanCommitEntry),
+    /// The row was created and journaled; the commit is the
+    /// transaction's.
+    Created(Project),
+}
+
+/// The `"added"` entry around a created row and its §6.9 warning.
+fn added_entry(project: &Project, warning: Option<String>) -> ScanCommitEntry {
+    ScanCommitEntry {
+        path: project.path.clone(),
+        outcome: "added".to_owned(),
+        project: Some(AddedProject::from_store(project, warning)),
+        existing: None,
+    }
+}
+
+/// The duplicate entry: the outcome is the existing row's own state —
+/// `"already_added"` for an active row, `"archived"` for the DB-015
+/// restore offer.
+fn duplicate_entry(path: &str, existing: &Project) -> ScanCommitEntry {
+    ScanCommitEntry {
+        path: path.to_owned(),
+        outcome: match existing.state {
+            ProjectState::Active => "already_added",
+            ProjectState::Archived => "archived",
+        }
+        .to_owned(),
+        project: None,
+        existing: Some(ExistingProject::of(existing)),
+    }
+}
+
+/// The `"excluded"` entry: a `project_exclusions` row holds the key
+/// and no project does.
+fn excluded_entry(path: &str) -> ScanCommitEntry {
+    ScanCommitEntry {
+        path: path.to_owned(),
+        outcome: "excluded".to_owned(),
+        project: None,
+        existing: None,
+    }
+}
+
+/// Whether `root` is `folder` itself, by DB-030's identity — the ONE
+/// rule the session gate and the classifier key by — not by bytes:
+/// both forms came out of `canonicalize`, so their keys exist, and a
+/// key that cannot be built cannot be equal.
+fn is_own_root(root: &Path, folder: &Path) -> bool {
+    match (
+        eunomia_fs::paths::path_key(root),
+        eunomia_fs::paths::path_key(folder),
+    ) {
+        (Ok(root_key), Ok(folder_key)) => root_key == folder_key,
+        _ => false,
+    }
+}
+
+/// The SEC-003 discovered-set rejection of a path no completed scan
+/// reported: the settings shape through the shared builder (the
+/// `session_paths::rejected_ui_path` twin for this command's rule).
+/// `value` is the caller's own input or the lossy spelling of the
+/// folder it resolved to — a diagnostic, never stored (SEC-008).
+fn rejected_unreported_path(path: &str) -> AppError {
+    rejected_field(
+        "path",
+        path,
+        "must be a repository the last completed scan of this session reported (SEC-003)",
+    )
+}
+
+/// A §6.9 field rejection of one candidate, carrying the repository's
+/// path beside the field — the batch's answer to "which row": the
+/// manual add names the field alone because its path is the one pick.
+fn field_rejection_of(root: &Path, mut error: AppError) -> AppError {
+    if !error
+        .params
+        .get("field")
+        .is_some_and(|field| field == "path")
+    {
+        error
+            .params
+            .insert("path".to_owned(), root.to_string_lossy().into_owned());
+    }
+    error
+}
+
+/// The discovered-set state, with the honest missing-state answer (the
+/// `scan_slot_missing` shape): managed by `setup` before anything that
+/// could fail, so its absence is an uninitialized-app bug — a refusal
+/// naming it, never a commit that admits everything or nothing
+/// silently.
+fn managed_findings<'a, R: Runtime>(
+    app: &'a AppHandle<R>,
+) -> Result<tauri::State<'a, ScanFindings>, AppError> {
+    app.try_state::<ScanFindings>().ok_or_else(|| {
+        let mut error = AppError::new(ErrorCode::DbLocked);
+        error.details = Some(ErrorDetails {
+            os_code: None,
+            os_kind: Some("ScanFindingsMissing".to_owned()),
+            os_message: Some("the scan findings set was not managed at startup".to_owned()),
+        });
+        error
+    })
 }
 
 /// The per-scan snapshot of step 3: the §6.5 scan settings and the
@@ -904,6 +1502,75 @@ mod tests {
         // The wire name is the frontend's whole contract; pinned
         // against the §7.10 literal exactly like `state://dirty`'s.
         assert_eq!(ScanProgressEvent::NAME, "scan://progress");
+    }
+
+    #[test]
+    fn the_findings_admit_exactly_the_published_keys_and_a_new_scan_replaces_them() {
+        // The discovered-set rule at its seam (D-179): the set admits
+        // a path iff its DB-030 key — the one identity rule — is one
+        // of the published keys. The exact-folder boundary of D-100
+        // holds (a folder UNDER a reported repository is not the
+        // repository, and the picked root is not a repository unless
+        // the walk reported it), each publication REPLACES the set
+        // (the last completed scan is the commit's universe, never a
+        // session-long union), and an empty publication is the honest
+        // empty set.
+        let findings = ScanFindings::new();
+        let key =
+            |path: &str| eunomia_fs::paths::path_key(Path::new(path)).expect("UTF-8 text keys");
+        assert!(
+            !findings.admits(Path::new("/scan/a")),
+            "a fresh session reports nothing"
+        );
+
+        findings.publish([key("/scan/a"), key("/scan/b")]);
+        assert!(findings.admits(Path::new("/scan/a")));
+        assert!(findings.admits(Path::new("/scan/b")));
+        assert!(
+            !findings.admits(Path::new("/scan/a/sub")),
+            "a folder under a reported repository is not the repository"
+        );
+        assert!(
+            !findings.admits(Path::new("/scan")),
+            "the scan root is not a repository unless the walk reported it"
+        );
+        assert_eq!(findings.len(), 2, "two reported keys");
+
+        findings.publish([key("/scan/c")]);
+        assert!(
+            !findings.admits(Path::new("/scan/a")),
+            "the next completed scan replaces the set"
+        );
+        assert!(findings.admits(Path::new("/scan/c")));
+        assert_eq!(findings.len(), 1, "only the last scan's keys remain");
+
+        findings.publish(std::iter::empty());
+        assert_eq!(
+            findings.len(),
+            0,
+            "a scan that found nothing reports nothing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_that_cannot_key_is_admitted_by_no_findings() {
+        // The D-086 addendum at the set's seam: a path whose text is
+        // not valid UTF-8 cannot equal any reported key (the walk
+        // refuses such paths before reporting a repository), so
+        // membership honestly answers false instead of failing.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let findings = ScanFindings::new();
+        findings.publish([
+            eunomia_fs::paths::path_key(Path::new("/scan/a")).expect("UTF-8 text keys"),
+            "/scan/repo\u{fffd}".to_owned(),
+        ]);
+        assert!(
+            !findings.admits(Path::new(OsStr::from_bytes(b"/scan/repo\xff"))),
+            "an unkeyable probe is admitted by nothing"
+        );
     }
 
     #[test]

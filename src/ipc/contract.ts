@@ -45,6 +45,8 @@ export type {
   ProjectAvailabilityEvent_Serialize as ProjectAvailabilityEventWire,
   ProjectColumnEntry_Serialize as ProjectColumnEntryWire,
   ScanClassWire,
+  ScanCommitEntry_Serialize as ScanCommitEntryWire,
+  ScanCommitResult_Serialize as ScanCommitResultWire,
   ScanProgressEvent as ScanProgressEventWire,
   ScanRunOutcome_Serialize as ScanRunOutcomeWire,
   ScanSkipReason,

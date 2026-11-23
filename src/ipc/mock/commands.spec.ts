@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { mockCommands } from './commands'
 import { mockState, resetMockState } from './state'
 import { mockEvents } from './events'
-import type { FixtureProfile } from '../fixtures/generator'
+import { PALETTE, type FixtureProfile } from '../fixtures/generator'
 
 /** A small pinned world: 4 projects (last one archived), 3 instructions. */
 const PROFILE: FixtureProfile = {
@@ -795,7 +795,7 @@ describe('scanStart / scanCancel', () => {
       { path: `${ROOT}/node_modules`, reason: 'excluded', os_code: null },
     ])
     // The store is untouched either way: nothing was added (ERR-002's
-    // twin — `scan_commit` is T-077's).
+    // twin — adding is `scanCommit`'s job, see its suite below).
     expect(mockState().projects).toHaveLength(4)
     expect(classes.size).toBe(4)
   })
@@ -847,6 +847,167 @@ describe('scanStart / scanCancel', () => {
 
   it('rejects an empty path with the E_VALIDATION field envelope', async () => {
     await expect(commands.scanStart('   ')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'path' },
+    })
+  })
+})
+
+describe('scanCommit', () => {
+  /** The fixture world's scan root and the synthetic discovery its walk reports. */
+  const ROOT = '/home/dev/src'
+  const DISCOVERED = `${ROOT}/discovered-repo`
+
+  /** One completed scan over the fixture world — the commit's precondition. */
+  async function scanWorld(): Promise<void> {
+    const outcome = await commands.scanStart(ROOT)
+    if (outcome.outcome !== 'completed') throw new Error('the uncanceled walk must complete')
+  }
+
+  it('adds the discovered repository with the manual-add rules and journals it', async () => {
+    // T-077/D-179, mock side: the one synthetic discovery goes through the
+    // SAME row-building step as `projectAddManual` (name from the folder,
+    // DB-042 label, D-29 color, appended `sort_order`, settings copied from
+    // `default.*`) with `added_via = 'scan'`, and journals one
+    // `project.added` entry naming the row.
+    await scanWorld()
+    const state = mockState()
+    const before = state.projects.length
+    const lastSortOrder = Math.max(...state.projects.map((row) => row.sortOrder))
+
+    const result = await commands.scanCommit([DISCOVERED])
+
+    expect(result.entries).toHaveLength(1)
+    const entry = result.entries[0]
+    expect(entry?.outcome).toBe('added')
+    expect(entry?.path).toBe(DISCOVERED)
+    expect(entry?.existing).toBeNull()
+    expect(entry?.project).toMatchObject({
+      path: DISCOVERED,
+      name: 'discovered-repo',
+      label: 'DISCOV',
+      added_via: 'scan',
+      sort_order: lastSortOrder + 1,
+      write_access_warning: null,
+    })
+    expect(PALETTE).toContain(entry?.project?.color)
+    expect(state.projects).toHaveLength(before + 1)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'project.added',
+      level: 'info',
+      visibility: 'user',
+      result: 'ok',
+      entity_type: 'project',
+      project_id: entry?.project?.id,
+    })
+  })
+
+  it('rejects a path no completed scan reported, before anything is added', async () => {
+    // The discovered-set rule (SEC-003, D-179): a path under the scanned
+    // root that the walk did not report is the typed `E_VALIDATION` of the
+    // `path` field echoing the caller's input, and nothing is added — with
+    // a reported path in the same selection, either. Before any completed
+    // scan nothing is reported at all.
+    await scanWorld()
+    const before = mockState().projects.length
+    const never = `${ROOT}/never-reported`
+
+    await expect(commands.scanCommit([DISCOVERED, never])).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'path', value: never },
+    })
+    expect(mockState().projects).toHaveLength(before)
+    await expect(commands.scanCommit(['   '])).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'path' },
+    })
+
+    resetMockState(PROFILE)
+    await expect(commands.scanCommit([DISCOVERED])).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'path' },
+    })
+  })
+
+  it('answers typed outcomes for registered and excluded paths and adds the rest', async () => {
+    // The typed non-add outcomes mirror the real command: an active row is
+    // `already_added` naming that row, an archived one `archived` with the
+    // restore offer's id, an excluded path `excluded`; the discovery in the
+    // same selection is still added — and re-sending the selection
+    // converges (one row, one journal entry for the discovery).
+    await scanWorld()
+    const state = mockState()
+    const known = state.projects.find((row) => row.state === 'active')
+    const archived = state.projects.find((row) => row.state === 'archived')
+    const excluded = state.exclusions[0]
+    if (!known || !archived || !excluded) throw new Error('the fixture world must hold all three')
+    const before = state.projects.length
+    const journalBefore = state.activity.length
+
+    const first = await commands.scanCommit([archived.path, excluded.path, DISCOVERED, known.path])
+    const byPath = new Map(first.entries.map((entry) => [entry.path, entry]))
+
+    expect(first.entries.map((entry) => entry.path)).toEqual([
+      archived.path,
+      excluded.path,
+      DISCOVERED,
+      known.path,
+    ])
+    expect(byPath.get(archived.path)).toMatchObject({
+      outcome: 'archived',
+      project: null,
+      existing: { id: archived.id, state: 'archived', path: archived.path },
+    })
+    expect(byPath.get(excluded.path)).toEqual({
+      path: excluded.path,
+      outcome: 'excluded',
+      project: null,
+      existing: null,
+    })
+    expect(byPath.get(DISCOVERED)?.outcome).toBe('added')
+    expect(byPath.get(known.path)).toMatchObject({
+      outcome: 'already_added',
+      project: null,
+      existing: { id: known.id, state: 'active' },
+    })
+    expect(state.projects).toHaveLength(before + 1)
+    expect(state.activity).toHaveLength(journalBefore + 1)
+
+    const second = await commands.scanCommit([archived.path, excluded.path, DISCOVERED, known.path])
+    expect(second.entries.map((entry) => entry.outcome)).toEqual([
+      'archived',
+      'excluded',
+      'already_added',
+      'already_added',
+    ])
+    expect(state.projects).toHaveLength(before + 1)
+    expect(state.activity).toHaveLength(journalBefore + 1)
+  })
+
+  it('collapses duplicate spellings and answers an empty selection with no entries', async () => {
+    // The same repository sent twice (once with a trailing separator, which
+    // keys alike) is one entry and one row; the empty selection is the
+    // typed no-op.
+    await scanWorld()
+    const state = mockState()
+    const before = state.projects.length
+
+    const result = await commands.scanCommit([DISCOVERED, `${DISCOVERED}/`, DISCOVERED])
+
+    expect(result.entries).toHaveLength(1)
+    expect(state.projects.filter((row) => row.path === DISCOVERED)).toHaveLength(1)
+    expect(state.projects).toHaveLength(before + 1)
+    await expect(commands.scanCommit([])).resolves.toEqual({ entries: [] })
+    expect(state.projects).toHaveLength(before + 1)
+  })
+
+  it('a cancelled scan publishes nothing', async () => {
+    // ERR-002: only a completed walk publishes its findings.
+    const pending = commands.scanStart(ROOT)
+    await commands.scanCancel()
+    expect((await pending).outcome).toBe('cancelled')
+
+    await expect(commands.scanCommit([DISCOVERED])).rejects.toMatchObject({
       code: 'E_VALIDATION',
       params: { field: 'path' },
     })

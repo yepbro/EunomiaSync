@@ -18,10 +18,13 @@
 // `project_add_manual` never triggers, and its SEC-003 session-allowlist
 // gate and §6.9 name-length validation are not modelled (an unpicked or
 // absurdly named folder is accepted); the write-access probe always
-// answers "writable"; `db_restore_backup`/`db_recreate` do not model the
-// recovery-mode-only guard; `markdown_preview` is a small escaper with the
-// one D-15 warning, not a pulldown-cmark mirror; D-29's tie-break is
-// palette order, not an id hash.
+// answers "writable"; `scan_commit` models the discovered-set rule (only
+// paths the last completed `scanStart` reported are admitted) but none of
+// its filesystem gates (a reported path that vanished or lost its `.git`
+// since the scan is added here); `db_restore_backup`/`db_recreate` do not
+// model the recovery-mode-only guard; `markdown_preview` is a small
+// escaper with the one D-15 warning, not a pulldown-cmark mirror; D-29's
+// tie-break is palette order, not an id hash.
 
 import type {
   ActivityPageWire,
@@ -32,6 +35,7 @@ import type {
   IpcCommands,
   MarkdownPreview,
   ProjectAddResultWire,
+  ScanCommitEntryWire,
   ScanRunOutcomeWire,
   ScannedRepository,
   SettingChange,
@@ -51,6 +55,7 @@ import {
   toAddedProject,
   toColumnEntry,
   type MockProjectRow,
+  type MockState,
 } from './state'
 
 /** The page size when the caller sends none (the real command's value). */
@@ -159,6 +164,56 @@ function pickColor(projects: readonly MockProjectRow[]): string {
   // Tie-break: first palette member (the real command hashes the new id —
   // an approximation, documented in DECISIONS.md D-108's limits).
   return best
+}
+
+/**
+ * Appends one project row the way BOTH add commands register one — the
+ * Rust side's shared create step (D-179): the name from the folder, the
+ * DB-042 label, the D-29 color over the ACTIVE rows, the appended
+ * `sort_order`, the write settings copied from `default.*`, the clean §5.7
+ * baseline, and the `project.added` journal entry. `key` is the canonical
+ * path (the mock has no filesystem: the key IS the path).
+ */
+function appendProjectRow(
+  state: MockState,
+  key: string,
+  addedVia: MockProjectRow['addedVia'],
+): MockProjectRow {
+  const defaults = defaultsFromSettings(state.settings)
+  const segments = key.split('/')
+  const name = (segments[segments.length - 1] ?? '').trim() || 'project'
+  const row: MockProjectRow = {
+    id: freshRowId(),
+    path: key,
+    name,
+    label: defaultLabel(name),
+    color: pickColor(state.projects),
+    state: 'active',
+    addedVia,
+    sortOrder: state.projects.reduce((max, p) => Math.max(max, p.sortOrder), 0) + 1,
+    scheme: defaults.scheme,
+    baseName: defaults.baseName,
+    extraLocalEnabled: defaults.extraLocalEnabled,
+    extraLocalPosition: defaults.extraLocalPosition,
+    extraProjectEnabled: defaults.extraProjectEnabled,
+    extraProjectPosition: defaults.extraProjectPosition,
+    available: true,
+    unavailableReason: null,
+    dirty: false,
+    // §5.7's clean baseline for a fresh row: never synced, no file
+    // verdict exists (OUT-005: the sync creates the file) — the
+    // watch-service mock twin would compute exactly this.
+    externalChanged: false,
+    fileDeleted: false,
+    // And no lost watch: the file was never observed, so nothing
+    // was lost from observation (the notice's cold baseline,
+    // D-155).
+    unwatchedReason: null,
+    lastSyncedAt: null,
+  }
+  state.projects.push(row)
+  journal('project.added', { entityType: 'project', entityId: row.id, projectId: row.id })
+  return row
 }
 
 // ---------------------------------------------------------------------------
@@ -323,40 +378,7 @@ export const mockCommands: IpcCommands = {
       const result: ProjectAddResultWire = { outcome, project: null, offered_root: null, existing }
       return result
     }
-    const defaults = defaultsFromSettings(state.settings)
-    const segments = key.split('/')
-    const name = (segments[segments.length - 1] ?? '').trim() || 'project'
-    const row: MockProjectRow = {
-      id: freshRowId(),
-      path: key,
-      name,
-      label: defaultLabel(name),
-      color: pickColor(state.projects),
-      state: 'active',
-      addedVia: 'manual',
-      sortOrder: state.projects.reduce((max, p) => Math.max(max, p.sortOrder), 0) + 1,
-      scheme: defaults.scheme,
-      baseName: defaults.baseName,
-      extraLocalEnabled: defaults.extraLocalEnabled,
-      extraLocalPosition: defaults.extraLocalPosition,
-      extraProjectEnabled: defaults.extraProjectEnabled,
-      extraProjectPosition: defaults.extraProjectPosition,
-      available: true,
-      unavailableReason: null,
-      dirty: false,
-      // §5.7's clean baseline for a fresh row: never synced, no file
-      // verdict exists (OUT-005: the sync creates the file) — the
-      // watch-service mock twin would compute exactly this.
-      externalChanged: false,
-      fileDeleted: false,
-      // And no lost watch: the file was never observed, so nothing
-      // was lost from observation (the notice's cold baseline,
-      // D-155).
-      unwatchedReason: null,
-      lastSyncedAt: null,
-    }
-    state.projects.push(row)
-    journal('project.added', { entityType: 'project', entityId: row.id, projectId: row.id })
+    const row = appendProjectRow(state, key, 'manual')
     return { outcome: 'added', project: toAddedProject(row), offered_root: null, existing: null }
   },
 
@@ -624,12 +646,15 @@ export const mockCommands: IpcCommands = {
    * makes `scanCancel` observable mid-scan); each step checks the
    * cancel latch and emits one `scan://progress` payload, and a
    * latched cancel answers the payload-less `cancelled` outcome
-   * (ERR-002: nothing is added to the store either way —
-   * `scan_commit` is T-077's). A second start while one is live
-   * rejects `E_SYNC_RUNNING` (the slot guard's mock twin). NOT
-   * modelled, like `project_add_manual`'s list: the SEC-003 gate
-   * (paths are trusted) — only the empty path is rejected, with the
-   * real command's `E_VALIDATION` field envelope.
+   * (ERR-002: nothing is added to the store either way — adding is
+   * `scanCommit`'s job). A COMPLETED walk publishes its reported keys
+   * as the session's discovered set, the only paths `scanCommit`
+   * admits (SEC-003's rule, D-179); a cancelled one leaves the
+   * previous set untouched. A second start while one is live rejects
+   * `E_SYNC_RUNNING` (the slot guard's mock twin). NOT modelled, like
+   * `project_add_manual`'s list: the SEC-003 gate on the ROOT (paths
+   * are trusted) — only the empty path is rejected, with the real
+   * command's `E_VALIDATION` field envelope.
    */
   async scanStart(path: string): Promise<ScanRunOutcomeWire> {
     // The live-scan guard precedes input validation, mirroring the
@@ -668,6 +693,74 @@ export const mockCommands: IpcCommands = {
       state.scanCancelled = true
     }
     return null
+  },
+
+  /**
+   * `scan_commit` (§7.10, PRJ-002's "Add selected"; T-077/D-179): the
+   * discovered-set rule first — every sent path's key must be among the
+   * last COMPLETED `scanStart`'s reported keys, else the typed
+   * `E_VALIDATION` rejection of the `path` field (nothing is added); an
+   * empty entry is the same field's rejection. Then one entry per
+   * DISTINCT path in sent order: a path an ACTIVE project holds answers
+   * `already_added` naming that row, one an ARCHIVED project holds
+   * `archived` with the same row (the restore offer's id), one in the
+   * exclusions answers `excluded`; every other path is appended through
+   * the shared add step with `added_via = 'scan'` and answers `added`.
+   * The typed outcomes are not errors and journal nothing; a re-sent
+   * selection converges. The empty selection answers `{ entries: [] }`.
+   */
+  async scanCommit(paths) {
+    const state = mockState()
+    for (const path of paths) {
+      if (path.trim() === '') {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'path',
+          value: path,
+          reason: 'the repository path must not be empty',
+        })
+      }
+      if (!state.scanFindings.includes(pathKeyOf(path))) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'path',
+          value: path,
+          reason: 'must be a repository the last completed scan of this session reported (SEC-003)',
+        })
+      }
+    }
+    const entries: ScanCommitEntryWire[] = []
+    const seen = new Set<string>()
+    for (const path of paths) {
+      const key = pathKeyOf(path)
+      if (seen.has(key)) continue
+      seen.add(key)
+      const existingRow = state.projects.find((row) => pathKeyOf(row.path) === key)
+      if (existingRow) {
+        const existing: ExistingProject = {
+          id: existingRow.id,
+          name: existingRow.name,
+          path: existingRow.path,
+          state: existingRow.state,
+        }
+        entries.push({
+          path: key,
+          outcome: existingRow.state === 'active' ? 'already_added' : 'archived',
+          project: null,
+          existing,
+        })
+        continue
+      }
+      if (state.exclusions.some((row) => row.path_key === key)) {
+        entries.push({ path: key, outcome: 'excluded', project: null, existing: null })
+        continue
+      }
+      entries.push({
+        path: key,
+        outcome: 'added',
+        project: toAddedProject(appendProjectRow(state, key, 'scan')),
+        existing: null,
+      })
+    }
+    return { entries }
   },
 
   /**
@@ -766,7 +859,9 @@ export const mockCommands: IpcCommands = {
  * backend's ≥100 ms throttle has no mock twin: the six emissions ARE
  * the observable, and the rate bound is the Rust seam's test), the
  * cancel latch checked between every step (a latched cancel answers
- * the payload-less `cancelled` outcome with the store untouched).
+ * the payload-less `cancelled` outcome with the store untouched), and
+ * the completed walk's keys published as the session's discovered set
+ * (the commit's SEC-003 universe).
  */
 async function runMockScan(root: string): Promise<ScanRunOutcomeWire> {
   const state = mockState()
@@ -818,6 +913,8 @@ async function runMockScan(root: string): Promise<ScanRunOutcomeWire> {
       current_path: step === 6 ? discovered : `${prefix}folder-${step}`,
     })
   }
+  // The discovered set (D-179): only a completed walk publishes.
+  state.scanFindings = repositories.map((repo) => repo.path_key)
   return {
     outcome: 'completed',
     checked,

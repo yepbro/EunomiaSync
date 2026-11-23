@@ -1663,6 +1663,33 @@ pub(crate) fn scan_start_failed(error: &AppError) {
     );
 }
 
+/// The `scan_commit` command's ONE failure edge (T-077, the D-096
+/// law): every `Err` path of the command — the `E_SYNC_RUNNING`
+/// SYS-005 refusal, the SEC-003 discovered-set rejection of a path no
+/// completed scan reported, `E_PROJECT_UNAVAILABLE` for a folder that
+/// vanished since the scan, `E_NOT_A_REPO` for one that is no longer
+/// a root, the `E_VALIDATION` envelope of a §6.9 field, the store
+/// fallbacks of the one-transaction batch (busy exhaustion, a corrupt
+/// cell, a rolled-back row) and the blocking-pool joins — flows
+/// through here with the error's own §7.10 vocabulary, in the
+/// `project_add_failed` shape. `error` level per §10's every-error
+/// rule. The typed non-add outcomes (`already_added`, `archived`,
+/// `excluded`) and the empty selection are success-shaped answers and
+/// log nothing; a successful commit is its own `project.added` journal
+/// entries, written inside the operation's transaction (D-051) — never
+/// duplicated into the file log (the info+user+ok unmirrored shape).
+pub(crate) fn scan_commit_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::scan",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "adding the selected scanned repositories failed"
+    );
+}
+
 /// A scan stopped by its user (T-076, ERR-002): the cancel token
 /// latched and a walker thread observed it — everything the walk
 /// accumulated was dropped and NOTHING was saved (the command wrote
@@ -3465,6 +3492,66 @@ mod tests {
         assert!(
             log.contains("/repos/plain") && log.contains("os_code=None"),
             "the params travel on the line and no OS fact is invented, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_scan_commit_failure_line_carries_the_code_and_payload() {
+        // The scan commit's §10 edge (T-077), in the
+        // `project_add_failed` pin shape: the commit's own rejection
+        // — a path no completed scan reported (`E_VALIDATION` naming
+        // the path field, the SEC-003 reason) — and a folder that
+        // vanished since the scan (`E_PROJECT_UNAVAILABLE` with the
+        // path in params and the OS refusal in details) both reach the
+        // log line with their code literals. The typed outcomes and
+        // the empty selection log nothing; that half is structural (no
+        // tracing call exists on those paths — they return `Ok`
+        // before the logging edge).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut unreported = AppError::new(crate::errors::ErrorCode::Validation);
+        unreported
+            .params
+            .insert("field".to_owned(), "path".to_owned());
+        unreported
+            .params
+            .insert("value".to_owned(), "/repos/never-scanned".to_owned());
+        unreported.params.insert(
+            "reason".to_owned(),
+            "must be a repository the last completed scan reported (SEC-003)".to_owned(),
+        );
+        let mut vanished = AppError::new(crate::errors::ErrorCode::ProjectUnavailable);
+        vanished
+            .params
+            .insert("path".to_owned(), "/repos/gone".to_owned());
+        let vanished = vanished.with_os_error(&std::io::Error::from_raw_os_error(2));
+
+        tracing::subscriber::with_default(subscriber, || {
+            scan_commit_failed(&unreported);
+            scan_commit_failed(&vanished);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("code=\"E_VALIDATION\"")
+                && log.contains("/repos/never-scanned")
+                && log.contains("SEC-003"),
+            "the SEC-003 rejection's line carries its code, the path and the reason, got: {log}"
+        );
+        assert!(
+            log.contains("code=\"E_PROJECT_UNAVAILABLE\"")
+                && log.contains("/repos/gone")
+                && log.contains("os_code=Some(2)"),
+            "the vanished folder's line carries its code, the path and the OS refusal, got: {log}"
+        );
+        assert_eq!(
+            log.matches("adding the selected scanned repositories failed")
+                .count(),
+            2,
+            "each failure says what failed, exactly once per call, got: {log}"
         );
         drop(temp);
     }

@@ -224,7 +224,8 @@ surfaces (§7, §8, §11), because the main-window UI has not landed:
 as of 2026-11-23, `src/App.vue` renders the shell only — no toolbar
 buttons, library, matrix, scan modal or sync panel. The
 scenario-relevant backend commands (`project_add_manual`,
-`scan_start`/`scan_cancel`, `sync_run`, `settings_get`/`settings_set`)
+`scan_start`/`scan_cancel`/`scan_commit`, `sync_run`,
+`settings_get`/`settings_set`)
 are registered (`src-tauri/src/lib.rs`); the library and assignment
 commands are not. No entry below is executable until its surfaces
 land; each entry's Pending line names them, with the spec §16
@@ -315,7 +316,7 @@ Source: spec §8 S2; §7.1 PRJ-002, PRJ-005…007, NFR-015; §9.6
 ALG-051…055; §6.5 scan defaults.
 
 Pending: the Scan modal (UI-002) and its result view — spec §16 M1.
-(The backend `scan_start`/`scan_cancel` are registered.)
+(The backend `scan_start`/`scan_cancel`/`scan_commit` are registered.)
 
 **Prepare.** A scratch root containing: two plain repos; a repo nested
 one level inside another repo; a repo under a folder named
@@ -347,7 +348,10 @@ Unix: `chmod 000 "<folder>"`); one repo already added by hand (S1).
   the OS code and a fix hint — and the scan continued past it
   (PRJ-007). No duplicate rows.
 - "Add selected" is disabled until at least one row is checked; the
-  add is one transaction (PRJ-002).
+  add is one transaction (PRJ-002): the added rows appear as columns
+  with the defaults, color and label a manual add would have given
+  them (S1), and the project settings modal names their origin as
+  found by scan (PRJ-008).
 - Canceling the big scan added nothing (PRJ-002's criterion), and the
   window stayed responsive during the walk (NFR-015).
 - The rescan produced no duplicates — the earlier adds sit in
