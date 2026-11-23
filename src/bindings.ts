@@ -278,18 +278,21 @@ export const commands = {
 	 *  6. **The watch refresh** (§5.7 SYS-007, T-257/D-137's follow-up
 	 *     2): the committed row joins the watched set, so the answer
 	 *     waits for one FULL pass through
-	 *     [`file_watch::refresh_after_sync`] — the SAME seam the sync
-	 *     pipeline runs after its writes (never a second refresh path),
-	 *     on the service task, its blocking half on the pool. The
+	 *     [`file_watch::refresh_after_mutation`] — the BOUNDED twin of
+	 *     the seam the sync pipeline runs after its writes (the same
+	 *     `Refresh` command and ack, never a second refresh path; the
+	 *     budget since T-280/D-156, so a pass stuck on a dead mount
+	 *     degrades instead of hanging this answer), on the service task,
+	 *     its blocking half on the pool. The
 	 *     refresh is never-fatal aftermath (D-138's watch posture): the
-	 *     project IS added whatever the pass answers — a refusal
-	 *     degrades silently, and the next anchor (an availability
-	 *     change, a debounced file event, the next sync or mutation)
-	 *     re-converges the set, because every full pass re-derives it
-	 *     from the project table. The other SYS-005-gated mutations
-	 *     change no watched file (`projects_reorder` moves sort_order,
-	 *     `exclusion_remove` touches no project row) and run no
-	 *     refresh; the spec's scheme/name/archive/restore/relink
+	 *     project IS added whatever the pass answers — a refusal or the
+	 *     budget's expiry degrades silently, and the next anchor (an
+	 *     availability change, a debounced file event, the next sync or
+	 *     mutation) re-converges the set, because every full pass
+	 *     re-derives it from the project table. The other SYS-005-gated
+	 *     mutations change no watched file (`projects_reorder` moves
+	 *     sort_order, `exclusion_remove` touches no project row) and run
+	 *     no refresh; the spec's scheme/name/archive/restore/relink
 	 *     commands call the same seam as they land.
 	 * 
 	 *  Failures reach the log with their §10 code

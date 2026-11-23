@@ -1759,11 +1759,14 @@ pub(crate) fn file_watch_init_failed(error: &eunomia_fs::watcher::WatcherInitErr
 /// so the state is never lost, only late. The payload is the
 /// error's own §7.10 vocabulary — the code literal, its
 /// interpolation params, the OS facts — in the
-/// `availability_check_failed` shape. An AWAITED pass failure (the
-/// `refresh_after_sync` seam) is deliberately NOT logged here: the
-/// awaiting caller owns the durable half (the sync pipeline's
-/// `sync_run_degraded` watch arm; the add flow's line is T-257's
-/// card), so every failure is logged exactly once.
+/// `availability_check_failed` shape. An AWAITED pass failure is
+/// deliberately NOT logged here, for either awaited seam
+/// (`refresh_after_sync`, or its bounded mutation twin
+/// `refresh_after_mutation`): the awaiting caller owns the durable
+/// half — the sync pipeline's `sync_run_degraded` watch arm answers
+/// for its calls, and the add flow's line is T-278's pending card —
+/// so this edge carries the fire-and-forget triggers' failures and
+/// every class is logged exactly once once that card lands.
 pub(crate) fn file_watch_pass_failed(error: &AppError) {
     tracing::error!(
         target: "eunomia::file_watch",

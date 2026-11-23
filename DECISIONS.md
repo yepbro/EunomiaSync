@@ -16654,3 +16654,282 @@ episode` test drives it with a failing emitter — the recording is
   the emit branch — the round-1 bug verbatim; M7b the recording
   call deleted), each with the cargo exit code 101 observed. The
   review phase is complete after this round (no third round).
+
+### D-156 — T-280: the bounded wait for mutation-initiated watch refreshes — the add's watch refresh can no longer hang the interactive answer on a stuck mount — 2026-11-22
+
+Problem: D-144's round-1 P3-4 (this card). `project_add_manual`'s
+committed arm awaits ONE FULL pass through `refresh_after_sync`;
+a pass stuck on a dead network mount (a stat that never returns)
+hangs the interactive answer with it. D-144's honest-boundaries
+sentence called the exposure not-new — the flow's own write-access
+probe touches the same folder first — but the probe touches ONE
+file while the pass probes EVERY available project's folder:
+strictly wider exposure than any other step of that flow, and the
+one place a UX answer waits on hardware the command never chose.
+(The flow's older unbounded awaits — the path canonicalize, the
+git-root walk, the write-access probe — stay D-144's recorded
+boundary; this card bounds the refresh pass the card names.)
+
+Readings recorded BEFORE coding (rule 1):
+
+- _The budget: a named 10-second constant beside the seam, not a
+  config key._ `MUTATION_REFRESH_BUDGET = Duration::from_secs(10)`
+  in `file_watch.rs` (§5.8/D-129's constants-not-config ruling for
+  this class). The value sits an order of magnitude above every
+  healthy pass's worst case — a full pass is local-fs work (one DB
+  transaction, per project a stat, a symlink resolution, one file
+  read and an in-memory build, per wanted directory one stat and a
+  watch syscall), milliseconds per project and sub-second for
+  hundreds — so a loaded machine cannot trip a false degrade,
+  while 10 s is still inside the interactive-patience band where
+  the user reads the answer rather than retries. The budget bounds
+  ONLY the refresh region: the write-access probe before it (which
+  can itself stall seconds on a dying disk) is not counted.
+- _The degrade: the walk continues in the background, never
+  cancelled._ On expiry the caller returns and the Refresh command
+  stays exactly where it was: if the bus accepted it, the service
+  task runs the pass whenever it becomes free and its completion
+  ack fires into a dropped receiver (the existing `let _ =
+done.try_send` — the at-least-once discipline needs no ack
+  consumer); if the bus was FULL, the send future was dropped and
+  the command never enqueued — that refresh is honestly abandoned,
+  and convergence rides the anchor set (every full pass re-derives
+  the watch set from the project table, D-144's idempotent
+  convergence; the next availability change, debounced event, sync
+  or mutation re-derives it without loss). Cancelling the walk
+  (a cancel seam the sync pipeline's runs have, D-147) is rejected:
+  the watch pass has no cancel seam, and killing it would forfeit
+  convergence the service can still deliver — for an ADD the
+  verdict inputs the user just created matter, the D-144 shape.
+- _The other callers keep the unbounded wait._ `refresh_after_sync`
+  is unchanged for the sync pipeline (D-138's never-fatal
+  aftermath) and the seam's own tests: the pipeline's phases 1 and
+  3 already read and write the SAME folders, so a mount hung enough
+  to hang the aftermath pass would have hung the phases long
+  before it — bounding only the aftermath protects nothing there
+  and would add a timeout class to `sync_run_degraded`'s
+  vocabulary. The mutation seam is a TWIN sharing the same
+  command/ack core (`Command::Refresh` with a done sender — one
+  refresh path, two wait policies), not a second refresh path.
+- _The timer is the already-present tokio `time` feature._
+  `tokio::time::timeout` (verified in the installed tokio 1.54.1
+  sources, `src/time/timeout.rs:86`) — tokio 1 with only `time` is
+  already a direct dependency of the app crate (D-054's retention
+  tick), so no new crate or feature crosses rule 9. The bounded
+  region wraps the send AND the recv: a full bus (64 queued
+  commands behind a hung pass) backpressures `send().await`, and
+  bounding only the ack would leave the unbounded path this card
+  exists to kill. Cancellation safety holds — mpsc send/recv are
+  cancel-safe; a send dropped mid-await either enqueued the value
+  or did not, and both states are correct under the anchor
+  discipline above.
+- _The test knob is the managed state's budget field._
+  `FileWatchState::with_budget(Duration)` (production `new()`
+  delegates with the constant — the DEBOUNCE-parameter precedent:
+  a parameter exists only so tests can run short windows) carried
+  on the managed state because the command under test takes no
+  parameters; the injection point must be reachable from the app.
+- _The degrade's diagnostics stay silent in this card._ No log
+  line is added (SEC-008 trivially holds): the add-flow refresh
+  warn is T-278's card, not absorbed here. The expiry answers the
+  caller with the `send_error()` family's class-only shape —
+  `DbLocked` + `os_kind: "FileWatchTimeout"` (mirroring
+  `FileWatchGone`'s D-037 shape) — a THIRD class beside the
+  refused seam and the pass failure; whether T-278's line covers
+  all three classes is that card's decision (recorded as a
+  follow-up note below).
+
+Solution — the seam, in `file_watch.rs` beside its twin:
+
+- `MUTATION_REFRESH_BUDGET` (the const above) and
+  `FileWatchState::with_budget` (the knob; `new()` delegates with
+  the const — the constructor is NOT test-only code, so no cfg
+  marker). `refresh_after_sync`'s body is factored into two
+  private helpers both seams share — `send_refresh_command` (the
+  `Refresh` with its ack onto the bus) and `await_ack` (the
+  receive) — so the twin differs from its sibling in exactly ONE
+  thing: `tokio::time::timeout(budget, send-then-ack)`, with the
+  expiry answering `mutation_refresh_timeout()` (the class-only
+  error). `project_add_manual`'s committed arm calls the twin; the
+  sync pipeline's aftermath (`sync_run_with`) and the seam tests
+  keep `refresh_after_sync` verbatim. Docs updated in the same
+  change (Rule 11): the module docs' mutation bullet, the twin's
+  and `Command::Refresh`'s docs, the add command's step-6 doc and
+  inline comment (which still called `logging.rs` a frozen zone —
+  stale since D-155), the service-loop and `logging.rs`
+  pass-failure docs (the "add flow's line" now names T-278's card
+  and both awaited seams), `ARCHITECTURE.md`'s watcher paragraph,
+  and the regenerated `src/bindings.ts` (the command-doc drift the
+  export test's loud-drift chain forces, D-003/D-144 — the test
+  was red until the regenerated file was staged, by design).
+
+Tests: 2 unit pins in `file_watch.rs` (the budget IS the recorded
+ten seconds; `new()` defaults to the constant and `with_budget`
+overrides it) + 4 ipc tests in `ipc_tests.rs`:
+
+- the seam's degrade: a parked receiver (the bus accepts commands,
+  no service consumes them — the hung-pass shape AT THE CALLER: no
+  ack exists) expires a 150 ms budget and answers
+  `FileWatchTimeout`, never a hang;
+- the bound's edge: the same parked world with the bus PRE-FILLED
+  to its capacity (64 permits) — the backpressured send degrades
+  at the same budget (the region is send AND ack; bounding the ack
+  alone is the unbounded path);
+- the no-false-degrade half: the real service over the production
+  budget answers the seam with the pass's own `Ok` (and the pass
+  counter advances — the Ok is a pass's answer, not a no-op); the
+  existing D-144 wiring tests carry the same pin through the
+  command path untouched;
+- the headline scenario end to end: the real `project_add_manual`
+  over IPC in the parked world answers `added` near a 150 ms
+  budget, the refresh command it queued SURVIVES the caller's
+  return (the service spawned afterwards consumes the queued
+  command with its dead ack — the `let _` ignore is the honest
+  recovery shape — plus its own startup permit, exactly two
+  passes), and the D-144 oracle converges: the snapshot records
+  the pre-existing differing file's `external_changed` — the
+  answer degraded, the state did not.
+
+The recovery-mode test gains the twin's assertion (the honest
+`NoDatabase` through `managed_db`, answered BEFORE any wait is
+armed — D-137's "waiting for a courier that does not exist is a
+hang" lesson, restated at this seam).
+
+Mutation-verified, each red observed then reverted to green (the
+hang-shaped reds were observed BEFORE round-1's P3-3 outer bounds
+landed, as shell `timeout` kills — exit 124; after that fix the
+same mutations fail the same tests BY NAME at the 3 s
+`DEGRADE_CEILING`, re-verified for M3 in 3.02 s): M1
+the timeout given `Duration::MAX` (the bound removed) → the
+degrade test hangs (was: killed by the outer `timeout 120`, exit
+124 — the honest red form for a hang-fix: the unbounded code's
+failure mode IS the hang); M2 the degrade made unconditional → the
+no-false-degrade test red (cargo 101) — the first attempt
+(`Duration::ZERO`) stayed GREEN, instructively: `tokio`'s
+`Timeout` polls the future BEFORE the deadline on every poll, so
+a zero budget still lets a fast ack win the race — recorded here
+so the next zero-budget mutation is not mistaken for a coverage
+gap; M3 the command rewired to the unbounded `refresh_after_sync`
+(the pre-fix code verbatim) → the headline test hangs (was: exit
+124; now: fails by name in 3.02 s); M4 the expiry answering a
+fake `Ok(vec![])` instead of the honest error → the degrade test
+red (101); M5 the const silently changed to 5 s → the literal pin
+red (101); M6 the timeout wrapped only the ack (the send left
+unbounded) → the full-bus test hangs (was: exit 124; under the
+round-1 test shape it fails by name at the ceiling instead).
+
+Checks green by exit code: `cargo fmt --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, `cargo test --workspace`
+(1707 tests), `pnpm lint`, `pnpm typecheck`, `pnpm run test` (287),
+`pnpm run format:check` (after prettier re-wrapped this entry).
+One environmental flake was worked up, not noted: the full
+workspace run red on `eunomia-fs`'s
+`a_recreated_directory_is_re_armed_by_the_next_set` ("no matching
+event within 60 s") with sibling tests starved past 60 s — the
+frozen-zone file (T-283's, byte-identical to base here); the
+isolated rerun and the next full run were green — load-induced
+inotify starvation, not a regression of this diff (which touches
+no `eunomia-fs` code; the app crate cannot influence it).
+
+Honest boundaries: the parked-receiver harness proves the bound
+at the CALLER-SEAM level — the ack never arrives — which is the
+exact caller-visible shape of a hung pass, but no test drives a
+REAL stuck stat (a portable hung mount is not constructible; the
+D-139 fake-backend premise, and the service's pass internals are
+not this seam's contract). The elapsed-time assertions use a 3 s
+ceiling against a 150 ms budget: they pin "the bound is real and
+budget-sized", not a precise timing — and since round-1's P3-3 fix
+the calls themselves sit under the `DEGRADE_CEILING` outer bound,
+so a regression fails these tests BY NAME in ~3 s (before that fix
+the red form was the hang, killed by the mutation harness's outer
+`timeout` shell — the history the mutation log above records). The budget protects
+the ANSWER, not the pass: a genuinely stuck service task stays
+stuck (every later seam caller degrades too, until an anchor
+heals it), and a mutation fired while the bus is FULL loses its
+refresh outright (recorded above — convergence is the anchor
+set's). The sync path's unbounded wait is now the ONLY unbounded
+one, by the recorded reading (its phases already own the mount
+exposure); a future owner may revisit. The frontend needs no
+change: the answer's shape is unchanged and the degrade is
+invisible on the wire (the verdict arrives via the next anchor's
+event/read — the D-144 reconciliation rule).
+
+Follow-up for the board (the orchestrator cards it): T-278's
+add-flow refresh warn should decide its CLASS SET — the refused
+seam (`FileWatchGone`), the pass failure (§10 through the
+caller), and now this seam's budget expiry (`FileWatchTimeout`,
+D-156's third class) share one caller-side line-or-not decision;
+the vocabulary is `logging.rs`'s `file_watch_*` family (D-155).
+The expiry currently borrows the `send_error()` family's
+`DbLocked` code (the D-037 convention, pinned by the seam test):
+harmless while the add swallows it, but the first caller that
+SURFACES this error should give it a dedicated code (or an
+`os_kind`-keyed text) instead of naming a database lock — the
+round-1 review's P3-6 note.
+
+Round-1 review addendum (D-156, same task; report
+`.opencode/reviews/t280-round1.md`, deepseek-v4.1-flash — verdict
+approve-with-fixes: 2×P2, 6×P3; the round independently verified
+the cancellation-safety claims against the installed tokio
+sources, the frozen zone (byte-identical to main), and the
+bindings export chain), findings processed here —
+
+- P2-1 (taken): the step-6 inline comment still promised the
+  converged set "by the time the answer lands" unconditionally —
+  the very guarantee this card removes on expiry. The sentence is
+  now budget-qualified with the next-anchor landing spelled out.
+- P2-2 (taken): three new headline claims said "the interactive
+  answer cannot hang on a stuck mount" — overstated: the same
+  flow's canonicalize, git-root walk and write-access probe remain
+  unbounded awaits (D-144's recorded older exposure; verified at
+  `session_paths.rs:172-188` and `commands.rs:2883-2887`). All
+  three (ARCHITECTURE.md, the module docs, this entry's title) now
+  scope the claim to the watch pass.
+- P3-1 (taken): three stale "after-sync seam" references (the
+  `Command::Refresh` field doc, `pump_event`'s doc) pluralised to
+  both seams; `logging.rs`'s "every failure is logged exactly
+  once" softened to name the pending T-278 half.
+- P3-2 (taken): the D-144 wiring test renamed
+  `…through_the_bounded_mutation_seam` (its comment said
+  "after-sync seam" — now false); the recovery test renamed
+  `the_refresh_seams_answer_honestly_without_a_database` (it
+  asserts both seams since this card).
+- P3-3 (taken): the three hang-shaped tests wrapped their call
+  under an OUTER bound (`DEGRADE_CEILING`, a `tokio` timeout for
+  the seam tests, a detached-thread `recv_timeout` for the real-IPC
+  one) so an unbounded regression fails BY NAME in 3 s instead of
+  stalling the suite — re-verified: the M3 mutation re-run now
+  fails in 3.02 s with the test's name (was: a `timeout`-kill 124).
+- P3-4 (taken): the full-bus test now fills `0..BUS_CAPACITY`
+  (made `pub(crate)`) instead of the magic 64, and adds the
+  structural send-half pin — the expired send was CANCELLED, not
+  enqueued (`parked.len() == BUS_CAPACITY`; tokio guarantees a
+  dropped send never delivered its value).
+- P3-5 (taken): the duplicated add harness collapsed into
+  `add_manual_watch_app_with_budget` with `add_manual_watch_app`
+  delegating (the `file_watch_app` refactor's mirror).
+- P3-6 (recorded, no code change): the borrowed `DbLocked` code is
+  the D-037 family convention; the follow-up above now points the
+  first surfacing caller at a dedicated code.
+
+Round-2 review addendum (D-156, same task; report
+`.opencode/reviews/t280-round2.md`, hy4-flash-free — verdict
+approve-with-fixes: 1×P3, "no code defect found"; the round
+re-derived every round-1 fix as real, the frozen zone, the
+cancellation/convergence claims, and the bindings consistency),
+the finding processed here —
+
+- R2-P3 (taken): this entry's own pre-addendum text still described
+  the hang-shaped tests' red mechanism as the shell `timeout` kill
+  in the present tense, though round-1's P3-3 outer bounds had
+  replaced it with by-name failures at the ceiling — rule 11
+  applies to the record itself. The mutation log and the
+  honest-boundaries sentence now carry the was/now distinction
+  (and the M3 re-run's 3.02 s by-name red). The review phase is
+  complete after this round (no third round).
+
+Orchestrator addendum (merge, 2026-11-22): the follow-ups above are
+tracked — two cards in the board's INBOX ("Follow-up T-280: …" — the
+T-278 class-set decision note; the dedicated timeout-code rule for
+the first surfacing consumer). The cards are the tracking unit; this
+note only records their existence.

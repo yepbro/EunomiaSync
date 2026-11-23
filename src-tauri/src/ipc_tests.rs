@@ -6230,6 +6230,21 @@ fn file_watch_app() -> (
     tauri::App<tauri::test::MockRuntime>,
     tauri::async_runtime::Receiver<crate::file_watch::Command>,
 ) {
+    file_watch_app_with_budget(crate::file_watch::MUTATION_REFRESH_BUDGET)
+}
+
+/// [`file_watch_app`] with an explicit mutation-refresh budget — the
+/// parked-service tests' harness (D-156's seam): a TINY budget
+/// plus a receiver the test HOLDS (never spawned) is the hung-pass
+/// shape at the caller — the bus accepts commands, but no service
+/// ever consumes them, so no ack ever arrives.
+fn file_watch_app_with_budget(
+    budget: std::time::Duration,
+) -> (
+    tempfile::TempDir,
+    tauri::App<tauri::test::MockRuntime>,
+    tauri::async_runtime::Receiver<crate::file_watch::Command>,
+) {
     let temp = tempfile::tempdir().expect("failed to create a temp directory");
     data_dirs::ensure_data_layout(temp.path())
         .expect("creating the data-directory layout in a temp directory must work");
@@ -6240,7 +6255,7 @@ fn file_watch_app() -> (
         .build(mock_context(noop_assets()))
         .expect("failed to build mock app");
     app.manage(database);
-    let (state, commands) = crate::file_watch::FileWatchState::new();
+    let (state, commands) = crate::file_watch::FileWatchState::with_budget(budget);
     app.manage(state);
     tauri_specta::Builder::<tauri::test::MockRuntime>::new()
         .events(tauri_specta::collect_events![
@@ -7793,11 +7808,13 @@ fn a_correctly_synced_scheme_a_project_with_extras_at_different_positions_matche
 }
 
 #[test]
-fn the_after_sync_seam_answers_honestly_without_a_database() {
+fn the_refresh_seams_answer_honestly_without_a_database() {
     // The recovery-mode contract (the availability/dirty precedent):
     // no `Db` managed — the honest `NoDatabase` answer, no event, no
-    // panic. The service itself is never spawned in that mode (the
-    // `lib.rs` setup returns before the spawn), pinned by the source
+    // panic — for BOTH awaited seams (the after-sync one and its
+    // bounded mutation twin). The service itself is never spawned in
+    // that mode (the `lib.rs` setup returns before the spawn), pinned
+    // by the source
     // scan below.
     let app = mock_builder()
         .build(mock_context(noop_assets()))
@@ -7822,6 +7839,22 @@ fn the_after_sync_seam_answers_honestly_without_a_database() {
         "the honest no-database answer, the managed_db edge every \
          database command shares"
     );
+    // The bounded mutation twin answers the same way — recovery mode
+    // is refused BEFORE any wait is armed (T-280/D-156: waiting for a
+    // courier that does not exist is a hang, not an error path —
+    // D-137's lesson, restated at this seam).
+    let error =
+        tauri::async_runtime::block_on(crate::file_watch::refresh_after_mutation(app.handle()))
+            .expect_err("a database-less mutation refresh must fail honestly");
+    assert_eq!(
+        error
+            .details
+            .as_ref()
+            .and_then(|details| details.os_kind.as_deref()),
+        Some("NoDatabase"),
+        "the twin seam's recovery answer is the same honest edge, \
+         never a budget wait"
+    );
     assert!(events.try_recv().is_err(), "no event without a database");
 }
 
@@ -7833,6 +7866,21 @@ fn the_after_sync_seam_answers_honestly_without_a_database() {
 /// returned so the test spawns the REAL service — the wiring's proof
 /// needs the service task, not a stub.
 fn add_manual_watch_app() -> (
+    tempfile::TempDir,
+    tauri::App<tauri::test::MockRuntime>,
+    tauri::async_runtime::Receiver<crate::file_watch::Command>,
+) {
+    add_manual_watch_app_with_budget(crate::file_watch::MUTATION_REFRESH_BUDGET)
+}
+
+/// [`add_manual_watch_app`] with an explicit mutation-refresh budget
+/// — the hung-world tests' harness (D-156): a TINY budget plus a
+/// receiver the test HOLDS (never spawned) is the hung-pass shape at
+/// the caller — the bus accepts commands, but no service ever
+/// consumes them, so no ack ever arrives.
+fn add_manual_watch_app_with_budget(
+    budget: std::time::Duration,
+) -> (
     tempfile::TempDir,
     tauri::App<tauri::test::MockRuntime>,
     tauri::async_runtime::Receiver<crate::file_watch::Command>,
@@ -7851,7 +7899,7 @@ fn add_manual_watch_app() -> (
     app.manage(database);
     app.manage(crate::session_paths::SessionPaths::new());
     app.manage(crate::sync_running::SyncRunning::new());
-    let (state, commands) = crate::file_watch::FileWatchState::new();
+    let (state, commands) = crate::file_watch::FileWatchState::with_budget(budget);
     app.manage(state);
     tauri_specta::Builder::<tauri::test::MockRuntime>::new()
         .events(tauri_specta::collect_events![
@@ -7862,15 +7910,17 @@ fn add_manual_watch_app() -> (
 }
 
 #[test]
-fn project_add_manual_refreshes_the_watch_set_through_the_after_sync_seam() {
-    // D-137's follow-up 2, wired by T-257: the committed add joins
-    // the watched set through ONE awaited full pass on the
-    // after-sync seam — the same seam the sync pipeline calls, never
-    // a second refresh path. The proof needs a verdict only a pass
-    // that COVERED the new row can record: a PRE-EXISTING differing
-    // `AGENTS.md` (SYS-008's literal reading — externally modified
-    // regardless of sync history). Without the wiring the cache
-    // stays empty (absent ≡ clean) and the flag reads false.
+fn project_add_manual_refreshes_the_watch_set_through_the_bounded_mutation_seam() {
+    // D-137's follow-up 2, wired by T-257, bounded by T-280/D-156:
+    // the committed add joins the watched set through ONE awaited
+    // full pass on the bounded mutation seam — the same refresh
+    // path (command, ack, service pass) the sync pipeline's
+    // aftermath runs, with a wait budget instead of an unbounded
+    // wait. The proof needs a verdict only a pass that COVERED the
+    // new row can record: a PRE-EXISTING differing `AGENTS.md`
+    // (SYS-008's literal reading — externally modified regardless
+    // of sync history). Without the wiring the cache stays empty
+    // (absent ≡ clean) and the flag reads false.
     let (temp, app, commands) = add_manual_watch_app();
     let repo = repo_dir(temp.path(), "eunomia-repo");
     std::fs::write(
@@ -7965,6 +8015,227 @@ fn a_refused_add_runs_no_watch_pass() {
         2,
         "a refused add runs no watch pass — the refresh is the \
          committed arm's alone"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+/// The budget the hung-world tests run: milliseconds, so the expiry
+/// is exercised without a real wait, yet far above the send's own
+/// microseconds — a healthy empty-bus send never races it.
+const HUNG_WORLD_BUDGET: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The OUTER bound every hung-world test wraps its call under: a
+/// regression to an unbounded wait fails the test BY NAME at this
+/// ceiling — the call is dropped or detached mid-await and the
+/// assertion message names the hang — instead of stalling the whole
+/// suite until a job timeout (the round-1 review's P3-3; the
+/// mutation checks' outer `timeout` shells demonstrated the same
+/// reds pre-fix, but a red a developer cannot see in the test
+/// output is half a red). Orders of magnitude above the budget for
+/// scheduling headroom on a loaded runner.
+const DEGRADE_CEILING: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[test]
+fn the_mutation_refresh_seam_degrades_when_no_ack_arrives_within_the_budget() {
+    // D-156's core contract at the seam: a pass that never answers
+    // (the hung-mount world) expires the budget, and the caller
+    // gets the class-only `FileWatchTimeout` answer — never a hang.
+    // The parked receiver IS that world at the caller: the command
+    // is accepted onto the bus, no service consumes it, no ack
+    // exists.
+    let (temp, app, _parked) = file_watch_app_with_budget(HUNG_WORLD_BUDGET);
+    let started = std::time::Instant::now();
+    let outcome = tauri::async_runtime::block_on(async {
+        tokio::time::timeout(
+            DEGRADE_CEILING,
+            crate::file_watch::refresh_after_mutation(app.handle()),
+        )
+        .await
+    });
+    let error = outcome
+        .expect("the seam must answer within the ceiling, not hang")
+        .expect_err("a never-acking pass must expire the budget, not hang");
+    assert!(
+        started.elapsed() < DEGRADE_CEILING,
+        "the degraded answer must land near the budget ({} ms), not hang: {:?}",
+        HUNG_WORLD_BUDGET.as_millis(),
+        started.elapsed()
+    );
+    assert_eq!(
+        error
+            .details
+            .as_ref()
+            .and_then(|details| details.os_kind.as_deref()),
+        Some("FileWatchTimeout"),
+        "the expiry's class-only answer, discriminable from FileWatchGone"
+    );
+    assert_eq!(
+        error.code.as_str(),
+        crate::errors::ErrorCode::DbLocked.as_str(),
+        "the send_error family's code — the honest not-answering class"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_mutation_refresh_seam_bounds_a_full_bus_backpressured_send_too() {
+    // The bound's edge (D-156): the region bounded is send AND ack —
+    // a full bus (every queued permit behind the parked consumer)
+    // backpressures the send, and only a timeout wrapping both
+    // halves degrades. Bounding the ack alone would leave this test
+    // failing at the outer ceiling on the send.
+    let (temp, app, parked) = file_watch_app_with_budget(HUNG_WORLD_BUDGET);
+    let state = app.state::<crate::file_watch::FileWatchState>();
+    for _ in 0..crate::file_watch::BUS_CAPACITY {
+        state.trigger(crate::file_watch::Command::Refresh { done: None });
+    }
+    let outcome = tauri::async_runtime::block_on(async {
+        tokio::time::timeout(
+            DEGRADE_CEILING,
+            crate::file_watch::refresh_after_mutation(app.handle()),
+        )
+        .await
+    });
+    let error = outcome
+        .expect("the send half of the region is bounded too — no hang")
+        .expect_err("a backpressured send must expire the budget, not hang");
+    assert_eq!(
+        error
+            .details
+            .as_ref()
+            .and_then(|details| details.os_kind.as_deref()),
+        Some("FileWatchTimeout")
+    );
+    // The structural send-half pin: the expired send was CANCELLED,
+    // not enqueued — tokio guarantees a dropped `send` never
+    // delivered its value, so the bus still holds exactly the fill.
+    // An ack-only bound (the M6 shape) parks the send on the full
+    // bus forever and this assertion's world is unreachable.
+    assert_eq!(
+        parked.len(),
+        crate::file_watch::BUS_CAPACITY,
+        "the expired send was cancelled — the refresh command never \
+         reached the bus, the honestly abandoned branch"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_mutation_refresh_seam_answers_the_real_pass_within_the_budget() {
+    // The no-false-degrade half: a healthy pass answers well inside
+    // the production budget, and the seam returns the PASS's own
+    // answer — not the timeout sentinel. The existing D-144 wiring
+    // tests carry the same pin through the command path (a healthy
+    // suite stays green with the production budget); this drives
+    // the seam directly so the Ok answer itself is the assertion.
+    let (temp, app, commands) = file_watch_app();
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    wait_for_watch_passes(&app, 1); // the startup pass over an empty table
+    let diff =
+        tauri::async_runtime::block_on(crate::file_watch::refresh_after_mutation(app.handle()))
+            .expect("a healthy pass must answer within the production budget");
+    assert!(
+        diff.is_empty(),
+        "an empty table's full pass reports no changes: {diff:?}"
+    );
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>()
+            .pass_count(),
+        2,
+        "the seam's pass ran — the Ok is the pass's own answer, not a no-op"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn project_add_manual_answers_within_the_refresh_budget_when_the_watch_pass_hangs() {
+    // T-280's headline scenario end to end: the committed add over
+    // the real IPC path with the watch pass in the hung world — the
+    // ANSWER returns near the budget (never-fatal aftermath, the
+    // project IS added), the refresh command the add queued
+    // SURVIVES the caller's return (the background continuation
+    // reading), and the next anchor converges the set: the service
+    // spawned afterwards consumes the queued pass plus its own
+    // startup permit, and only a pass that COVERED the committed
+    // row can record the pre-existing differing file's verdict
+    // (D-144's oracle).
+    let (temp, app, commands) = add_manual_watch_app_with_budget(HUNG_WORLD_BUDGET);
+    let repo = repo_dir(temp.path(), "eunomia-repo");
+    std::fs::write(
+        repo.join("AGENTS.md"),
+        "A pre-existing file an editor left.\n",
+    )
+    .expect("the pre-existing target must work");
+    let picked = pick_folder(&app, &repo);
+    let webview = main_webview(&app);
+
+    // Act: the committed add in the hung world — on its own thread
+    // under the outer ceiling, so an unbounded regression fails THIS
+    // test by name at the ceiling instead of stalling the suite
+    // (the round-1 review's P3-3; the mock IPC's channel round trip
+    // is thread-safe — the webview handle is a cloneable handle).
+    // A detached thread that outlives the ceiling stays parked until
+    // the process exits — the visible failure it produces is the
+    // point.
+    let started = std::time::Instant::now();
+    let (answer, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = answer.send(invoke_project_add_manual(
+            &webview,
+            &picked,
+            serde_json::json!(null),
+        ));
+    });
+    let added = receiver
+        .recv_timeout(DEGRADE_CEILING)
+        .expect("the add must answer within the ceiling, not hang — the bound regressed")
+        .expect("the add must succeed — the expired refresh is never-fatal aftermath");
+    assert_eq!(added.outcome, "added");
+    let new_id = added
+        .project
+        .expect("the added arm carries the created row")
+        .id;
+    assert!(
+        started.elapsed() < DEGRADE_CEILING,
+        "the interactive answer returns near the budget even while \
+         the pass cannot answer: {:?}",
+        started.elapsed()
+    );
+
+    // The queued refresh survived the caller's return: the service
+    // spawned NOW consumes the add's own queued command (its ack
+    // receiver is long dropped — the `let _` ignore is the honest
+    // recovery shape) plus its startup permit — exactly two passes.
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    wait_for_watch_passes(&app, 2);
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>()
+            .pass_count(),
+        2,
+        "the queued mutation refresh ran beside the startup permit — \
+         the degrade abandoned nothing that was already on the bus"
+    );
+    // The convergence oracle (D-144): the set re-derived, the
+    // verdict recorded — the answer degraded, the state did not.
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>().snapshot(),
+        vec![crate::file_watch::ProjectFileChange {
+            project_id: new_id,
+            external_changed: true,
+            file_deleted: false,
+        }],
+        "the next anchor converges the set — only a pass that \
+         covered the committed row can record this"
     );
     // Windows teardown rule.
     drop(app);

@@ -55,14 +55,19 @@
 //!   names).
 //! - **Project mutations** — SYS-007's own set points: a project
 //!   ADDED joins the watched set (`project_add_manual`'s committed
-//!   arm awaits [`refresh_after_sync`] since T-257), and the
-//!   scheme/file-name/archive/restore/relink changes call the same
-//!   seam as their §7.10 commands land (`project_update`,
-//!   `project_archive`, `project_restore`, `project_relink` — the
-//!   SYS-005 gate's "join as they land" precedent). No commit-hook
-//!   piggyback exists here by design: the DB-022 hook is the dirty
-//!   service's, and this service's pass probes folders — a hook that
-//!   fires inside the connection's mutex must never block (D-121).
+//!   arm awaits the bounded mutation seam
+//!   [`refresh_after_mutation`] since T-280 — the after-sync seam's
+//!   twin with a wait budget, so the watch pass can no longer hang
+//!   the interactive answer; the add flow's own older probe
+//!   exposure stays D-144's recorded boundary), and the
+//!   scheme/file-name/archive/restore/
+//!   relink changes call the same seam as their §7.10 commands land
+//!   (`project_update`, `project_archive`, `project_restore`,
+//!   `project_relink` — the SYS-005 gate's "join as they land"
+//!   precedent). No commit-hook piggyback exists here by design: the
+//!   DB-022 hook is the dirty service's, and this service's pass
+//!   probes folders — a hook that fires inside the connection's
+//!   mutex must never block (D-121).
 //!
 //! The backend's lost-events signal ([`WatchEvent::Backend`], SYS-010)
 //! also lands as a `Refresh`: the documented "re-check all target
@@ -148,8 +153,10 @@
 //! every-error rule — logged by the service loop for the
 //! FIRE-AND-FORGET triggers; an awaited seam failure's durable half
 //! is the caller's own line, so every failure logs exactly once —
-//! the add flow's awaited seam stays T-257's line and logs nowhere
-//! until that card lands),
+//! the add flow's awaited seam stays T-278's line and logs nowhere
+//! until that card lands; the mutation twin's budget expiry is a
+//! third class beside the refused seam and the pass failure, its
+//! boundary recorded in D-156),
 //! the emit warn (`file_watch_emit_failed`, a missed UI update —
 //! the at-least-once retry contract) and the refused-watch warn
 //! (`file_watch_refused`, once per degradation episode over the
@@ -202,13 +209,30 @@ use crate::logging;
 /// tests can run a short window; production passes this constant.
 pub(crate) const DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// How long an INTERACTIVE caller waits for its mutation-initiated
+/// refresh pass ([`refresh_after_mutation`], T-280/D-156) before
+/// degrading and answering without the pass — the bounded twin of the
+/// after-sync seam's unbounded wait. Ten seconds sits an order of
+/// magnitude above every healthy full pass's worst case (local-fs
+/// work: one DB transaction, per project a stat, a symlink
+/// resolution, a read and an in-memory build — milliseconds per
+/// project, sub-second for hundreds), so a loaded machine cannot
+/// trip a false degrade, while staying inside the band where the
+/// user still reads the answer instead of retrying. A constant, not
+/// a config key (§5.8/D-129's ruling for this class); a field of
+/// [`FileWatchState`] only so the tests can run a short window (the
+/// [`DEBOUNCE`] parameter precedent).
+pub(crate) const MUTATION_REFRESH_BUDGET: Duration = Duration::from_secs(10);
+
 /// The capacity of the command bus: room for a burst of debounced
 /// batches behind a running pass. The pump uses `try_send` — a drop
 /// is covered by the next refresh point (the reconciliation anchor;
 /// watch events are best-effort triggers, refresh points are the
 /// correctness anchors), never by a lost state: the verdict is
 /// recomputed from the file on the next pass whatever this batch saw.
-const BUS_CAPACITY: usize = 64;
+/// `pub(crate)` for the full-bus test's fill and post-expiry length
+/// check (the mutation seam's send-half pin, D-156).
+pub(crate) const BUS_CAPACITY: usize = 64;
 
 /// One entry of the `state://file-changed` diff (§7.10): the project
 /// a change is about, addressed by its row id, plus the two §5.7
@@ -251,13 +275,17 @@ impl Event for FileChangedEvent {
 
 /// What wakes the service task: a full pass (subscriptions + every
 /// verdict) or a debounced batch touching one file set. A full pass
-/// may carry an ack — [`refresh_after_sync`]'s completion channel.
+/// may carry an ack — the completion channel of both refresh seams
+/// ([`refresh_after_sync`]'s unbounded await and
+/// [`refresh_after_mutation`]'s budgeted one; the service cannot
+/// tell them apart — one command, two wait policies).
 /// `pub(crate)` because it rides the pub(crate) signatures of
 /// [`FileWatchState::new`], [`FileWatchState::trigger`] and
 /// [`spawn_service`].
 pub(crate) enum Command {
     /// Recompute the watch set and every available project's verdict.
-    /// `done` receives the pass's result (the after-sync seam); the
+    /// `done` receives the pass's result (both awaited seams — the
+    /// after-sync one and its bounded mutation twin); the
     /// fire-and-forget triggers (startup, availability, the backend's
     /// lost-events signal) pass `None`.
     Refresh {
@@ -316,6 +344,12 @@ pub(crate) struct FileWatchState {
     /// empty diff is silent by contract). Written by the service loop
     /// in production too, read by nothing outside the tests.
     passes: AtomicU64,
+    /// The bounded wait's budget for mutation-initiated refreshes
+    /// ([`refresh_after_mutation`]): the production default is
+    /// [`MUTATION_REFRESH_BUDGET`]; [`with_budget`] exists only so
+    /// the tests can run a short window (the [`DEBOUNCE`] parameter
+    /// precedent, T-280/D-156).
+    mutation_budget: Duration,
 }
 
 impl FileWatchState {
@@ -323,6 +357,17 @@ impl FileWatchState {
     /// [`spawn_service`] consumes — created together because the
     /// channel is the state's own seam.
     pub(crate) fn new() -> (Self, tauri::async_runtime::Receiver<Command>) {
+        Self::with_budget(MUTATION_REFRESH_BUDGET)
+    }
+
+    /// [`new`] with an explicit mutation-refresh budget — the test
+    /// seam for the bounded wait ([`refresh_after_mutation`]):
+    /// production constructs through [`new`] with the recorded
+    /// constant, while a harness parks a service that never acks and
+    /// wants the expiry in milliseconds, not seconds.
+    pub(crate) fn with_budget(
+        mutation_budget: Duration,
+    ) -> (Self, tauri::async_runtime::Receiver<Command>) {
         let (trigger, commands) = tauri::async_runtime::channel(BUS_CAPACITY);
         (
             Self {
@@ -330,6 +375,7 @@ impl FileWatchState {
                 unwatched: Mutex::new(BTreeMap::new()),
                 trigger,
                 passes: AtomicU64::new(0),
+                mutation_budget,
             },
             commands,
         )
@@ -1072,7 +1118,7 @@ pub(crate) fn listen_availability<R: Runtime>(app: &AppHandle<R>) {
 /// riding an ordinary batch — or a stream-error batch alike, D-139)
 /// is the one full re-check of everything, FIRE-AND-FORGET:
 /// `done: None`, because no caller waits on this trigger's outcome
-/// (the after-sync seam builds its own ack pair).
+/// (both awaited seams build their own ack pairs).
 ///
 /// The send is a `try_send` onto the bounded bus: a FULL bus drops
 /// the delivery instead of blocking the pump behind a slow pass (the
@@ -1140,7 +1186,7 @@ pub(crate) fn spawn_service<R: Runtime>(
                     // fire-and-forget trigger: an awaited failure's
                     // durable half is the CALLER's (the sync
                     // pipeline's `sync_run_degraded` watch arm; the
-                    // add flow's line is T-257's card), so every
+                    // add flow's line is T-278's card), so every
                     // failure is logged exactly once (D-155).
                     if let (Err(error), None) = (&result, done.as_ref()) {
                         logging::file_watch_pass_failed(error);
@@ -1224,11 +1270,14 @@ pub(crate) fn spawn_service<R: Runtime>(
 /// NOT the caller's problem to detect: the diff is returned anyway,
 /// the cache deliberately stays unrecorded, and the next trigger
 /// re-detects and re-emits it (the at-least-once contract — the same
-/// posture as `dirty_recalc`'s seam). Also the refresh seam the
-/// project-mutation commands call when a commit can change the
-/// watched set (SYS-007: `project_add_manual`'s committed arm since
-/// T-257; the scheme/name/archive/restore commands join as they
-/// land) — one seam, never a second refresh path.
+/// posture as `dirty_recalc`'s seam). The project-mutation commands
+/// refresh through the BOUNDED twin of this seam
+/// ([`refresh_after_mutation`], T-280/D-156): the same `Refresh`
+/// command and ack, but an interactive answer that waits at most a
+/// budget instead of as long as a stuck mount — one refresh path,
+/// two wait policies (`project_add_manual`'s committed arm since
+/// T-280; the scheme/name/archive/restore commands join as they
+/// land).
 ///
 /// # Errors
 ///
@@ -1254,14 +1303,89 @@ pub(crate) async fn refresh_after_sync<R: Runtime>(
     managed_db(app)?;
     let (done_sender, mut done) =
         tauri::async_runtime::channel::<Result<Vec<ProjectFileChange>, AppError>>(1);
+    send_refresh_command(app, done_sender).await?;
+    await_ack(&mut done).await
+}
+
+/// The bounded twin of [`refresh_after_sync`] for INTERACTIVE
+/// mutation callers (T-280/D-156): the same `Refresh` command, the
+/// same ack channel, the same single service pass — but the caller
+/// waits at most [`FileWatchState`]'s budget
+/// ([`MUTATION_REFRESH_BUDGET`] in production) for the answer,
+/// because an interactive command's response must not hang on a
+/// stuck mount the pass probes. The budget bounds the WHOLE
+/// send-and-await region: a full bus backpressures the send behind a
+/// hung pass just as it would delay the ack, and bounding only half
+/// the region would leave the unbounded path (D-156).
+///
+/// # Degrade (the honest reading, D-156)
+///
+/// On expiry the caller answers [`mutation_refresh_timeout`] — the
+/// class-only "the pass did not answer in time" error — and the
+/// refresh CONTINUES IN THE BACKGROUND, never cancelled: an
+/// enqueued command stays queued (the service runs the pass whenever
+/// it becomes free; its ack then fires into this caller's dropped
+/// receiver and is ignored by the service's own `let _`), and if the
+/// bus was full the send was dropped and never enqueued — that
+/// refresh is honestly abandoned. Either way convergence is the
+/// anchor set's, not the wait's: every full pass re-derives the
+/// watch set from the project table (D-144's idempotent
+/// convergence), so the next anchor re-derives it without loss.
+/// Cancelling the walk is deliberately NOT offered — for an ADD the
+/// verdict inputs the user just created matter, and a walk the
+/// service can still finish is worth more than a walk nobody ran.
+///
+/// # Errors
+///
+/// The pass's [`AppError`] when the pass answered within the budget;
+/// [`send_error()`]'s `FileWatchGone` when the bus itself is gone
+/// (no service — the fast refusal, unchanged by the budget);
+/// [`mutation_refresh_timeout`] when the budget expires. Recovery
+/// mode is answered HERE exactly like [`refresh_after_sync`] — the
+/// honest `NoDatabase` through [`managed_db`], never a wait.
+pub(crate) async fn refresh_after_mutation<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<ProjectFileChange>, AppError> {
+    managed_db(app)?;
+    let budget = app.state::<FileWatchState>().mutation_budget;
+    let (done_sender, mut done) =
+        tauri::async_runtime::channel::<Result<Vec<ProjectFileChange>, AppError>>(1);
+    // The region bounded is send + ack BOTH (the doc above): one
+    // timeout wraps them together, so a backpressured send degrades
+    // at the same budget the ack would. `tokio::time` is already a
+    // dependency of this crate (D-054's retention tick; no new
+    // feature crosses the rule 9 line — D-156).
+    let bounded = async {
+        send_refresh_command(app, done_sender).await?;
+        await_ack(&mut done).await
+    };
+    match tokio::time::timeout(budget, bounded).await {
+        Ok(result) => result,
+        Err(_expired) => Err(mutation_refresh_timeout()),
+    }
+}
+
+/// The command send both seams share: one `Refresh` with an ack, onto
+/// the single service task's bus — there is no second refresh path
+/// (D-144), only a second WAIT POLICY ([`refresh_after_mutation`]).
+async fn send_refresh_command<R: Runtime>(
+    app: &AppHandle<R>,
+    done: tauri::async_runtime::Sender<Result<Vec<ProjectFileChange>, AppError>>,
+) -> Result<(), AppError> {
     app.state::<FileWatchState>()
         .trigger
         .clone()
-        .send(Command::Refresh {
-            done: Some(done_sender),
-        })
+        .send(Command::Refresh { done: Some(done) })
         .await
-        .map_err(|_send| send_error())?;
+        .map_err(|_send| send_error())
+}
+
+/// The ack await both seams share: the pass's own result, or the
+/// honest "the service is not answering" fallback when the channel
+/// closed first.
+async fn await_ack(
+    done: &mut tauri::async_runtime::Receiver<Result<Vec<ProjectFileChange>, AppError>>,
+) -> Result<Vec<ProjectFileChange>, AppError> {
     match done.recv().await {
         Some(result) => result,
         None => Err(send_error()),
@@ -1276,6 +1400,23 @@ fn send_error() -> AppError {
         os_code: None,
         os_kind: Some("FileWatchGone".to_owned()),
         os_message: Some("the file-watch service is not running".to_owned()),
+    });
+    error
+}
+
+/// The bounded mutation seam's expiry answer — [`send_error`]'s
+/// D-037 class-only shape with its own discriminable kind: the
+/// service exists, the pass simply did not answer within the
+/// budget (the stuck-mount world; T-280/D-156). Never logged by
+/// this seam: the add flow degrades silently and the refresh-refused
+/// warn line is T-278's card — whether that line also covers this
+/// timeout class is that card's decision (D-156's boundary).
+fn mutation_refresh_timeout() -> AppError {
+    let mut error = AppError::new(crate::errors::ErrorCode::DbLocked);
+    error.details = Some(crate::errors::ErrorDetails {
+        os_code: None,
+        os_kind: Some("FileWatchTimeout".to_owned()),
+        os_message: Some("the watch pass did not answer within the mutation budget".to_owned()),
     });
     error
 }
@@ -1321,6 +1462,30 @@ mod tests {
         // spelling of it (the service's parameter exists for the
         // tests' short windows).
         assert_eq!(DEBOUNCE, Duration::from_millis(300));
+    }
+
+    #[test]
+    fn the_mutation_budget_is_the_recorded_ten_seconds() {
+        // D-156's recorded value: an order of magnitude above any
+        // healthy full pass's worst case (no false degrade under
+        // load), inside the interactive-patience band. Pinned so the
+        // value cannot drift silently — changing it is a decision,
+        // and the decision trail lives in DECISIONS.md.
+        assert_eq!(MUTATION_REFRESH_BUDGET, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn the_state_defaults_to_the_recorded_mutation_budget() {
+        // Production constructs through `new()`; the constructor's
+        // default IS the constant (the knob changes only what a test
+        // explicitly overrides).
+        assert_eq!(state_only().mutation_budget, MUTATION_REFRESH_BUDGET);
+        assert_eq!(
+            FileWatchState::with_budget(Duration::from_millis(1))
+                .0
+                .mutation_budget,
+            Duration::from_millis(1)
+        );
     }
 
     // ---- the diff semantics (D-112's shape over the clean baseline) ---
@@ -1925,7 +2090,7 @@ mod tests {
         // and the stream-error batch), and the pump's whole answer is
         // the one full re-check the spec sanctions — a `Refresh` with
         // no ack. `done` must be `None`: no caller waits on this
-        // trigger (the after-sync seam builds its own ack pair), so a
+        // trigger (both awaited seams build their own ack pairs), so a
         // sender here would answer a channel nobody receives.
         let (command, mut commands) = pumped(WatchEvent::Backend);
         match command {

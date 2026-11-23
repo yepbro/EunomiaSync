@@ -2822,18 +2822,21 @@ pub(crate) struct ExistingProject {
 /// 6. **The watch refresh** (§5.7 SYS-007, T-257/D-137's follow-up
 ///    2): the committed row joins the watched set, so the answer
 ///    waits for one FULL pass through
-///    [`file_watch::refresh_after_sync`] — the SAME seam the sync
-///    pipeline runs after its writes (never a second refresh path),
-///    on the service task, its blocking half on the pool. The
+///    [`file_watch::refresh_after_mutation`] — the BOUNDED twin of
+///    the seam the sync pipeline runs after its writes (the same
+///    `Refresh` command and ack, never a second refresh path; the
+///    budget since T-280/D-156, so a pass stuck on a dead mount
+///    degrades instead of hanging this answer), on the service task,
+///    its blocking half on the pool. The
 ///    refresh is never-fatal aftermath (D-138's watch posture): the
-///    project IS added whatever the pass answers — a refusal
-///    degrades silently, and the next anchor (an availability
-///    change, a debounced file event, the next sync or mutation)
-///    re-converges the set, because every full pass re-derives it
-///    from the project table. The other SYS-005-gated mutations
-///    change no watched file (`projects_reorder` moves sort_order,
-///    `exclusion_remove` touches no project row) and run no
-///    refresh; the spec's scheme/name/archive/restore/relink
+///    project IS added whatever the pass answers — a refusal or the
+///    budget's expiry degrades silently, and the next anchor (an
+///    availability change, a debounced file event, the next sync or
+///    mutation) re-converges the set, because every full pass
+///    re-derives it from the project table. The other SYS-005-gated
+///    mutations change no watched file (`projects_reorder` moves
+///    sort_order, `exclusion_remove` touches no project row) and run
+///    no refresh; the spec's scheme/name/archive/restore/relink
 ///    commands call the same seam as they land.
 ///
 /// Failures reach the log with their §10 code
@@ -3070,22 +3073,31 @@ async fn project_add_manual_impl<R: Runtime>(
             .map_err(db::join_failure_to_app_error)?;
             // Step 6 — the watch refresh (§5.7 SYS-007, T-257): the
             // committed row joins the watched set, so one FULL pass
-            // runs through the after-sync seam — the same awaited
-            // pass the sync pipeline runs after its writes, with the
-            // converged set and the emitted first-observation diff in
-            // place by the time the answer lands (a pre-existing
-            // differing target file is therefore already reported,
-            // SYS-008's literal reading). NEVER-FATAL (the command
-            // docs' step 6): the project IS added whatever the pass
-            // answers — the refusal arms below (recovery mode is
-            // unreachable here, the flow holds a database; the real
-            // case is a watcher backend that refused to start, when
-            // no service task exists and the send fails fast)
-            // degrade silently, and the next watch anchor re-converges
-            // the set. The warn line this degrade deserves lives in
-            // `logging.rs` — a frozen zone this window; the recorded
-            // logging follow-up owns it (the D-121 precedent).
-            let _never_fatal_watch_refresh = file_watch::refresh_after_sync(&app).await;
+            // runs through the mutation seam — the same awaited pass
+            // the sync pipeline runs after its writes (one refresh
+            // path). When the pass answers within the budget, the
+            // converged set and the emitted first-observation diff
+            // are in place by the time the answer lands (a
+            // pre-existing differing target file is therefore
+            // already reported, SYS-008's literal reading); on
+            // expiry the verdict arrives with the NEXT anchor's
+            // event/read instead (D-144's reconciliation rule).
+            // BOUNDED since T-280 (D-156): the interactive
+            // answer waits at most the recorded budget — a pass
+            // stuck on a dead mount degrades instead of hanging
+            // the response, and the pass keeps converging on the
+            // service task whatever this caller does. NEVER-FATAL
+            // (the command docs' step 6): the project IS added
+            // whatever the pass answers — the refusal arms below
+            // (recovery mode is unreachable here, the flow holds a
+            // database; the real case is a watcher backend that
+            // refused to start, when no service task exists and the
+            // send fails fast) degrade silently, and the next watch
+            // anchor re-converges the set. The warn line this
+            // degrade deserves lives in `logging.rs` — T-278's
+            // card; the timeout's class (`FileWatchTimeout`) is
+            // recorded for it in D-156.
+            let _never_fatal_watch_refresh = file_watch::refresh_after_mutation(&app).await;
             Ok(ProjectAddResult::added(&project, warning))
         }
     }
