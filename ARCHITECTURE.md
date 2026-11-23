@@ -158,7 +158,8 @@ Rust commands are registered through `tauri-specta`:
    `#[specta::specta]`. Commands that take an `AppHandle` are generic
    over `R: Runtime` — the documented tauri-specta shape — and the
    registration pins the concrete runtime (`::<tauri::Wry>`).
-2. The command is added to `collect_commands![...]` in `src-tauri/src/lib.rs`.
+2. The command is added to `collect_commands![...]` in
+   `src-tauri/src/lib.rs`.
    The registered set is eighteen commands — the §7.10 names that
    are implemented so far. It comprises the recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
@@ -513,7 +514,8 @@ kept, oldest deleted — never the copy just written, so a
 clock-set-back directory cannot cost the day its copy; pruning is
 best-effort throughout and never turns a successful copy into a
 reported failure. `pre-migration-*` names are outside this daily cap;
-their retention is the separate T-253 age rule below, not a count. A fresh first launch gets its copy of the empty
+their retention is the separate T-253 age rule below, not a count. A fresh
+first launch gets its copy of the empty
 database too ("at every startup" — a cheap, honest baseline). The
 publication mechanics are the pre-migration scheme's (D-038): `.tmp`
 staging, `hard_link` no-clobber publication, §9.5 retries, and a
@@ -606,7 +608,8 @@ staging debris or `-wal`/`-shm`/`-journal` siblings, a 0-byte
 sibling would pass both gates and silently bootstrap an empty
 database; missing → `E_VALIDATION`; symlinks not followed), re-run
 the startup gates over the chosen copy (`E_DB_TOO_NEW`/`E_DB_CORRUPT`
-before anything is touched), **stage the copy** (`db/eunomiasync.sqlite3.tmp`:
+before anything is touched), **stage the copy**
+(`db/eunomiasync.sqlite3.tmp`:
 a byte copy, never a hard link — a link would let later writes
 mutate the backup — `0600` before publication, fsynced, while the
 live file is still in place, so a full disk or a permission leaves `db/`
