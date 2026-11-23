@@ -608,16 +608,23 @@ the startup gates over the chosen copy (`E_DB_TOO_NEW`/`E_DB_CORRUPT`
 before anything is touched), **stage the copy** (`db/eunomiasync.sqlite3.tmp`:
 a byte copy, never a hard link — a link would let later writes
 mutate the backup — `0600` before publication, fsynced, while the
-live file is still in place, so a full disk or a permission leaves `db/` exactly as it was), preserve the damaged database as `db-backups/pre-recovery-<UTC>.sqlite3` (renamed, not discarded —
+live file is still in place, so a full disk or a permission leaves `db/`
+exactly as it was), preserve the damaged database as
+`db-backups/pre-recovery-<UTC>.sqlite3` (renamed, not discarded —
 though the T-253 age rule may retire it as an aged copy at a later
-open; chmod `0600` before the rename, stale `-journal`/`-wal`/`-shm` siblings renamed alongside first — though a gate read over the
+open; chmod `0600` before the rename, stale `-journal`/`-wal`/`-shm`
+siblings renamed alongside first — though a gate read over the
 damaged file already lets SQLite's own crash recovery remove bogus
 siblings, the preserve catches what those reads leave — the main
 rename as the commit point), publish the staged copy by one rename
 (§9.5's staging pattern, parent-directory fsync best-effort), reopen
-through the full `Db::open` chain, sweep any `running` rows a dead process left into `interrupted` (the §9.4 startup crash recovery, T-258 — recovery mode is the one state where no run can be live), write the day's ERR-001 copy, and `app.manage` the reopened database — §7.10's "…and reopens it": the
+through the full `Db::open` chain, sweep any `running` rows a dead process
+left into `interrupted` (the §9.4 startup crash recovery, T-258 — recovery
+mode is the one state where no run can be live), write the day's ERR-001
+copy, and `app.manage` the reopened database — §7.10's "…and reopens it": the
 app continues without a restart. The window in which the database
-path is empty is the two renames; the preserve audit line rides the `on_preserved` callback into it. Every recovery step is audited
+path is empty is the two renames; the preserve audit line rides the
+`on_preserved` callback into it. Every recovery step is audited
 through the facade (`recovery_preserved`/
 `recovery_recreated`/`recovery_restored`/`recovery_failed`, plus the
 opener's two lines — the failure lines carry the code literal, the
