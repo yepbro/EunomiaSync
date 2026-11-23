@@ -19401,3 +19401,91 @@ plants a hand-written `AGENTS.md` in (a)/(c)/(d) (OUT-005); and (b)
 gained its assigned instruction explicitly, closing a D-25 trap (an
 unassigned project's empty build over a non-empty file returns
 NeedsConfirmation instead of writing). None refused.
+
+### D-176 — T-318: LIB-025's last-variant guard annotated as UI-unreachable, the refusal scoped to the surfaces behind the disabled button (`variant_delete` 7.10, the store layer) — 2026-11-23
+
+Problem: T-315's round-1 P3-1 (this card's source, folded into the
+smoke file then): spec §7.3's LIB-023/024/025 row asks for a Delete
+disable "for the last variant" (LIB-025) next to the main-variant
+disable (LIB-024), but no UI path reaches the last-variant disable —
+LIB-024 fires first. The card offered defer-to-M2 or annotate; the
+owner took it into the 2026-11-23 flash batch (act, don't defer).
+
+Reading (Rule 2, verified before writing): three facts compose the
+unreachability. (1) DB-010 (`docs/spec.md:352`): every active
+instruction has at least one active variant and exactly one active
+main variant — pinned at the schema level by the `ux_variant_main`
+partial unique index (`docs/spec.md:280-281`). (2) D-125's owner
+ruling (§3.2's D-12 row, `docs/spec.md:86`): the main variant cannot
+be deleted at all — the Delete button disabled with "Make another
+variant main first" (LIB-024), so no UI flow removes the main
+variant. (3) Therefore the active variant set always contains the
+main variant; the last remaining variant is necessarily the main one,
+and its Delete is disabled by LIB-024 with the LIB-024 hint — the
+LIB-025 disable (the same button's other condition) has no state to
+fire in. The UI surfaces were swept for a counterexample: the
+editor's variant list (§7.3's LIB-017…022 row — the only
+variant-delete affordance), matrix cells (§7.4 MAIN-001…005 —
+assign/unassign only), bulk operations (assignments, not variant
+deletes), Hide/Restore (instruction-level), per-project custom text
+(bypasses the variant model, §7.3's MAIN-007 row) — none deletes a
+last non-main variant. But the row is not UI-only, and not deletable
+either: the IPC contract exposes `variant_delete`
+(`docs/spec.md:578`, §7.10), a public surface whose callers are not
+bound by a webview disable, and the landed store layer enforces
+LIB-025 there absolutely — `delete_variant` refuses `LastVariant`
+before any replacement logic, "whatever the replacement names"
+(`crates/eunomia-store/src/library.rs:1792-1799`; the falsifying test
+`the_last_active_variant_cannot_be_deleted_whatever_the_replacement`,
+`crates/eunomia-store/tests/library.rs:1014-1030`). So the card's
+fork resolved to its second branch: a reachable path exists behind
+the UI, and the row is scoped to it rather than marked dead.
+
+Solution: the LIB-023/024/025 row (`docs/spec.md:475`) keeps its
+requirement text intact and gains two sentences in the spec's own
+idiom (requirement/section references in parens; no invented
+jargon): the LIB-025 disable never fires through the UI (LIB-024 +
+DB-010 make the last remaining variant always the main one), and
+LIB-025 stays in force as the defensive refusal on the surfaces
+behind that disabled button — `variant_delete` (7.10) and the store
+layer reject deleting an instruction's last active variant even when
+a replacement is named. Untouched on purpose: §3.2's D-12 row is a
+dated customer-answer record (dated records are not rewritten — the
+D-120 addendum posture, the T-305 precedent); §6.4's variant delete
+row (`docs/spec.md:367`) states data-model behavior, makes no UI
+claim, and is correct as written; the LIB-017…022 disable
+enumeration (`docs/spec.md:474`) reads consistently once :475
+carries the reading — the button is disabled for the last variant,
+which is always the main one; `docs/manual-smoke.md`'s S4 pass note
+(:440-443) already states this exact reading and is this card's
+source, so it needed no edit. One-row diff; no prettier re-pad (the
+cell stays shorter than the column's widest cell).
+
+Honest boundaries: batch regime (owner instruction 2026-11-23) — no
+tests run; the store-layer behavior was verified by reading the
+landed code at this commit, not by executing its suite. The
+`variant_delete` command itself is not yet registered (§7.10's
+library commands are unlanded — D-175's record); the annotation is
+normative for the contract, as the spec's other command notes are.
+One review round per the batch regime. No follow-up cards; T-320
+edits spec.md after this merge (rebase resolves).
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t318-round1.md`, deepseek-v4.1-flash):
+APPROVE — 0×P0/P1/P2, three P3s; one taken in the amend, two
+declined. P3-3 taken: the annotation's "already disabled with the
+LIB-024 hint" surfaces an unspecified copy consequence — in the
+one-variant state the hint's advice ("Make another variant main
+first") is unsatisfiable, because no other variant exists to make
+main; the wording is owner-specified copy (§3.2's D-12 row, D-125's
+ruling — the only two occurrences of the string in docs/), so
+changing it is an owner decision outside this card; recorded here,
+and flagged to the orchestrator as a candidate follow-up for the
+library-milestone UI work (M2). P3-1 declined (the reviewer's own
+escape clause: acceptable under the minimal-diff mandate): a :474
+pointer would widen the diff past the card's "one row's annotation"
+— the reading for that row's reader lives in this entry's Solution
+paragraph. P3-2 declined for the same mandate (the reviewer called
+it defensible: §7.3 is where LIB-025 lives); duplicating
+`variant_delete` semantics into §7.10's command notes would be a
+one-line follow-up for a later spec task, not this flash card.
