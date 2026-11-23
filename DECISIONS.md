@@ -15601,6 +15601,16 @@ Solution, per item of the card:
   grant, the dialog site hand-synced into `src/bindings.ts` (D-166);
   `src/ipc/index.ts` lines 20–22 and the `eunomia-fs` Cargo.toml
   half remain open, their follow-up cards unchanged.
+  Addendum (T-305, 2026-11-23): the two open halves above are closed —
+  the `src/ipc/index.ts` facade header states the T-246 truth (four of
+  §7.10's five events generated, subscription behind the event grant;
+  T-295, `23ec7cb`), the `eunomia-fs` Cargo.toml comment says
+  `tempfile` active with `walkdir` still idle (T-296, `3a653f1`), and
+  item 5's closure is D-168 — the docs-pass package's follow-up set is
+  closed in full. (The original "both false" verdict over-counted:
+  only "generates none yet" was false; the "serves commands only
+  today" clause names the commands facade truthfully, and T-295 kept
+  it.)
 - _Item 2, D-071/D-072 — the drop story, not a burn story._ These are
   not unwritten numbers: both entries existed and were dropped.
   D-071 (the ALG-061 move) was added by T-046 (`51c6524`), D-072 (the
@@ -15657,6 +15667,12 @@ Solution, per item of the card:
   its source) is a platform-support claim, not a CI claim, and stays;
   §15's risk-table row ("testing on Ubuntu 22.04 and 24.04") is a
   mitigation plan, also untouched.
+  Addendum (T-305, 2026-11-23): both "stays" dispositions above are
+  superseded by the owner's re-scoping ruling (T-299, D-168) —
+  NFR-001…003 read "24.04 and newer" (§1's D-26 row, "24.04+"), and
+  the risk row sits under §16 (the card's §15 label was off by one)
+  and tests 24.04/26.04 hedged as `ubuntu-latest` at the time of
+  writing.
 - _Item 6, spec §6.9._ One line under the validation table: "A name
   field also rejects `NUL` — project name, instruction name, variant
   name, heading name — an extension stricter than the rows above,
