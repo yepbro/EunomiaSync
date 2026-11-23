@@ -1472,3 +1472,14 @@ fn an_unreadable_retention_setting_is_swallowed_into_the_report() {
     );
     assert_eq!(run_row_of(&app, &run_id).status, SyncRunStatus::Success);
 }
+
+// T-126's cross-phase suite: the whole §9.4 pipeline on temporary Git
+// repositories in all three schemes (`sync_pipeline_tests.rs`). It is
+// declared here rather than in `lib.rs`'s test-module block because
+// `lib.rs` was a sibling task's frozen zone when the suite landed; the
+// `#[path]` form keeps the file beside every other `*_tests.rs` module
+// while the suite compiles exactly as a `lib.rs`-declared one would.
+// Moving the declaration up beside the phase suites is a one-line
+// follow-up once that zone is free (DECISIONS.md D-183).
+#[path = "sync_pipeline_tests.rs"]
+mod sync_pipeline_tests;

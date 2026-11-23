@@ -20310,3 +20310,347 @@ its own card; spec SEC-010 (docs/spec.md:897) names `npm audit` while the
 toolchain has been pnpm since D-018 — T-228's gate is the moment to align
 the wording; both overrides become removable once js-beautify and
 editorconfig declare the patched majors.
+
+### D-183 — T-126: the sync-pipeline integration suite on temporary Git repositories in all schemes — the card's "no file observer" clause is spec v1.0 text and is pinned as v1.2's display-only rule, the suite registers under `sync_phase4_tests.rs` while `lib.rs` is a frozen zone, and every oracle is a spec literal — 2026-11-23
+
+Problem: T-126 (spec §15.1's Integration row — "the sync pipeline on
+temporary Git repositories in all schemes"; §15.4's mapping of DoD 7,
+13–15 and 17; OUT-005, 011, 012, 014, 015) asks for integration tests
+of the pipeline: creation and overwrite, order, the marker, external
+edits overwritten, library operations that change no file, and "no
+file observer in the code". Three questions were open before a line
+was written.
+
+- _"No file observer" against the spec._ The card's phrase is spec
+  v1.0's OUT-014 verbatim: `git show ae89176:docs/spec.md` line 481
+  reads "External edits to target files are not tracked: no file
+  watcher, no comparing, no merging — There is no watcher code and no
+  conflict dialogs". Commit `16a0597` (v1.1, 2026-11-17) replaced that
+  row: §5.7 now defines the display-only watch (SYS-007…010), and
+  OUT-014 reads "the app never merges them and never writes a file
+  because of a watch event", accepted by "An external edit flips the
+  state without any dialog; a sync still overwrites the file and makes
+  a backup". The landed service is that watcher (`file_watch.rs`,
+  T-102/D-137).
+
+  Reading: the spec is the authoritative source (§1.4), and the brief
+  itself defers to it ("a test/inspection pin per OUT-0xx as the spec
+  assigns"). A literal "no watcher code" pin would assert against an
+  implemented P0 requirement and be red by construction; a source scan
+  for the absence of watcher tokens would be the pseudo-test Project
+  Rule 11 forbids. The suite therefore pins the clause the spec
+  assigns today, per scheme, with the real service live: after the
+  run's own writes the settled service reads every project clean and
+  the files hold what the run left; after an external edit the verdict
+  flips, the `state://file-changed` wire carries exactly the flips, the
+  files still hold exactly the external bytes (nothing merged, nothing
+  written back), and no run row, copy or stamp moves.
+
+  Follow-up for the board: the card's text is stale (v1.0 wording).
+
+- _Where the suite registers._ Both layouts the brief envisioned need
+  `lib.rs`. `src-tauri/tests/` cannot reach the pipeline — every module
+  of `lib.rs` is `pub(crate)` (only `specta_builder` and `run` are
+  `pub`), and `ipc_tests.rs`'s module doc already records that command
+  handlers are crate-private. A new in-src `*_tests.rs` module needs a
+  `mod` line in `lib.rs`'s test block — T-077's frozen zone in this
+  batch. The brief's line for that case: do not edit `lib.rs`;
+  narrowly-scoped test-support additions in `sync_phase*.rs` are in
+  zone when strictly required; stop only when a `lib.rs` change is
+  unavoidable. It is not: the suite is declared as a
+  `#[path = "sync_pipeline_tests.rs"]` child module of
+  `sync_phase4_tests.rs` — the finish phase's suite, a test file, so no
+  production byte moves. A `#[path]` on a module declared at the top
+  level of a non-`mod.rs` file resolves against that file's directory;
+  the compile confirms it (the tests run as
+  `sync_phase4_tests::sync_pipeline_tests::*`). No `#[path]` attribute
+  existed in the tree before (a grep finds none) — this is the first.
+
+  Follow-up: once `lib.rs` is free, move the declaration into its test
+  block (`#[cfg(test)] mod sync_pipeline_tests;` after
+  `mod sync_phase4_tests;`) and delete the `#[path]` block — two
+  lines, no test change.
+
+- _What counts as a library operation._ The §7.10 library commands are
+  not landed (the command tasks ahead). The seven operations of the
+  DoD-7 test go through the store writers those commands will call over
+  the same `Db::run` executor (`update_variant`, `assign`, `unassign`,
+  `hide_item`, `move_item`, `update_item`, and `create_item` +
+  `create_variant` + `assign`), each in its own transaction; the run
+  itself is always the real `sync_run`. Vacuity is excluded twice: the
+  library is read back in its new order (MAIN-011), and the next sync
+  must produce the hand-derived new content of all three schemes.
+
+Solution: `src-tauri/src/sync_pipeline_tests.rs` — thirteen tests over
+one harness: real `.git` repositories from
+`eunomia_fs::temp_repos::TempRepos`, a real database in a temp data
+root, the mock app in the state `setup` produces (the `ipc_tests.rs`
+`sync_watch_app` shape), and the real watch service spawned in every
+test — a run awaits the after-sync refresh's ack with no budget (the
+D-137 hang note) — at the ipc suite's 40 ms test debounce.
+
+- _Creation and overwrite (OUT-005, §7.5, T-F4, T-F12, D-22, D-24)._ A
+  missing target is created in A and C and never in B
+  (`skipped`/`E_MARKERS_INVALID`, the run `partial`, nothing backed up
+  or stamped); an existing A/C file is fully replaced and its
+  hand-written bytes survive as exactly one copy; in B only the block
+  is rewritten — a refused marker pair stays byte for byte, and the
+  outside of a BOM + CRLF file is kept and reads back `unchanged`.
+- _Order (DoD 5, OUT-001…004, ALG-020…022)._ The file follows the
+  library `position` after a `move_item`, not the creation order.
+- _The marker (DoD 13, 14; ALG-030…032; D-23; D-065; D-01)._ The ALG-032
+  template field by field; the marker as the last line of A and C and
+  the line before the end marker in B; exactly one per file; one line
+  for every project of a run, naming the run's own instant; scheme A's
+  full build with the reading lines in their positions.
+- _External edits (T-F13, OUT-015, OUT-014)._ The state flips, the next
+  sync overwrites without a dialog and backs the external bytes up; in
+  B only the block is the app's — a line after the end marker survives.
+- _A deleted target (SYS-009, OUT-005, OUT-020)._ Files a sync once
+  wrote are deleted outside the app: the hint flips, the watcher
+  recreates nothing itself, the next sync recreates the A and C targets
+  (nothing to back up) and skips B with `E_MARKERS_INVALID` — and the
+  skipped B keeps the sync state of the run that wrote it.
+- _Library operations (DoD 7, OUT-011, 012, MAIN-011, OUT-010, D-11,
+  ALG-020)._ Seven operations: same bytes, same modification time, no
+  run, no copy — until the next sync applies every one of them.
+- _Unchanged runs and the sync times (T-F9, D-24, DoD 17, OUT-020,
+  DB-024, MAIN-024, MAIN-027)._ A no-change run leaves bytes and
+  modification times alone and makes no copy while stamping the
+  `unchanged` projects; `written` and `unchanged` are stamped, `skipped`
+  and `failed` keep their previous state — for a project that WAS
+  stamped, not only for one that never was — and a `partial` run moves
+  nobody's overall time.
+
+The oracle posture: no expectation is rebuilt through the builders
+under test (`eunomia_core::target_file`, `assembly_b`, `marker_clock`,
+`hash`) — the bytes are spelled from ALG-020…022, ALG-030…032 and
+decisions D-19, D-21, D-22 and D-23, and the D-19 marker lines are
+re-spelled in the suite (the fixtures are user files: a drifted
+production constant must fail the suite, not follow it). The error
+mappers are the consolidated seams only (`library_seed_error_for_tests`,
+`sync_runs_app_error_for_tests`, `projects_store_to_app_error`,
+`sqlite_error_to_app_error`) — no new spelling (D-161, D-162, D-171).
+
+Four smaller rulings inside the suite:
+
+- _A `written` stamp is asserted inside its run; an `unchanged` one
+  equals `finished_at`._ Phase 3 stamps the write instant and phase 4's
+  `finished_at` is a later one; DB-002 carries milliseconds, so
+  equality is not the `written` contract. §9.4 phase 4 step 1 makes it
+  the `unchanged` one.
+- _Waits are condition polls with a 30 s ceiling, never pass-count
+  slots._ D-140's rule: the bound is a failure ceiling, a healthy run
+  returns early. The one `sleep` is the lower bound of a "nothing
+  further happens" check — a late write can be missed, never invented.
+- _Expectations ride the fixture's canonical roots_ (`TempRepos`
+  canonicalizes — D-160), and the one injected write refusal uses
+  `io::Error::other`: no raw OS code in a test (Project Rule 3).
+- _The primary claim is asserted first._ The mutation pass moved two
+  assertions: the refused-marker test now leads with "nothing is
+  written into the file", and the watch test gained an explicit
+  precondition — after the run's own writes the settled service reads
+  every project clean — so a write-back is caught by the direct claim,
+  not by a missing later flip.
+
+Falsifiability (Rule 4; mutations applied with an exact-once driver,
+observed red, reverted — `git diff` clean after every batch): nineteen
+batches, twenty-one mutants, across `sync_phase1.rs`, `sync_phase3.rs`,
+`sync_phase4.rs`, `file_watch.rs`, the core `body.rs`, `assembly_b.rs`,
+`extra_files.rs`, `target_file.rs` and `marker_clock.rs`, and the
+store's `list_items`.
+
+- _The mutants._ The whole-file blank line dropped (A1); a missing
+  scheme-B target falling to the whole-file plan (A2); the marker's
+  second shifted per project (A3); phase 4 not stamping `unchanged`
+  (A4); the ALG-033 comparison short-circuited (B1); a failed write
+  stamping (B2); an invalid pair spliced at offset 0 (B3); the same
+  with the `skipped` verdict kept, the file written anyway (B4); the
+  watcher writing on an event (C); the body in reverse order (D1); the
+  splice normalizing CRLF (D2); the reading-line tie swapped (D3); the
+  store listing by creation time (D4); scheme C splicing reading lines
+  (E); a hidden instruction selected (F1); a heading written with
+  nothing assigned in its section (F2); a missing A/C target skipped
+  instead of written (I); a skipped project's stamps cleared (J); the
+  scheme-C main file written too (K); the extra files written too (L2);
+  the run clock shifted uniformly by +90 s (W — run once under each
+  marker slack, the point of round 2's P3-1).
+- _The result — every test red, each on one of its own assertions._ The
+  table is the record the round-1 review asked for; every row was
+  observed on the committed test file (the combined batches A and B and
+  the single-mutant batches B4 and D23 were re-run after the round-1
+  edits).
+
+  | test                  | mutant → the assertion that fired                                                                                                                                                                                                                          |
+  | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | creation              | A2 → "§9.4 phase 4 step 3: a skipped project beside written ones"; B4 → "§7.5: the app does not create a scheme-B file"; K → "scheme C leaves the existing main file byte for byte"; A3 → "ALG-032: one marker for every project of the run"               |
+  | overwrite             | A1 → "the scheme-A target: exactly one empty line between the managed block and the marker"; E → "ALG-030's reading lines are scheme A's alone"; B1 → the statuses (`unchanged` × 3)                                                                       |
+  | refused marker pair   | B4 → "project 1: nothing is written into a refused scheme-B file"; I → "§9.4 phase 4 step 3: five skipped projects beside a written one"                                                                                                                   |
+  | BOM + CRLF            | D2 → "the T-F12 target after the sync: the bytes before the begin marker changed"; B1 → the statuses (`unchanged`)                                                                                                                                         |
+  | order                 | D4 → the second run's statuses (`unchanged` × 3 after a reorder); D1 → "the baseline: the creation order"                                                                                                                                                  |
+  | the marker            | A3 → "ALG-032: one time per run, the same for all projects"                                                                                                                                                                                                |
+  | scheme A's full build | D3 → "scheme-A project 0: ALG-030's composition" (the `.local.md` line first); L2 → "D-01: the app does not change an extra file that already exists"                                                                                                      |
+  | external edit         | B1 → the statuses (`written`, `unchanged`, `written`)                                                                                                                                                                                                      |
+  | the watch             | C → "the watch events of the run's own writes changed no verdict"                                                                                                                                                                                          |
+  | library operations    | F1 → the second sync's content (the hidden instruction's text in the build); B1 → the second run's statuses (`unchanged` × 3)                                                                                                                              |
+  | no-change run         | A4 → "§9.4 phase 4 step 1 stamps the unchanged project"                                                                                                                                                                                                    |
+  | the sync times        | B2 → "OUT-020: a failed project keeps its previous sync state"; J → "OUT-020: a skipped project keeps its previous sync state" (the fourth run); A4 → "§9.4 phase 4 step 1: an unchanged project is stamped with the run's time"                           |
+  | deleted target        | I → the second run's statuses (`skipped`, `written`, `skipped`); B3 → "the skipped scheme-B project beside two written ones"; J → "OUT-020: a skipped project keeps the sync state of the run that wrote it"; C → the `file_deleted` verdict never settles |
+
+- _Three predictions were wrong, and each said something._ The
+  refused-marker test stayed green under the short-circuited
+  comparison — an invalid file is refused at step 4 and never reaches
+  step 5, so that mutant could not reach the pin (it got its own). The
+  watch test went red under two mutants predicted harmless, both
+  indirectly — that is why the precondition above exists. And the first
+  per-project-marker mutant indexed the date field, so phase 3 itself
+  panicked and every red came from the mutant's own bug: a red run is
+  evidence only when the panic site is the suite's assertion. The
+  runner prints every failure's site and message; a batch counts only
+  when they are the suite's own. The round-1 additions brought four
+  more, all explained: the refused-marker test also went red under the
+  missing-target mutant (its scheme-A project has a missing target
+  too); the watch and library-operations tests died in the suite's own
+  `read` helper on that same mutant; a first form of the extra-files
+  mutant (L) clobbered the own target of a scheme-C project whose stem
+  is `AGENTS` — that target is named `AGENTS.project.md` — and was
+  tightened into L2; and a runner bug that printed MATCH for a batch
+  in which nothing had compiled was caught before it could hide a
+  missing mutant (a "not run" is a mismatch unless a filter asked for
+  it).
+- _Two would-be no-ops never ran, and one batch was split._ The
+  exact-once guard stopped a failed-write arm four columns deeper than
+  assumed and a `String` moved into a loop closure (and, in round 1, a
+  missing-target arm at the wrong indentation and two mutants that
+  returned a `WrittenFile` where a `Result` was due). The first
+  combined batch masked two of its four mutants behind earlier failing
+  assertions — a mutant behind another's assertion proves nothing — so
+  each got a batch of its own.
+
+Honest boundaries: Linux only, locally — the three-OS green is CI's on
+the merge push (the card's own "done when"). Platform facts are
+analysed here, not executed:
+
+- _The macOS startup race of D-181 (main's entry for CI 45235995817;
+  not in this entry's base)._ FSEvents can deliver a fixture write made
+  BEFORE `spawn_service` after the stream starts, as one extra, silent
+  partial pass; the pre-fix ipc batteries broke on absolute pass-count
+  slots. This suite has none. Its only pass-count wait is `>= 1` in
+  `go_live`, where the startup `Refresh` is the first command on the
+  bus (a pre-startup event routes through an empty table and never
+  counts as a pass). Its one event assertion is a SET of flips,
+  collected after a condition wait that guarantees all three were
+  already emitted (emit-then-record), and every straggler pass is
+  verdict-neutral: it re-reads files whose verdicts only the test's own
+  acts change. D-181's own second iteration shows how subtle this
+  family is, so the macOS legs are the ones to watch on the merge push.
+- _Teardown is best-effort on every OS — not "the `Db` first"._
+  `tauri::App` (2.12.6) has no `Drop` and holds its state in an
+  `Arc<AppManager>`; the live watch service task owns an `AppHandle`
+  and loops on the bus for the process's life, so the managed `Db`
+  outlives every world, and `TempDir::drop` is
+  `let _ = remove_dir_all(…)` (tempfile 3.27.0). A temp root with a
+  file still open can therefore survive the drop — a leak, never a
+  failure — and every sibling suite that spawns the service shares it.
+  Whether Windows refuses that removal is not executed here. Measured
+  on Linux after round 2, because leaked roots turned up in `/tmp`
+  while this task ran: this suite's worlds were removed in 78 of 78
+  runs (four clean runs and two with failing tests under mutants), and
+  so were the sibling watch batteries' (144 tests, twice); the one root
+  each whole-workspace run leaves comes from `recovery_tests` (21
+  tests) — one 8-KB, freshly migrated, empty `db/eunomiasync.sqlite3`
+  per run, the file its `db_recreate` round trip writes. Thirteen such
+  roots had accumulated across that day's sessions before the count
+  started. The open-handle leak is therefore not this suite's on
+  Linux; a board follow-up carries the pointer.
+
+Three more boundaries are stated rather than implied. The creation
+marker's zone NAME is checked for shape only — that it names the system
+zone is `marker_clock`'s own suite's pin. OUT-014's display half (the
+MAIN-028 column, no dialog) is UI: the suite pins the service's half
+and the manual smoke checklist owns the rest. The library operations
+run through the store writers, not through §7.10 commands (not landed).
+DoD 9 — the dirty flag after a library edit — is deliberately not
+pinned: its §15.4 row is not this card's. D-179… D-182 were issued to
+parallel sessions and are not in this entry's base (`fd00673`).
+
+Checks: `CARGO_BUILD_JOBS=2 cargo fmt --all -- --check`,
+`CARGO_BUILD_JOBS=2 cargo clippy --workspace --all-targets -- -D
+warnings` and `CARGO_BUILD_JOBS=2 cargo nextest run --workspace
+--no-fail-fast --test-threads=4` — all exit 0 on Linux (1652 tests,
+1652 passed, none skipped; the suite's thirteen among them) — and
+`pnpm run format:check` exit 0.
+
+Round-1 review addendum (D-183, same task; report
+`.opencode/reviews/t126-round1.md`, deepseek-v4.1-flash — REQUEST
+CHANGES: 0×P0, 0×P1, 3×P2, 5×P3; all taken, one of them in part):
+
+- P2-1 (taken): the falsifiability record named red sites for nine of
+  the twelve tests. The per-test table above replaces the prose, and
+  every row was re-observed on the committed file.
+- P2-2 (taken in part): the creation test cited SYS-009 while
+  exercising a never-written target, not a deleted one — real, and the
+  citation moved to a dedicated test. The finding's premise that the
+  recreation "is pinned nowhere in the tree" is refuted by the code:
+  scheme A is pinned at `ipc_tests.rs:8698`
+  (`a_real_sync_run_recreates_a_deleted_target_and_clears_the_hint`,
+  whose own comment defers B and C). The thirteenth test exists for
+  what was actually unpinned — scheme C, and scheme B after a deletion
+  — and carries the strong form of the skipped stamp.
+- P2-3 (taken): "a skipped project keeps its previous sync state" was
+  only pinned `None → None`. The sync-times test gained a fourth run —
+  a stamped scheme-B project skips and keeps its stamps byte for byte —
+  and the thirteenth test pins the same against the run that wrote the
+  file.
+- P3-1 (taken): "the managed `Db` closes first (field order)" was false
+  while the service holds an `AppHandle`; reworded here and in the
+  suite, with the registry sources cited above.
+- P3-2 (taken): "six library operations" → seven (six of all three
+  schemes, one of scheme C alone).
+- P3-3 (taken): "does not edit the main file" and D-01 were asserted
+  with no such file present. The creation test now seeds a scheme-C
+  main file and the scheme-A test both extra files, and asserts each
+  byte for byte (mutants K and L2).
+- P3-4 (taken): a failure message that mislabelled its two halves.
+- P3-5 (taken): two boundaries stated in the suite's module doc — the
+  zone name's shape-only check and OUT-014's display half. The smoke
+  checklist's missing externally-modified entry is a board follow-up:
+  `docs/manual-smoke.md` is outside this task's zone.
+
+The reviewer's three questions go to the orchestrator in the report:
+the owner's acceptance of the v1.2 reading (the card text is stale),
+the Linux-plus-CI-on-merge flow for the three-OS gate, and SYS-009's
+scope — answered here by taking the test.
+
+Round-2 review addendum (D-183, same task; report
+`.opencode/reviews/t126-round2.md`, `opencode-go/hy4-flash-free` —
+APPROVE: 0×P0, 0×P1, 0×P2, 2×P3; both taken; all eight round-1
+dispositions independently verified against the tree, all thirteen
+tests audited `real`). The review phase is complete after this round.
+
+- P3-1 (taken): the marker window's slack was twice what the clock
+  warrants. The clock truncates the zone offset to whole minutes
+  (`marker_clock.rs`), so an offset carrying seconds moves the
+  reconstructed instant by less than a minute — one minute covers it
+  and nothing else. `MARKER_SLACK_SECONDS` is 60 now. Proven both ways
+  with one mutant, the run clock shifted uniformly by +90 s: under the
+  old slack the four window-checking tests all stayed green — the shift
+  was invisible; under the new one all four fail on "ALG-032: the
+  marker names the run's own time". The marker mutants of batch G were
+  re-run after the change and stay red on their assertions.
+- P3-2 (taken): a named seed premise ("the seeded project must
+  persist") sat INSIDE the `Db::run` closure, where a panic is remapped
+  to the `E_DB_LOCKED` envelope and loses its label; the row's presence
+  is now checked after `block_on`. No `expect`, `unwrap` or panic
+  remains inside any executor closure of the suite.
+
+Provenance of the round-2 report: the CLI capture of that run broke
+with a transport reset when the OpenCode server restarted mid-review
+(the partial transcript is kept as
+`.opencode/reviews/t126-round2-hy4-attempt1-failed.md`). The reviewer
+session itself survived the restart and completed —
+`ses_df580cb20ffeCrZz2P54tYr6Ur`, outcome `succeeded` — so no second
+review run was launched: the report file is that session's final
+message, exported with `opencode session export` and written verbatim
+under a provenance note. Its two questions repeat round 1's first two
+and go to the orchestrator in the report.
