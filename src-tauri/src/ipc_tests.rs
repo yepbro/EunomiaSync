@@ -7453,7 +7453,7 @@ fn an_unavailable_project_is_unwatched_until_its_folder_returns() {
 #[test]
 fn a_queued_fire_and_forget_refresh_behind_file_events_still_runs_a_full_pass() {
     // The round-1 review's P1-2 pin: a `Refresh { done: None }` (the
-    // availability listener's, the SYS-010 backend error's) queued
+    // availability listener's, the SYS-010 lost-events signal's) queued
     // behind debounced file events must stay a FULL pass — the naive
     // coalescing stored only the ack sender, so a fire-and-forget
     // Refresh collapsed into the partial re-read and the watch set
