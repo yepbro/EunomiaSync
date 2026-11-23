@@ -58,13 +58,17 @@
 //! tiebreaker (`created_at DESC, id DESC`): UUIDv7 TEXT sorts by
 //! creation (D-031), so a same-millisecond pair resolves by true
 //! creation order, and the order is deterministic regardless.
-//! The pair key is `source_path` VERBATIM — a contract for the
-//! future record writer: it must store one stable spelling per
-//! file (the §9.4 phase 1 resolved target path). A writer that
-//! changes the spelling silently splits a file's history into two
-//! windows, each capped separately (up to 2×N copies, never an
-//! error) — the relative-`backup_path` ruling below is the same
-//! contract for the other column.
+//! The pair key is `source_path` VERBATIM — the one-stable-spelling
+//! contract of D-122, kept by the writer that landed with the
+//! sync-phase-2 task (T-115): src-tauri's `sync_phase2` inserts
+//! every record through `backup_records::insert` with `source_path`
+//! set to the §9.4 phase 1 resolved target path's text (the pass
+//! fact's `source_text`, on both insert paths — the success
+//! transaction and the `E_BACKUP_FAILED` abort sweep). A writer
+//! that drifts from the resolved spelling silently splits a file's
+//! history into two windows, each capped separately (up to 2×N
+//! copies, never an error) — the relative-`backup_path` ruling
+//! below is the same contract for the other column.
 //!
 //! # Deletion precedes the mark; the mark is the caller's transaction
 //!
