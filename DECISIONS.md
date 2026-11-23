@@ -19214,6 +19214,60 @@ outright and owned by the D-170 follow-up, not "tense". P3-3: the
 screen. P3-4: import classified — a merge per D-18, non-destructive.
 None refused.
 
+Owner-ruling addendum (2026-11-23, T-320 — the follow-up card this
+entry's round 1 created): the census's heading rename/move
+classification is superseded — the owner ruled them outside the
+destructive class, by refining the definition, not by adding a
+LIB-030/031 confirmation. NFR-021's definition sentence is unchanged;
+the bullet gains a scoping one — what the action discards decides
+whether the lost state counts: stored content and stored records
+count, the name or position of a record that itself survives does not
+— and the exclusion follows the ruling's content-versus-metadata line
+(the ruling's term "layout metadata" is realized in the spec as the
+surviving-record criterion, per round 1: a generic metadata category
+would have left heading deletion — same name, same position,
+instructions staying — unsupported in its recorded destructive class).
+A rename or a move discards only the name or position — the section
+record and its items survive (a move carries the whole section with
+its items, LIB-032), and the old value is re-entered by hand. The
+ground is not in-app recoverability: 6.2 keeps no heading revisions
+and the action log is the rename/move's only record — the old name is
+genuinely gone from the app's data, and what the refined reading
+rejects is counting a replaced label on a surviving record as lost
+content. The same sentence pins the boundary: deleting a heading
+removes the section record itself, with no restore command, and stays
+destructive (6.4, UI-010). The rest of the census stands, re-verified
+member by member against the refined wording: custom-text deletion
+(stored content in the assignment; the `revisions` CHECK covers
+instruction and variant only, so it has no history), manual
+excluded-path deletion (the exclusion record itself destroyed, no way
+back), heading deletion (above), the D-11 purge and the recovery pair
+(content destroyed wholesale, no in-app way back) stay destructive;
+edits (version history), assignments (the variant stays selectable —
+the definition's third arm, not the scoping), archiving/hiding/soft
+deletes/restores, sync writes, the empty sync result, the unsaved
+discard and import stay non-destructive — nothing else flips class.
+LIB-030/031 gains no confirmation; one clause marks rename and move
+non-destructive (12.7), and every destructive member keeps its
+confirmation home. Ledger footprint: folded here — one record for one
+ruling, the T-316/D-086 addendum posture; this addendum is T-320's
+record and no separate D-number is spent on it.
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t320-round1.md`, deepseek-v4.1-flash):
+request-changes — one P1, one P2, one P3; all taken in the amend.
+P1-1: the first draft's generic "layout metadata" gloss inside the
+definition left heading deletion's recorded destructive class
+unsupported by the refined wording (deletion discards the same
+name/position and no other content). P2-1: the term was new,
+undefined, occurred once in the spec and read broader than the
+card's minimal scope (and beside §9.2, which builds heading names
+into the file). P3-1: the definition sentence carried three nested
+em-dash glosses. The amend reverts the definition sentence, moves the
+scoping into its own sentences pinned to the surviving-record
+criterion, and pins the deletion boundary (6.4, UI-010). None
+refused.
+
 ### D-174 — T-313: spec's release-checklist mentions cross-referenced to docs/manual-smoke.md — the file named as the release checklist's in-repo companion, never as the checklist itself — 2026-11-23
 
 Problem: T-277's report asked for a cross-reference "in spec §15.5 —
