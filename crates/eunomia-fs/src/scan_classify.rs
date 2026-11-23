@@ -58,11 +58,14 @@
 //! this module documents the failure mode so the obligation cannot
 //! be assumed away. A path that is not canonical still classifies,
 //! by the key of its text; canonical aliasing (DB-031) is the ADD
-//! flow's
-//! [`canonical_path_key`](crate::paths::canonical_path_key), never
-//! the classifier's. Two spellings that collapse to one key (a
-//! doubled separator; NFC/NFD under the folding rules of Windows
-//! and macOS) are one repository with one class.
+//! flow's concern, answered by keying the canonical root — the
+//! canonicalize-then-key composition
+//! ([`canonical_path_key`](crate::paths::canonical_path_key)), taken
+//! step by step by the app layer (the gate's canonicalization, then
+//! the key at the add site) — never the classifier's. Two
+//! spellings that collapse to one key (a doubled separator; NFC/NFD
+//! under the folding rules of Windows and macOS) are one repository
+//! with one class.
 //!
 //! # Classification never sees lossy text (the D-086 addendum)
 //!

@@ -438,10 +438,18 @@ pub fn canonicalize(path: &Path) -> Result<std::path::PathBuf, CanonicalizeError
 }
 
 /// The identity key of a project path (DB-030, DB-031): canonicalizes
-/// first, then keys — the composition the add-project flow will call
-/// (the flows land in a later task), and the seam DB-031's symlink
-/// rule lives in. A folder and a symlink to
+/// first, then keys — the module's two primitives in one call, and
+/// the seam DB-031's symlink rule lives in. A folder and a symlink to
 /// it resolve to the same canonical form, so they get ONE key.
+///
+/// The landed flows compose the primitives themselves instead of
+/// calling this: the add flow runs `validate_ui_path` →
+/// `find_git_root` → `path_key` (src-tauri's `commands`), and the
+/// SEC-003 gate and the scan key their already-canonical paths the
+/// same way (`session_paths`, `scan_classify`). The callers of this
+/// composition today are the tests; it remains the module's one-call
+/// composition for consumers that want the canonical key in one
+/// step.
 ///
 /// # Errors
 ///
@@ -486,8 +494,10 @@ pub fn canonical_path_key(path: &Path) -> Result<String, CanonicalizeError> {
 /// But DB-030/DB-031's identity promises hold only for canonical
 /// input: a non-canonical path gets the key of its TEXT (e.g. `/repo`
 /// and a symlink spelled `/alias` key differently until
-/// canonicalized), which is why [`canonical_path_key`] is the entry
-/// point flows should call. The repository scan (ALG-053) keys the
+/// canonicalized), which is why [`canonical_path_key`] is the
+/// ready-made one-call composition for consumers starting from a raw
+/// path; the landed flows compose the primitives themselves instead
+/// (its doc names the callers). The repository scan (ALG-053) keys the
 /// paths it walked; that holds given the scan is rooted at a stored
 /// canonical path and keeps D-07's no-follow rule — the scan task
 /// owns both preconditions.
