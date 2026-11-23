@@ -17955,3 +17955,128 @@ no tests were touched. Findings fixed —
   `LibraryError` seeding helpers as plumbing by D-149's test-side
   ruling, so a literal "second copy" reading does not fire on
   them.
+
+### D-163 — T-290: `file_event` stays — the "upcoming variant/sync/backup tasks" justification was half-stale (sync and backup landed without it, on the journal + `backup_records` route), the pending library and `backup_restore` tasks are the adopt-or-retire trigger — 2026-11-23
+
+Problem: T-268's triage report (follow-up card, not touched by its
+task) flagged the logging facade's `file_event(FileOp, &Path,
+Option<u64>)` primitive (D-032) as potentially dead: the recorded
+premise — the facet is "for the upcoming variant/sync/backup tasks"
+(ARCHITECTURE.md, Logging section) — no longer holds on two of its
+three halves, because the sync tasks landed and did not take it. The
+card offers two readings — keep until a consumer appears, or remove
+as dead — and the owner moved it into the cycle without picking one;
+per Rule 1 the executor picks the sound reading and records it here
+in the same change.
+
+Census (verified before writing, Rule 2; grep census over this
+worktree at this commit): `file_event` (logging.rs:1899; the `FileOp`
+enum at :1922 with its `as_str` at :1936) carries
+`#[allow(dead_code)]` and has ZERO production callers — the only
+caller is the SEC-008 contract test
+(`file_events_carry_paths_and_ids_but_never_content`, logging.rs:2234,
+calls at :2263-2264), and every other mention is doc prose (db.rs:154,
+session_paths.rs:110, and `logging.rs`'s own module docs at :134-136
+and :1077-1078). The landed
+consumers the justification promised never arrived: the sync pipeline
+journals its per-project file-write outcomes through `action_log`
+(`SyncProjectResult`/`SyncRunFinished`, sync_phase4.rs:376-425)
+mirrored by `action_logged` under D-051's call-once rule, plus the
+seven `sync_*` diagnostic facets (logging.rs:1483-1622), and target
+file backups go through `backup_target_file` + `backup_records`
+(sync_phase2, the commands.rs:975 seam) — neither calls `file_event`,
+and the `BackupCreated` journal member has no production producer yet
+(test-side uses only: the store's vocabulary/round-trip tests and the
+activity-filter seed at ipc_tests.rs:1035). The remaining
+prospective consumers are concrete, not speculative: the variant
+library milestone is pending (no `variant_*`/`instruction_*` commands
+in commands.rs — the `VariantSaved`/`VariantRestored` vocabulary was
+coined for it), and `backup_restore` (BKP-007, a target-file write
+OUTSIDE a sync run, which the sync journal structurally does not
+cover) is explicitly pending — it stands on the SYS-005 gate list
+with the other project-editing commands, and "joins the same gate as
+those commands land" (commands.rs:2813-2815).
+
+Solution (the keep ruling): `file_event` stays the tested-today/
+consumed-later facet it shipped as (D-032) — removal would discard a
+pinned SEC-008 contract primitive whose remaining consumers are
+concrete pending tasks, and would be a code change outside this
+md-only task in any case. The stale half of the justification is
+corrected in ARCHITECTURE.md's Logging section (the only md claim
+site; docs/spec.md carries no facade/`file_event` claim — verified by
+grep): the facet is now described as tested and still-unused, with
+the landed sync/backup route named (`action_log` + `action_logged`
+for sync, `backup_records` for the phase-2 backups) and the pending
+producers as its prospective consumers. The trigger: the first task
+that lands a target-file write outside the sync journal (a variant
+library task or `backup_restore`) must either adopt `file_event`
+(drop the `#[allow(dead_code)]`) or consciously retire the primitive
+by its own ruling, and the adopting ruling also decides the fate of
+the already-superseded `Synced`/`BackedUp` members (their producers
+landed on the journal/`backup_records` route and never emitted a
+line) — landing such a write while leaving the allow untouched is a
+review finding.
+
+Follow-up for the board (the orchestrator cards it): the stale
+justification also survives in `.rs` doc comments — `file_event`'s
+own ("The upcoming variant, sync and backup tasks log through this
+helper"; "No production caller exists yet (the variant/sync tasks are
+upcoming)", logging.rs:1885-1896), `FileOp`'s ("first produced by
+the upcoming variant/sync/backup tasks", logging.rs:1917-1919), the
+module header's SEC-008 bullet ("the primitive the upcoming
+variant/sync/backup tasks will log through", logging.rs:134-136) and
+the "already write" phrasing about `file_event`
+(logging.rs:1077-1078) — correcting them is a non-md change and
+falls outside this task's md-only scope, so the Rule 11 debt is
+tracked by the follow-up card, not silently left.
+
+Checks: md-only change — ARCHITECTURE.md (the Logging section) and
+DECISIONS.md (this entry) are the only files in the diff; nothing
+compile-bearing changed, so no cargo run (the md-only exception,
+which in this batch coincides with the batch regime: suites are not
+run — the orchestrator runs them centrally when the flash batch
+closes). `pnpm run format:check` exit 0; the pre-commit hook gates
+the commit; ONE review round per the batch regime. The census above
+is point-in-time: the cited lines move as the files evolve — the
+RULE is the durable content, not the line numbers.
+
+Honest boundaries: the tests were not run in this batch, so nothing
+here is proven by execution; the census is asserted from grep, and
+the "pending" status of the library and `backup_restore` tasks is
+read from the code (no commands, the gate comment) and the board
+state as given to this task — not re-verified against Todoist
+(executor subagents do not touch the board). If the owner rules the
+variant milestone cancelled, this entry's trigger lapses and the
+remove reading becomes the follow-up's answer.
+
+Round-1 review addendum (D-163, same task; report
+`.opencode/reviews/t290-round1.md`, deepseek-v4.1-flash — approve,
+no P0/P1; 2×P2, 5×P3, all taken in the amend): the round re-verified
+the census (every fact checked against the code), the clean tail
+append, the md-only scope and the no-test-touch. Findings fixed —
+
+- P2-1 (taken): the ARCHITECTURE.md sentence attributed the BACKUP
+  file-write outcomes to the `action_log` journal, where they do not
+  land (`BackupCreated` has no production producer — the phase-2
+  copies are `backup_records` rows); the sentence now names each
+  route separately, and the heading (and the commit subject) say
+  "journal + `backup_records` route" instead of "the journal route".
+- P2-2 (taken): the follow-up list of stale `.rs` doc sites missed
+  two — the module header's SEC-008 bullet (logging.rs:134-136) and
+  the "already write" phrasing (:1077-1078); both are now named, so
+  the briefed card fixes all four sites.
+- P3-1 (taken): "every other mention is a doc cross-reference" now
+  includes `logging.rs`'s own module docs (:134-136, :1077-1078) —
+  the parenthetical was not exhaustive.
+- P3-2 (taken): ipc_tests.rs:1035 is an activity-filter seed, not
+  "the vocabulary oracle"; the census now says "test-side uses only"
+  and names the store's vocabulary/round-trip tests.
+- P3-3 (taken): the gate-list quote is verbatim now ("joins the same
+  gate as those commands land", commands.rs:2813-2815) instead of a
+  quoted paraphrase.
+- P3-4 (taken): the trigger also decides the fate of the
+  already-superseded `Synced`/`BackedUp` `FileOp` members — an
+  adoption that leaves them dead behind the allow would repeat
+  today's defect.
+- P3-5 (taken): "the Logging row" → "the Logging section"
+  (ARCHITECTURE.md has sections, not rows).

@@ -778,8 +778,16 @@ SEC-008 is enforced structurally: every tracing event of the app is
 constructed in `logging.rs` from typed parameters (paths, operation
 codes, numeric IDs) — the event macros and `#[instrument]` are banned
 everywhere else by a `config_tests.rs` text pin, and the facade's
-`file_event` primitive (for the upcoming variant/sync/backup tasks) has
-no parameter that could carry instruction text or file content. The
+`file_event` primitive has no parameter that could carry instruction
+text or file content. The primitive is a tested, still-unused facet
+(`#[allow(dead_code)]`, the keep ruling D-163): the sync and backup
+tasks landed without it — sync journals its file-write outcomes in
+the `action_log` journal mirrored by `action_logged` (D-051) plus
+the `sync_*` diagnostic facets, and the phase-2 backups record
+theirs in `backup_records` rows — and the facet's prospective
+consumers are the pending file-operation producers outside the sync
+journal (the variant library tasks, `backup_restore`/BKP-007); the
+first such producer either adopts the primitive or retires it. The
 `logging.rs` tests prove the contract end to end: a file event carries
 the path and the ID while the operation's instruction text stays out of
 the log. One deliberate exception: config warnings may quote the
