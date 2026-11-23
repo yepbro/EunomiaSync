@@ -181,8 +181,9 @@ reviews. The pstack principles cover specific techniques; rust-skills/vue are
 language-level.
 
 Solution: installed the operator-provided `architecture-patterns` skill (English
-original, unmodified; no upstream repository tracked) as `.opencode/skills/architecture-
-patterns/`: 9 patterns, 11 anti-patterns, decision rules, and an evidence-based review
+original, unmodified; no upstream repository tracked) as
+`.opencode/skills/architecture-patterns/`: 9 patterns, 11 anti-patterns,
+decision rules, and an evidence-based review
 format. Wired as the design/review gate in AGENTS.local.md — applied when planning
 features or reviewing structure, before language-level skills; precedence over the
 overlapping pstack principles pinned there (idempotent expands its pattern 4, boundary
@@ -443,8 +444,9 @@ here and in the `lib.rs` registration comment.
 
 Problem: with the scaffold's `permissions: ["core:default", "opener:default"]`
 the webview could call the whole `core:default` bundle — event, path, and
-window/webview state APIs (including `core:webview:allow-internal-toggle-
-devtools`), plus the opener plugin — while SEC-001 (§5.6) says the updater,
+window/webview state APIs (including
+`core:webview:allow-internal-toggle-devtools`), plus the opener plugin —
+while SEC-001 (§5.6) says the updater,
 dialog, and opener plugins are invoked from Rust only and application
 commands are not capability-gated. Which permissions, if any, the webview
 honestly needs had to be decided on facts.
@@ -2701,7 +2703,7 @@ Solution, in `src-tauri/src/db.rs`:
   else, surfaced on the first attempt). The mutex guard is local to
   `attempt_once`, so the connection is free during every pause and
   each attempt re-locks.
-- _The operation is `FnMut`, not `FnOnce._ A retry re-runs the whole
+- _The operation is `FnMut`, not `FnOnce`._ A retry re-runs the whole
   body in a fresh transaction. That is safe because the failed
   attempt rolled back completely (the rollback is the transaction
   drop D-037 already documents), so the retry is a fresh run over
@@ -5824,8 +5826,9 @@ Solution: `src-tauri/src/markdown.rs` (`preview_html`, pure
   answers in any mode, and its `Result<T, AppError>` is §7.10's
   uniform shape, not a claim of fallibility: the pipeline is total,
   no `Err` is reachable, so no §10 log edge exists either.
-- DEPENDENCIES: `pulldown-cmark = { version = "0.13", default-
-features = false, features = ["html"] }` (0.13.6 resolves; the
+- DEPENDENCIES:
+  `pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }`
+  (0.13.6 resolves; the
   dropped default features take the `getopts` CLI machinery out of
   the build) and `ammonia = "4"` (4.2.5 resolves). Both are NEW
   crates in the graph — unlike the rusqlite/jiff/tokio precedents
@@ -6417,8 +6420,9 @@ gains exactly one `pub mod temp_files;` line; the `//!` prose list is
 deliberately untouched (D-062's known-open-item posture — parallel
 tasks edit that block only when it is next free).
 
-The API is three functions and their types. (1) `tmp_file_name(
-target_name, token)` — the ONLY spelling of a staging name: `.` +
+The API is three functions and their types. (1)
+`tmp_file_name(target_name, token)` — the ONLY spelling of a staging name:
+`.` +
 target name + `.eunomia-` + token + `.tmp`, the token validated as
 exactly 8 lowercase-hex characters. (2) `is_app_tmp_file(name,
 target_name)` — the matcher, byte-exact and case-sensitive: the
@@ -6494,8 +6498,8 @@ file's name — 9.5 step 1 resolves symlinks before staging, so a
 `CLAUDE.md` link stages (and is swept) as `AGENTS.md`; the sweep and
 the writer must hand the same spelling to the grammar, or each
 spelling's debris waits for the other target's sweep. Deliberately
-no new dependencies (the crate manifest is untouched; `std::time::
-SystemTime` is std, and `tempfile` is already a crate dependency —
+no new dependencies (the crate manifest is untouched; `std::time::SystemTime`
+is std, and `tempfile` is already a crate dependency —
 pinned by D-019 for the atomic module — serving the tests). The
 builder rejects a target name that is not a single plain file name
 (separator, NUL, `.`/`..` — it would stage in another folder, which
@@ -8454,8 +8458,8 @@ grep -c eunomia_fs15fault_injection` → 0, with a feature-enabled
   untouched, nothing staged); skip-counter selectivity (the first
   arrival passes with its write landed — the discriminator a broken
   counter cannot fake) and one-shot liveness (a third write
-  completes unparked). Cross-target clippy (`x86_64-pc-windows-
-msvc`, `aarch64-apple-darwin`, lib and --all-targets, `-D
+  completes unparked). Cross-target clippy (`x86_64-pc-windows-msvc`,
+  `aarch64-apple-darwin`, lib and --all-targets, `-D
 warnings`) passes: the windows arm's fault blocks and the
   cfg-gated `Locked` refusal compile on every leg that can reach
   them.
@@ -9089,10 +9093,11 @@ D-051 unmirrored info+user+ok shape, and reads journal nothing).
   §6.4 does.
 
 Tests: 10 IPC tests in `ipc_tests.rs` (the package total stays all
-green): the acceptance pair (`removing_an_exclusion_makes_the_next_
-scan_classify_the_path_new`), the PRJ-017 coexistence pin
-(`removing_an_exclusion_of_an_archived_project_keeps_the_scan_verdict_
-archived`), every field + stable order with a forced same-millisecond
+green): the acceptance pair
+(`removing_an_exclusion_makes_the_next_scan_classify_the_path_new`), the
+PRJ-017 coexistence pin
+(`removing_an_exclusion_of_an_archived_project_keeps_the_scan_verdict_archived`),
+every field + stable order with a forced same-millisecond
 tiebreak pin (both reason members, the DB-002 created_at shape), the
 empty-database list, the honest no-database answers for both
 commands, the corrupt `reason` cell's fallback envelope
@@ -9123,8 +9128,9 @@ DELETE back), and the registration pins for both §7.10 names.
   class enumeration its sibling received in round 1 (the remove path
   has three mapper seams: the list read, the delete, the journal
   insert); the two new facade edges gained the real-subscriber test
-  the peer edges have (`the_exclusion_failure_lines_carry_the_code_
-and_payload` in `logging.rs` — a wrong target or dropped field on
+  the peer edges have
+  (`the_exclusion_failure_lines_carry_the_code_and_payload` in `logging.rs` — a
+  wrong target or dropped field on
   either line now fails a test).
 
 ### D-108 — Frontend mock IPC layer behind one facade and the `VITE_IPC_MOCK` flag — 2026-11-20
@@ -10144,11 +10150,13 @@ extension.
 
 Tests: store — the two new integration tests above plus the
 `the_exclusion_members_round_trip_and_reject_near_misses` unit test
-and the updated vocabulary oracles (`enums_round_trip_the_schema_
-check_literals`, `the_action_vocabulary_covers_log_001_to_004_
-member_by_member`); app — the T-078 journal asserts repointed (one
-test, `exclusion_remove_deletes_the_row_and_journals_the_path_in_
-one_transaction`); frontend — the mock journal test repointed
+and the updated vocabulary oracles
+(`enums_round_trip_the_schema_check_literals`,
+`the_action_vocabulary_covers_log_001_to_004_member_by_member`);
+app — the T-078 journal asserts repointed (one
+test,
+`exclusion_remove_deletes_the_row_and_journals_the_path_in_one_transaction`);
+frontend — the mock journal test repointed
 (`exclusionRemove journals exclusion.removed naming the removed row
 (D-119)`). No other journal surface moved: the tracing mirror's
 decision table is level/visibility/result-based and the new entry
@@ -10265,8 +10273,9 @@ event). App — the IPC seam moved UP a boundary:
 envelope, the allowlist does not grow, the hand-sent lossy spelling
 gets the same answer at the add gate, the database stays empty, the
 valid sibling picks and adds with its lossless canonical stored
-path); the commands unit `a_non_utf8_root_lookup_failure_is_the_
-encoding_validation_envelope`. The full existing `path_key` battery
+path); the commands unit
+`a_non_utf8_root_lookup_failure_is_the_encoding_validation_envelope`. The
+full existing `path_key` battery
 stays green after the lossy branch's deletion; Linux-only fixtures
 follow the `temp_files` EILSEQ posture (APFS/NTFS reject invalid-byte
 names). `temp_repos` (fixture tooling) and `tests/scan_platform.rs`
@@ -10477,8 +10486,8 @@ keep)`.
   would leave a `pruned` record over a live file — a lying status
   the restore screen must never see.
 - _FS failure = report, not error; record stays `ok`._ A removal
-  that fails after the §9.5 transient-hold retries (`retry_transient_
-hold`, now pub(crate) in `storage`) skips its record, lands in
+  that fails after the §9.5 transient-hold retries (`retry_transient_hold`,
+  now pub(crate) in `storage`) skips its record, lands in
   `RetentionOutcome::failures` with the record id, the stored cell
   and a typed reason, and the walk continues — the daily-copy
   prune's best-effort posture: phase 4 must not fail a successful
@@ -11762,8 +11771,9 @@ Round-1 review addendum (D-132, same task; report
 - P2-3 (taken): the success-path transaction comment still claimed
   dedup claims write rows — corrected to the UNIQUE ruling.
 - P2-4 (taken): (a) the record-transaction failure branch is now
-  pinned (`a_record_transaction_failure_cleans_the_copies_and_
-leaves_the_run_running`: a stale record claiming the run's exact
+  pinned
+  (`a_record_transaction_failure_cleans_the_copies_and_leaves_the_run_running`:
+  a stale record claiming the run's exact
   §5.5 name under a historic source spelling → the copy is made, the
   insert hits UNIQUE, the orphan is swept, the store error
   propagates, the run row stays `running`); (b) the abort test also
@@ -12035,8 +12045,8 @@ Round-2 review addendum (D-133, same task; report
 `.opencode/reviews/t116-round2.md`, hy4-flash-free — no P0/P1/P2;
 1×P3): the reviewer verified every round-1 fix in place and
 discriminating (the sequenced clock's bytes-and-counter double pin,
-the precondition pass's ordering and its `is_none_or(Option::
-is_none)` double arm, the doc corrections), confirmed both round-1
+the precondition pass's ordering and its `is_none_or(Option::is_none)` double
+arm, the doc corrections), confirmed both round-1
 declinations without new arguments, re-audited the loop fresh
 (transaction boundaries, the `Arc<write>` sharing, the marker reuse,
 the failure-vs-`Err` split, SEC-008, the §10 table against the
@@ -14386,8 +14396,8 @@ Problem: D-130's recorded follow-up (joined by D-135's third copy):
 the content-build mechanics exist as THREE deliberate mirrors —
 `managed_text` (D-064's markerless seam) and the chunked
 mini-snapshot pass of 25 (D-121's set-L batching) in
-`src-tauri/src/dirty_recalc.rs` (D-121), `src-tauri/src/
-sync_phase0.rs` (D-130, born because `dirty_recalc.rs` was T-102's
+`src-tauri/src/dirty_recalc.rs` (D-121), `src-tauri/src/sync_phase0.rs`
+(D-130, born because `dirty_recalc.rs` was T-102's
 frozen zone), and `benches/eunomia-load` (D-135, behind pin tests
 with a source-scan tripwire). Each copy is independently pinned, but
 three spellings of the same bytes are three chances to drift; the
@@ -15159,16 +15169,18 @@ wanted-minus-watched difference — now reports the phantom shapes.
 Tests: the battery in `crates/eunomia-fs/tests/watcher.rs` gains
 three tests and one honest flip. NEW, red against the pre-fix code
 (observed: both failed on `watched_files` still naming the phantom
-file): `a_wanted_directory_deleted_for_good_leaves_watched_files_
-and_reports_the_gap` (a REAL backend: converge, `remove_dir_all`,
+file):
+`a_wanted_directory_deleted_for_good_leaves_watched_files_and_reports_the_gap`
+(a REAL backend: converge, `remove_dir_all`,
 re-set — watched empties, the seam answers the file, and the
-directory's return re-arms) and `a_limit_refused_re_arm_of_a_
-converged_directory_leaves_watched_files_and_reports_the_gap`
+directory's return re-arms) and
+`a_limit_refused_re_arm_of_a_converged_directory_leaves_watched_files_and_reports_the_gap`
 (the seam's `Limit` kind: the refused re-arm empties `watched_files`
 and fills the seam, a repeated pass answers identically, the lift
 converges). NEW, green-on-arrival by design and discriminating via
-mutation M2: `a_non_evidential_refused_re_arm_keeps_the_converged_
-watch_counted` (an `Other`-kind refusal of a converged re-arm keeps
+mutation M2:
+`a_non_evidential_refused_re_arm_keeps_the_converged_watch_counted` (an
+`Other`-kind refusal of a converged re-arm keeps
 the watch counted — the genuinely-live-watch half, the reason the
 class exists). FLIPPED: the D-139 battery's second pass
 (`a_watch_limit_hit_mid_set_leaves_the_later_directories_unwatched`)
@@ -15177,8 +15189,8 @@ assertion pinned the phantom as the surviving half of the then-known
 bug; this card carries the behavior change D-139 deferred, so the
 pass now asserts the honest answer (the whole set unwatched) plus a
 third pass pinning idempotence. NEW unit test in `watcher.rs`'s
-colocated suite: `notify_error_kinds_map_onto_the_refusal_evidence_
-classes` (PathNotFound→Gone, MaxFilesWatch→Limit, generic and io→
+colocated suite: `notify_error_kinds_map_onto_the_refusal_evidence_classes`
+(PathNotFound→Gone, MaxFilesWatch→Limit, generic and io→
 Other, through notify's public `Error::new`). The fake gained the
 refusal class (`LimitBackend::refusing_from_with(kind, from)`,
 `refusing_from` = the `Limit` kind, so the existing battery's
@@ -15239,8 +15251,8 @@ source claim re-verified in the registry sources before taking:
   `refusal_kind` mapped notify's `PathNotFound` to `Gone`, but that
   kind is produced by the backends that reach the syscall — inotify
   (remapping the kernel's ENOENT, `src/inotify.rs:451-457`) and
-  FSEvents (pre-checking with `path.exists()`, `src/fsevent.rs:
-372-375`); the WINDOWS backend refuses a missing path earlier and
+  FSEvents (pre-checking with `path.exists()`, `src/fsevent.rs:372-375`);
+  the WINDOWS backend refuses a missing path earlier and
   generically (`src/windows.rs:557-564` — `Error::generic("Input
 watch path is neither a file nor a directory.")`, i.e.
   `ErrorKind::Generic` → `Other`), so the deleted-for-good phantom
@@ -15253,8 +15265,8 @@ watch path is neither a file nor a directory.")`, i.e.
   stat failure falls through to the backend's own arming, which
   also covers the TOCTOU race); the kind mapping stays as the
   fallback, and the new unit test
-  `the_production_backend_refuses_a_gone_directory_as_gone_on_
-every_platform` pins both gone shapes through the REAL
+  `the_production_backend_refuses_a_gone_directory_as_gone_on_every_platform`
+  pins both gone shapes through the REAL
   constructor. The pre-check also closes a Linux hole the round
   surfaced in passing: inotify happily arms a watch on a FILE, so a
   file standing where a watched directory was would have armed,
@@ -15278,8 +15290,8 @@ every_platform` pins both gone shapes through the REAL
   unreachable-but-present path is `Other`; the doc now states the
   stat-based definition and moves "unreachable" to the `Other`
   line.
-- P3-4 (taken): the citation ranges tightened (`inotify.rs:
-451-457`, debouncer `lib.rs:600-608`) and the Windows backend is
+- P3-4 (taken): the citation ranges tightened (`inotify.rs:451-457`,
+  debouncer `lib.rs:600-608`) and the Windows backend is
   now cited where the platform boundary is recorded (the P1
   paragraph above).
 
@@ -15470,9 +15482,7 @@ test-side assertion helpers on the shared mapper; the store-mapper
 family's second-copy trigger). The cards are the tracking unit; this
 note only records their existence.
 
-### D-150 — T-266: ARCHITECTURE.md's workspace tree rebuilt to the
-
-actual module layout — 2026-11-22
+### D-150 — T-266: ARCHITECTURE.md's workspace tree rebuilt to the actual module layout — 2026-11-22
 
 Problem: D-145's follow-up audit showed the tree stale far beyond
 T-265's own rows: eunomia-core listed 7 of 25 modules, eunomia-store
@@ -16081,8 +16091,8 @@ instead of refusing; M4 the `Cancelled` arm answering `Completed`
 `pnpm typecheck`, `pnpm exec vitest run` (286) — all green by exit
 code; `src/bindings.ts` regenerated and pinned by the export test.
 
-Frozen zones untouched (`file_watch.rs`, `crates/eunomia-store/
-tests/**`); the fs-crate edits are comment-tense fixes only (Rule
+Frozen zones untouched (`file_watch.rs`, `crates/eunomia-store/tests/**`);
+the fs-crate edits are comment-tense fixes only (Rule
 11), no behavior. Follow-ups for the board: T-077 (`scan_commit`)
 consumes the answer's selection and is the ONLY writer; T-120
 (`sync_cancel`) remains the sync slot's consumer; the `ipc/index.ts`
@@ -16305,8 +16315,8 @@ Problem: three live citations pointed at "D-141" — a number the
 counter never issued and no entry ever carried (D-142's round-1 P2-1,
 carded as the T-256 follow-up): D-115's scope note ("the D-141
 loud-drift rule"), D-138's mock-layer-deviation bullet ("D-141's
-loud-drift layer"), and the mock module header (`src/ipc/mock/
-commands.ts` 6, "see DECISIONS.md D-141"). A reader following any of
+loud-drift layer"), and the mock module header (`src/ipc/mock/commands.ts` 6,
+"see DECISIONS.md D-141"). A reader following any of
 the three landed on nothing: the design the citations promised
 existed only as prose inside D-108 and the code comments. The same
 gap class T-287 closed by restoring D-071/D-072; closed here by
@@ -16422,8 +16432,8 @@ Readings recorded BEFORE coding (rule 1):
   D-096 one-edge-per-failure-class shape. All four target
   `eunomia::file_watch`. (a) `file_watch_init_failed` — `warn`: a
   watcher backend that fails to construct leaves the app running with
-  no watching (SYS-010's no-crash posture), the `db_backup_daily_
-failed` degrade shape; called from `lib.rs`'s existing
+  no watching (SYS-010's no-crash posture), the `db_backup_daily_failed`
+  degrade shape; called from `lib.rs`'s existing
   `if let Err(_init)` arm (anchor-scoped: the arm's body only). (b)
   `file_watch_pass_failed(&AppError)` — `error`, the §10 every-error
   rule and the `availability_check_failed` shape (code/params/os_*
@@ -16433,8 +16443,9 @@ failed` degrade shape; called from `lib.rs`'s existing
   pipeline's `sync_run_degraded` watch arm since D-138; the add flow's
   line is T-257's separate card, not absorbed here), so gating on
   `done.is_none()` logs every failure exactly once instead of
-  double-logging the awaited ones. (c) `file_watch_emit_failed
-(&tauri::Error)` — `warn`, the `availability_emit_failed`/
+  double-logging the awaited ones. (c)
+  `file_watch_emit_failed(&tauri::Error)` — `warn`, the
+  `availability_emit_failed`/
   `scan_progress_emit_failed` shape verbatim: a missed UI update, not
   lost state (the cache deliberately stays unrecorded; the next
   trigger re-emits at-least-once). (d) `file_watch_refused(gone,
@@ -16562,8 +16573,8 @@ D-144 round-1 P2-2 lesson), and is deliberately NOT exclusive with
 the §5.7 verdicts (a refused watch does not stop the verdict pass —
 files are read on every full pass, watched or not).
 
-Tests: fs — three integration tests in `crates/eunomia-fs/tests/
-watcher.rs` (the mid-set limit answers `Limit` for exactly the
+Tests: fs — three integration tests in `crates/eunomia-fs/tests/watcher.rs`
+(the mid-set limit answers `Limit` for exactly the
 refused files and a never-armed `Other` refusal answers `Other`; a
 real-backend gone-for-good directory answers `Gone`, cleared by the
 directory's return; a path with no classifiable parent answers
@@ -16573,8 +16584,8 @@ the per-class counts). app unit — the recording/swap semantics, the
 gate's six transitions (first-refusal Some with counts; reshaped
 Some; changed-class Some; converged None; standing None; recovered
 None), the closed wire vocabulary, and the composite proof
-(`a_limit_refused_target_flows_through_the_real_pass_to_the_gate_
-and_notice`: the REAL `blocking_half` over a fake backend refusing
+(`a_limit_refused_target_flows_through_the_real_pass_to_the_gate_and_notice`:
+the REAL `blocking_half` over a fake backend refusing
 one of two real repo roots — the refused target lands id-keyed with
 `Limit`, one episode opens, a repeated pass under the standing
 refusal adds no second episode, the notice seam serves the loss,
@@ -16695,8 +16706,8 @@ here:
   the reviewer's shape: the post-pass bookkeeping (refused-watch
   recording + gate, diff, delivery, verdict recording) factored as
   `finish_pass` around an INJECTABLE emitter, and the new
-  `a_failed_emit_still_records_the_refused_watch_and_opens_the_
-episode` test drives it with a failing emitter — the recording is
+  `a_failed_emit_still_records_the_refused_watch_and_opens_the_episode`
+  test drives it with a failing emitter — the recording is
   the watch's own fact (owed by the pass that observed it), the
   episode opens, and the verdict cache deliberately stays stale.
   Mutation-verified red-then-green (M7a the recording moved after
@@ -17289,14 +17300,16 @@ the watcher WITH its battery, and T-103/T-259/T-260/T-262
 gap analysis: map every §5.7 requirement onto the landed tests and
 close only what is genuinely unpinned. The mapping (requirement →
 existing pin): the T-F13 flag/display half + the SIMULATED
-next-sync clearing → `an_external_edit_marks_the_project_externally_
-modified_without_writing_anything`; deletion vs never-synced →
+next-sync clearing →
+`an_external_edit_marks_the_project_externally_modified_without_writing_anything`;
+deletion vs never-synced →
 `deleting_a_synced_target_file_reports_target_deleted…`; the
 verdict battery (A/B/C, body/marker/outside edits, broken markers,
 non-UTF-8, CRLF, pre-existing files) → the 15-test unit battery in
 `file_watch.rs`; the debounce/wire literals → the two literal pins;
-startup computation → `projects_list_carries_the_watch_service_
-verdicts_from_its_snapshot`; unavailable→unwatch→rewatch →
+startup computation →
+`projects_list_carries_the_watch_service_verdicts_from_its_snapshot`;
+unavailable→unwatch→rewatch →
 `an_unavailable_project_is_unwatched_until_its_folder_returns`;
 SYS-010 in full → the D-139/D-148/D-155 batteries; the
 overwrite+backup write itself → the sync battery
@@ -17336,8 +17349,8 @@ already existed:
   (`split_written_target`), because cross-run byte equality is
   deliberately NOT the oracle: every run writes its own ALG-032
   marker timestamp (SYNC_MARKER's "the timestamp never decides").
-- _`a_real_sync_run_overwrites_the_external_edit_backs_it_up_and_
-clears_the_state`_ — T-F13 verbatim: external edit → the event,
+- _`a_real_sync_run_overwrites_the_external_edit_backs_it_up_and_clears_the_state`_
+  — T-F13 verbatim: external edit → the event,
   the external-ONLY carrier row (dirty stays down — independence's
   one direction), then the REAL run rewrites the same managed
   block, keeps exactly one backup holding the external bytes, and
@@ -17347,8 +17360,8 @@ clears_the_state`_ — T-F13 verbatim: external edit → the event,
   — SYS-009's second sentence: delete → the hint event, the REAL
   run recreates (OUT-005's missing-A/C-is-written), no backup
   exists to make, the hint clears through the same wire.
-- _`an_archived_projects_edits_no_longer_reach_the_wire_while_its_
-active_sibling_reports`_ — SYS-007's archive rule: archive through
+- _`an_archived_projects_edits_no_longer_reach_the_wire_while_its_active_sibling_reports`_
+  — SYS-007's archive rule: archive through
   the store (the
   exact call the future command will run — no archive command
   exists, T-109's card), the after-sync seam's full pass answers an
@@ -17474,8 +17487,8 @@ callers) and audited the diff clean on all four test-audit checks.
 The one finding is taken: the archive test's NAME still stated the
 unobservable half ("leaves the watch set") after P3-2 reworded the
 comment, assert, and this entry — renamed to the observable
-(`an_archived_projects_edits_no_longer_reach_the_wire_while_its_
-active_sibling_reports`), this card being the
+(`an_archived_projects_edits_no_longer_reach_the_wire_while_its_active_sibling_reports`),
+this card being the
 test-behavior-not-implementation principle applied to itself. Two
 precision notes the round flagged as not-findings are recorded
 here: `drain_the_clearing` is the extraction of the deleted inline
@@ -17756,8 +17769,8 @@ locally on ubuntu):
 Diagnosis — both are TEST platform-assumption bugs; production was
 verified correct, no production defect:
 
-1. The composite proof builds `TargetWatcher::with_backend(
-RefusingBackend)` (the pre-fix :1896-1899), so the REAL notify
+1. The composite proof builds `TargetWatcher::with_backend(RefusingBackend)`
+   (the pre-fix :1896-1899), so the REAL notify
    backend never runs and D-148's refusal classification (the stat
    pre-check, notify's kind mapping — notify's windows.rs:557-564,
    inotify.rs:451-457) is NOT in play: the fake refuses iff its plan
@@ -18021,9 +18034,9 @@ mapper is "the common mapper"; where the shared test helper lives
 (the card names no home); and what the new `Member` shape means
 for behavior preservation.
 
-Solution: one `#[cfg(test)] pub(crate) fn
-sync_runs_app_error_for_tests(SyncRunsError) -> AppError` in
-`db.rs`, directly after the mapper family (`sync_runs_to_app_error`
+Solution: one
+`#[cfg(test)] pub(crate) fn sync_runs_app_error_for_tests(SyncRunsError) -> AppError`
+in `db.rs`, directly after the mapper family (`sync_runs_to_app_error`
 then its `backup_records_to_app_error` sibling — D-149's co-located
 pair stays contiguous, the twin is the next item) — the home is
 the family's convention, not a fresh location choice: `db.rs`
@@ -18261,9 +18274,7 @@ append, the md-only scope and the no-test-touch. Findings fixed —
 - P3-5 (taken): "the Logging row" → "the Logging section"
   (ARCHITECTURE.md has sections, not rows).
 
-### D-164 — T-291: the paths.rs module header states the landed
-
-responsibility — 2026-11-23
+### D-164 — T-291: the paths.rs module header states the landed responsibility — 2026-11-23
 
 Problem: D-150's follow-up bullet — paths.rs:3's `//!` header still said
 "Planned responsibility" over an implemented module. Reading the header
