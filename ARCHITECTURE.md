@@ -592,7 +592,8 @@ read-only pair: `db_backups_list` (the `*.sqlite3` regular files of
 newest first; staging debris, preserve siblings, foreign files and
 symlinks are not copies) and `app_open_data_folder`
 (the opener plugin's Rust API; SEC-001 — the webview holds no
-`opener:` permission). The destructive pair — `db_recreate`, `db_restore_backup(backup_name)`
+`opener:` permission). The destructive pair — `db_recreate`,
+`db_restore_backup(backup_name)`
 — is guarded three times (a healthy `Db` already managed →
 `E_VALIDATION`; a concurrent recovery → `E_VALIDATION` over an
 async-mutex gate; and for `db_recreate` alone, a live file both
