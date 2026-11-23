@@ -21074,3 +21074,198 @@ review run was launched: the report file is that session's final
 message, exported with `opencode session export` and written verbatim
 under a provenance note. Its two questions repeat round 1's first two
 and go to the orchestrator in the report.
+
+### D-184 — T-228: the supply-chain gates land in CI — `cargo audit` beside cargo-deny, a full `pnpm audit`, and a dependency-free license allow-list check in place of the spec's `license-checker` (which sees 24 of 257 installed packages under pnpm) — 2026-11-23
+
+Problem: SEC-010 (docs/spec.md:897) has demanded `cargo audit`,
+`cargo-deny` and `npm audit` in CI since spec v1.0, and §5.3's "License
+checks" row (docs/spec.md:154) names `license-checker` for the npm side;
+CI ran only `cargo-deny` (the `deny` job, D-060's structure). Card T-228:
+the gates as separate steps, done "when the job falls on a known
+vulnerability or an incompatible license". Five questions the card left
+open, each settled before the first edit (rule 1).
+
+1. _Where the steps live: inside the existing jobs, no new job._
+   `cargo audit` joins `deny`; `pnpm audit` and the license check join
+   `lint`. Both are checks main's branch protection requires — read
+   through the protection API on 2026-11-23: lint, test, deny, e2e,
+   build × 4 legs — so each new gate blocks a merge by construction. A
+   new `audit` job would report red and block nothing until someone
+   added it to that list by hand. `deny` keeps its id and name (a
+   rename orphans the required context — D-060's round-1 P0), the job
+   count stays at fourteen, and `ci-rerun/decide.py`, which knows only
+   `test` and the `test-matrix (` prefix, needs nothing.
+
+2. _`npm audit` reads `pnpm audit`._ The toolchain has been pnpm since
+   D-018; the orchestrator's ruling, D-182's follow-up. SEC-010 now
+   names the real command (rule 11).
+
+3. _The license tool: not `license-checker`._ Measured on a scratch
+   copy of `package.json` + `pnpm-lock.yaml` + `pnpm-workspace.yaml`
+   (`pnpm install --frozen-lockfile --ignore-scripts`, pnpm 12.6.0):
+
+   | Inventory                                                      | Packages seen                                        |
+   | -------------------------------------------------------------- | ---------------------------------------------------- |
+   | `pnpm licenses list --json`                                    | 257 installed versions under 246 names               |
+   | `license-checker@25.0.1` (the card's and the spec's tool; dlx) | 25 — the 24 direct dependencies and the private root |
+   | `license-checker-rseidelsohn@5.0.1` (the maintained fork)      | 252 — all but the five platform binaries             |
+
+   The five the fork misses: `@rolldown/binding-linux-x64-gnu`,
+   `@tailwindcss/oxide-linux-x64-gnu`, `@tailwindcss/oxide-wasm32-wasi`,
+   `@tauri-apps/cli-linux-x64-gnu`, `lightningcss-linux-x64-gnu`.
+   `license-checker` last shipped 2022-06-19 (`pnpm view …
+time.modified`) and walks the tree with npm's deprecated
+   `read-installed` (`lib/index.js:11`, `:298`; `package.json:64`),
+   which under pnpm's layout returns nothing transitive; its own
+   install warns of seven deprecated subdependencies. A gate built on
+   it would pass a GPL package one level down. The fork walks with
+   arborist and misses the native binaries — the packages most likely
+   to carry a license of their own — and fetches some 130 packages for
+   work pnpm already does. Chosen: pnpm's own inventory, which is what
+   `--frozen-lockfile` put on disk, judged by a script with no
+   dependencies (`.github/scripts/licenses/check.mjs`). Rule 9: no
+   devDependency is added — package.json and pnpm-lock.yaml are
+   untouched — and `pnpm dlx`, the other option on the card, would have
+   resolved the checker's own dependency tree from the registry on
+   every run, unpinned: the wrong shape for a supply-chain gate. Spec
+   §5.3 says so now.
+
+4. _Allow-list and scope._ The list is
+   `.github/scripts/licenses/allow-list.txt`: deny.toml's eleven
+   licenses in the same order, plus two the current tree needs and the
+   Rust tree has never had — `BlueOak-1.0.0` (the glob 14 line) and
+   `Python-2.0` (argparse). Both are permissive and OSI-approved in the
+   SPDX License List 3.29.0 (2026-09-16); `Python-2.0` is FSF-libre as
+   well. The check covers the whole tree, devDependencies included —
+   the scope of `pnpm audit` here and of cargo-deny over Cargo.lock —
+   because a devDependency imported from app code still ships, and the
+   gate should not depend on the classification being right. Reading
+   an expression: `OR` needs one listed alternative, `AND` every
+   operand, `X WITH Y` listed verbatim — cargo-deny's reading of
+   deny.toml; `Unknown`, `UNLICENSED`, non-SPDX strings and anything
+   unparsable fail closed. `check.test.mjs` pins the parity with
+   deny.toml as an oracle (every deny.toml license present; the
+   additions exactly the two above), so the two lists cannot drift
+   apart silently.
+
+5. _cargo audit's policy._ Defaults, no ignores: a vulnerability
+   advisory exits 1; unmaintained, unsound and yanked stay warnings,
+   which is deny.toml's own tolerance for transitive unmaintained
+   crates (`unmaintained = "workspace"`). `-D warnings` on the current
+   Cargo.lock exits 1 with "7 denied warnings found" — the gate would
+   be red on day one, so it is not used. deny.toml is untouched.
+
+Solution — `.github/workflows/ci.yml`:
+
+- `lint`, after `pnpm install --frozen-lockfile` and ahead of the fmt
+  and clippy steps (cheapest first): `pnpm audit` — the full tree;
+  exits 1 on any advisory at or above low (the documented default
+  level, pnpm.io/cli/audit) and on a registry it cannot reach.
+  `--ignore-registry-errors` would turn the latter into a pass and is
+  deliberately absent. Then `node --test
+.github/scripts/licenses/check.test.mjs`, then `pnpm licenses list
+--json > "$RUNNER_TEMP/licenses.json" && node
+.github/scripts/licenses/check.mjs …` — a file, not a pipe, so each
+  exit status is the step's own (rule 5); an empty or unreadable
+  inventory is exit 2, never "no packages, no problems".
+- `deny`: `dtolnay/rust-toolchain@stable` (only so that `cargo` can
+  dispatch to the subcommand; nothing compiles);
+  `taiki-e/install-action@v2` with `tool: cargo-audit` and
+  `fallback: none`. The action installs the release binary — the
+  static musl build on Linux x64 — and checks the archive against the
+  SHA-256 pinned in its manifest (`manifests/cargo-audit.json`: 0.23.0
+  as "latest" at v2.90.8; the x86_64-musl hash `4f01c74e…` is also
+  GitHub's digest for that asset, reproduced on the downloaded
+  archive). `fallback: none` removes the cargo-binstall branch, the
+  one the README says is handed `github.token`. Then `cargo audit`
+  (placed first, so a published vulnerability shows before the docker
+  build of cargo-deny), then the `EmbarkStudios/cargo-deny-action@v2`
+  step unchanged.
+- No cache for any of the three gates: the advisory database and the
+  registry answer are fetched on every run, so none can go stale by
+  construction; a failed fetch fails its step.
+
+Failure paths, each exercised rather than reasoned (cargo-audit 0.23.0 —
+the gnu and the musl release binary alike — with `--db` pointed at a
+scratch directory):
+
+- `pnpm audit`: exit 0 on the current lockfile; exit 1 on the pre-T-323
+  lockfile (`git show 21ed8f8^:…` — four advisories, 2 high, 2
+  moderate); exit 1 with `ERR_PNPM_AUDIT_BAD_RESPONSE` against
+  `--registry http://127.0.0.1:9`, and exit 0 for the same run with
+  `--ignore-registry-errors`.
+- `cargo audit`: exit 0 on the current Cargo.lock ("7 allowed warnings
+  found"); exit 1 on a scratch lockfile with `smallvec 0.6.9`
+  (RUSTSEC-2021-0003, RUSTSEC-2019-0012, RUSTSEC-2019-0009) and on one
+  with `rustls 0.23.30` (four advisories; its yanked flag reported as
+  an allowed warning); exit 1 when the advisory database cannot be
+  fetched.
+- License check: exit 0 on the real inventory ("257 installed packages
+  under 9 license identifiers"); exit 1 on the same tree after
+  `pnpm add` of three local fixture packages — `GPL-3.0-only`, no
+  license field (`Unknown`), `(MIT OR Apache-2.0) AND CDDL-1.0` —
+  naming each. Before an install, `pnpm licenses list --json` puts
+  every package under `Unknown`, which the checker refuses as well.
+- The checker's own suite: 8 tests, and 28 mutations of `check.mjs`
+  and the allow-list (the verdict forced true, trailing tokens
+  ignored, OR and AND swapped, the `WITH` exception dropped, the
+  empty-inventory and shape guards removed, the length cap removed or
+  off by one, stdin unread, each exit code zeroed, a deny.toml license
+  removed from the list, a third addition) — every one turns the suite
+  red. The two expectations the first run exposed as wrong were the
+  tests' (a `LicenseRef-…` id is a well-formed entry; `AND` binds
+  tighter than `OR`), not the checker's.
+
+Honest boundaries. (a) The JS license gate covers what is installed on
+the Linux x64 runner: pnpm's list is of installed packages, so the
+Windows and macOS binaries are not in it — the host-target scope
+cargo-deny has by default (deny.toml sets no `[graph] targets`). (b)
+`pnpm audit` is as strict as its configuration: `audit.ignore` and
+`audit.level` in `pnpm-workspace.yaml` would weaken it, and neither is
+there today. (c) `taiki-e/install-action@v2` floats — the action's
+major tag and, with it, cargo-audit's version (the manifest's "latest"),
+under the README's dependency cooldown of one to a few days; pinning
+`@v2.90.8` would pin both and is the owner's call (the `deny` step
+floats the same way). (d)
+A CI-side change: nothing ran on GitHub from the worktree. Proved
+locally: the tools' behavior on the real lockfiles with the release
+binaries, actionlint 1.7.12 with shellcheck clean on both workflow
+files, YAML parse sanity. The push-time run is the proof for the action
+mechanics.
+
+Checks, exit codes: `pnpm audit` 0; the license check 0; `node --test
+.github/scripts/licenses/check.test.mjs` 0; `pnpm run lint` 0 (the new
+`.mjs` files are in its scope); `pnpm run format:check` 0; `cargo deny
+check` not run — deny.toml is untouched. No Rust suite was run
+(CI-side change).
+
+Follow-ups for the board, outside this card: ARCHITECTURE.md's CI
+bullets for `lint` and `deny` do not list the new steps (true, but
+incomplete — one docs touch); CONTRIBUTING.md's local check list could
+gain `cargo audit`, `pnpm audit` and the license two-liner; the gates
+run on push and pull_request only, so a vulnerability published after
+a merge is seen at the next push — a scheduled run of the three gates
+in a small separate workflow would close that window; the allow-list's
+two npm-only additions are a policy the owner may want to confirm;
+`build (ubuntu-24.04)` is absent from the required checks (seen in the
+protection listing; older than this card).
+
+Reviews, two rounds on two models, both read-only (the worktree's HEAD,
+status and diff hash identical before and after each):
+
+- Round 1, deepseek-v4.1-flash (report
+  `.opencode/reviews/t228-round1.md`): APPROVE, 0×P0/P1/P2, 1×P3 —
+  taken in the amend. The checker's usage header said CI runs "exactly
+  these two lines" while CI writes the inventory to `$RUNNER_TEMP` and
+  chains the commands with `&&`; the header now says "the same two
+  commands" and writes the inventory outside the repo. The reviewer
+  re-derived the cargo-audit exit semantics from the RustSec source
+  (`cargo-audit/src/presenter.rs`, `should_exit_with_failure`), read
+  install-action's `action.yml` to confirm that `fallback: none`
+  removes the `github.token` branch, and re-measured the dead-registry
+  and pre-T-323 cases.
+- Round 2, hy4-flash-free (report `.opencode/reviews/t228-round2.md`):
+  APPROVE, no finding at any level. It re-ran six mutations of its own
+  on a copy of the checker (each turned the suite red) and the fixture
+  inventories through the real CLI (exit 1 / 1 / 1 for the three
+  offending licenses, 2 for empty, non-JSON and wrong-shaped input).

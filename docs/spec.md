@@ -151,7 +151,7 @@ Rule: `core` does no input/output and is tested without the file system or the d
 | UI components    | `@tanstack/vue-virtual`, `sortablejs` (Vue wrapper)                                                | Matrix virtualization, drag-and-drop                                                                                   |
 | Tauri plugins    | dialog, updater, single-instance, opener                                                           | No other plugins are used; `dialog` and `opener` are called from Rust only (SEC-001)                                   |
 | Tests            | `cargo test`, `proptest`, Vitest, Playwright (against the Vite dev server with a mocked IPC, 15.1) |                                                                                                                        |
-| License checks   | `cargo-deny`, `license-checker`                                                                    | App license: dual license, MIT License and Apache License, Version 2.0; dependency licenses must be compatible with it |
+| License checks   | `cargo-deny`; for npm packages, an allow-list checked over `pnpm licenses list`                    | App license: dual license, MIT License and Apache License, Version 2.0; dependency licenses must be compatible with it |
 
 | File watching | `notify` + `notify-debouncer-full` | Target files of active projects (5.7) |
 | Config file | `serde` + `toml` | Machine-level `config.toml` (5.8); user settings live in SQLite (6.5) |
@@ -894,7 +894,7 @@ Requirements SEC-001…003 are in 5.6. In addition:
 - **SEC-007 (P0).** Rights: backups folder `0700`, DB file `0600` on Unix. On Windows, the user profile rights are inherited.
 - **SEC-008 (P0).** Instruction text and file content never go into logs. Paths do, so a reminder about this is shown when the logs folder is opened.
 - **SEC-009 (P1).** An import file is treated as untrusted: schema and version check, 50 MB limit, field length limits from 6.9, no executable content.
-- **SEC-010 (P0).** CI runs `cargo audit`, `cargo-deny`, `npm audit`. Lock files are kept in the repository.
+- **SEC-010 (P0).** CI runs `cargo audit`, `cargo-deny`, `pnpm audit`, and the license allow-list check of 5.3 (`.github/scripts/licenses/`) over the installed npm packages. Lock files are kept in the repository.
 - **SEC-011 (P0).** The private update signing key is stored outside the repository (a CI secret). A key rotation procedure is described.
 - **SEC-012 (P0).** The app runs with user rights and does not ask for elevation (NFR-011).
 

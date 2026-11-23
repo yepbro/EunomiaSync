@@ -34,6 +34,26 @@ jobs:
           cache: pnpm
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+      # Supply-chain gates (SEC-010), cheapest first so an advisory shows
+      # in seconds rather than after clippy.
+      #
+      # pnpm audit reads pnpm-lock.yaml — the whole tree, devDependencies
+      # included — and fails closed: any advisory at or above low exits 1,
+      # and so does a registry it cannot reach. `--ignore-registry-errors`
+      # would turn that second case into a pass; never add it here.
+      - name: Dependency advisories (pnpm audit)
+        run: pnpm audit
+      # The license gate (spec §5.3 "License checks"): pnpm's own inventory
+      # of the installed tree against the in-repo allow-list, by a checker
+      # with no dependencies — which is why it is not license-checker
+      # (DECISIONS.md D-184). Its unit tests run first, then the real
+      # check. The list command writes a file and the checker reads it, so
+      # each exit status is the step's own; an empty or unreadable
+      # inventory is refused (exit 2), never "no packages, no problems".
+      - name: Dependency licenses — checker unit tests
+        run: node --test .github/scripts/licenses/check.test.mjs
+      - name: Dependency licenses — installed packages against the allow-list
+        run: pnpm licenses list --json > "$RUNNER_TEMP/licenses.json" && node .github/scripts/licenses/check.mjs "$RUNNER_TEMP/licenses.json"
       - name: cargo fmt
         run: cargo fmt --all -- --check
       - name: cargo clippy
@@ -299,6 +319,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # cargo audit — the RustSec advisories gate (SEC-010), ahead of
+      # cargo-deny so a published vulnerability shows in seconds: it reads
+      # Cargo.lock and the advisory database and compiles nothing. Default
+      # policy with no ignores: a vulnerability advisory exits 1;
+      # unmaintained, unsound and yanked stay warnings (deny.toml's own
+      # tolerance for transitive unmaintained crates), printed in the log.
+      # The advisory database is fetched fresh on every run — nothing is
+      # cached, so the gate cannot go stale; a failed fetch fails the step.
+      #
+      # The toolchain is installed only because `cargo` is the dispatcher
+      # that finds cargo-audit on PATH; nothing is built.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      # The official release binary (the static musl build on Linux x64),
+      # not a build from source: the action checks the archive against the
+      # SHA-256 pinned in its own manifest. cargo-audit is on that
+      # manifest's supported list, so `fallback: none` only makes it the
+      # sole path — the cargo-binstall fallback is the branch the action's
+      # README says is handed github.token.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+          fallback: none
+      - name: cargo audit
+        run: cargo audit
+      # The policy gate for bans, licenses, sources and duplicates, plus
+      # its own pass over advisories. Unchanged: cargo audit is added
+      # beside it, never in its place.
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   e2e:

@@ -1,0 +1,35 @@
+# License allow-list for the installed npm packages — the JavaScript twin of
+# deny.toml's [licenses] allow-list for Rust. CI checks it (the lint job)
+# over `pnpm licenses list --json` with check.mjs next to this file
+# (spec §5.3 "License checks", SEC-010; DECISIONS.md D-184).
+#
+# One SPDX license id per line; `#` starts a comment. A package passes when
+# this list satisfies its license expression the way cargo-deny reads
+# deny.toml: `OR` needs one listed alternative, `AND` needs every operand,
+# parentheses group, and `X WITH Y` must be listed verbatim. Anything else
+# fails the check — Unknown, UNLICENSED, "SEE LICENSE IN ...", a copyleft or
+# source-available id — until it is added here on purpose, with its reason.
+#
+# The app ships under MIT OR Apache-2.0 (README, Cargo.toml), so every entry
+# must be compatible with distributing it under either.
+
+# --- deny.toml [licenses] allow, same order: keep the two lists in step ---
+MIT
+Apache-2.0
+Apache-2.0 WITH LLVM-exception
+BSD-2-Clause
+BSD-3-Clause
+ISC
+Unicode-3.0
+Zlib
+MPL-2.0
+CDLA-Permissive-2.0
+CC0-1.0
+
+# --- npm-only additions, absent from the Rust tree so far ---
+# Blue Oak Model License 1.0.0: a permissive license, OSI-approved
+# (SPDX License List 3.29.0).
+BlueOak-1.0.0
+# Python License 2.0: a permissive license, FSF-libre and OSI-approved
+# (SPDX License List 3.29.0).
+Python-2.0
