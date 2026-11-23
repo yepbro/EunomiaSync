@@ -643,6 +643,11 @@ pub fn mark_project_unchanged(
 /// `finished_at` is the **caller's** timestamp (the
 /// [`create_running`]/`started_at` contract: the app layer captures the
 /// moment, the column names it) and must be the DB-002 UTC shape.
+/// The moment is THIS abort's — read when the run aborts, never an
+/// instant captured earlier in the run (a phase's entry stamp serving
+/// as the abort's end is the T-325 defect, which struck phase 2's copy
+/// pass out of the run's duration): the store writes the caller's text
+/// verbatim and cannot tell the two apart.
 /// Scoped to the `running` source state — re-aborting a finished run
 /// is the wrong-state refusal below, never a history rewrite.
 ///

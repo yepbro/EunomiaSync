@@ -95,7 +95,12 @@
 //!   history-of-a-gone-copy status — born terminal, because the
 //!   alternative, insert-`ok`-then-mark, spends a transaction to
 //!   reach the same cells), [`abort_run`] finishes the run `aborted`
-//!   with `E_BACKUP_FAILED`, and [`reset_projects_not_started`]
+//!   with `E_BACKUP_FAILED` and the ABORT's own instant as
+//!   `finished_at` — the injected `abort_clock`, read once right
+//!   before this transaction, never the run's backup instant (which
+//!   would strike the whole copy pass and sweep out of the run's
+//!   duration: a slow backup that aborts read as a run of zero
+//!   duration, T-325) — and [`reset_projects_not_started`]
 //!   returns every non-`skipped` verdict to `not_started`
 //!   ("the last sync of every project stays unchanged" is OUT-020's
 //!   `last_synced_at`/`last_synced_hash`, which no code path here
@@ -255,14 +260,42 @@ struct NewRecordInput {
     copy_path: Option<PathBuf>,
 }
 
-/// Runs §9.4 phase 2 end to end over phase 1's outcome: one read
-/// transaction (project facts + dedup digests), the copy loop on the
-/// blocking pool through the injected `backup` operation, and one
-/// write transaction for the records — or, on any copy error, the
-/// §9.4 phase 2 step 2 abort (delete this run's copies, one
-/// transaction writing the `discarded` history, the aborted run and
-/// the per-project reset, then the typed `E_BACKUP_FAILED`
-/// envelope).
+/// Runs §9.4 phase 2 end to end over phase 1's outcome — the
+/// production entry: [`run_with_abort_clock`] over the real clock.
+///
+/// The five parameters are the `sync_run` command's wiring and they
+/// do not change: the abort's clock is not the command's to hand over
+/// (production's is the real clock and nothing else), so the seam
+/// sits BEHIND this signature and the tests drive
+/// [`run_with_abort_clock`] directly — the command layer's own
+/// `sync_run` / `sync_run_with` shape.
+///
+/// # Errors
+///
+/// [`run_with_abort_clock`]'s.
+pub(crate) async fn run<R, B>(
+    app: &AppHandle<R>,
+    phase1: &Phase1Outcome,
+    data_dir: &Path,
+    backup: B,
+    now: Timestamp,
+) -> Result<Phase2Outcome, AppError>
+where
+    R: Runtime,
+    B: Fn(&BackupTarget<'_>) -> Result<BackupOutcome, BackupError> + Send + 'static,
+{
+    run_with_abort_clock(app, phase1, data_dir, backup, now, Timestamp::now).await
+}
+
+/// [`run`] with the abort's clock injected — the seam T-325 added.
+///
+/// One read transaction (project facts + dedup digests), the copy
+/// loop on the blocking pool through the injected `backup`
+/// operation, and one write transaction for the records — or, on any
+/// copy error, the §9.4 phase 2 step 2 abort (delete this run's
+/// copies, one transaction writing the `discarded` history, the
+/// aborted run and the per-project reset, then the typed
+/// `E_BACKUP_FAILED` envelope).
 ///
 /// `data_dir` is the app's data directory (the §5.5 tree's root —
 /// production passes the managed `DataRoot`'s path; the tests point
@@ -271,6 +304,21 @@ struct NewRecordInput {
 /// 15.1 failure points. `now` is the run's backup instant (D-061):
 /// one [`Timestamp`] resolves into the `BackupTime` of every copy
 /// name and the DB-002 `created_at` of every record.
+///
+/// `abort_clock` answers the ABORT's instant. It is consulted at most
+/// once, on the abort path only — after the sweep, right before the
+/// verdict transaction, the moment the row goes terminal (the phase-1
+/// abort's and the command's `stop_run`'s posture) — and its answer,
+/// in the same DB-002 spelling, is the aborted run's `finished_at`.
+/// It is deliberately a SECOND instant of the run, not one derived
+/// from `now`: the copy pass and the sweep are the run's time too, so
+/// a `finished_at` equal to the backup instant strikes them out of
+/// the run's duration — a slow backup that aborts read as a run of
+/// zero duration (the 2026-11-23 project review's P3-2, T-325; the
+/// same point D-132's round-1 P3-1 had declined, reversed).
+/// [`FnOnce`], because one run aborts at most once. The read point is
+/// pinned: the suite's clock answers one instant while a swept copy
+/// is still on disk and a later one once it is gone.
 ///
 /// # Errors
 ///
@@ -282,12 +330,13 @@ struct NewRecordInput {
 ///   transaction leaves the run row `running` — the crash-recovery
 ///   rule's case; the copies such a failure orphaned are deleted
 ///   best-effort on the way out).
-pub(crate) async fn run<R, B>(
+pub(crate) async fn run_with_abort_clock<R, B>(
     app: &AppHandle<R>,
     phase1: &Phase1Outcome,
     data_dir: &Path,
     backup: B,
     now: Timestamp,
+    abort_clock: impl FnOnce() -> Timestamp,
 ) -> Result<Phase2Outcome, AppError>
 where
     R: Runtime,
@@ -360,12 +409,12 @@ where
     // streaming passes per file; nothing here may hold the lock).
     let pass = {
         let data_dir = data_dir.to_owned();
-        // The stamp moves onto the pool with the loop (the abort path
-        // below still needs the original for the run row's
-        // `finished_at`).
-        let pass_stamp = created_at.clone();
+        // The run's backup stamp moves onto the pool with the loop:
+        // every record it makes carries it. The abort path below reads
+        // its OWN instant (T-325) — the backup stamp is not the run's
+        // end.
         let pass_handle = tauri::async_runtime::spawn_blocking(move || {
-            copy_pass(facts, &data_dir, backup_time, pass_stamp, backup)
+            copy_pass(facts, &data_dir, backup_time, created_at, backup)
         });
         pass_handle.await.map_err(join_failure_to_app_error)?
     };
@@ -466,6 +515,13 @@ where
                     "; {refused} copy(ies) of this run could not be deleted"
                 ));
             }
+            // The abort's own instant (T-325), read ONCE here: after
+            // the sweep, right before the verdict transaction — the
+            // moment the row goes terminal. Never the backup instant
+            // `now`: the copy pass and the sweep are the run's time
+            // too, so a sweep riding §9.5's ladder (up to 1.3 s per
+            // copy) is inside the stamp by the same rule.
+            let finished_at = db002_stamp(abort_clock());
             let aborted = database
                 .run(move |transaction| {
                     for record in &made {
@@ -488,7 +544,7 @@ where
                     abort_run(
                         transaction,
                         &run_id,
-                        &created_at,
+                        &finished_at,
                         ErrorCode::BackupFailed.as_str(),
                         &abort_details,
                     )

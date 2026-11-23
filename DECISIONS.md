@@ -11870,6 +11870,18 @@ Round-1 review addendum (D-132, same task; report
   in production both stamps come from the same real clock within one
   run; the phase-1 abort reads `now_utc()` because phase 1 owns no
   instant of its own.
+  Addendum (2026-11-23, T-325/D-185): the decline above is reversed.
+  The 2026-11-23 project review re-raised the same point as its P3-2
+  and the owner carded it: the two stamps are a whole copy pass
+  apart, and that gap is the run duration a report lost. The aborted
+  run's `finished_at` is now the ABORT's own instant, read once right
+  before the abort transaction — so the composition bullet above
+  ("… and the aborted run's `finished_at`") and the round-2 line
+  that lists `finished_at` among the confirmed rulings are no longer
+  true as written. The determinism the decline protected is kept by a
+  clock seam (`run_with_abort_clock`), not by one instant; "record
+  and name cannot disagree" stands, both still deriving from `now`.
+  D-185 carries the fix, the tests and the consumers' verification.
 - P3-2 (superseded by P1-1): the name now rides `params` for the UI;
   the composed `os_message` keeps it too (the acceptance criterion
   reads over the whole envelope).
@@ -21269,3 +21281,243 @@ status and diff hash identical before and after each):
   on a copy of the checker (each turned the suite red) and the fixture
   inventories through the real CLI (exit 1 / 1 / 1 for the three
   offending licenses, 2 for empty, non-JSON and wrong-shaped input).
+
+### D-185 — T-325: the phase-2 abort stamps `finished_at` with the abort's OWN instant through the `run_with_abort_clock` seam (production: the real clock); D-132's round-1 P3-1 declined the same point and is reversed; MAIN-027 and every other `finished_at` consumer grep-verified unaffected — 2026-11-23
+
+Problem: the 2026-11-23 project review (its P3-2, verified by the
+owner) found the phase-2 abort path handing the run's BACKUP instant
+to `abort_run` as `finished_at`: `created_at = db002_stamp(now)` is
+phase 2's entry instant — the `jiff::Timestamp::now()` the `sync_run`
+command passes at its call (`commands.rs:1204-1210`) — and the abort
+transaction wrote that where the abort's own moment belongs. The whole
+copy pass (three streaming passes per file over possibly dead
+volumes) and the abort sweep vanished from the run's duration: a slow
+backup that aborted read as a run that ended when its backups began.
+Re-verified present at this task's base (`ae83a87`; main had moved
+past the review's revision): the red run in the Tests section
+reproduces it on the untouched tree. Three facts make it a defect,
+not a reading:
+
+- _The column's documented meaning._ The store's own rule for the
+  terminal stamp — `finished_at` "IS stamped — the moment the row
+  reached its terminal status, exactly what the column names for
+  `aborted` rows too" (`crates/eunomia-store/src/sync_runs.rs`,
+  `mark_interrupted_runs`' docs) — and the wire DTO's doc on
+  `SyncRunSummary::finished_at` ("When the run reached its terminal
+  status (DB-002)", `commands.rs:710-711`) both name the abort's
+  moment, never an earlier one.
+- _The sibling aborts read the clock at the abort._ Phase 1's
+  `E_DISK_FULL` tail (`values::now_utc()` right before its
+  transaction, `sync_phase1.rs:439`) and the command's `stop_run` /
+  `stop_run_if_running` (`commands.rs:1383`, `:1406`).
+- _History._ D-132's round-1 review raised exactly this as its P3-1
+  and T-115 declined it: "§6.2 pins no abort-stamp accuracy, a second
+  clock parameter breaks the determinism the fixed instant buys, and
+  in production both stamps come from the same real clock within one
+  run". The last clause is the error — the two stamps are a whole
+  copy pass apart, and that gap is the duration a report loses. This
+  entry reverses the decline; a dated addendum beside D-132's P3-1
+  points here. (§9.4 and §6.2 do stay silent on abort-stamp accuracy
+  — the ruling rests on the column's own documented meaning, not on a
+  spec sentence, which is why the fix is a card and not a spec PR.)
+
+Solution: `src-tauri/src/sync_phase2.rs` gains ONE clock seam; no
+other behavior moves.
+
+- _The seam: `run_with_abort_clock`._ `run` keeps its five
+  parameters — they are the `sync_run` command's wiring
+  (`commands.rs:1204-1210`) and `commands.rs` is a frozen zone for
+  this task (T-077's) — and becomes the production entry: it
+  delegates with `Timestamp::now`.
+  `run_with_abort_clock(…, abort_clock: impl FnOnce() -> Timestamp)`
+  is the body. `FnOnce`, because one run aborts at most once and the
+  clock is consulted on the abort path only; no `Send`/`'static`,
+  because it is read on the async side, before the transaction
+  closure is built. The command layer's own `sync_run` /
+  `sync_run_with` shape, and phase 3's injected `clock` precedent
+  (D-133).
+- _Where the clock is read: once, right before the verdict
+  transaction, after the sweep._ That is the moment the row goes
+  terminal — the phase-1 abort's and `stop_run`'s posture — and not
+  the copy failure: the abort sweep is the run's time too (a deletion
+  riding §9.5's ladder takes up to 1.3 s per copy), and the run, with
+  its `sync_running` flag, lives until the abort has committed. The
+  answer is stamped through the module's own `db002_stamp` — the
+  `values::now_utc` spelling its unit test pins — so production's
+  stamp has exactly the shape of every other terminal stamp. The read
+  point is pinned, not only documented: the seam test's clock answers
+  one instant while a swept copy is still on disk and a later one once
+  it is gone, so a read before the sweep stamps the wrong literal
+  (mutant M4 below).
+- _What did NOT change._ `now` (the run's backup instant, D-061)
+  still resolves into every copy name and every record's
+  `created_at`; the abort stamp is a SECOND instant of the run, so
+  record and name still cannot disagree. `commands.rs` is untouched:
+  the command passes `jiff::Timestamp::now()` exactly as before. The
+  store's `abort_run` is untouched in behavior — it always wrote the
+  caller's timestamp verbatim; the defect was the caller's argument.
+  Its doc now states the contract the defect slipped through: the
+  moment is THIS abort's, and "the store writes the caller's text
+  verbatim and cannot tell the two apart". No new crate, no unsafe,
+  no deny ignore; nothing user-provided reaches any diagnostic.
+- _Consumers of an aborted run's `finished_at` — grep-verified
+  unaffected._ MAIN-027 (`last_success_finished_at`, the only
+  statement in the tree that filters or orders by the column) filters
+  `status = 'success'`: an `aborted` row never matches, so the overall
+  last-success time cannot move (§9.4 phase 4 step 4). The P3-4
+  wrapper cannot overwrite the stamp: `stop_run_if_running` decides
+  by the ROW (`running` only, `commands.rs:1409-1414`), and phase 2's
+  in-phase abort left it `aborted` — the no-op `ipc_tests.rs` already
+  pins over `finished_at` ("the terminal row is never rewritten").
+  `finish_run` and the startup `interrupted` sweep are each scoped to
+  `running` rows; the `sync_runs` retention (`action_log::cleanup`)
+  orders by `started_at DESC, id DESC`, not `finished_at`. No code
+  computes a run duration today — no `finished_at`/`started_at`
+  difference in `src-tauri`, the crates or `src/` — so the card's
+  "reports" are the row itself plus the readers not yet landed
+  (`sync_last_result`, the history UI), which now read a truthful
+  stamp; the wire type (`string | null`) is unchanged, and the phase-2
+  abort answers `Err`, so no summary carries the stamp today.
+- _`sync_pipeline_tests.rs` (T-126) pinned nothing to update._ The
+  suite has no abort-path test at all — zero occurrences of `abort`,
+  `E_BACKUP_FAILED` or `BackupFailed`; its thirteen tests cover
+  creation, overwrite, the markers, external edits, library
+  operations, the watch, unchanged runs and the sync times — so no
+  expectation there encoded the old behavior, and the file is not
+  touched. A pipeline-level abort test with a measurable pause would
+  need a clock seam on the COMMAND (`commands.rs`, frozen here): a
+  board follow-up, below.
+
+Tests (Bug-Driven Development; `src-tauri/src/sync_phase2_tests.rs` —
+two new tests, one expectation corrected, the suite's header and
+`fixed_now`'s doc corrected with it):
+
+- RED FIRST, on the untouched tree:
+  `the_production_entry_stamps_the_abort_with_the_real_clock`. The
+  production entry `run` is driven with a backup instant fixed at
+  `2000-01-01T00:00:00.000Z` (far in the past, so the ordering cannot
+  depend on the day the suite runs); the row must carry an instant
+  between the test's own two clock readings, compared at the DB-002
+  millisecond (the stamp truncates) — no sleep anywhere. At base it
+  failed with `finished_at = 2000-01-01T00:00:00.000Z`: the injected
+  backup instant, written as the abort's end.
+- The card's criterion, over the seam:
+  `an_abort_after_a_measurable_pause_stamps_finished_at_after_created_at`.
+  The clock models a slow backup and has one answer per moment of the
+  abort, keyed on what the phase itself has done by then: the backup
+  instant (`2026-11-21T10:30:00.123Z`) until the failing copy has
+  answered (the injector's own `before_fail` hook flips a flag); the
+  failure's instant (`2026-11-21T10:30:47.000Z`) while the swept copy
+  is still on disk; the abort instant (`2026-11-21T10:30:47.500Z`,
+  47.377 s after the backup instant) once the sweep has deleted it.
+  Asserted: `finished_at > created_at`, compared as instants;
+  `finished_at` equals the abort instant's DB-002 literal — an
+  independent oracle, never an output of `db002_stamp`; and the swept
+  copy's `discarded` record still carries `created_at = CREATED_AT`
+  under the copy name the backup instant stamps (D-061 intact — and
+  the record is the proof the copy existed for the middle state).
+  No production seam and no sleep: the clock reads a flag and the
+  disk, both joined before the read point. The three states separate
+  "read at the phase's entry", "read at the failure" and "read after
+  the sweep" — mutants M2 and M4 below.
+- Corrected expectation — a test that had encoded the defect, not a
+  check evaded:
+  `a_copy_error_aborts_the_run_sweeps_the_copies_and_resets_the_rows`
+  asserted `finished_at == CREATED_AT` ("the fixed stamp") and its
+  docs said one value pins "the record `created_at` … and the aborted
+  run's `finished_at`" — the same reading D-132 recorded. It now
+  drives the seam with the constant abort clock and asserts
+  `ABORTED_AT`. It was the only assertion in the tree of a phase-2
+  abort's stamp value (every `_tests.rs` and the store suite
+  grepped), so leaving it would have kept the bug pinned; the three
+  stamp-asserting tests are the suite's whole change of expectations.
+- Mutation record — four mutants, each applied to the final tree, run
+  with `--no-fail-fast`, then restored byte-for-byte (sha256 checked
+  before and after every run):
+  M1, the original defect (`abort_run(…, &entry_stamp, …)`) → exactly
+  the three stamp-asserting tests red, 14/17 green;
+  M2, the clock read at the phase's ENTRY, before the copy pass →
+  only the stateful-clock test red (`finished_at = CREATED_AT`),
+  16/17 — the real-clock and the constant-clock tests cannot see it;
+  M3, the production entry wiring its own `now` as the abort clock →
+  only the production-entry test red, 16/17 — the seam tests cannot
+  see a wrong production wiring;
+  M4, the clock read right after the copy pass, BEFORE the sweep →
+  only the stateful-clock test red (`finished_at` = the failure's
+  literal, `…47.000Z`), 16/17 — the documented read point's own
+  oracle (the round-1 review's P3-3).
+  Every new or corrected assertion therefore has a mutant that turns
+  it red, and each test has one only it can catch.
+- Store: no test changed. `abort_run_finishes_the_run_without_touching_counters_or_rows`
+  (`crates/eunomia-store/tests/sync_runs.rs`) already pins the
+  caller's stamp verbatim, with a `FINISHED_AT` distinct from
+  `STARTED_AT` — the store's half was never wrong, and no store-level
+  oracle can tell the caller's right instant from its wrong one.
+
+Checks: `CARGO_BUILD_JOBS=2 cargo fmt --all -- --check`,
+`CARGO_BUILD_JOBS=2 cargo clippy --workspace --all-targets -- -D
+warnings`, `CARGO_BUILD_JOBS=2 cargo nextest run --workspace
+--no-fail-fast --test-threads=4` (1654 tests, 1654 passed, none
+skipped) and `pnpm run format:check` — all exit 0 on Linux: before
+the review, after the round-1 fixes, and once more on the final
+amended tree after the round-2 review (which brought no fix).
+
+Follow-ups for the board (the orchestrator cards them):
+
+- A pipeline-level abort test with a measurable pause is not possible
+  today without a clock seam on the COMMAND: `sync_run_with` passes
+  `jiff::Timestamp::now()` to phase 2 (`commands.rs:1209`), a frozen
+  zone for this task. When `commands.rs` unfreezes, an abort clock in
+  the `SyncRunSeams` shape would let `sync_pipeline_tests.rs` pin the
+  stamp through the real command; until then the production entry is
+  covered by the phase-2 suite's real-clock window test.
+- The store suite has no executable "an aborted run never moves
+  MAIN-027" pin: its four MAIN-027 tests cover `success`, `partial`,
+  `failed`, the empty run and the ordering, and the exclusion of
+  `aborted` is the `status = 'success'` filter, grep-verified above.
+  A characterization test is cheap if the owner wants it executable.
+- Phase 1's abort reads the real clock at the abort
+  (`sync_phase1.rs:439`) — correct today — but its test asserts only
+  `finished_at.is_some()` (`sync_phase1_tests.rs:491`), so the stamp
+  has no oracle of its own; `sync_phase1.rs` and its suite are outside
+  this task's zone.
+
+Round-1 review addendum (D-185, same task; report
+`.opencode/reviews/t325-round1-report.md` in the task's worktree,
+`opencode-go/deepseek-v4.1-flash` — APPROVE: 0×P0, 0×P1, 0×P2, 3×P3;
+all three taken in the amend):
+
+- P3-1 (taken): the inline comment said the sweep's ladder takes "up
+  to 1.3 s"; the ladder runs per swept path (`remove_copy_with` once
+  per copy), so the comment now says "per copy", as this entry already
+  did.
+- P3-2 (taken): the test suite's header still named `run` as the only
+  entry the suite drives; it now names the clock seam for the tests
+  that fix the abort's stamp.
+- P3-3 (taken — by giving the read point an oracle, not a
+  disclaimer): "after the sweep, right before the transaction" was a
+  documented choice no test distinguished from "right after the copy
+  pass", because the round-1 clock flipped once, at the failure. The
+  seam test's clock now has three states — the phase's entry, the
+  failure with the swept copy still on disk, after the sweep — and
+  asserts the last one; mutant M4 is red on that test alone. No
+  production seam was needed: the clock reads the swept copy's
+  presence on disk, an observable the phase itself produces and joins
+  before the read point. `run_with_abort_clock`'s doc and the suite's
+  header now state the pin.
+
+Round-2 review addendum (D-185, same task; report
+`.opencode/reviews/t325-round2-report.md` in the task's worktree,
+`opencode-go/hy4-flash-free` — APPROVE: no findings at any level). The
+reviewer verified all three round-1 dispositions in the tree (the
+per-copy comment, the suite header, the three-state clock — judged
+deterministic, non-vacuous, with the card's criterion still the
+primary assertion), re-derived the timestamp source and the consumer
+list (none missed), audited every new and corrected test as real and
+matched to the card, validated the four mutants by reading, and
+checked every citation of this entry and of the D-132 addendum against
+the tree. No fix followed, so the review phase is complete after this
+round. One boundary was the reviewer's own: the "Checks:" paragraph's
+exit codes were taken on the brief's word, not re-executed — so the
+four checks were run once more on the final amended tree after this
+addendum (a docs-only amend; all exit 0).

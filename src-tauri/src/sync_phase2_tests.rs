@@ -3,10 +3,13 @@
 //!
 //! The suite drives the phase the way production reaches it —
 //! [`sync_phase2::run`] over a real phase-1 outcome produced by
-//! [`sync_phase0::run`] + [`sync_phase1::run`] — against REAL project
-//! folders and REAL §5.5 backup trees in a temp root, so every copy
-//! on the success path is `eunomia-fs`'s own verified operation
-//! answering over a real fixture. The failure points of spec 15.1
+//! [`sync_phase0::run`] + [`sync_phase1::run`], and, where a test
+//! fixes the abort's stamp, that entry's clock seam
+//! [`sync_phase2::run_with_abort_clock`] (T-325) — against REAL
+//! project folders and REAL §5.5 backup trees in a temp root, so
+//! every copy on the success path is `eunomia-fs`'s own verified
+//! operation answering over a real fixture. The failure points of
+//! spec 15.1
 //! (T-F1's run-level half) are injected through the phase's `backup`
 //! seam (the D-089 pattern): a stateful closure delegates to the REAL
 //! `backup_target_file` until the failing call, then answers with the
@@ -34,6 +37,10 @@
 //!   the typed envelope carrying ALL of BKP-005's fields (project
 //!   name, source path, backups folder, OS code and error type,
 //!   cause, recommendation);
+//! * the aborted run's `finished_at` is the ABORT's own instant — the
+//!   clock seam's answer after the sweep, later than the records'
+//!   `created_at`, never the run's backup instant (T-325); the
+//!   production entry [`sync_phase2::run`] reads the real clock;
 //! * a deletion the filesystem refuses on the abort path keeps that
 //!   copy's record `ok` over the live file — the never-lying-mark
 //!   rule (D-122's prune posture, applied to `discarded`);
@@ -45,7 +52,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use tauri::Manager;
@@ -80,9 +88,8 @@ const MARKER: &str = "<!-- Created by EunomiaSync 2026-11-17 14:03:22 Europe/Pra
 const ABC_DIGEST: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
 /// The run's fixed backup instant — 2026-11-21T10:30:00.123Z. One
-/// value pins three spellings at once: the record `created_at`
-/// (DB-002), the copy name's stamp (BKP-001), and the aborted run's
-/// `finished_at`.
+/// value pins two spellings at once: the record `created_at`
+/// (DB-002) and the copy name's stamp (BKP-001).
 fn fixed_now() -> jiff::Timestamp {
     "2026-11-21T10:30:00.123Z"
         .parse()
@@ -92,6 +99,38 @@ fn fixed_now() -> jiff::Timestamp {
 /// The `created_at` every record of a run shares (the fixed instant's
 /// DB-002 spelling).
 const CREATED_AT: &str = "2026-11-21T10:30:00.123Z";
+
+/// The failure's fixed instant — right after the copy pass, before
+/// the sweep: 46.877 s after the backup instant. The value a clock
+/// read AT the failure would stamp, and the one the phase must not
+/// (T-325: the read point is after the sweep).
+fn failed_now() -> jiff::Timestamp {
+    "2026-11-21T10:30:47.000Z"
+        .parse()
+        .expect("the fixed failure instant must parse")
+}
+
+/// The failure instant's DB-002 spelling (the twin of [`failed_now`]).
+const FAILED_AT: &str = "2026-11-21T10:30:47.000Z";
+
+/// The abort's fixed instant — the failure's instant plus the sweep's
+/// 500 ms, 47.377 s after the backup instant: a slow backup whose copy
+/// pass fails late, then a sweep of its own (T-325's scenario).
+fn fixed_abort_now() -> jiff::Timestamp {
+    "2026-11-21T10:30:47.500Z"
+        .parse()
+        .expect("the fixed abort instant must parse")
+}
+
+/// The abort instant's DB-002 spelling — the `finished_at` an aborted
+/// run carries in the seam-driven tests. A literal, never an output
+/// of the module under test.
+const ABORTED_AT: &str = "2026-11-21T10:30:47.500Z";
+
+/// The copy the abort sweep deletes in the stamp tests: the `abc`
+/// fixture's copy under the fixed instant's name (the FIPS digest's
+/// hash8 — the name `ready_projects_…` pins as a literal).
+const SWEPT_COPY_NAME: &str = "AGENTS.md.20261121T103000123Z.ba7816bf.bak";
 
 // ---- the harness ------------------------------------------------------
 
@@ -138,6 +177,14 @@ fn run_row_of(
             .map(|row| row.expect("the run row this suite recorded must persist"))
     }))
     .expect("reading the run row must work")
+}
+
+/// A DB-002 stamp as an instant: the tests compare stamps as
+/// instants, never as text.
+fn instant_of(stamp: &str) -> jiff::Timestamp {
+    stamp
+        .parse()
+        .unwrap_or_else(|error| panic!("a DB-002 stamp must parse, got {stamp:?}: {error}"))
 }
 
 /// The run repository's per-project rows, in `sort_order`.
@@ -788,12 +835,13 @@ fn a_copy_error_aborts_the_run_sweeps_the_copies_and_resets_the_rows() {
         },
         None,
     );
-    let refusal = tauri::async_runtime::block_on(sync_phase2::run(
+    let refusal = tauri::async_runtime::block_on(sync_phase2::run_with_abort_clock(
         app.handle(),
         &phase1,
         temp.path(),
         injection,
         fixed_now(),
+        fixed_abort_now,
     ))
     .expect_err("the copy error must abort the run");
 
@@ -850,11 +898,13 @@ fn a_copy_error_aborts_the_run_sweeps_the_copies_and_resets_the_rows() {
     assert_eq!(records[0].project_id, healthy);
     assert_eq!(records[0].status, "discarded");
 
-    // The run row: aborted with the §10 literal and the fixed stamp.
+    // The run row: aborted with the §10 literal and the abort's own
+    // stamp — the clock seam's answer (T-325), never the backup
+    // instant the records carry.
     let run = run_row_of(&app, &phase1.run_id);
     assert_eq!(run.status, SyncRunStatus::Aborted);
     assert_eq!(run.error_code.as_deref(), Some("E_BACKUP_FAILED"));
-    assert_eq!(run.finished_at.as_deref(), Some(CREATED_AT));
+    assert_eq!(run.finished_at.as_deref(), Some(ABORTED_AT));
     assert!(
         run.details
             .as_deref()
@@ -930,6 +980,204 @@ fn a_copy_error_aborts_the_run_sweeps_the_copies_and_resets_the_rows() {
             "the last sync of every project stays unchanged"
         );
     }
+}
+
+#[test]
+fn an_abort_after_a_measurable_pause_stamps_finished_at_after_created_at() {
+    // T-325's criterion, over the clock seam: the aborted run's
+    // `finished_at` is the ABORT's instant. The clock models a slow
+    // backup and has one answer per moment of the abort, keyed on what
+    // the phase itself has done by then: the backup instant until the
+    // failing copy has answered; the failure's instant while the swept
+    // copy is still on disk (the copy pass is over, the sweep has not
+    // run); the after-sweep instant once the sweep deleted it. The
+    // phase must read the LAST one — after the sweep, right before the
+    // verdict transaction, the documented read point — so the copy
+    // pass's time AND the sweep's land inside the run's duration. A
+    // phase that read its clock at its entry, at the failure, or that
+    // stamped the backup instant, records the pause as zero or short.
+    let (temp, app, repos) = phase2_app();
+    let (healthy, healthy_repo) = seed_repo_project(
+        &app,
+        &repos,
+        1,
+        eunomia_store::settings::Scheme::A,
+        BaseName::AgentsMd,
+    );
+    let (failing, failing_repo) = seed_repo_project(
+        &app,
+        &repos,
+        2,
+        eunomia_store::settings::Scheme::A,
+        BaseName::AgentsMd,
+    );
+    seed_assigned_instruction(&app, &healthy, "Be brief.");
+    seed_assigned_instruction(&app, &failing, "Be terse.");
+    fs::write(healthy_repo.join("AGENTS.md"), b"abc").expect("writing the fixture must work");
+    fs::write(failing_repo.join("AGENTS.md"), b"old failing bytes")
+        .expect("writing the fixture must work");
+
+    let phase1 = preflight_ok(&app);
+    // The clock's first state is the failing copy's own answer: the
+    // flag flips right before the injector refuses (the blocking pool),
+    // and the phase reads the clock after that join. Its other two
+    // states are the swept copy's presence on disk — the deletion is
+    // joined before the read point too, so neither state can race.
+    let failed = Arc::new(AtomicBool::new(false));
+    let hook_flag = Arc::clone(&failed);
+    let injection = injected_backup(
+        2,
+        BackupError::CopyFailed {
+            path: PathBuf::from("/data/backups/failing/x.bak"),
+            source: std::io::Error::from_raw_os_error(28),
+            cleanup: None,
+        },
+        Some(Box::new(move || {
+            hook_flag.store(true, Ordering::Release);
+        })),
+    );
+    let swept_copy = project_backup_folder(temp.path(), &healthy, 1).join(SWEPT_COPY_NAME);
+    let clock_path = swept_copy.clone();
+    let clock_flag = Arc::clone(&failed);
+    let refusal = tauri::async_runtime::block_on(sync_phase2::run_with_abort_clock(
+        app.handle(),
+        &phase1,
+        temp.path(),
+        injection,
+        fixed_now(),
+        move || {
+            if !clock_flag.load(Ordering::Acquire) {
+                fixed_now()
+            } else if clock_path.exists() {
+                failed_now()
+            } else {
+                fixed_abort_now()
+            }
+        },
+    ))
+    .expect_err("the copy error must abort the run");
+    assert_eq!(refusal.code, ErrorCode::BackupFailed);
+    assert!(
+        failed.load(Ordering::Acquire),
+        "the fixture's precondition: the failing copy answered"
+    );
+
+    // The run row: aborted, and its `finished_at` is later than the
+    // records' `created_at` — the card's criterion, compared as
+    // instants.
+    let run = run_row_of(&app, &phase1.run_id);
+    assert_eq!(run.status, SyncRunStatus::Aborted);
+    let finished_at = run
+        .finished_at
+        .as_deref()
+        .unwrap_or_else(|| panic!("an aborted run is finished, got {run:?}"));
+    assert!(
+        instant_of(finished_at) > instant_of(CREATED_AT),
+        "T-325: an abort after a measurable pause writes finished_at later than \
+         created_at, got {finished_at} against {CREATED_AT}"
+    );
+    // And it is exactly the clock's answer AFTER the sweep — a
+    // literal, never a helper of the module under test. The failure's
+    // own instant is what a read BEFORE the sweep would stamp.
+    assert_eq!(
+        run.finished_at.as_deref(),
+        Some(ABORTED_AT),
+        "the stamp is the abort clock's answer after the sweep (a read at the \
+         failure would stamp {FAILED_AT})"
+    );
+
+    // D-061 is untouched: the abort stamp is a SECOND instant of the
+    // run. The swept copy's `discarded` record still carries the
+    // backup instant — its `created_at` and the copy name's BKP-001
+    // stamp agree, and neither moved to the abort's. The record is
+    // also the proof the copy existed to be swept (the clock's middle
+    // state was reachable).
+    let records = records_of(&app, &phase1.run_id);
+    assert_eq!(records.len(), 1, "only the made copy gets a record");
+    assert_eq!(records[0].project_id, healthy);
+    assert_eq!(records[0].status, "discarded");
+    assert_eq!(records[0].created_at, CREATED_AT);
+    assert!(
+        records[0].backup_path.ends_with(SWEPT_COPY_NAME),
+        "the copy name keeps the backup instant's stamp: {:?}",
+        records[0].backup_path
+    );
+    assert!(
+        !swept_copy.exists(),
+        "the sweep deleted the copy before the row went terminal"
+    );
+}
+
+#[test]
+fn the_production_entry_stamps_the_abort_with_the_real_clock() {
+    // T-325, the production path: [`sync_phase2::run`] is what the
+    // `sync_run` command calls, and its abort clock is the real one —
+    // the seam behind it is the tests' door, never production's. The
+    // row must therefore carry an instant read between this test's own
+    // two readings of the clock (compared at the DB-002 millisecond,
+    // since the stamp truncates — no sleep is involved), and NOT the
+    // injected backup instant, which is deliberately set far in the
+    // past so the ordering cannot depend on the day the suite runs.
+    let (temp, app, repos) = phase2_app();
+    let (project, repo) = seed_repo_project(
+        &app,
+        &repos,
+        1,
+        eunomia_store::settings::Scheme::A,
+        BaseName::AgentsMd,
+    );
+    seed_assigned_instruction(&app, &project, "Be brief.");
+    fs::write(repo.join("AGENTS.md"), b"abc").expect("writing the fixture must work");
+
+    let phase1 = preflight_ok(&app);
+    let injection = injected_backup(
+        1,
+        BackupError::CopyFailed {
+            path: PathBuf::from("/data/backups/p/x.bak"),
+            source: std::io::Error::from_raw_os_error(28),
+            cleanup: None,
+        },
+        None,
+    );
+    let backup_instant: jiff::Timestamp = "2000-01-01T00:00:00.000Z"
+        .parse()
+        .expect("the fixed instant must parse");
+
+    let before = jiff::Timestamp::now();
+    let refusal = tauri::async_runtime::block_on(sync_phase2::run(
+        app.handle(),
+        &phase1,
+        temp.path(),
+        injection,
+        backup_instant,
+    ))
+    .expect_err("the copy error must abort the run");
+    let after = jiff::Timestamp::now();
+
+    assert_eq!(refusal.code, ErrorCode::BackupFailed);
+    let run = run_row_of(&app, &phase1.run_id);
+    assert_eq!(run.status, SyncRunStatus::Aborted);
+    let finished_at = run
+        .finished_at
+        .as_deref()
+        .expect("an aborted run is finished");
+    assert_eq!(
+        finished_at.len(),
+        24,
+        "the DB-002 shape, got {finished_at:?}"
+    );
+    let finished = instant_of(finished_at);
+    assert!(
+        before.as_millisecond() <= finished.as_millisecond()
+            && finished.as_millisecond() <= after.as_millisecond(),
+        "the production abort stamp is read inside the run: got {finished_at} \
+         for a run between {before} and {after}"
+    );
+    assert!(
+        finished > backup_instant,
+        "the card's criterion on the production path: finished_at is later \
+         than the backup instant, got {finished_at}"
+    );
 }
 
 #[test]
