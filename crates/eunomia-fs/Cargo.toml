@@ -39,17 +39,26 @@ fault-injection = []
 # Dependency set pinned by the spec (docs/spec.md 5.2) and the owner
 # rulings of 2026-11-19 (DB-030 as amended in spec commits 1e1b930 and
 # 9a953d9; the DECISIONS.md entry of this task records the adoption).
-# The `walkdir`/`tempfile` modules are still skeleton stubs, so those
-# two stay intentionally idle until the task that implements their use
-# lands (precedent: the spec-pinned allow-list of eunomia-core,
-# DECISIONS.md D-017):
+# `walkdir` stays intentionally idle; `tempfile` is active:
 # - `ignore` drives the repository scan (spec 9.6, ALG-050): its parallel
 #   WalkBuilder, run with .gitignore reading disabled; active since the
 #   scan task (T-061) landed;
-# - `walkdir` covers plain recursive traversal outside the repository-scan
-#   algorithm, e.g. the app's own data directory (scan, backup);
-# - `tempfile` stages same-folder write-then-rename file updates (atomic,
-#   spec 9.5);
+# - `walkdir` has no call site anywhere in the workspace yet: held until
+#   the task that implements its use lands (precedent: the spec-pinned
+#   allow-list of eunomia-core, DECISIONS.md D-017) — reserved for plain
+#   recursive traversal outside the repository-scan algorithm, e.g. the
+#   app's own data directory, should a future task need it (the scan
+#   itself is `ignore`'s walker; every data-directory sweep today is a
+#   single-folder `read_dir`, never recursive — the `temp_files`
+#   stale-file sweep included);
+# - `tempfile` supplies RAII temporary directories: `TempRepos`
+#   (`temp_repos.rs`, the spec 12.2 benchmark/integration fixture
+#   roots, task T-136; consumed by the `eunomia-load` benchmark crate,
+#   D-109, which feeds the roots to eunomia-store's `data_sets`) and
+#   the crate-wide `TempDir` test scaffolding (unit tests, integration
+#   tests, doctests); the atomic write's same-folder staging (spec 9.5)
+#   is the crate's own `temp_files::tmp_file_name` grammar, not
+#   `tempfile`;
 # - `dunce` canonicalizes paths without Windows verbatim (`\\?\`) prefixes
 #   — the DB-030 canonical form (paths), and the stored path is its
 #   verbatim output; active since the canonicalization task landed;
