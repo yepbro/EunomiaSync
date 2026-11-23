@@ -15635,7 +15635,9 @@ Solution, per item of the card:
   stay untouched, with the two facts kept apart (review P2-4):
   NFR-018 is referenced but undefined, and NFR-014 does not appear in
   the spec at all — neither is this card's list; follow-up material
-  for the owner.
+  for the owner. Addendum (T-297, 2026-11-23): both closed — NFR-018
+  defined in §12.6 Error Presentation (defined, not re-pointed), the
+  NFR-014/NFR-016 gaps annotated under §12's heading (D-167).
 - _Item 5, REL-001._ The workflow truth is `runs-on: ubuntu-latest`
   (`.github/workflows/ci.yml`, the test-matrix and build matrix legs,
   unchanged since D-060); the spec row now says "Ubuntu (the
@@ -18391,3 +18393,99 @@ generator's source plus a full re-render comparison, not proven by
 the pin test — that runs centrally, and until it does the hand-sync
 is a verified reconstruction, not a witnessed regeneration. Cited
 line numbers move as the files evolve.
+
+### D-167 — T-297: the NFR numbering sweep — NFR-018 defined where its two references point (new §12.6 Error Presentation), the NFR-014/NFR-016 gaps annotated under §12's heading, the census's remaining danglers NFR-011/012/021 reported, not fixed — 2026-11-23
+
+Problem: D-151 item 4 left two facts apart as follow-up material
+(its round-1 P2-4 corrected "dangling" to the two distinct states):
+NFR-018 is referenced twice (§7.10's envelope sentence, UI-011) and
+defined nowhere, and NFR-014 does not appear in the spec at all — the
+sparse NFR numbering reads as lost content (the card's motivation).
+
+Solution:
+
+- _Census first (Rule 2)._ Every `NFR-0NN` token in `docs/spec.md`
+  enumerated and classified. Defined: NFR-001…003 (§12.1), 004…006
+  (§12.5, D-151), 007…010 (§12.3), 013 (§7.9 bullet), 015 (§7.1's
+  table row), 017 and 022 (§7.4's row "MAIN-010, NFR-017, NFR-022" —
+  the ID column with the requirement text and AC is a definition),
+  019/020/022 (§12.4), 023 (§12.1),
+  024 (§12.3). Beyond the card's two, the sweep found three more
+  referenced-but-undefined IDs: NFR-011 (SEC-012), NFR-012 (SEC-004),
+  NFR-021 (§10's general rules and UI-010) — and a second absent
+  number: NFR-016. History checked, not assumed: all four danglers
+  first appear as citations in spec v1.0 (`ae89176`) and were never
+  defined anywhere later (nothing was dropped — dangling from day
+  one); `git log -S` over the whole repository history finds no trace
+  of NFR-014 or NFR-016 ever carrying a requirement — before this
+  commit, NFR-014's only hit anywhere was D-151's own record
+  (`deb2d98`) and NFR-016 had none; this commit's note adds both
+  numbers to `docs/spec.md`, so the note and this entry are now their
+  only mentions. The range spellings (NFR-001…003 and friends) count
+  as definitions of every number they span; NFR-002/003/005 are not
+  holes.
+- _NFR-018 — defined, not re-pointed._ Both references mean the
+  error-message presentation contract (what happened, where, why,
+  what to do; technical details collapsed into a "Technical details"
+  section), and no existing NFR states it: NFR-004…006 covers
+  transport and localization (the envelope fields, rendered localized
+  from the catalog), not message content. The one existing statement
+  of the content is UI-011 itself — one of the two reference sites,
+  so re-pointing its own cite would be a self-citation; re-pointing
+  to NFR-006 instead would pin the four questions to a requirement
+  that does not state them, against D-151's settled reading — its
+  round-1 P2-4 removed UI-011's clause from §12.5 precisely because
+  that content "previews NFR-018's". New §12.6 Error Presentation
+  defines it in the spec's own style (one P0 bullet), with the
+  content sourced from the §7.10 envelope and cross-cites in both
+  directions — the restatement pattern §12.5 already uses against
+  UI-020 and §7.10. Both reference sites resolve unchanged: §7.10
+  cites NFR-006 for localization and NFR-018 for the presentation
+  contract; UI-011 keeps its UX wording. The one-paragraph
+  subsection follows §12's existing shape (12.4 and 12.5 are
+  single-bullet sections too).
+- _The gap note sits under §12's heading_, before 12.1, and covers
+  both absent numbers in one sentence — annotating 014 alone would
+  leave 016 as the same unexplained hole two numbers away, and a
+  per-gap note would split the one fact (both never carried a
+  requirement) artificially. The wording claims only what is
+  provable: no requirement was ever written under either number in
+  this file, the file's history before the note holds no trace of
+  either, the gaps are recorded, nothing renumbered. The card's
+  "intentionally skipped/burned" is deliberately not asserted —
+  following the D-033/D-066/D-081 precedent the card points at, only
+  the consistency is assertable, not the cause.
+- _NFR-011/012/021 reported, not fixed._ The card mandates 018 and
+  014 and says "report any others"; defining three more requirements
+  is requirement authoring, not numbering hygiene. Each dangler has
+  one or two citation sites whose surrounding text already carries
+  the content (no elevation: SEC-012 and ARCHITECTURE.md's
+  `requestedExecutionLevel="asInvoker"` note; update-only network:
+  SEC-004 and NFR-013; destructive-action confirmations: UI-010 and
+  §10's rules), so a follow-up in the NFR-018 shape — read the
+  sites, define in §12 or re-point — is small. Follow-up cards for
+  the orchestrator.
+
+Checks: md-only diff (`docs/spec.md`, this file); prettier green;
+batch regime (owner instruction 2026-11-23) — tests not run, the
+orchestrator runs the suite centrally after the flash batch; one
+review round per the md-only exception.
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t297-round1.md`, deepseek-v4.1-flash):
+request-changes — three P2s and three P3s, all taken in the amend.
+P2-1: the §12.6 bullet's envelope field list lacked `details` — the
+OS reason the bullet demands lives in `details.os_code`/`os_kind`
+(`src-tauri/src/errors.rs`, `src/components/AppErrorAlert.vue`,
+D-113), not in `params`; `details` added to the list. P2-2: the
+census's "only hit anywhere" bookkeeping ignored the commit itself —
+now scoped "before this commit". P2-3: the closure pointer under
+D-151 item 4, the card's source (the D-166 same-batch precedent).
+P3-1: "no existing requirement" narrowed to "no existing NFR" —
+UI-011 IS a requirement stating the content — with the self-citation
+reason for declining it as the re-point target stated. P3-2: the
+spec note's history clause scoped to "before this note" (the note
+itself is a trace). P3-3: the quoted label brought to the shipped
+"Technical details" (`errors.details.summary` in
+`src/locales/en.json`) in §12.6 and in UI-011's one-word quote — a
+mismatch the v1.0 wording carried. None refused.

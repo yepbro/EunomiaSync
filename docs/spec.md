@@ -824,7 +824,7 @@ Matrix focus is a roving tabindex over the assignment cells: exactly one cell ha
 ### 11.4. Confirmations and Messages
 
 - **UI-010 (P0).** A confirmation that explains what will happen is required for: archiving a project (typing the name), hiding an instruction, deleting a heading (the dialog says: "The section's instructions stay in place and become part of the previous section"), deleting a variant, an empty sync result, bulk actions on 10 or more assignments (NFR-021), restoring an archived project, deleting an excluded path, and deleting per-project custom text (MAIN-007). In P1, the same is required for restoring a file from a backup, restoring a version, and import.
-- **UI-011 (P0).** An error message answers four questions: what happened, where (path, project), why (code and OS reason), and what to do (NFR-018). Technical details are collapsed into a "Details" section with a copy button.
+- **UI-011 (P0).** An error message answers four questions: what happened, where (path, project), why (code and OS reason), and what to do (NFR-018). Technical details are collapsed into a "Technical details" section with a copy button.
 - **UI-012 (P0).** Empty states: no projects ("Add project" and "Scan folder" buttons), no instructions ("New instruction"), empty search.
 
 ### 11.5. Localization and Look
@@ -836,6 +836,8 @@ Matrix focus is a roving tabindex over the assignment cells: exactly one cell ha
 Design: the UI uses standard Tailwind components.
 
 ## 12. Non-Functional Requirements
+
+Numbering note: the NFR numbering skips two numbers — no requirement was ever written under NFR-014 or NFR-016 in this file, and the file's history before this note holds no trace of either. The gaps are recorded here; nothing is renumbered.
 
 ### 12.1. Platforms
 
@@ -871,6 +873,10 @@ Maximum supported scale for v1: 2000 projects, 5000 library items.
 ### 12.5. Localization
 
 - **NFR-004…006 (P0).** Backend error texts reach the UI as `message_key` and `params` (§7.10's error envelope) and are rendered localized from the frontend catalog (UI-020).
+
+### 12.6. Error Presentation
+
+- **NFR-018 (P0).** Every error message answers four questions: what happened, where (path, project), why (code and OS reason), and what to do. The content comes from the §7.10 error envelope (`code`, `message_key`, `params`, `details`) and is localized by `message_key` (NFR-004…006); technical details are collapsed into a "Technical details" section with a copy button (UI-011).
 
 ## 13. Security and Privacy
 
