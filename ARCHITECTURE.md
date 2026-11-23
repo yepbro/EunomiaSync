@@ -917,17 +917,18 @@ updater is part of the MVP scope (spec 7.9).
 
 ## CI
 
-GitHub Actions workflow (`.github/workflows/ci.yml`) runs twelve jobs
-(DECISIONS.md D-060, D-074):
+GitHub Actions workflow (`.github/workflows/ci.yml`) runs fourteen jobs
+(DECISIONS.md D-060, D-074, D-168):
 
 - **lint** — `cargo fmt --check`, `cargo clippy -D warnings`, ESLint,
   Prettier, TypeScript.
-- **test-matrix** — `cargo test --workspace` on four OS legs
-  (`ubuntu-latest`, `windows-latest`, `macos-15`, `macos-15-intel`),
-  `fail-fast: false`; the frontend unit tests (Vitest) run on the Linux
-  leg only. On the Windows leg a staging step copies the app manifest
-  beside every test executable as `<exe>.manifest` — without it the
-  manifest-less test harnesses die at load with
+- **test-matrix** — `cargo test --workspace` on five OS legs
+  (`ubuntu-latest`, `ubuntu-24.04`, `windows-latest`, `macos-15`,
+  `macos-15-intel`), `fail-fast: false`; the frontend unit tests
+  (Vitest) run on the two Linux legs only (ubuntu-latest and the
+  pinned ubuntu-24.04). On the Windows leg a staging step copies the app
+  manifest beside every test executable as `<exe>.manifest` — without it
+  the manifest-less test harnesses die at load with
   `STATUS_ENTRYPOINT_NOT_FOUND` (D-074; the same note in
   `CONTRIBUTING.md` covers running the tests on a local Windows
   machine).
@@ -937,7 +938,7 @@ GitHub Actions workflow (`.github/workflows/ci.yml`) runs twelve jobs
   leg.
 - **deny** — `cargo-deny` (licenses, advisories, duplicate crates).
 - **e2e** — Playwright against the Vite dev server.
-- **build** — `tauri build --debug --no-bundle` on the same four OS
+- **build** — `tauri build --debug --no-bundle` on the same five OS
   legs as the test matrix (a compile/link smoke; the macOS legs cover
   both arm64 and x64).
 
