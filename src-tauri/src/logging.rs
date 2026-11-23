@@ -1764,9 +1764,13 @@ pub(crate) fn file_watch_init_failed(error: &eunomia_fs::watcher::WatcherInitErr
 /// (`refresh_after_sync`, or its bounded mutation twin
 /// `refresh_after_mutation`): the awaiting caller owns the durable
 /// half — the sync pipeline's `sync_run_degraded` watch arm answers
-/// for its calls, and the add flow's line is T-278's pending card —
-/// so this edge carries the fire-and-forget triggers' failures and
-/// every class is logged exactly once once that card lands.
+/// for its calls, and the add flow's line is
+/// [`file_watch_mutation_refresh_degraded`] (T-278) — so this edge
+/// carries the fire-and-forget triggers' failures and every class the
+/// caller OBSERVES is logged exactly once (the one window: a pass
+/// failure the mutation budget outlives answers the caller
+/// `FileWatchTimeout` and is logged nowhere else — the D-156
+/// addendum's recorded boundary).
 pub(crate) fn file_watch_pass_failed(error: &AppError) {
     tracing::error!(
         target: "eunomia::file_watch",
@@ -1821,6 +1825,60 @@ pub(crate) fn file_watch_refused(gone: usize, limit: usize, other: usize) {
         other,
         "target files are not being watched; their external edits are \
          invisible until the backend arms them again"
+    );
+}
+
+/// The mutation-initiated watch refresh degraded (T-278, D-144's
+/// silent-degrade gap; the D-156 addendum records the class set): the
+/// awaiting command's own durable half for the seam it called — the
+/// caller-side complement of [`file_watch_pass_failed`], whose
+/// fire-and-forget gate (`done: None`) deliberately leaves every
+/// awaited failure to its caller. Exactly three refusal classes reach
+/// the add flow's committed arm, and all three warn here:
+/// `FileWatchGone` (the bus gone — the backend refused to start; the
+/// init warn at launch was a different episode, so this line is the
+/// only record that the user's new project joins no watch this
+/// session), the pass's own §10 failure answered within the budget
+/// (the sync pipeline carries its equivalent through
+/// `sync_run_degraded`'s watch arm), and `FileWatchTimeout` (the
+/// budget's expiry — the most likely real-world refusal, a stuck
+/// mount). Recovery mode's `NoDatabase` is not in the set: the
+/// committed arm runs after the flow's own transaction, a database is
+/// proven (D-144), so the class cannot occur here. `warn`, not
+/// `error`: the project IS added, the verdict stands, and the next
+/// watch anchor re-derives the set (the `db_backup_daily_failed`
+/// reasoning — an `error` line would read as a failed add in log
+/// triage). ONE line per command whose refresh refused — the command
+/// is the episode (the `sync_run_degraded` per-run precedent for
+/// awaited callers; the `log_rotation_failed` episode gates target
+/// repeating producers, and the awaited seam answers at most once per
+/// call) — so repeat adds in one session re-warn: each is a distinct
+/// user answer that degraded. A healthy refresh logs nothing (the
+/// no-line policy). The payload is the error's own §10 vocabulary —
+/// the class rides `os_kind` for the seam's two class-only answers
+/// and the code literal for the pass failure; nothing SEC-008-
+/// protected (instruction text, file content) rides the line —
+/// `params` is the error contract's curated user-visible set, empty
+/// for today's pass errors (SEC-008) — and the borrowed `DbLocked`
+/// code stays the D-037 family convention (the dedicated timeout-code
+/// rule is the first surfacing consumer's follow-up — a log line
+/// surfaces nothing). The exactly-once property is the CALLER'S
+/// observed class: a pass failure the budget outlives answers
+/// `FileWatchTimeout` here and is logged nowhere else (the service's
+/// awaited gate keeps its silence, `file_watch.rs`'s `done.is_none()`
+/// arm) — the one window the D-155 chain leaves open, recorded in the
+/// D-156 addendum.
+pub(crate) fn file_watch_mutation_refresh_degraded(error: &AppError) {
+    tracing::warn!(
+        target: "eunomia::file_watch",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "the watch refresh after the project mutation degraded; the \
+         committed state stands and the next watch anchor re-derives \
+         the set"
     );
 }
 
@@ -2994,6 +3052,104 @@ mod tests {
                 && log.contains("other=0")
                 && log.contains("invisible until the backend arms them again"),
             "the refused-watch warn must carry the per-class counts, got: {log}"
+        );
+    }
+
+    #[test]
+    fn the_mutation_refresh_degrade_line_warns_each_refusal_class() {
+        // T-278 (the D-156 addendum's class set): the awaited
+        // mutation refresh's refusal is the CALLER's durable half —
+        // three classes reach the add flow's committed arm
+        // (`FileWatchGone`, the pass's §10 failure,
+        // `FileWatchTimeout`), and one warn per degraded command
+        // carries the class in the §10 payload: the kind for the
+        // seam's two class-only answers, the code literal plus OS
+        // facts for the pass failure. The two seam errors here are
+        // built in the exact shape the seams answer (the ipc seam
+        // tests pin the real answers; the ipc call-site tests drive
+        // the real seams through the committed arm); the pass-failure
+        // error is the synthetic §10 form the D-155 logging tests use
+        // — a real classified pass error is not ipc-constructible
+        // (the D-139 fake-backend premise, and `file_watch.rs` is
+        // frozen for T-104).
+        let (_temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Warn)
+            .expect("building the subscriber must work");
+
+        tracing::subscriber::with_default(subscriber, || {
+            let gone = {
+                let mut error = AppError::new(crate::errors::ErrorCode::DbLocked);
+                error.details = Some(crate::errors::ErrorDetails {
+                    os_code: None,
+                    os_kind: Some("FileWatchGone".to_owned()),
+                    os_message: Some("the file-watch service is not running".to_owned()),
+                });
+                error
+            };
+            file_watch_mutation_refresh_degraded(&gone);
+            let timeout = {
+                let mut error = AppError::new(crate::errors::ErrorCode::DbLocked);
+                error.details = Some(crate::errors::ErrorDetails {
+                    os_code: None,
+                    os_kind: Some("FileWatchTimeout".to_owned()),
+                    os_message: Some(
+                        "the watch pass did not answer within the mutation budget".to_owned(),
+                    ),
+                });
+                error
+            };
+            file_watch_mutation_refresh_degraded(&timeout);
+            let pass = {
+                let mut error = AppError::new(crate::errors::ErrorCode::DbCorrupt);
+                error
+                    .params
+                    .insert("path".to_owned(), "/db/here".to_owned());
+                error.details = Some(crate::errors::ErrorDetails {
+                    os_code: Some(11),
+                    os_kind: Some("DatabaseCorrupt".to_owned()),
+                    os_message: Some("database disk image is malformed".to_owned()),
+                });
+                error
+            };
+            file_watch_mutation_refresh_degraded(&pass);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert_eq!(
+            log.matches(" WARN ").count(),
+            3,
+            "one warn per degraded command — three classes driven, got: {log}"
+        );
+        assert!(
+            log.contains("os_kind=Some(\"FileWatchGone\")")
+                && log.contains("the file-watch service is not running"),
+            "the gone class rides its kind and class-only message, got: {log}"
+        );
+        assert!(
+            log.contains("os_kind=Some(\"FileWatchTimeout\")")
+                && log.contains("the watch pass did not answer within the mutation budget"),
+            "the timeout class rides its kind and class-only message, got: {log}"
+        );
+        assert!(
+            log.contains("code=\"E_DB_CORRUPT\"")
+                && log.contains("os_code=Some(11)")
+                && log.contains("DatabaseCorrupt")
+                && log.contains("database disk image is malformed"),
+            "the pass failure rides the §10 code literal and OS facts, got: {log}"
+        );
+        assert!(
+            log.contains("params={\"path\": \"/db/here\"}"),
+            "the params channel renders the error contract's curated user-visible \
+             set verbatim — the payload's one user-visible field, pinned here (the \
+             round-1 review's F5): SEC-008-protected content (instruction text, \
+             file content) has no channel onto the line at all, got: {log}"
+        );
+        assert_eq!(
+            log.matches("the watch refresh after the project mutation degraded")
+                .count(),
+            3,
+            "the consequence names itself on every class's line, got: {log}"
         );
     }
 

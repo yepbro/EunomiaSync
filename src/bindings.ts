@@ -286,9 +286,12 @@ export const commands = {
 	 *     its blocking half on the pool. The
 	 *     refresh is never-fatal aftermath (D-138's watch posture): the
 	 *     project IS added whatever the pass answers — a refusal or the
-	 *     budget's expiry degrades silently, and the next anchor (an
-	 *     availability change, a debounced file event, the next sync or
-	 *     mutation) re-converges the set, because every full pass
+	 *     budget's expiry degrades with its class-only warn
+	 *     ([`logging::file_watch_mutation_refresh_degraded`], T-278: the
+	 *     gone service, the pass's §10 failure, the timeout — one line
+	 *     per command; the command is the episode), and the next anchor
+	 *     (an availability change, a debounced file event, the next sync
+	 *     or mutation) re-converges the set, because every full pass
 	 *     re-derives it from the project table. The other SYS-005-gated
 	 *     mutations change no watched file (`projects_reorder` moves
 	 *     sort_order, `exclusion_remove` touches no project row) and run

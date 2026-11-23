@@ -16934,6 +16934,129 @@ T-278 class-set decision note; the dedicated timeout-code rule for
 the first surfacing consumer). The cards are the tracking unit; this
 note only records their existence.
 
+T-278 addendum (this entry's follow-up card, executed; the class-set
+decision recorded BEFORE coding, 2026-11-22): the add flow's
+caller-side warn landed as ONE facade line,
+`file_watch_mutation_refresh_degraded(&AppError)` (`warn`, target
+`eunomia::file_watch`, the `file_watch_pass_failed` §10 payload shape
+verbatim), called from `project_add_manual`'s committed arm — the
+caller-side complement of D-155's fire-and-forget edge that D-155's
+own boundary note assigned to this card. The per-class decisions:
+
+- `FileWatchGone` — warns. The init warn fired once at LAUNCH (a
+  different episode); at the add moment no other line exists for this
+  refusal, so this line is the only record that the user's new
+  project joins no watch this session.
+- The pass failure answered WITHIN the budget (the §10 `AppError`) —
+  warns. D-155 left exactly this half to this card: its
+  `file_watch_pass_failed` gates on `done: None`, so an awaited
+  failure has no line of its own there — the sync pipeline carries
+  its own through `sync_run_degraded`'s watch arm, and this line is
+  the add flow's equivalent durable half. With it, every class the
+  caller OBSERVES is logged exactly once (D-155's gate chain closed
+  for the observed set) — with one recorded window this chain leaves
+  open: a pass failure the budget outlives answers the caller
+  `FileWatchTimeout` and is logged NOWHERE ELSE (the service's
+  awaited gate keeps its silence because the ack receiver was still
+  `Some` when the caller returned). Not a regression of this card —
+  D-155's gate already had it — but named here because this is the
+  card that was supposed to close the chain; the unclaimed-failure
+  surface (the service logging when the ack `try_send` fails) is a
+  follow-up, not this card's code.
+- `FileWatchTimeout` — warns: this entry's headline degrade; silent
+  would leave D-144's original gap standing for the MOST LIKELY
+  real-world refusal (a stuck mount), against the follow-up's whole
+  point.
+- Recovery mode's `NoDatabase` is NOT in the set: unreachable at this
+  call site — the committed arm runs after the flow's own
+  transaction, a `Db` is proven (D-144's recorded reasoning) — so the
+  class needs no decision here.
+
+Level and shape: `warn`, not `error` — the project IS added, the
+verdict stands, the next anchor converges (the
+`db_backup_daily_failed`/`sync_run_degraded` reasoning; an `error`
+line would read as a failed add in log triage). The payload is the
+error's own §10 vocabulary (code, params, os_code/os_kind/os_message):
+the class rides `os_kind` for the seam's two class-only answers and
+the code literal for the pass failure; nothing SEC-008-protected
+(instruction text, file content) rides the line — `params` is the
+error contract's curated user-visible set (paths and similar
+UI-011 "where" facts), empty for today's pass errors (SEC-008). The
+borrowed `DbLocked` code stays the D-037 family
+convention — a log line surfaces nothing to the user, so the
+dedicated timeout-code rule remains the first SURFACING consumer's
+follow-up. The once-shape: the COMMAND is the episode — one line per
+add whose refresh refused; repeat adds in one session re-warn. Each
+add is a distinct user answer that degraded (the `sync_run_degraded`
+per-run precedent for awaited callers), while the
+`log_rotation_failed`/`file_watch_refused` episode gates both target
+REPEATING producers (the writer's per-write retry; the service's
+periodic passes) — the awaited seam answers at most once per call —
+and suppression would need shared session state (a new seam, outside
+this card) while hiding a real fact. A healthy add logs nothing (the
+no-line policy: the facade has no success arm, the call site matches
+`Ok`).
+
+Tests: `logging.rs` drives the line for all three classes (the
+capture pattern; the pass-failure error is the synthetic §10 form the
+D-155 logging tests use — a real classified pass error is not
+ipc-constructible, the D-139 fake-backend premise); `ipc_tests` pin
+the call-site DECISION through a thread-local capture over the
+direct-driven `project_add_manual_impl` (`pub(crate)`, the
+`pipeline_refusal` precedent — a real-IPC invoke runs on runtime
+threads where the thread-local subscriber cannot see, the
+D-032/D-143 boundary): the parked world answers `FileWatchTimeout`
+and warns once, the dropped-receiver world answers `FileWatchGone` —
+TWICE under one capture (two adds), pinning the once-shape's other
+half: the command is the episode, repeat adds re-warn (the round-1
+review's F4); the healthy real service logs nothing at all at warn
+level while the pass counter proves the refresh ran, under a ceiling
+of budget + slack (the round-1 review's F3: the healthy call's outer
+bound must not contradict the 10 s contract it drives — a true hang
+still reddens the capture and pass assertions through the seam's own
+budget). Mutation reds: the call site deleted → both degrade tests
+red; the call widened to the success arm → the healthy test red; the
+level lowered → the logging test red — all four claimed reds (a
+fourth: the seam skipped → the pass-counter oracle red) verified
+independently by the round-1 reviewer in an isolated copy. Honest
+boundaries: the pass-failure class is not driven through the REAL
+service (its only honest driver is the unit level this card does not
+own — `file_watch.rs` is frozen for T-104); its coverage is the
+facade test plus the class-agnostic call-site arm. Forced deviation
+(rule 10): the `file_watch.rs` doc sentences that name the add flow
+silent or pending are stale the moment this line lands and stay
+frozen for T-104's window — ALL FOUR sites, each by its exact
+wording (the quotes are the stable key, the line numbers drift; the
+follow-up card's scope is these four sentences, not fewer — the
+round-1 review's F1):
+
+1. the module docs' pass-failure paragraph: "the add flow's awaited
+   seam stays T-278's line and logs nowhere until that card lands";
+2. the service loop's awaited-gate comment: "the add flow's line is
+   T-278's card), so every failure is logged exactly once (D-155)";
+3. `refresh_after_sync`'s Errors doc: "the add flow degrades silently
+   — its `logging.rs` line is the recorded follow-up";
+4. `mutation_refresh_timeout`'s doc: "the add flow degrades silently
+   and the refresh-refused warn line is T-278's card — whether that
+   line also covers this timeout class is that card's decision".
+
+Reported as the follow-up card that carries the doc truth (rule 11's
+debt, recorded here); a second follow-up records the unclaimed
+pass-failure window above (the service could log when the ack
+`try_send` fails).
+
+Round-2 review addendum (D-156, same task; report
+`.opencode/reviews/t278-round2.md`, hy4-flash-free — verdict
+approve: no P1/P2/P3 findings; the round re-derived all five round-1
+fixes as real, not cosmetic — the four frozen-zone quotes verified
+verbatim against the frozen file, the two-add gone test proven
+falsifiable by an isolated-copy mutation, the healthy ceiling
+contract-aligned, the OBSERVES-qualified claims consistent across
+code and record, the `params` rendering pinned — and re-ran the gate
+chain green by exit code: fmt 0, clippy 0, the four new tests 0, the
+app-crate lib suite 0 (553/0), the workspace suite 0 (1713/0)). The
+review phase is complete after this round (no third round).
+
 ### D-157 — T-138: the assignment-toggle save benchmark — §12.2's third budget row measured through the store's own `reassign`, the alternation keeping every iteration a real write — 2026-11-22
 
 Problem: T-138 turns §15.1's Load row toward §12.2's third budget

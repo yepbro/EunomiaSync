@@ -7997,6 +7997,18 @@ const HUNG_WORLD_BUDGET: std::time::Duration = std::time::Duration::from_millis(
 /// reds pre-fix, but a red a developer cannot see in the test
 /// output is half a red). Orders of magnitude above the budget for
 /// scheduling headroom on a loaded runner.
+/// The OUTER bound for the hung-world tests' calls: a regression to
+/// an unbounded wait fails the test BY NAME at this
+/// ceiling — the call is dropped or detached mid-await and the
+/// assertion message names the hang — instead of stalling the whole
+/// suite until a job timeout (the round-1 review's P3-3; the
+/// mutation checks' outer `timeout` shells demonstrated the same
+/// reds pre-fix, but a red a developer cannot see in the test
+/// output is half a red). Orders of magnitude above the budget for
+/// scheduling headroom on a loaded runner. The HEALTHY world's call
+/// uses `HEALTHY_CEILING` below — budget + slack, computed at runtime
+/// (`Duration` addition is not const-stable) to keep the link to the
+/// production budget it exercises (the round-1 review's F3).
 const DEGRADE_CEILING: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[test]
@@ -8198,6 +8210,223 @@ fn project_add_manual_answers_within_the_refresh_budget_when_the_watch_pass_hang
         }],
         "the next anchor converges the set — only a pass that \
          covered the committed row can record this"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+/// The in-memory warn capture the committed arm's call-site logging
+/// tests drive (T-278): the crate's own fmt shape — the settings
+/// `logging::fmt_subscriber` builds (a level filter and
+/// `log_internal_errors(false)`), over a shared buffer instead of a
+/// file, because the production file subscriber lives behind
+/// `logging.rs`'s private seam. Thread-local by construction: it is
+/// installed with `tracing::subscriber::with_default` and sees exactly
+/// the events fired on the test thread — the direct-driven impl's own
+/// lines — never the runtime's other threads (the D-032/D-143
+/// worker-thread boundary; the service task, spawned or not, cannot
+/// pollute the capture).
+#[derive(Clone)]
+struct WarnCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl WarnCapture {
+    fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("the capture lock")).into_owned()
+    }
+}
+
+impl std::io::Write for WarnCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("the capture lock")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for WarnCapture {
+    type Writer = WarnCapture;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// The capture subscriber: warn level (the degrade line under test is
+/// a warn, and the healthy world's silence then asserts an EMPTY
+/// capture), `log_internal_errors(false)` as every subscriber of this
+/// crate builds with (the fmt layer's own writer-error fallback must
+/// stay off, the `logging.rs` module docs' Windows reasoning).
+fn warn_capture_subscriber(capture: &WarnCapture) -> impl tracing::Subscriber {
+    tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::WARN)
+        .log_internal_errors(false)
+        .finish()
+}
+
+#[test]
+fn a_committed_add_whose_refresh_times_out_warns_the_degrade_once() {
+    // T-278's class-set decision (the D-156 addendum): the budget's
+    // expiry is one of the three refusal classes the committed arm
+    // warns, ONE line per command — the command is the episode. The
+    // parked world at the caller (D-156's hung shape: the bus accepts
+    // the command, no service consumes it, no ack exists), driven
+    // through the real committed arm so the warn the arm owes its own
+    // answer is captured on the polling thread.
+    let (temp, app, _parked) = add_manual_watch_app_with_budget(HUNG_WORLD_BUDGET);
+    let repo = repo_dir(temp.path(), "eunomia-repo");
+    let picked = pick_folder(&app, &repo);
+    let capture = WarnCapture::new();
+    let subscriber = warn_capture_subscriber(&capture);
+
+    tracing::subscriber::with_default(subscriber, || {
+        let result = tauri::async_runtime::block_on(async {
+            tokio::time::timeout(
+                DEGRADE_CEILING,
+                crate::commands::project_add_manual_impl(app.handle().clone(), picked, None),
+            )
+            .await
+        })
+        .expect("the add must answer within the ceiling, not hang — the bound regressed")
+        .expect("the add must succeed — the expired refresh is never-fatal aftermath");
+        assert_eq!(result.outcome, "added");
+    });
+
+    let log = capture.text();
+    assert!(
+        log.contains(" WARN ")
+            && log.contains("os_kind=Some(\"FileWatchTimeout\")")
+            && log.contains("the watch refresh after the project mutation degraded"),
+        "the budget's expiry must warn the class-only degrade line, got: {log}"
+    );
+    assert_eq!(
+        log.matches(" WARN ").count(),
+        1,
+        "one degrade line per command — the command is the episode, got: {log}"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_committed_add_whose_watch_service_is_gone_warns_the_degrade_once() {
+    // The backend-refused world: the bus's receiving half dropped with
+    // the init refusal (no service was ever spawned), so the send
+    // fails fast and the seam answers `FileWatchGone`. The launch-time
+    // init warn is a different episode — this line is the record that
+    // THIS add's watch join never happened (the D-156 addendum's
+    // first class). TWO adds under one capture: the once-shape
+    // ruling's other half (the round-1 review's F4) — the COMMAND is
+    // the episode, so a repeat add in the same session re-warns, each
+    // is a distinct user answer that degraded, exactly one line per
+    // command — in the opposite direction of the
+    // `log_rotation_failed`/`file_watch_refused` episode gates (which
+    // silence standing refusals of REPEATING producers; the awaited
+    // seam answers once per call and its caller owes the line).
+    let (temp, app, commands) =
+        add_manual_watch_app_with_budget(crate::file_watch::MUTATION_REFRESH_BUDGET);
+    drop(commands);
+    let repo = repo_dir(temp.path(), "eunomia-repo");
+    let picked = pick_folder(&app, &repo);
+    let second_repo = repo_dir(temp.path(), "eunomia-second");
+    let second_picked = pick_folder(&app, &second_repo);
+    let capture = WarnCapture::new();
+    let subscriber = warn_capture_subscriber(&capture);
+
+    tracing::subscriber::with_default(subscriber, || {
+        for path in [picked, second_picked] {
+            let result = tauri::async_runtime::block_on(crate::commands::project_add_manual_impl(
+                app.handle().clone(),
+                path,
+                None,
+            ))
+            .expect("each add must succeed — the refused refresh is never-fatal aftermath");
+            assert_eq!(result.outcome, "added");
+        }
+    });
+
+    let log = capture.text();
+    assert!(
+        log.contains(" WARN ")
+            && log.matches("os_kind=Some(\"FileWatchGone\")").count() == 2
+            && log
+                .matches("the watch refresh after the project mutation degraded")
+                .count()
+                == 2,
+        "each add's gone refusal must warn the class-only degrade line, got: {log}"
+    );
+    assert_eq!(
+        log.matches(" WARN ").count(),
+        2,
+        "one degrade line per command — two adds, two episodes, got: {log}"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_healthy_add_logs_no_degrade_line() {
+    // The no-line policy's caller-side half (the D-156 addendum): the
+    // refresh answered Ok — the converged set and the emitted
+    // first-observation diff are in place by the time the answer
+    // lands — and the capture stays EMPTY at warn level (the D-051
+    // mirror policy keeps the journal's info off the file log's warn
+    // filter too). The pass counter is the Ok-was-exercised oracle:
+    // the startup pass plus the add's own mutation pass — the silence
+    // covers a real Ok, not a skipped seam (the D-144 wiring test
+    // pins the convergence itself).
+    let (temp, app, commands) = add_manual_watch_app();
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    wait_for_watch_passes(&app, 1); // the startup pass over an empty table
+    let repo = repo_dir(temp.path(), "eunomia-repo");
+    let picked = pick_folder(&app, &repo);
+    let capture = WarnCapture::new();
+    let subscriber = warn_capture_subscriber(&capture);
+    // The healthy world's outer bound: budget + slack — the contract
+    // this test drives is the production budget itself, so the ceiling
+    // must not contradict it (the round-1 review's F3); a true hang
+    // still surfaces through the seam's own budget answering `Err`
+    // (reddening the capture and pass-counter assertions below).
+    let healthy_ceiling =
+        crate::file_watch::MUTATION_REFRESH_BUDGET + std::time::Duration::from_secs(3);
+
+    let answer = tracing::subscriber::with_default(subscriber, || {
+        tauri::async_runtime::block_on(async {
+            tokio::time::timeout(
+                healthy_ceiling,
+                crate::commands::project_add_manual_impl(app.handle().clone(), picked, None),
+            )
+            .await
+        })
+        .expect("a healthy pass must answer within the budget-plus-slack ceiling")
+        .expect("the healthy add must succeed")
+    });
+    assert_eq!(answer.outcome, "added");
+
+    let log = capture.text();
+    assert!(
+        log.is_empty(),
+        "a healthy add logs nothing at warn level — the no-line policy, got: {log}"
+    );
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>()
+            .pass_count(),
+        2,
+        "the add's own refresh ran — the silence covers a real Ok, not a skipped seam"
     );
     // Windows teardown rule.
     drop(app);

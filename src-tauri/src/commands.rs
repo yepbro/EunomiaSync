@@ -2830,9 +2830,12 @@ pub(crate) struct ExistingProject {
 ///    its blocking half on the pool. The
 ///    refresh is never-fatal aftermath (D-138's watch posture): the
 ///    project IS added whatever the pass answers — a refusal or the
-///    budget's expiry degrades silently, and the next anchor (an
-///    availability change, a debounced file event, the next sync or
-///    mutation) re-converges the set, because every full pass
+///    budget's expiry degrades with its class-only warn
+///    ([`logging::file_watch_mutation_refresh_degraded`], T-278: the
+///    gone service, the pass's §10 failure, the timeout — one line
+///    per command; the command is the episode), and the next anchor
+///    (an availability change, a debounced file event, the next sync
+///    or mutation) re-converges the set, because every full pass
 ///    re-derives it from the project table. The other SYS-005-gated
 ///    mutations change no watched file (`projects_reorder` moves
 ///    sort_order, `exclusion_remove` touches no project row) and run
@@ -2859,7 +2862,11 @@ pub(crate) async fn project_add_manual<R: Runtime>(
 /// The body of [`project_add_manual`], split so the one logging edge
 /// covers every failure path (the `activity_list` shape) — including
 /// the SEC-003 rejection, which fires before anything else.
-async fn project_add_manual_impl<R: Runtime>(
+/// `pub(crate)` for the ipc suite's call-site logging tests (T-278),
+/// which drive it directly on the test thread so the thread-local
+/// capture sees its own lines (the `pipeline_refusal` precedent; a
+/// real-IPC invoke runs on runtime threads the capture cannot see).
+pub(crate) async fn project_add_manual_impl<R: Runtime>(
     app: AppHandle<R>,
     path: String,
     accept_repo_root: Option<bool>,
@@ -3092,12 +3099,17 @@ async fn project_add_manual_impl<R: Runtime>(
             // (recovery mode is unreachable here, the flow holds a
             // database; the real case is a watcher backend that
             // refused to start, when no service task exists and the
-            // send fails fast) degrade silently, and the next watch
-            // anchor re-converges the set. The warn line this
-            // degrade deserves lives in `logging.rs` — T-278's
-            // card; the timeout's class (`FileWatchTimeout`) is
-            // recorded for it in D-156.
-            let _never_fatal_watch_refresh = file_watch::refresh_after_mutation(&app).await;
+            // send fails fast) degrade with their class-only warn,
+            // and the next watch anchor re-converges the set (the
+            // warn line is `file_watch_mutation_refresh_degraded`,
+            // T-278 — the D-156 addendum's class set: gone, the
+            // pass's §10 failure, the timeout; every class the caller
+            // OBSERVES is logged exactly once — a pass failure the
+            // budget outlives answers the timeout here and is logged
+            // nowhere else, the D-156 addendum's recorded window).
+            if let Err(refused) = file_watch::refresh_after_mutation(&app).await {
+                logging::file_watch_mutation_refresh_degraded(&refused);
+            }
             Ok(ProjectAddResult::added(&project, warning))
         }
     }
