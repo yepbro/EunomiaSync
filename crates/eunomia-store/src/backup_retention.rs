@@ -3,9 +3,10 @@
 //! by limit", §9.4 phase 4 step 2).
 //!
 //! One entry point, [`apply`], for the sync pipeline to call after
-//! a run finishes (§9.4 phase 4 — the caller lands with the
-//! pipeline task; today only the tests drive this service): for
-//! every "project and file" pair —
+//! a run finishes (§9.4 phase 4 — the caller landed with the
+//! pipeline task: the phase-4 finish in src-tauri's `sync_phase4`
+//! invokes it inside the run's finish transaction, and the integration
+//! tests drive the service too): for every "project and file" pair —
 //! the `(project_id, source_path)` of the `backup_records` rows —
 //! the newest `keep` checked copies stay and every older one is
 //! physically deleted from the backups folder, its record marked
