@@ -20079,3 +20079,164 @@ instead of infinitely patient. Checks re-run green on ubuntu:
 fmt, clippy `--workspace --all-targets -D warnings`, `cargo test
 --workspace` (37 suites), `format:check`. The macOS legs are CI's
 to confirm on the second merge push.
+
+### D-182 — T-323: four dev-dependency advisories closed — happy-dom by direct upgrade, glob/minimatch by parent-scoped pnpm overrides living in `pnpm-workspace.yaml` (the pinned pnpm 12 ignores package.json's `pnpm` field) — 2026-11-23
+
+Problem: `pnpm audit` (full) was red with four advisories, every one on a
+dev-only path — reproduced bit-for-bit at the start of T-323 (exit 1:
+2 high, 2 moderate), matching the 2026-11-23 project review (P2-2):
+
+| Package   | Installed | Advisory (severity)            | Patched  | Paths from the root                                                                                   |
+| --------- | --------- | ------------------------------ | -------- | ----------------------------------------------------------------------------------------------------- |
+| happy-dom | 20.14.6   | GHSA-834v-8h66-3h79 (High)     | >=21.0.4 | `happy-dom`; `vitest > happy-dom`                                                                     |
+| happy-dom | 20.14.6   | GHSA-c8p4-j97h-3vg8 (High)     | >=21.0.0 | the same two paths                                                                                    |
+| glob      | 13.0.7    | GHSA-3g3m-2fjr-6pw4 (Moderate) | >=14.0.2 | `@vue/test-utils > js-beautify > glob`                                                                |
+| minimatch | 10.2.6    | GHSA-g3hv-75wg-m249 (Moderate) | >=11.0.1 | `@vue/test-utils > js-beautify > editorconfig > minimatch`; the same chain through `glob > minimatch` |
+
+Each path starts at a devDependency (`happy-dom`, `vitest`,
+`@vue/test-utils`), so the runtime `dependencies` (`@tauri-apps/api`,
+`pinia`, `vue`, `vue-i18n`) were never on a vulnerable path, and
+`pnpm audit --prod` is clean after the change. SEC-010 names the CI
+audit, and a red full audit would have blocked the gate planned as T-228.
+
+Solution — the mechanism follows what the consumers declare, read from the
+installed manifests and the registry rather than assumed:
+
+1. `happy-dom`: direct upgrade, package.json devDependency `^20` →
+   `^21.0.4`. vitest 4.1.12 declares `happy-dom` as an optional peer with
+   range `*` (`node_modules/vitest/package.json`:
+   `peerDependencies.happy-dom`, `peerDependenciesMeta.happy-dom.optional`),
+   so one direct upgrade covers both audit paths — the lockfile's vitest
+   entry now reads `(happy-dom@21.0.4)`. The floor is the patched version
+   of the stricter advisory (vulnerable `>=17.0.0 <=21.0.3`); a bare `^21`
+   would still admit 21.0.0–21.0.3. Resolved to 21.0.4, also the
+   registry's latest (`engines.node >=20`; the project runs Node 22).
+2. `glob`: override `js-beautify>glob: ^14.0.2`. No parent upgrade
+   exists — js-beautify 2.0.3 is the latest release (`pnpm view
+js-beautify version`) and declares `glob: ^13.0.6`; @vue/test-utils
+   2.6.0 (also latest) declares `js-beautify: ^2.0.0`; and glob has no
+   patched 13.x (vulnerable `>=9.0.0 <=14.0.1`). Resolved to 14.0.6.
+3. `minimatch`: override `editorconfig>minimatch: ^11.0.1`. editorconfig
+   3.0.2 is the newest release js-beautify's `editorconfig: ^3.0.2` admits
+   and declares `minimatch: ~10.2.4`. editorconfig 4.0.1 already depends
+   on `minimatch: ~11.0.5` — the major the override selects — but sits
+   outside that range. Resolved to 11.0.9, the instance the tree already
+   carried for `@typescript-eslint/typescript-estree`, now shared by all
+   three consumers.
+
+Both overrides are scoped to the parent on purpose. A bare `minimatch`
+override would also rewrite eslint's own edges — `@eslint/config-array`
+0.21.2 and `@eslint/eslintrc` 3.3.7 both declare `minimatch: ^3.1.5` —
+which the advisory does not reach (vulnerable `>=7.0.0 <11.0.1`); the
+resolved `minimatch@3.1.5` is unchanged. No `glob>minimatch` entry is
+needed: glob 14 declares the 11.x line itself (`^11.0.5` in the installed
+14.0.6; `^11.0.0` in the registry manifests of 14.0.0–14.0.2), and
+resolution takes the highest match.
+
+Rule 1 — the brief's mechanism assumption, resolved before coding. The
+spawn brief named `pnpm.overrides` in package.json as "the likely
+mechanism". That is the pre-12 location: the project pins
+`packageManager: pnpm@12.6.0` (D-018), which no longer reads the field.
+Verified on a scratch copy of `package.json` + `pnpm-lock.yaml` with
+`pnpm install --lockfile-only`:
+
+```
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The
+following keys were ignored: "pnpm.overrides". See https://pnpm.io/settings
+for the new home of each setting.
+```
+
+with a 0-line lockfile delta — glob 13.0.7 and minimatch 10.2.6 unchanged,
+the audit still red. The pnpm 12 documentation agrees (pnpm.io/configuring:
+"pnpm does not read settings from the `pnpm` field of `package.json`";
+`overrides` is documented under "Settings (pnpm-workspace.yaml)", with the
+selector rule "`qar@1>zoo` will only override the `zoo` dependency of
+`qar@1`"). The same probe with the overrides in a new root
+`pnpm-workspace.yaml` produced exactly the delta below. pnpm 12.6.0 ships
+as a native binary with no readable JS, so the install probe — not a
+source read — is the citation. The new file carries settings only, with no
+`packages` key. In pnpm's own model that is still a workspace — the file
+"defines the root of the workspace", and "if the `packages` field is
+omitted, only the root package is included in the workspace"
+(pnpm.io/settings#packages) — so what is absent is multi-package
+semantics, not workspace mode. D-018's "pnpm settings would go into
+`pnpm-workspace.yaml` if ever needed" is the clause this entry exercises;
+the other half of its guard — no workspace packages, Turborepo or tsdown,
+nothing here adopts monorepo tooling — keeps its meaning (wording
+corrected after the round-1 review, P3-1).
+
+Lockfile delta (`pnpm install`; package.json +1/−1, pnpm-lock.yaml
++22/−26, nothing else moved): the `overrides:` block is recorded in the
+lockfile, so CI's `pnpm install --frozen-lockfile` enforces it; the
+importer's `happy-dom` specifier and vitest's peer suffix and
+`optionalDependencies.happy-dom`; `glob@13.0.7` → `glob@14.0.6`;
+`path-scurry@2.0.2` → `path-scurry@3.0.0` (glob 14's own `^3.0.0` — the
+one package the card does not name whose version moved);
+`minimatch@10.2.6` leaves the tree (its `brace-expansion@5.0.13` stays,
+11.0.9 uses it too); `happy-dom@20.14.6` → `happy-dom@21.0.4`;
+js-beautify's and editorconfig's edges. "Regeneration" here is the
+re-resolution of the changed edges from the existing lockfile, not a
+from-scratch re-resolve — that would bump every package and exceed the
+card. Operational note: an incremental `pnpm install` leaves the
+superseded directories in `node_modules/.pnpm` until a fresh install
+(unreferenced by `node_modules/.pnpm/lock.yaml`; `pnpm why` already
+resolves only the new versions) — not a sign that the override missed.
+
+Compatibility evidence — the risk an override carries is "a major the
+consumer never declared", so both were exercised, not assumed:
+
+- Exposure. In this graph `glob` and `editorconfig` are loaded only by
+  js-beautify's CLI: its two CLI files are the only ones in the package
+  requiring either (`js/lib/cli.js`, which all three bins load, and its
+  source twin `js/src/cli.js`, which nothing loads). The calls:
+  `glob.hasMagic` (lib/cli.js:72 and :636), `glob.globSync(pattern, {
+absolute: true, ignore: [...] })` (:641-644), `editorconfig.parseSync`
+  (:231) → `new Minimatch(...)` (editorconfig lib/index.js:179) and
+  `escape` (:246). @vue/test-utils 2.6.0 inlines js-beautify's library
+  sources into all four of its dist builds (23 inlined module markers
+  each, no external `js-beautify` import), so nothing the project itself
+  runs loads these packages at all.
+- Differential smoke, before and after, against the real installed
+  packages (a one-off script, not committed): `glob.hasMagic`,
+  `glob.globSync` with js-beautify's verbatim arguments,
+  `editorconfig.parseSync` for both sections of a fixture `.editorconfig`,
+  and the real CLI on a glob input, a glob plus `--editorconfig` for js and
+  for css, a plain path and stdin. The two JSON outputs differ in exactly
+  three fields, the versions (glob 13.0.7 → 14.0.6; glob>minimatch and
+  editorconfig>minimatch 10.2.6 → 11.0.9). Every `hasMagic` verdict, file
+  list, parsed section, CLI status and stdout line and output-file hash is
+  identical — including `node_modules` staying ignored by the glob.
+- happy-dom is the vitest environment (`test.environment` in
+  vite.config.ts): `pnpm run test` passed 11 files / 287 tests before and
+  after. A throwaway spec asserting `navigator.userAgent` contains
+  `HappyDOM/21.0.4` passed, and its `HappyDOM/20.14.6` control failed —
+  the environment is the new version at runtime, not only in the lockfile.
+
+Tests: no new spec. The diff changes no project code, so there is no
+behavior of ours to pin; the falsifiable oracles are the audit's exit
+status and the existing 287 specs under the new environment. A spec
+asserting resolved versions would mirror the lockfile (a pseudo-test,
+Rule 11), and the CLI smoke targets a path the project never runs — it
+stays a recorded one-off rather than a permanent test.
+
+Rule 9: the card is the owner sanction. No runtime dependency is added
+(the `dependencies` block is byte-identical, `pnpm audit --prod` clean);
+the dev graph gains no package name, only `path-scurry` 3.0.0 in place of
+2.0.2. Rust is untouched — `Cargo.toml`, `Cargo.lock` and `deny.toml` are
+unchanged, so cargo-deny's ignore list is unchanged by construction; the
+cargo suites were not run for this diff (CI's).
+
+Checks, all exit 0 on a from-scratch tree (`rm -rf node_modules` first):
+`pnpm install --frozen-lockfile` (554 ms; CI's install mode);
+`pnpm audit` — "No known vulnerabilities found"; `pnpm audit --prod`;
+`pnpm run test` (11 files, 287 tests); `pnpm run lint`;
+`pnpm run typecheck`; `pnpm run format:check` (the new YAML is
+prettier-checked).
+
+Follow-ups for the board, outside this card: pnpm prints
+`[WARN] deprecated eslint@9.39.5. 10.15.0 is not deprecated, outside the
+range you declared.` on every install — the eslint 9 → 10 major deserves
+its own card; spec SEC-010 (docs/spec.md:897) names `npm audit` while the
+toolchain has been pnpm since D-018 — T-228's gate is the moment to align
+the wording; both overrides become removable once js-beautify and
+editorconfig declare the patched majors.

@@ -1,0 +1,22 @@
+# pnpm 12 reads its settings from this file. It no longer reads package.json's
+# `pnpm` field — a setting found there is ignored with a warning — so the
+# overrides below would have no effect anywhere else (D-018, D-182 in
+# DECISIONS.md). Settings only: there is no `packages` key, so just the root
+# package is in the workspace (pnpm.io/settings#packages) — single-package
+# semantics, no monorepo.
+
+# Security floors for two transitive dev dependencies whose consumers still
+# declare the vulnerable lines: js-beautify 2.0.3 (the latest release) wants
+# glob ^13.0.6 and editorconfig ^3.0.2, and editorconfig 3.x (the newest line
+# that range admits) wants minimatch ~10.2.4. glob has no patched 13.x.
+#   glob      GHSA-3g3m-2fjr-6pw4  fixed in 14.0.2
+#   minimatch GHSA-g3hv-75wg-m249  fixed in 11.0.1
+#
+# Scoped to the parent on purpose: a bare `minimatch` override would also
+# rewrite eslint's own minimatch 3.x edges (@eslint/config-array and
+# @eslint/eslintrc, both ^3.1.5), which the advisory does not reach. No
+# `glob>minimatch` entry is needed: glob 14 depends on minimatch ^11 itself.
+# Removable once js-beautify and editorconfig declare the patched majors.
+overrides:
+  'js-beautify>glob': '^14.0.2'
+  'editorconfig>minimatch': '^11.0.1'
