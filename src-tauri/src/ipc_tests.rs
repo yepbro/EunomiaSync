@@ -6309,6 +6309,86 @@ fn wait_for_watch_passes(app: &tauri::App<tauri::test::MockRuntime>, at_least: u
     }
 }
 
+/// Converges the startup's watcher state before the act (CI
+/// 45235995817, D-181): the fixtures write the target BEFORE
+/// `spawn_service`, and FSEvents — macOS — can still deliver those
+/// writes AFTER the stream started. The stream is bounded by
+/// `kFSEventStreamEventIdSinceNow` (notify 8.2.2 `src/fsevent.rs:289`)
+/// — the greatest event id the daemon has ASSIGNED at creation, not
+/// the wall clock of the write — and the daemon assigns an id when it
+/// processes the change, so a write that completed just before the
+/// stream's birth can carry a later id and land as a post-startup
+/// debounced pass (`latency: 0.0` + `NoDefer`, `src/fsevent.rs:290-291`,
+/// only make the delivery prompt, never earlier). inotify — Linux —
+/// structurally cannot do it (the kernel queues an event only after
+/// the watch attaches), which is why "pre-spawn writes are invisible"
+/// never failed an ubuntu leg or a local run. The late pass is
+/// harmless to every verdict — it re-reads the same state — but it
+/// breaks the tests that index passes absolutely (`wait_for(2)` for
+/// the act's own pass) or assert none ran after the premise.
+///
+/// The convergence is CAUSAL, not temporal: the helper rewrites the
+/// target with its own current bytes (read here, so the two can never
+/// drift) and waits for the partial pass that rewrite itself
+/// provokes. The settle write is issued strictly after the stream's
+/// birth, and a stream delivers in event-id order, so by the time the
+/// settle pass runs, every earlier fixture event has been delivered —
+/// before the settle's own event or coalesced into its debounced
+/// batch — leaving the service in the settled state the return value
+/// names. The rewrite changes no verdict (same bytes — the diff
+/// contract stays silent) and is the TEST's fixture hand, not the
+/// service's (OUT-014's "a watch event never writes a file" is about
+/// the service, and stays pinned). Returns the settled pass count —
+/// the baseline the act-window deltas below assert against.
+fn converge_startup_watch(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    target: &std::path::Path,
+) -> u64 {
+    let before = app
+        .state::<crate::file_watch::FileWatchState>()
+        .pass_count();
+    let bytes = std::fs::read(target).expect("the settle read must work");
+    std::fs::write(target, bytes).expect("the settle rewrite must work");
+    wait_for_watch_passes(app, before + 1);
+    app.state::<crate::file_watch::FileWatchState>()
+        .pass_count()
+}
+
+/// Collects the next change-carrying report with a deadline — this
+/// file's canonical post-pass pattern since CI 45009611489 (the
+/// macos-15-intel legs): the pass counter can reach the awaited
+/// number a hair before the listener delivers onto the channel, so an
+/// instantaneous `try_recv` races it and panics `Empty`. Returns the
+/// first non-empty batch of flagged changes, or an empty vec at the
+/// deadline — for the caller's assertion to name, never to swallow:
+/// `assert_eq!` against the expected batch stays exactly as
+/// falsifiable as the old `try_recv().expect` shape, minus the race.
+fn next_flagged_changes(
+    events: &std::sync::mpsc::Receiver<crate::file_watch::FileChangedEvent>,
+) -> Vec<crate::file_watch::ProjectFileChange> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut flagged = Vec::new();
+    while flagged.is_empty() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match events.recv_timeout(remaining) {
+            Ok(event) => flagged.extend(
+                event
+                    .changes
+                    .into_iter()
+                    .filter(|change| change.external_changed || change.file_deleted),
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the event listener died mid-test")
+            }
+        }
+    }
+    flagged
+}
+
 /// Seeds one project with the given scheme/base pair through the
 /// repository, returning its row id. Owned inputs — the executor's
 /// closure is `'static`.
@@ -6529,24 +6609,26 @@ fn an_external_edit_marks_the_project_externally_modified_without_writing_anythi
         .expect("the watcher must start");
     let events = listen_file_changed(&app);
     wait_for_watch_passes(&app, 1);
+    // The startup convergence (CI 45235995817): on macOS the pre-spawn
+    // fixture write can arrive as a late debounced pass and silently
+    // occupy the "second" pass slot the edit below waits for — the
+    // `Empty` failure of the red run. The settle pass re-reads a
+    // matching file, so the wire stays silent through it.
+    let settled = converge_startup_watch(&app, &target);
     // A clean startup: the file matches the build — no event.
     assert!(events.try_recv().is_err(), "a matching file emits nothing");
 
     // The external edit, made completely outside the app.
     let external = "My own edit, made in an editor.\n";
     std::fs::write(&target, external).expect("the external edit must work");
-    wait_for_watch_passes(&app, 2);
+    wait_for_watch_passes(&app, settled + 1);
     assert_eq!(
-        events
-            .try_recv()
-            .expect("the external edit must be reported"),
-        crate::file_watch::FileChangedEvent {
-            changes: vec![crate::file_watch::ProjectFileChange {
-                project_id: project_id.clone(),
-                external_changed: true,
-                file_deleted: false,
-            }],
-        },
+        next_flagged_changes(&events),
+        vec![crate::file_watch::ProjectFileChange {
+            project_id: project_id.clone(),
+            external_changed: true,
+            file_deleted: false,
+        }],
         "the debounce re-read flipped the verdict — no dialog involved"
     );
     // The display-only pin: the service wrote NOTHING back; the file
@@ -6665,6 +6747,12 @@ fn deleting_a_synced_target_file_reports_target_deleted_a_never_synced_one_repor
         .expect("the watcher must start");
     let events = listen_file_changed(&app);
     wait_for_watch_passes(&app, 1);
+    // The startup convergence (CI 45235995817's class): the pre-spawn
+    // fixture write to the synced target can surface as a late
+    // debounced pass on macOS and take the deletion's pass slot —
+    // converge before the act. The settle pass reads the matching
+    // file: silent, like the startup one.
+    let settled = converge_startup_watch(&app, &synced_target);
     // Startup over a missing-but-never-synced file: silent.
     assert!(
         events.try_recv().is_err(),
@@ -6672,16 +6760,14 @@ fn deleting_a_synced_target_file_reports_target_deleted_a_never_synced_one_repor
     );
 
     std::fs::remove_file(&synced_target).expect("the deletion must work");
-    wait_for_watch_passes(&app, 2);
+    wait_for_watch_passes(&app, settled + 1);
     assert_eq!(
-        events.try_recv().expect("the deletion must be reported"),
-        crate::file_watch::FileChangedEvent {
-            changes: vec![crate::file_watch::ProjectFileChange {
-                project_id: synced_id,
-                external_changed: false,
-                file_deleted: true,
-            }],
-        },
+        next_flagged_changes(&events),
+        vec![crate::file_watch::ProjectFileChange {
+            project_id: synced_id,
+            external_changed: false,
+            file_deleted: true,
+        }],
         "SYS-009's own flag — A/C recreate the file at sync, B would \
          skip with E_MARKERS_INVALID (the sync pipeline's half)"
     );
@@ -6872,6 +6958,14 @@ fn an_archived_row_never_carries_watch_flags_even_from_a_stale_cache_entry() {
         .expect("the watcher must start");
     let _events = listen_file_changed(&app);
     wait_for_watch_passes(&app, 1);
+    // The startup convergence (CI 45235995817): on macOS the pre-spawn
+    // external edit can arrive as a late debounced pass after this
+    // point — the `left: 2` failure of the red run, which read the
+    // extra pass as a premise violation. Converge first: the settle
+    // pass re-checks the still-active project and records the SAME
+    // external-modification verdict, so the premise survives it
+    // intact and the baseline names the settled count.
+    let settled = converge_startup_watch(&app, &target);
     // The stale-window premise, verified: the cache holds the
     // modified verdict for the still-active project.
     assert_eq!(
@@ -6889,7 +6983,7 @@ fn an_archived_row_never_carries_watch_flags_even_from_a_stale_cache_entry() {
     assert_eq!(
         app.state::<crate::file_watch::FileWatchState>()
             .pass_count(),
-        1,
+        settled,
         "no further pass ran — the stale cache entry is the premise"
     );
 
@@ -6978,6 +7072,11 @@ fn an_unavailable_row_never_carries_watch_flags_even_from_a_stale_cache_entry() 
         .expect("the watcher must start");
     let _events = listen_file_changed(&app);
     wait_for_watch_passes(&app, 1);
+    // The startup convergence (CI 45235995817) — the archived-row
+    // sibling's note, same failure (`left: 2`, this time on the intel
+    // leg): converge the pre-spawn edit's possible late FSEvents
+    // delivery into the baseline before the window under test opens.
+    let settled = converge_startup_watch(&app, &target);
     // The stale-window premise, verified: the cache holds the
     // modified verdict for the still-available project.
     assert_eq!(
@@ -7015,7 +7114,7 @@ fn an_unavailable_row_never_carries_watch_flags_even_from_a_stale_cache_entry() 
     assert_eq!(
         app.state::<crate::file_watch::FileWatchState>()
             .pass_count(),
-        1,
+        settled,
         "no further pass ran — the stale cache entry is the premise"
     );
     // Windows teardown rule.
@@ -7243,37 +7342,35 @@ fn a_scheme_b_project_reports_edits_and_deletion_through_its_own_semantics() {
         .expect("the watcher must start");
     let events = listen_file_changed(&app);
     wait_for_watch_passes(&app, 1);
+    // The startup convergence (CI 45235995817's class) — the deletion
+    // battery's note: the pre-spawn fixture write can surface as a
+    // late debounced pass on macOS and take the rewrite's slot.
+    let settled = converge_startup_watch(&app, &target);
     assert!(events.try_recv().is_err(), "the assembled file matches");
 
     // The markers are removed by hand: never a match again.
     std::fs::write(&target, format!("{outside}Be brief.\n"))
         .expect("the markerless rewrite must work");
-    wait_for_watch_passes(&app, 2);
+    wait_for_watch_passes(&app, settled + 1);
     assert_eq!(
-        events
-            .try_recv()
-            .expect("the markerless rewrite must be reported"),
-        crate::file_watch::FileChangedEvent {
-            changes: vec![crate::file_watch::ProjectFileChange {
-                project_id: project_id.clone(),
-                external_changed: true,
-                file_deleted: false,
-            }],
-        }
+        next_flagged_changes(&events),
+        vec![crate::file_watch::ProjectFileChange {
+            project_id: project_id.clone(),
+            external_changed: true,
+            file_deleted: false,
+        }]
     );
 
     // The deletion: the same target-deleted flag as A/C.
     std::fs::remove_file(&target).expect("the deletion must work");
-    wait_for_watch_passes(&app, 3);
+    wait_for_watch_passes(&app, settled + 2);
     assert_eq!(
-        events.try_recv().expect("the deletion must be reported"),
-        crate::file_watch::FileChangedEvent {
-            changes: vec![crate::file_watch::ProjectFileChange {
-                project_id,
-                external_changed: false,
-                file_deleted: true,
-            }],
-        }
+        next_flagged_changes(&events),
+        vec![crate::file_watch::ProjectFileChange {
+            project_id,
+            external_changed: false,
+            file_deleted: true,
+        }]
     );
     // Windows teardown rule.
     drop(app);
@@ -7373,31 +7470,11 @@ fn an_unavailable_project_is_unwatched_until_its_folder_returns() {
     tauri::async_runtime::block_on(crate::availability::recheck_and_emit(app.handle()))
         .expect("the second availability recheck must succeed");
     wait_for_watch_passes(&app, 3);
-    // The pass counter can reach the awaited number a hair before the
-    // listener delivers the emit onto the channel (the macos-15-intel
-    // CI legs, run 45009611489): wait for the report conditionally —
-    // this file's canonical post-pass pattern — instead of an
-    // instantaneous recv.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut reported: Vec<crate::file_watch::ProjectFileChange> = Vec::new();
-    while reported.is_empty() {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        match events.recv_timeout(remaining) {
-            Ok(event) => reported.extend(
-                event
-                    .changes
-                    .into_iter()
-                    .filter(|change| change.external_changed || change.file_deleted),
-            ),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("the event listener died mid-test")
-            }
-        }
-    }
+    // The conditional report wait (run 45009611489's race note, the
+    // helper's own doc): the pass counter can reach the awaited
+    // number a hair before the listener delivers the emit onto the
+    // channel — no instantaneous recv here.
+    let reported = next_flagged_changes(&events);
     assert_eq!(
         reported,
         vec![crate::file_watch::ProjectFileChange {
@@ -7504,27 +7581,10 @@ fn a_queued_fire_and_forget_refresh_behind_file_events_still_runs_a_full_pass() 
         .trigger(crate::file_watch::Command::Refresh { done: None });
     wait_for_watch_passes(&app, 2);
     // The clearing wire: bravo's marking must arrive (a full pass
-    // re-read it); alpha stays clean (nothing named it but fillers).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut markings = Vec::new();
-    while markings.is_empty() {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        match events.recv_timeout(remaining) {
-            Ok(event) => markings.extend(
-                event
-                    .changes
-                    .into_iter()
-                    .filter(|change| change.external_changed || change.file_deleted),
-            ),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("the event listener died mid-test")
-            }
-        }
-    }
+    // re-read it); alpha stays clean (nothing named it but fillers) —
+    // through the conditional report wait, like every post-pass
+    // assertion in this file.
+    let markings = next_flagged_changes(&events);
     assert_eq!(
         markings,
         vec![crate::file_watch::ProjectFileChange {
@@ -8713,14 +8773,12 @@ fn a_real_sync_run_recreates_a_deleted_target_and_clears_the_hint() {
     std::fs::remove_file(&target).expect("the external deletion must work");
     wait_for_watch_passes(&app, base + 1);
     assert_eq!(
-        events.try_recv().expect("the deletion must be reported"),
-        crate::file_watch::FileChangedEvent {
-            changes: vec![crate::file_watch::ProjectFileChange {
-                project_id: project.clone(),
-                external_changed: false,
-                file_deleted: true,
-            }],
-        },
+        next_flagged_changes(&events),
+        vec![crate::file_watch::ProjectFileChange {
+            project_id: project.clone(),
+            external_changed: false,
+            file_deleted: true,
+        }],
         "SYS-009's hint for a file a sync once left behind"
     );
 

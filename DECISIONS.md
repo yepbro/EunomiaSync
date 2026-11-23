@@ -19711,3 +19711,151 @@ title — no counter correction (`set_counter` stays forbidden).
 Checks: the 13 affected cards were re-titled T-288…T-300 in the
 same session; all later numbering (T-301…T-321, D-161…D-178) went
 through `.result` with zero recurrences.
+
+### D-181 — CI 45235995817: the macOS watch batteries' startup race — FSEvents can deliver the pre-spawn fixture writes after the stream starts; the batteries now converge the startup before the act — 2026-11-23
+
+Problem: CI run 45235995817 (push 16a1c51..fd00673, fd00673 =
+origin/main): ubuntu-latest, ubuntu-24.04 and windows-latest green
+(and the local ubuntu `cargo test --workspace` had been green before
+the push), red on both macOS legs — with DIFFERENT test subsets per
+leg, the first fact that points at a race rather than a deterministic
+platform behavior:
+
+1. `test-matrix (macos-15)` — 2 failed:
+   `ipc_tests::an_external_edit_marks_the_project_externally_modified_without_writing_anything`
+   panicked at ipc_tests.rs:6542:14 — `the external edit must be
+reported: Empty` (the `Debug` of `TryRecvError::Empty`: the wire
+   held no event after the pass the test waited for), and
+   `ipc_tests::an_archived_row_never_carries_watch_flags_even_from_a_stale_cache_entry`
+   at :6889:5 — `assertion 'left == right' failed: no further pass
+ran — the stale cache entry is the premise`, `left: 2, right: 1`.
+2. `test-matrix (macos-15-intel)` — 1 failed:
+   `ipc_tests::an_unavailable_row_never_carries_watch_flags_even_from_a_stale_cache_entry`
+   at :7015:5 — the same `left: 2, right: 1` shape.
+
+Hypotheses ruled out first (the spawn brief's list):
+
+- T-304/D-171's seam (`library_seed_error_for_tests`, the batch's
+  helper consolidation) — REFUTED by the log shape: its non-`Sql`
+  arms panic with documented wording naming the arm and embedding the
+  error's `Display`, and neither failure text matches; the failing
+  lines (:6542, :6889, :7015) sit AFTER `spawn_service`, while the
+  seam runs during seeding, which succeeded (the seeds'
+  `.expect("seeding the assignment through the repository must
+work")` never fired). T-289's `sync_runs_app_error_for_tests`
+  Member-panic: same refutation. The cookie 0.18.3 bump
+  (Cargo.lock's only change in the range): the watch batteries never
+  touch cookies. Decisive negative fact: the three failing tests'
+  bodies, the watch helpers (`wait_for_watch_passes`,
+  `listen_file_changed`, `WATCH_DEBOUNCE`) and `file_watch.rs` itself
+  are byte-identical across 16a1c51..fd00673 (`git diff` on the range
+  touches `dirty_recalc.rs` (+70, a `#[cfg(test)]` fn),
+  `dirty_recalc_tests.rs` and `ipc_tests.rs`' seeding helpers and
+  comments only) — the batch changed timing, not watch behavior.
+
+Diagnosis — a TEST platform-assumption bug (D-160's class), no
+production defect: the batteries write their fixtures BEFORE
+`spawn_service` and assume those writes are invisible to the watcher
+forever. On Linux that is a structural guarantee (inotify queues an
+event only after the watch attaches). On macOS it is only a
+probability: the FSEvents stream is bounded by
+`kFSEventStreamEventIdSinceNow` (notify 8.2.2 `src/fsevent.rs:289`) —
+the greatest event id the DAEMON has assigned at creation, not the
+wall clock of the write — and the daemon assigns an id when it
+processes the change, so a write that completed just before the
+stream's birth can carry a later id and be delivered after it
+(`latency: 0.0` + `NoDefer`, `src/fsevent.rs:290-291`, make the
+delivery prompt, never earlier). The delivered event's path is the
+file itself (`FileEvents` flag), so it passes the watcher's name
+filter (`is_watched_name`, watcher.rs:792-799), routes through
+`by_path`, and lands as ONE extra debounced partial pass — silent
+(the re-read reproduces the same verdict) but counted. That single
+extra pass explains all three failures exactly: in the stale-cache
+tests it lands between `wait_for_watch_passes(1)` and the exact
+`pass_count() == 1` assert (→ `left: 2`); in the external-edit test
+it lands before the edit, so `wait_for_watch_passes(2)` returns on
+the NOISE pass — which read the still-clean file and emitted nothing
+— and the following `try_recv` finds an empty channel (→ `Empty`).
+Which test it breaks is a per-leg coin flip on delivery latency —
+matching the observed disjoint subsets. The pre-batch run 45134955298
+was green on the same coin.
+
+Solution — the batteries now converge the startup before the act
+(ipc_tests.rs):
+
+1. `converge_startup_watch(app, target) -> u64`: a CAUSAL settle, not
+   a sleep — rewrites the target with its own just-read bytes and
+   waits for the partial pass that rewrite itself provokes. The
+   settle write is issued strictly after the stream's birth and a
+   stream delivers in event-id order, so when the settle pass runs,
+   every earlier fixture event has been delivered (before the
+   settle's own event or coalesced into its debounced batch). The
+   settle changes no verdict (same bytes — the diff contract stays
+   silent) and is the TEST's fixture hand, not the service's (OUT-014
+   stays pinned). The return value — the settled pass count — becomes
+   the baseline the act-window assertions measure against
+   (`pass_count() == settled` instead of `== 1`; `settled + n`
+   instead of absolute slots).
+2. `next_flagged_changes(events)`: the conditional report wait this
+   file has called its canonical post-pass pattern since run
+   45009611489 (the macos-15-intel legs), extracted to one spelling —
+   the two inline copies refactored onto it. Collects the first
+   change-carrying batch with a 5 s deadline; an empty return fails
+   the caller's `assert_eq!` (never swallows).
+3. Applied to the three red tests plus the two same-shape latent
+   siblings the sweep found (`deleting_a_synced_target_file…`,
+   `a_scheme_b_project_reports_edits_and_deletion…` — absolute
+   `wait_for(2/3)` slots + `try_recv().expect`); the
+   between-syncs/`refresh_after_sync` battery's one remaining
+   `try_recv().expect` (:8716 pre-fix) moved onto the conditional
+   wait (the 45009611489 race applies to it directly).
+
+No production line touched, no `#[cfg]`/`#[ignore]` gating
+(the 23ab989/45064887502 symlink-test gate stays the exception for a
+test whose SUBJECT is the delivery itself), no assertion weakened:
+the exact-count asserts still pin "no further pass ran" — now against
+the settled baseline instead of a platform-wrong absolute.
+
+Falsifiability (Rule 4; mutations observed red, then reverted):
+poisoning the settle to append extra bytes makes the settle pass flip
+the verdict and the very next silence assert fail ("a matching file
+emits nothing") — the settle provably runs and its re-read reaches
+the wire; triggering an extra `Refresh` inside the archived test's
+act window fails its baseline assert with `left: 3, right: 2` — the
+exact CI failure shape, still caught; making `next_flagged_changes`
+return early fails the external-edit assert with `left: []` — the
+conditional wait cannot pass vacuously.
+
+Honest boundaries: macOS cannot be executed here. The mechanism is
+proven from the sources (notify 8.2.2 fsevent.rs:289-291 cited
+above; the name filter and routing read in-tree), from the log shape
+(disjoint per-leg subsets; `Empty` exactly where a noise-consumed
+slot puts it; `left: 2` exactly where an extra silent pass puts it),
+and from the battery's own history (45009611489 and 45064887502 —
+the same FSEvents nondeterminism family, already documented in this
+file's comments). If the diagnosis is right, both macOS legs go
+green and stay green; if it is wrong the same panics recur and the
+settle's doc names the suspect (a fixture event delivered out of
+order, later than the settle pass — bounded by the stream's in-order
+delivery, the residual risk this entry accepts).
+
+Swept for siblings (the watch battery, `wait_for_watch_passes`
+callers): `projects_list_carries_the_watch_service_verdicts…` and
+`a_healthy_watch_set…` assert columns after the startup full pass
+(noise-proof — the verdict comes from the pass, not the wire);
+`an_unavailable_project_is_unwatched…` asserts silence with settle
+sleeps and ends in the conditional wait; the long-debounce
+fire-and-forget test holds every fixture event past the test's
+lifetime by construction; the add-manual/mutation-refresh family
+spawns over an empty watch set (pre-add noise routes to nothing) and
+subsumes file events behind queued `Refresh`es (file_watch.rs's
+coalescing); `synced_world_between_syncs` drains 300 ms at the
+source before any caller's baseline; the symlink test is already
+macOS-gated (D-181 changes nothing there).
+
+Checks: `CARGO_BUILD_JOBS=2 cargo fmt --check`,
+`CARGO_BUILD_JOBS=2 cargo clippy --workspace --all-targets
+-- -D warnings`, `CARGO_BUILD_JOBS=2 cargo test --workspace` (37
+suites; the src-tauri lib suite: 562 passed, 0 failed) and
+`pnpm run format:check` — all green on ubuntu. The two macOS legs
+are CI's to confirm on the merge push.
