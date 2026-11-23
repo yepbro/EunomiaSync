@@ -15590,6 +15590,11 @@ Solution, per item of the card:
   ("`walkdir`/`tempfile` … stay intentionally idle" — `tempfile` is
   used across the crate today, `walkdir` still is not). Follow-up
   cards for the orchestrator.
+  Addendum (T-294, 2026-11-23): the two `commands.rs` items and their
+  mirror are closed — both comments state the event-subscription
+  grant, the dialog site hand-synced into `src/bindings.ts` (D-166);
+  `src/ipc/index.ts` lines 20–22 and the `eunomia-fs` Cargo.toml
+  half remain open, their follow-up cards unchanged.
 - _Item 2, D-071/D-072 — the drop story, not a burn story._ These are
   not unwritten numbers: both entries existed and were dropped.
   D-071 (the ALG-061 move) was added by T-046 (`51c6524`), D-072 (the
@@ -18329,3 +18334,60 @@ registration listing and the command-definition grep at the time of
 writing, and the cited lib.rs/commands.rs line numbers move as the
 files evolve — the RULE (enumerate from `collect_commands!`, not
 from memory) is the durable content, not the line numbers.
+
+### D-166 — T-294: the last stale capability claims of the D-116 package corrected — the opener helper's "stays empty" and `dialog_pick_folder`'s "stays plugin-free", the latter hand-synced byte-exact into its generated `src/bindings.ts` mirror — 2026-11-23
+
+Problem: D-151 item 1's "still stale, outside this task's file
+scope" tail (the card that became T-294): the `open_data_folder`
+helper's "`capabilities/default.json` stays empty" and
+`dialog_pick_folder`'s "`capabilities/default.json` stays
+plugin-free" (mirrored into the generated `src/bindings.ts`). Both
+contradict the landed grant — the file has carried exactly
+`core:event:allow-listen` plus `core:event:allow-unlisten` since
+T-246 (D-116, pinned by
+`config_tests.rs::capability_grants_the_webview_only_event_listening`)
+— while the retained "no `opener:`/`dialog:` permission" halves stay
+pinned true (`recovery_tests.rs`'s no-opener pin and the exact
+two-element config pin).
+
+What changed (doc comments only, no code): both parentheticals now
+read "`capabilities/default.json` grants only the event-subscription
+pair `core:event:allow-listen`/`-unlisten`" — the vocabulary
+`lib.rs`'s plugin comment, ARCHITECTURE.md's Plugins item, spec §5.6
+SEC-001 and the config pin already use. The `dialog_pick_folder` doc
+is mirrored into `src/bindings.ts` by the tauri-specta export, so
+its two replacement lines were hand-synced there; the
+`open_data_folder` comment is a private helper with no mirror (the
+task card's "mirror" covers the dialog site only — verified: no
+"stays empty" string reaches the generated file).
+
+Judgment call (the brief's "only for a non-obvious judgment call"):
+regeneration was impossible in this batch (the exporter runs on a
+debug build; tests forbidden), so the mirror was hand-synced to the
+generator's rendering instead. The convention was verified without
+running it: `specta-typescript-0.0.15/src/primitives.rs:203-245`
+(installed sources) emits `/**`, then `*` plus the raw doc line
+per `docs.lines()` (`escape_jsdoc_text` rewrites only `*/`; no
+rewrapping), then ` */` — exactly what 16/16 `commands.rs` and 2/2
+`scan.rs` doc blocks show in the committed file (the round-1 review
+re-rendered every block with that rule against `src/bindings.ts`:
+all match, the edited block included). The central suite's
+`export_bindings_are_up_to_date` pin (`lib.rs`'s `include_str!` vs
+re-export) is the binding proof. D-151's bullet carries an addendum
+marking this pair closed (`src/ipc/index.ts` lines 20–22 and the
+`eunomia-fs` Cargo.toml half stay open).
+
+Checks: tests not run (batch regime — the orchestrator runs the
+central suite when the flash batch closes); the pre-commit gates
+were run and are green (cargo fmt --check, eslint, prettier,
+vue-tsc — all exit 0, re-run on the amend). ONE review round per the
+batch regime (`.opencode/reviews/t294-round1.md`,
+deepseek-v4.1-flash — approve-with-fixes; its single P2, the closure
+unrecorded, is this entry and the D-151 addendum, taken in the
+amend).
+
+Honest boundaries: the mirror's byte-exactness is argued from the
+generator's source plus a full re-render comparison, not proven by
+the pin test — that runs centrally, and until it does the hand-sync
+is a verified reconstruction, not a witnessed regeneration. Cited
+line numbers move as the files evolve.

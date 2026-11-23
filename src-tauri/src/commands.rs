@@ -311,7 +311,8 @@ async fn run_recovery<R: Runtime>(app: &AppHandle<R>, operation: Recovery) -> Re
 
 /// Opens `path` in the OS file manager through the opener plugin's
 /// Rust API (SEC-001: the call lives in Rust; the webview has no
-/// `opener:` permission — `capabilities/default.json` stays empty).
+/// `opener:` permission — `capabilities/default.json` grants only
+/// the event-subscription pair `core:event:allow-listen`/`-unlisten`).
 /// Split from the command so the error mapping is testable without
 /// spawning a real file-manager window: the opener call itself is the
 /// one untestable seam here (it side-effects the desktop), covered by
@@ -4064,7 +4065,8 @@ pub(crate) fn app_info_impl<R: Runtime>(app: &AppHandle<R>, uid: u32) -> Result<
 ///
 /// SEC-001: the dialog plugin is invoked from this Rust command only
 /// — the webview holds no `dialog:` permission
-/// (`capabilities/default.json` stays plugin-free), so this command
+/// (`capabilities/default.json` grants only the event-subscription
+/// pair `core:event:allow-listen`/`-unlisten`), so this command
 /// is the single path from the UI to the native picker. That is
 /// exactly what lets SEC-003 work: every folder the UI may later name
 /// passed through here (and landed in the session allowlist) or is a

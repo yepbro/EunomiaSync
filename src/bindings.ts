@@ -87,7 +87,8 @@ export const commands = {
 	 * 
 	 *  SEC-001: the dialog plugin is invoked from this Rust command only
 	 *  — the webview holds no `dialog:` permission
-	 *  (`capabilities/default.json` stays plugin-free), so this command
+	 *  (`capabilities/default.json` grants only the event-subscription
+	 *  pair `core:event:allow-listen`/`-unlisten`), so this command
 	 *  is the single path from the UI to the native picker. That is
 	 *  exactly what lets SEC-003 work: every folder the UI may later name
 	 *  passed through here (and landed in the session allowlist) or is a
