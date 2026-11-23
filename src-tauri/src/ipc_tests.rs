@@ -9318,25 +9318,6 @@ fn sync_library_seed_error(error: eunomia_store::library::LibraryError) -> crate
     }
 }
 
-/// Maps a run-repository read failure onto the wire shape the executor
-/// needs (the `sync_phase1_tests.rs` assertion-side shape).
-fn sync_runs_read_error(error: eunomia_store::sync_runs::SyncRunsError) -> crate::errors::AppError {
-    match error {
-        eunomia_store::sync_runs::SyncRunsError::Sql(sql) => {
-            crate::db::sqlite_error_to_app_error(sql)
-        }
-        other => {
-            let mut app_error = crate::errors::AppError::new(crate::errors::ErrorCode::DbLocked);
-            app_error.details = Some(crate::errors::ErrorDetails {
-                os_code: None,
-                os_kind: Some("SyncRunsRead".to_owned()),
-                os_message: Some(other.to_string()),
-            });
-            app_error
-        }
-    }
-}
-
 /// The run row through the app's database (the assertion-side read).
 fn sync_run_row(
     app: &tauri::App<tauri::test::MockRuntime>,
@@ -9346,7 +9327,7 @@ fn sync_run_row(
     let run_id = run_id.to_owned();
     tauri::async_runtime::block_on(database.run(move |tx| {
         eunomia_store::sync_runs::get(tx, &run_id)
-            .map_err(sync_runs_read_error)
+            .map_err(crate::db::sync_runs_app_error_for_tests)
             .map(|row| row.expect("the run row must persist"))
     }))
     .expect("reading the run row must work")
@@ -9360,7 +9341,8 @@ fn sync_run_rows(
     let database = sync_database_of(app);
     let run_id = run_id.to_owned();
     tauri::async_runtime::block_on(database.run(move |tx| {
-        eunomia_store::sync_runs::list_projects(tx, &run_id).map_err(sync_runs_read_error)
+        eunomia_store::sync_runs::list_projects(tx, &run_id)
+            .map_err(crate::db::sync_runs_app_error_for_tests)
     }))
     .expect("reading the run's rows must work")
 }

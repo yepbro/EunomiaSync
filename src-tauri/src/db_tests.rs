@@ -71,7 +71,8 @@ use std::time::{Duration, Instant};
 use tauri::async_runtime;
 
 use crate::db::{
-    Db, backup_records_to_app_error, sqlite_error_to_app_error, sync_runs_to_app_error,
+    Db, backup_records_to_app_error, sqlite_error_to_app_error, sync_runs_app_error_for_tests,
+    sync_runs_to_app_error,
 };
 use crate::errors::AppError;
 
@@ -664,6 +665,53 @@ fn sync_runs_failures_map_to_the_wire_through_the_one_mapper() {
         record_wire["details"]["os_message"],
         serde_json::json!("a stored status cell is outside its vocabulary")
     );
+}
+
+#[test]
+fn the_assertion_side_helper_routes_sql_through_the_one_mapper() {
+    // Arrange: the `Sql` arm of the assertion-side twin
+    // (`sync_runs_app_error_for_tests`, the one helper the six
+    // per-suite copies dissolved into, T-289/D-162) — the delegation
+    // to the ONE mapper is the helper's whole contract, so a suite's
+    // mapped envelope is exactly what production puts on the wire.
+    // The oracle is the §10 table's literal for one representative
+    // class (DiskFull → `E_DISK_FULL`), never a comparison against
+    // the mapper itself — that would mirror the implementation (the
+    // project's rule 4). Mutation: severing the delegation or
+    // re-spelling the arm turns this red.
+    use eunomia_store::sync_runs::SyncRunsError;
+    use rusqlite::ffi::{Error as SqliteError, SQLITE_FULL};
+
+    // Act & Assert: the classified store failure reaches the wire
+    // shaped by the §10 literals, the mapper's own union table's
+    // representative class.
+    let app_error =
+        sync_runs_app_error_for_tests(SyncRunsError::Sql(rusqlite::Error::SqliteFailure(
+            SqliteError::new(SQLITE_FULL),
+            Some("the runs table says no".to_owned()),
+        )));
+    let wire = serde_json::to_value(&app_error).expect("a classified error must serialize");
+    assert_eq!(wire["code"], serde_json::json!("E_DISK_FULL"));
+    assert_eq!(wire["message_key"], serde_json::json!("errors.disk_full"));
+    assert_eq!(wire["details"]["os_kind"], serde_json::json!("DiskFull"));
+}
+
+#[test]
+#[should_panic(expected = "hit the `Member` envelope")]
+fn the_assertion_side_helper_panics_on_the_unreachable_member_envelope() {
+    // The `# Panics` contract of the assertion-side twin, pinned
+    // directly: the suites read rows they wrote through the
+    // sanctioned writers, so a `Member` envelope cannot reach the
+    // helper — when it does anyway, the panic is the loud failure,
+    // not the silently mapped envelope the six deleted per-suite
+    // copies used to produce. The oracle is the documented contract
+    // text itself (the `# Panics` section and the panic message):
+    // re-mapping the arm, or rewording the panic into a return, turns
+    // this red. T-289/D-162.
+    let _ = sync_runs_app_error_for_tests(eunomia_store::sync_runs::SyncRunsError::Member {
+        column: "status",
+        found: "paused".to_owned(),
+    });
 }
 
 #[test]

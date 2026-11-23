@@ -40,6 +40,7 @@ use eunomia_store::storage::open_db;
 use crate::commands::begin_sync;
 use crate::data_dirs;
 use crate::db::Db;
+use crate::db::sync_runs_app_error_for_tests;
 use crate::dirty_recalc::{DirtyEvent, DirtyState, recalc_and_emit};
 use crate::errors::{AppError, ErrorCode};
 use crate::sync_phase0::{self, PreparedProject};
@@ -94,7 +95,7 @@ fn run_rows_of(
     let database = database_of(app);
     let run_id = run_id.to_owned();
     tauri::async_runtime::block_on(database.run(move |tx| {
-        eunomia_store::sync_runs::list_projects(tx, &run_id).map_err(sync_runs_app_error)
+        eunomia_store::sync_runs::list_projects(tx, &run_id).map_err(sync_runs_app_error_for_tests)
     }))
     .expect("reading the run's rows must work")
 }
@@ -108,33 +109,10 @@ fn run_row_of(
     let run_id = run_id.to_owned();
     tauri::async_runtime::block_on(database.run(move |tx| {
         eunomia_store::sync_runs::get(tx, &run_id)
-            .map_err(sync_runs_app_error)
+            .map_err(sync_runs_app_error_for_tests)
             .map(|row| row.expect("the run row this suite recorded must persist"))
     }))
     .expect("reading the run row must work")
-}
-
-/// The assertion-side error mapping for the store reads (only `Sql`
-/// is reachable from these reads on a database this suite just
-/// wrote). The non-`Sql` fallback deliberately embeds the error's
-/// `Display` — the richest panic message when an assertion-side read
-/// fails — and never reaches the wire; the wire's class-only rule
-/// lives in `db::sync_runs_to_app_error` (SEC-008).
-fn sync_runs_app_error(error: eunomia_store::sync_runs::SyncRunsError) -> AppError {
-    match error {
-        eunomia_store::sync_runs::SyncRunsError::Sql(sql) => {
-            crate::db::sqlite_error_to_app_error(sql)
-        }
-        other => {
-            let mut app_error = AppError::new(ErrorCode::DbLocked);
-            app_error.details = Some(crate::errors::ErrorDetails {
-                os_code: None,
-                os_kind: Some("SyncRunsRead".to_owned()),
-                os_message: Some(other.to_string()),
-            });
-            app_error
-        }
-    }
 }
 
 // ---- seeding ----------------------------------------------------------

@@ -1172,6 +1172,41 @@ pub(crate) fn backup_records_to_app_error(error: BackupRecordsError) -> AppError
     }
 }
 
+/// The assertion-side twin of [`sync_runs_to_app_error`] for the
+/// test suites (T-289, D-149's follow-up): the six per-suite
+/// `SyncRunsError` → `AppError` helpers (`sync_phase0_tests.rs`'s
+/// `sync_runs_app_error`, the `runs_app_error` of the phase 1–4
+/// suites, `ipc_tests.rs`'s `sync_runs_read_error`) each carried
+/// their own `Sql`-arm spelling; they all route through here now,
+/// and the `Sql` arm rides the one production mapper, so a suite's
+/// mapped envelope is exactly the envelope production puts on the
+/// wire (the D-149 one-spelling law, now on the test side too). The
+/// mapper family above stays contiguous — the twin is a `cfg(test)`
+/// seam beside it, the [`Db::set_busy_timeout_for_tests`] shape.
+///
+/// # Panics
+///
+/// Panics if `error` carries the `Member` envelope — unreachable
+/// from the suites, which read back only rows they wrote through
+/// the sanctioned repositories, so the arm is a cannot-happen
+/// guard: the panic names the arm and embeds the error's `Display`
+/// (the offending value included, deliberately — assertion-side
+/// wording that never reaches the wire; the wire's class-only rule
+/// stays in [`sync_runs_to_app_error`], SEC-008). The guard is
+/// pinned by `db_tests`'s
+/// `the_assertion_side_helper_panics_on_the_unreachable_member_envelope`,
+/// the `Sql` delegation by
+/// `the_assertion_side_helper_routes_sql_through_the_one_mapper`.
+#[cfg(test)]
+pub(crate) fn sync_runs_app_error_for_tests(error: SyncRunsError) -> AppError {
+    match error {
+        error @ SyncRunsError::Member { .. } => panic!(
+            "the assertion-side sync-run read hit the `Member` envelope, which the suites cannot produce (rows are read back through the sanctioned writers): {error}"
+        ),
+        error @ SyncRunsError::Sql(_) => sync_runs_to_app_error(error),
+    }
+}
+
 /// Why the database could not be opened or migrated at startup. Kept
 /// as data (the same shape as `DataLayoutError`/`ConfigError`) because
 /// the `Display` text is what the startup failure surfaces — tauri

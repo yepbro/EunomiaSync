@@ -17956,6 +17956,137 @@ no tests were touched. Findings fixed —
   ruling, so a literal "second copy" reading does not fire on
   them.
 
+### D-162 — T-289: the six test-side sync-run assertion helpers consolidated onto the one `db.rs` mapper, the `Member` arm a documented panic — 2026-11-23
+
+Problem: D-149's follow-up card. The six test-side assertion
+helpers (D-149's exact list: `sync_runs_app_error` in
+`sync_phase0_tests.rs` 123, `runs_app_error` in each of
+`sync_phase1_tests.rs` 96, `sync_phase2_tests.rs` 128,
+`sync_phase3_tests.rs` 113, `sync_phase4_tests.rs` 114, and
+`sync_runs_read_error` in `ipc_tests.rs` 9323) each hand-rolled
+their own `Sql`-arm spelling (`Sql` → `sqlite_error_to_app_error`)
+plus the `SyncRunsRead`+`Display` fallback — six copies of the
+assertion-side mapping, each able to drift away from the one
+production mapper. Three readings were open before coding: which
+mapper is "the common mapper"; where the shared test helper lives
+(the card names no home); and what the new `Member` shape means
+for behavior preservation.
+
+Solution: one `#[cfg(test)] pub(crate) fn
+sync_runs_app_error_for_tests(SyncRunsError) -> AppError` in
+`db.rs`, directly after the mapper family (`sync_runs_to_app_error`
+then its `backup_records_to_app_error` sibling — D-149's co-located
+pair stays contiguous, the twin is the next item) — the home is
+the family's convention, not a fresh location choice: `db.rs`
+already hosts a `cfg(test)` seam beside production code (the
+`Db::set_busy_timeout_for_tests` shape, named as the seam shape in
+`commands.rs`'s own cfg(test) doc at 797), and the helper belongs
+beside the mapper it delegates to. No new module (one function —
+structure for structure's sake is what D-149 refused for the
+production side too).
+
+- _"The common mapper" is the production one._ The helper's `Sql`
+  arm delegates directly to `db::sync_runs_to_app_error` (the
+  T-264/D-149 one-mapper), NOT a re-spelled
+  `sqlite_error_to_app_error` call: the repo keeps exactly one
+  `Sql`-arm spelling (db.rs 1140), and if production's arm ever
+  changes, the suites follow it — the card's "переход на общий
+  маппер" reading. The classifier call the six helpers spelled is
+  now reachable only through the mapper.
+- _The `Member` arm is the documented panic-rich fallback._ The
+  helper's match names both variants (the six `other =>` catch-alls
+  are gone — a new store variant is now a compile error at the
+  helper, the pat-exhaustive law) and panics on `Member` with a
+  message naming what happened (the arm, why the suites cannot
+  produce it) plus the error's `Display` — the D-149 assertion-side
+  vocabulary ("the richest panic message"), deliberately
+  value-embedding and never on the wire; the wire's class-only rule
+  stays in the mapper (SEC-008), and the helper's `# Panics` doc
+  section carries the contract. Behavior preservation: the arm is
+  unreachable in every suite (D-149's ruling — rows are read back
+  only through the sanctioned writers), so on every input the
+  suites can produce, the helper returns exactly what the old
+  helpers returned; the deleted silent `SyncRunsRead` fallback
+  envelope was never observed by any test.
+- _The migration map._ Six definitions deleted, 17 call sites
+  re-pointed to the one helper (phase 0: 2 — 97, 111; phase 1: 2 —
+  122, 136; phase 2: 4 — 154, 168, 575, 726; phase 3: 2 — 139,
+  153; phase 4: 5 — 140, 151, 396, 478, 1438; ipc: 2 — 9349,
+  9363). The phase suites import it by name (a plain `use` line —
+  those files' one-import-per-line style); `ipc_tests.rs` uses the
+  fully qualified path (that file's style for `crate::db` items).
+  The
+  per-suite doc comments went with the definitions; D-149's P3-1
+  "class-only here too" rewording is superseded by the shared doc.
+- _Out of scope, ruled so._ The `LibraryError` sibling family
+  (`sync_library_seed_error` in `ipc_tests.rs` 9306 and the
+  per-phase library-seed helpers) is a different input enum and a
+  different candidate (routed below as a follow-up for the board);
+  D-149's "sync-run family only" ruling
+  stands. No production code changed: `sync_runs_to_app_error`,
+  `sqlite_error_to_app_error` and the store enum are byte-identical
+  to the parent commit.
+
+Tests: the two helper pins live in `db_tests.rs` beside the
+mapper's union pin (the round-1 P2-1 fix — the suites' own
+`map_err` sites `.expect` success and never observe an envelope,
+so they were never a falsifiable oracle for the helper):
+`the_assertion_side_helper_routes_sql_through_the_one_mapper`
+drives one representative §10 class (`SQLITE_FULL`) through the
+helper with the wire literal as the oracle — not a comparison
+against the mapper itself, which would mirror the implementation —
+and `the_assertion_side_helper_panics_on_the_unreachable_member_envelope`
+pins the `# Panics` contract with `#[should_panic]` on the
+documented panic text. The six suites' own pins stay the oracle
+for the reads they assert;
+`sync_runs_failures_map_to_the_wire_through_the_one_mapper` keeps
+proving the mapper's arms.
+
+Honest boundaries: the batch regime (owner instruction
+2026-11-23) defers suite runs to the orchestrator's central run —
+the refactored helpers' green run is not proven in this task;
+`cargo fmt` is applied here, clippy and `test --workspace` land
+with the batch. The panic message's `Display` would embed a
+hostile stored value if the arm ever fired; that is test-side
+assertion wording only, never a diagnostic surface, and the
+function does not exist outside `cfg(test)` builds (a production
+caller is impossible by construction).
+
+Follow-ups for the board (the orchestrator cards them): the
+`LibraryError` sibling family — `sync_library_seed_error` in
+`ipc_tests.rs` 9306 and the five per-phase `library_seed_error`
+helpers — is the same consolidation shape over a different input
+enum; a future card can run this task's play on it.
+
+Round-1 review addendum (D-162, same task; report
+`.opencode/reviews/t289-round1.md`, deepseek-v4.1-flash — APPROVE,
+no P0/P1; 1×P2, 3×P3): the round re-derived the byte-identity of
+the `Sql` path through the one mapper against all six deleted
+bodies, the `Member` unreachability per suite (the store's two
+`from_member` decoders are the only `Member` constructors; the raw
+suite `UPDATE`s touch non-vocabulary cells or valid literals only),
+the unchanged `#[test]` counts, the retained imports' liveness, and
+the clean tail append. Findings fixed here —
+
+- P2-1 (taken): the new guard was pinned by no test, and this
+  entry's "falsifiable by construction" overstated the evidence —
+  a mutation of either arm leaves all 17 `map_err` sites green
+  (they `.expect` success, never an envelope). Two pins added in
+  `db_tests.rs` beside the mapper's union pin (named in the Tests
+  paragraph above, reworded to the actual evidence).
+- P3-1 (taken): the migration bullet's continuation line sat at
+  column 0 (prettier-clean lazy continuation, but a broken left
+  edge); the sentence is reworded onto the bullet's indent.
+- P3-2 (taken): the `LibraryError` deferral was recorded without a
+  tracked card; routed above as a follow-up for the board (the
+  orchestrator cards it — executor subagents never touch the
+  board).
+- P3-3 (taken): the seam sat between the two production mappers,
+  splitting D-149's co-located pair; moved after
+  `backup_records_to_app_error` — the family contiguous, the twin
+  still beside it, the placement now stated in the helper's doc
+  and in the Solution paragraph above.
+
 ### D-163 — T-290: `file_event` stays — the "upcoming variant/sync/backup tasks" justification was half-stale (sync and backup landed without it, on the journal + `backup_records` route), the pending library and `backup_restore` tasks are the adopt-or-retire trigger — 2026-11-23
 
 Problem: T-268's triage report (follow-up card, not touched by its
