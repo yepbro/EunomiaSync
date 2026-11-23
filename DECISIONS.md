@@ -18489,3 +18489,78 @@ itself is a trace). P3-3: the quoted label brought to the shipped
 "Technical details" (`errors.details.summary` in
 `src/locales/en.json`) in §12.6 and in UI-011's one-word quote — a
 mismatch the v1.0 wording carried. None refused.
+
+### D-168 — T-299: the Linux baseline re-scoped to 24.04/26.04 by the owner's ruling — the spec support floor and the Risks-table row (§16; the card's §15 label is off by one) follow the docs, and CI pins ubuntu-24.04 beside ubuntu-latest — 2026-11-23
+
+Problem: D-151 item 5 left a split (its follow-up card, T-299):
+REL-001 stated the CI truth (`ubuntu-latest`, 26.04), while NFR-001…003
+still claimed "Ubuntu 22.04 and newer" support (its source, §1's D-26
+platform row, said "Ubuntu 22.04+"), and the webkit2gtk risk row — in
+the Risks table under §16, though the card and D-151 item 5 label it
+§15 — still mitigated with "testing on Ubuntu 22.04 and 24.04" —
+docs-vs-CI drift. The owner's ruling on the card: "берем 24.04/26.04.
+Обновит под это доки, привести в соответствие тесты при CI".
+
+Chosen reading (rule 1): the ruling re-scopes the Linux support floor
+to 24.04+ and the tested pair to 24.04 (pinned) + 26.04
+(`ubuntu-latest`). "Привести в соответствие тесты" = the matrix gains a
+pinned `ubuntu-24.04` leg; the docs claims move accordingly — the
+support claims become "24.04+" (§1's D-26 row) and "24.04 and newer"
+(NFR-001…003), the Risks-table row names 24.04 and 26.04, and REL-001
+keeps its label-migration parenthetical but now states both legs run.
+The build matrix carries the same leg list, keeping the build job's
+documented invariant (ARCHITECTURE.md: the build runs on the same OS
+legs as the test matrix) intact — a compile smoke on the floor image
+also catches `webkit2gtk`-dev differences, the compile-time face of
+the risk row. No wording site resisted the reading.
+
+Solution: `docs/spec.md` — D-26 now says 24.04+ and NFR-001…003 say
+"24.04 and newer"; the Risks-table row (§16) says "Testing on Ubuntu
+24.04 and 26.04 (`ubuntu-latest` at the time of writing)"; REL-001
+says both supported versions run in CI — `ubuntu-latest` (26.04 at the
+time of writing) carries everything in its list, while the pinned
+`ubuntu-24.04` leg runs the Rust test suite, the frontend unit tests
+and the build smoke.
+`.github/workflows/ci.yml` — the test-matrix and build `os:` lists
+gain `ubuntu-24.04` (after `ubuntu-latest`), the matrix comment states
+the Linux pairing and the support-floor rationale, and the
+frontend-gating comment's "a future ubuntu pin" is brought to the
+present pin, with the doubled Vitest/pnpm install on the pinned leg
+accepted in the comment itself (rule 11). `ci-rerun.yml` needs
+nothing: its one job has no `os:` list, and `decide.py` matches legs
+by the `test-matrix (` prefix (MATRIX_LEG_PREFIX), so the new leg is
+auto-covered; the recorded fixtures stay valid.
+
+Follow-ups (orchestrator cards, not created here): ARCHITECTURE.md —
+read-only for this task; T-300 owns the file this batch — says "twelve
+jobs" and "four OS legs" twice; after this change the counts are
+fourteen and five, the test-matrix bullet's runner-label list lacks
+`ubuntu-24.04`, and "the frontend unit tests (Vitest) run on the Linux
+leg only" reads singular over what are now two Linux legs. One docs
+touch should refresh them all.
+
+Checks: batch regime (owner instruction 2026-11-23) — no tests run and
+no workflow dispatched; the CI run at push time is the proof for the
+matrix change. Prettier green on the whole diff; pre-commit hook green
+(cargo fmt --check, eslint, prettier --check, vue-tsc); the acceptance
+greps (each old wording) return nothing outside DECISIONS.md records.
+One review round per the batch override.
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t299-round1.md`, deepseek-v4.1-flash):
+request-changes — one P1, one P2, four P3s, all taken in the amend.
+P1: the first draft cited "§15's webkit2gtk risk row" — the Risks
+table lives under §16 (`docs/spec.md:979`, `:999`); the card's and
+D-151 item 5's §15 label carried the error in, every live mention is
+re-cited to §16, and the mislabel is recorded here. P2: the rewritten
+frontend-gating comment kept the singular "the Linux leg" —
+pluralized, and the accepted duplication recorded in the comment. P3s:
+the Risks row now hedges 26.04 with "`ubuntu-latest` at the time of
+writing" so the next label migration cannot re-stale it; REL-001 now
+names what the pinned leg actually carries (the Rust test suite, the
+frontend unit tests, the build smoke — lint, deny and e2e stay
+`ubuntu-latest`-only); the first draft quoted ARCHITECTURE's "same
+four OS legs" as the invariant evidence — the stale count is dropped,
+the substance quoted; and the Problem paragraph no longer attributes
+one wording to both spec sites (D-26 said "22.04+", NFR-001…003 said
+"22.04 and newer"). None refused.

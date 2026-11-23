@@ -97,7 +97,7 @@ If sources conflict, this order applies: (1) the customer's answers from 17.11.2
 | D-23 | Creation marker                                | HTML comment `<!-- Created by EunomiaSync 2026-11-17 14:03:22 Europe/Prague +01:00 -->`. Without an IANA name: `UTC+01:00`                                                                                                                                                                                                      |
 | D-24 | Identical content                              | If the new content matches the existing file, ignoring the marker line, the file is not overwritten (status "unchanged"). This setting is on by default                                                                                                                                                                         |
 | D-25 | Empty result                                   | If the build is empty but the file is not, a confirmation with a list of such projects is shown before the sync                                                                                                                                                                                                                 |
-| D-26 | Platforms (40)                                 | Windows 10 22H2+ (x64, arm64), macOS 12+ (arm64, x64), Ubuntu 22.04+ (x64; arm64 if possible)                                                                                                                                                                                                                                   |
+| D-26 | Platforms (40)                                 | Windows 10 22H2+ (x64, arm64), macOS 12+ (arm64, x64), Ubuntu 24.04+ (x64; arm64 if possible)                                                                                                                                                                                                                                   |
 | D-27 | Release (38, 39)                               | GitHub Releases and the Tauri updater with signed updates. Installers are not signed for now (no Authenticode, no notarization)                                                                                                                                                                                                 |
 | D-28 | Telemetry (43), portable build (41), tray (36) | Not doing these                                                                                                                                                                                                                                                                                                                 |
 | D-29 | New project color (PRJ-010)                    | The least used palette color among active projects; on a tie, chosen by the hash of the project ID (deterministic)                                                                                                                                                                                                              |
@@ -841,7 +841,7 @@ Numbering note: the NFR numbering skips two numbers — no requirement was ever 
 
 ### 12.1. Platforms
 
-- **NFR-001…003 (P0).** Windows 10 22H2 and newer (x64, arm64), macOS 12 and newer (arm64, x64), Ubuntu 22.04 and newer (x64; arm64 if possible). File system work (rights, paths, atomic replace, symlinks) is tested separately on each platform (section 15).
+- **NFR-001…003 (P0).** Windows 10 22H2 and newer (x64, arm64), macOS 12 and newer (arm64, x64), Ubuntu 24.04 and newer (x64; arm64 if possible). File system work (rights, paths, atomic replace, symlinks) is tested separately on each platform (section 15).
 - **NFR-023 (P0).** Windows: long path support is turned on through the manifest. Linux: running as root shows a warning, because the created files will be owned by root.
 
 ### 12.2. Performance
@@ -900,7 +900,7 @@ Requirements SEC-001…003 are in 5.6. In addition:
 | macOS    | `.dmg`, `.app` for arm64 and x64                                           | Installers are not signed or notarized for now (P1). Until then, the app must be opened by hand through the context menu |
 | Linux    | `.deb` and `.AppImage`                                                     | Depends on `webkit2gtk-4.1`. The `.rpm` format is optional                                                               |
 
-- **REL-001 (P0).** CI (GitHub Actions) on Windows, macOS (arm64 and x64), and Ubuntu (the `ubuntu-latest` runner image; 26.04 at the time of writing — the label migrated from 24.04 in November 2026, and GitHub's 22.04 images are deprecated): formatting, `clippy -D warnings`, `cargo test`, `cargo-deny`, frontend linter and type check, Vitest, e2e, artifact build, signing of update artifacts, a release draft with `latest.json`.
+- **REL-001 (P0).** CI (GitHub Actions) on Windows, macOS (arm64 and x64), and Ubuntu (both supported versions run in CI: `ubuntu-latest` — 26.04 at the time of writing, the label having migrated from 24.04 in November 2026, with GitHub's 22.04 images deprecated — carries everything listed below, while a pinned `ubuntu-24.04` leg runs the Rust test suite, the frontend unit tests and the build smoke, so the support floor itself is exercised): formatting, `clippy -D warnings`, `cargo test`, `cargo-deny`, frontend linter and type check, Vitest, e2e, artifact build, signing of update artifacts, a release draft with `latest.json`.
 - **REL-002 (P0).** Versioning follows SemVer. Release notes come from `CHANGELOG.md` and are shown in the update dialog (UPD-002).
 - **REL-003 (P0).** Uninstalling the app does not delete the data directory. The Windows installer offers a "Remove user data" checkbox (off by default).
 - **REL-004 (P0).** There is one update channel (stable). Project license: dual license, MIT License and Apache License, Version 2.0. Repository, releases, and updates: https://github.com/yepbro/EunomiaSync. Author: Den Brooks, denis@yepbro.pro. App identifier (bundle ID): `pro.yepbro.eunomiasync`. The "About" window shows the list of dependency licenses.
@@ -998,11 +998,11 @@ Total: about 18.5 person-weeks. Stages M1 and M2 can run in parallel if there is
 
 ### Risks
 
-| Risk                                              | Impact                       | Mitigation                                                                |
-| ------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------- |
-| Different `webkit2gtk` versions on Linux          | Layout and UI failures       | Testing on Ubuntu 22.04 and 24.04, a minimal set of CSS features          |
-| File locks by antivirus and editors on Windows    | Write errors                 | Retries with pauses, a clear `E_FILE_LOCKED` error, backup before writing |
-| Browser-only e2e does not exercise the real shell | IPC regressions slip through | Mock-runtime IPC tests in Rust and the manual release checklist (15.1)    |
-| Matrix performance on set L                       | UI lag                       | Virtualization on both axes, an early benchmark in M3                     |
-| macOS permissions during a scan                   | Skipped folders              | Clear messages in "Skipped", help                                         |
-| Loss of the update signing key                    | Cannot release updates       | A backup of the key and a rotation procedure (SEC-011)                    |
+| Risk                                              | Impact                       | Mitigation                                                                                                |
+| ------------------------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Different `webkit2gtk` versions on Linux          | Layout and UI failures       | Testing on Ubuntu 24.04 and 26.04 (`ubuntu-latest` at the time of writing), a minimal set of CSS features |
+| File locks by antivirus and editors on Windows    | Write errors                 | Retries with pauses, a clear `E_FILE_LOCKED` error, backup before writing                                 |
+| Browser-only e2e does not exercise the real shell | IPC regressions slip through | Mock-runtime IPC tests in Rust and the manual release checklist (15.1)                                    |
+| Matrix performance on set L                       | UI lag                       | Virtualization on both axes, an early benchmark in M3                                                     |
+| macOS permissions during a scan                   | Skipped folders              | Clear messages in "Skipped", help                                                                         |
+| Loss of the update signing key                    | Cannot release updates       | A backup of the key and a rotation procedure (SEC-011)                                                    |

@@ -52,6 +52,11 @@ jobs:
       # signal this matrix exists to catch (REL-001, spec §15.5).
       fail-fast: false
       matrix:
+        # Linux runs both supported versions: ubuntu-latest (26.04 at
+        # the time of writing) beside a pinned ubuntu-24.04 — the spec's
+        # support floor (NFR-001…003) and the webkit2gtk risk row in the
+        # Risks table (§16); the pin keeps the floor tested when
+        # ubuntu-latest moves on again.
         # macos-15 is arm64 (M1); macos-15-intel is the macOS 15 x64
         # image — the standard free runner class for public repos
         # (4 CPU / 14 GB RAM). Per actions/runner-images#13045 the
@@ -62,7 +67,7 @@ jobs:
         # Intel runners also queue longer than arm64 ones, and one run now
         # starts 4 macOS jobs against the free plan's 5 concurrent macOS
         # slots: a queued or slow leg is infrastructure, not a flake.
-        os: [ubuntu-latest, windows-latest, macos-15, macos-15-intel]
+        os: [ubuntu-latest, ubuntu-24.04, windows-latest, macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -76,10 +81,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
-      # Frontend unit tests stay on the Linux leg only (REL-001 reads the
-      # frontend stack as platform-independent); the other legs run Rust
-      # tests and need neither pnpm nor Node. Gated on runner.os, not the
-      # label string, so a future ubuntu pin cannot switch them off.
+      # Frontend unit tests stay on the Linux legs only (REL-001 reads
+      # the frontend stack as platform-independent; the duplication on
+      # the pinned ubuntu-24.04 leg is accepted); the other legs run
+      # Rust tests and need neither pnpm nor Node. Gated on runner.os,
+      # not the label string, so the ubuntu-24.04 pin — and any future
+      # ubuntu label — cannot switch them off.
       - name: Set up pnpm
         if: runner.os == 'Linux'
         uses: pnpm/action-setup@v4
@@ -318,12 +325,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The same OS legs as the test-matrix job above (Linux carries
+        # the pinned ubuntu-24.04 beside ubuntu-latest — 26.04 — so the
+        # compile smoke covers both supported versions too).
         # macos-15-intel adds the macOS x64 compile leg (spec §14 wants
         # arm64 and x64 artifacts; the bundled .dmg/.app artifacts arrive
         # with the release task — this is the x64 build smoke); for the
         # Intel-label lifecycle see the comment on the test-matrix job
         # above.
-        os: [ubuntu-latest, windows-latest, macos-15, macos-15-intel]
+        os: [ubuntu-latest, ubuntu-24.04, windows-latest, macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
