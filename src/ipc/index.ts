@@ -20,8 +20,11 @@
 // Events: `src/bindings.ts` generates the §7.10 events too — four of the
 // five names (all but `sync://progress`), payload types and `listen`/
 // `once` included; on the real side subscription runs behind the
-// `core:event:allow-listen`/`-unlisten` grant (T-246/D-116). The facade
-// still serves commands only today: the mock-side seam is `./mock/events`
+// `core:event:allow-listen`/`-unlisten` grant (T-246/D-116). The same
+// generated objects carry `emit`/`emitTo`; those stay ACL-denied in
+// the webview — the grant covers the subscription pair only; emitting
+// events stays Rust-only (SEC-001). The facade still serves commands
+// only today: the mock-side seam is `./mock/events`
 // — it keys the two events the mock emits (`state://project-availability`,
 // `scan://progress`), typed over their generated payload types — and one
 // `ipc.events` serving both backends is still the facade task's line.

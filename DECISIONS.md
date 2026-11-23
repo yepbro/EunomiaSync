@@ -15611,6 +15611,16 @@ Solution, per item of the card:
   only "generates none yet" was false; the "serves commands only
   today" clause names the commands facade truthfully, and T-295 kept
   it.)
+  Addendum (T-309, 2026-11-23): the "since T-246" dating of that one
+  false half was wrong too — "generates none yet" was false since
+  T-079/D-112, whose title records the first specta event (the manual
+  `Event` impl), whose commit (`d3bfb43`) carried the first
+  `src/bindings.ts` events entry, and whose successor D-116 already
+  read "commands-only — stale since T-079". T-246 (`a875afe`) granted
+  the listen/unlisten pair and typed the mock bus without touching
+  `src/bindings.ts` at all; the generated set was completed later,
+  event by event (T-101 `c02abf2`, T-102 `b4817d9`, T-076 `09cbeac`
+  last). The count correction stands in the T-305 addendum above.
 - _Item 2, D-071/D-072 — the drop story, not a burn story._ These are
   not unwritten numbers: both entries existed and were dropped.
   D-071 (the ALG-061 move) was added by T-046 (`51c6524`), D-072 (the
@@ -18979,3 +18989,60 @@ Findings fixed here —
   envelope for this class turns this red" — a re-spelled
   character-identical delegation is not observable by it, which is
   the point of keeping the spelling shared).
+
+### D-172 — T-309: the T-295 follow-up on D-151 item 1 closed — the "both false" over-count found already discharged by the T-305 addendum, the residue ("since T-246"; first generation T-079/D-112) annotated beside it, and the facade header naming the generated `emit`/`emitTo` as ACL-denied (SEC-001) — 2026-11-23
+
+Problem: the T-295 report's follow-up card asked for (1) an
+annotation on D-151 item 1's "both false since T-246" parenthetical
+(the commands-facade half was true; the lie was only "generates
+nothing") and, optionally in the same edit, (2) a sentence in
+`src/ipc/index.ts` stating that the generated `emit`/`emitTo`
+bindings stay capability-denied in the webview (SEC-001).
+
+Solution: item (1)'s count half was found already discharged (Rule
+2: the addenda read in this tree before writing) — the T-305
+addendum under item 1 carries exactly that correction, so it was
+not duplicated. What it leaves open — the dating: the original text
+still pins the falseness to "T-246's generated event bindings",
+while the false half was false since T-079/D-112, whose title
+records the first specta event (the manual `Event` impl) and whose
+successor D-116 already read "commands-only — stale since T-079" —
+is fixed by the dated T-309 addendum beside it. Item (2) landed in
+the same edit: the header's events paragraph now states that the
+same generated objects carry `emit`/`emitTo` and those stay
+ACL-denied in the webview — the grant covers the subscription pair
+only; emitting events stays Rust-only (SEC-001). True against the
+tree: `src/bindings.ts`'s `makeEvent` generates `emit`/`emitTo`
+beside `listen`/`once` on every event object (`bindings.ts:2428-2433`,
+the `events` block `:509-514`); `capabilities/default.json` grants
+exactly `core:event:allow-listen` plus `core:event:allow-unlisten`
+(`capabilities/default.json:4-6`, the denial held by the
+description and the
+`config_tests.rs::capability_grants_the_webview_only_event_listening`
+pin, `config_tests.rs:1107`); spec §5.6's SEC-001 says "emitting
+events is Rust-only as well" (`docs/spec.md:194`).
+
+Checks: comment-only diff (`src/ipc/index.ts`, this file); no
+behavior changes, no tests — the batch regime (owner instruction
+2026-11-23) defers suite runs to the orchestrator's central run;
+pre-commit hook green (cargo fmt --check, eslint, prettier --check,
+vue-tsc). One review round per the batch override.
+
+Honest boundary: the ACL denial of a webview-side `emit` call is
+stated from the capability file, the pin, the spec and D-116 — not
+demonstrated by a runtime experiment (out of scope for a
+comment-only task).
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t309-round1.md`, deepseek-v4.1-flash):
+request-changes — one P0, three P3s, all taken in the amend. P0:
+the T-309 addendum's first draft said "T-246 completed the
+generated set" — false: T-246's diff never touches
+`src/bindings.ts` (`git show --stat a875afe`), the set was
+completed later, event by event (T-101 `c02abf2`, T-102 `b4817d9`,
+T-076 `09cbeac` last; the reviewer's per-event `git log -S` census,
+re-verified in this session), and the addendum above now states the
+verified history — the very failure mode the card is about, caught
+by the ledger's own review. P3s: D-172's claims carry file:line
+anchors, the check record moved into the `Checks:` paragraph, and
+the header sentence's comma splice became a semicolon.
