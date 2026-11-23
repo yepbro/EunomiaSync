@@ -81,7 +81,10 @@
 //! reads the gap from [`TargetWatcher::unwatched_files`] instead
 //! (turning a refusal into an event would loop: `Backend` →
 //! re-check → `set_files` → `Backend`, with nothing new to say).
-//! The classification is advisory — honest state comes from
+//! [`TargetWatcher::unwatched_kinds`] answers the same gap WITH the
+//! refusal's evidence class per file — the form the SYS-010 warning
+//! line and non-blocking notice consume (D-155). The classification
+//! is advisory — honest state comes from
 //! re-reading the file — but it is tested as delivered.
 //!
 //! # The backend seam
@@ -185,6 +188,17 @@ pub enum WatchEvent {
 /// Carries a class-only diagnostic string, never file content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatcherInitError(String);
+
+impl WatcherInitError {
+    /// Wraps the class-only diagnostic — the backend's own error text,
+    /// never file content. The construction seam for callers that need
+    /// to state an init failure the backend did not produce (the
+    /// logging facade's line tests; a fake backend's refusal),
+    /// mirroring [`WatchRefused::new`].
+    pub fn new(reason: String) -> Self {
+        Self(reason)
+    }
+}
 
 impl fmt::Display for WatcherInitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -451,6 +465,17 @@ pub struct TargetWatcher<B: WatchBackend = NotifyBackend> {
     /// touch it, all on the caller's side. Invariant: every live
     /// directory is a key of the map.
     live: BTreeSet<PathBuf>,
+    /// The refusal-evidence half: the CLASS of the last refusal each
+    /// wanted directory's re-arm answered, cleared by a successful
+    /// arm and dropped when the directory leaves the wanted set. The
+    /// same evidence `set_files` reads for its liveness bookkeeping
+    /// (the `kind` the backend refused with), kept so
+    /// [`TargetWatcher::unwatched_kinds`] can explain every
+    /// wanted-but-unwatched file with its parent directory's class —
+    /// the SYS-010 notice and warning line's data (D-155). A file
+    /// with no recorded parent class answers [`WatchRefusalKind::
+    /// Other`] — the honest catch-all, not evidence of anything.
+    refused: HashMap<PathBuf, WatchRefusalKind>,
     /// The converged file set: every wanted file whose directory is
     /// actually watched LIVE right now. This, not the last
     /// `set_files` input and not bare map membership, is the truth
@@ -481,6 +506,7 @@ impl TargetWatcher<NotifyBackend> {
             backend,
             dirs,
             live: BTreeSet::new(),
+            refused: HashMap::new(),
             files: BTreeSet::new(),
             wanted: BTreeSet::new(),
         })
@@ -501,6 +527,7 @@ impl<B: WatchBackend> TargetWatcher<B> {
             backend,
             dirs: Arc::new(Mutex::new(HashMap::new())),
             live: BTreeSet::new(),
+            refused: HashMap::new(),
             files: BTreeSet::new(),
             wanted: BTreeSet::new(),
         }
@@ -518,8 +545,10 @@ impl<B: WatchBackend> TargetWatcher<B> {
     /// "no watch" is the honest answer for an unavailable root, not
     /// an error (SYS-007's removal rule; the retry is the next call) —
     /// and the gap stays OBSERVABLE through
-    /// [`TargetWatcher::unwatched_files`], the seam SYS-010's notice
-    /// and log lines will read.
+    /// [`TargetWatcher::unwatched_kinds`] (the class-carrying form
+    /// the SYS-010 notice and warn line read, D-155) and its path-set
+    /// twin [`TargetWatcher::unwatched_files`] (the form this crate's
+    /// own battery asserts on).
     ///
     /// The re-arm's outcome is EVIDENCE about the watch's life, read
     /// per the refusal's [`WatchRefusalKind`] (the liveness half of
@@ -538,6 +567,15 @@ impl<B: WatchBackend> TargetWatcher<B> {
     pub fn set_files(&mut self, files: &[PathBuf]) {
         self.wanted = files.iter().cloned().collect();
         let wanted = wanted_dirs(files);
+        // The refusal evidence of directories no longer wanted goes
+        // with them: the leaving-set loop below iterates the CONVERGED
+        // map, which never held a never-armed refused directory, so
+        // the prune cannot live there (the round-1 P3-1 fix) — a
+        // stale entry could never change an answer (every wanted
+        // directory is re-armed and its record overwritten before any
+        // read), but the map would grow by one entry per distinct
+        // refused-then-removed directory for the session.
+        self.refused.retain(|dir, _| wanted.contains_key(dir));
         // Plan against a snapshot of the live map, run the watch
         // syscalls with NO lock held (the event thread reads the map
         // while they run), then commit the converged result in one
@@ -573,13 +611,20 @@ impl<B: WatchBackend> TargetWatcher<B> {
                 Ok(()) => {
                     converged.insert(dir.clone(), names.clone());
                     self.live.insert(dir.clone());
+                    // An armed watch needs no refusal explanation;
+                    // a previous pass's refusal stops describing it.
+                    self.refused.remove(dir);
                 }
                 Err(refused) => {
                     // The refusal's class is the evidence: `Gone` and
                     // `Limit` prove the watch cannot exist (a phantom
                     // entry would lie — watched_files must not count
                     // it), `Other` says nothing about the watch and
-                    // the carried liveness stands.
+                    // the carried liveness stands. Either way the
+                    // class is the last fact known about the
+                    // directory — the evidence unwatched_kinds
+                    // explains the gap with (D-155).
+                    self.refused.insert(dir.clone(), refused.kind());
                     if refused.kind() != WatchRefusalKind::Other {
                         self.live.remove(dir);
                     }
@@ -614,17 +659,17 @@ impl<B: WatchBackend> TargetWatcher<B> {
 
     /// The wanted-but-unwatched set: the files of the last
     /// [`TargetWatcher::set_files`] that have NO live watch right
-    /// now — the SYS-010 seam. A non-empty answer means the backend
-    /// refused a root (an unwatchable folder, the inotify watch
-    /// limit) or proved a converged watch dead by refusing its
+    /// now — the path-set half of the SYS-010 seam (this crate's own
+    /// battery asserts on it; the app layer reads the class-carrying
+    /// [`TargetWatcher::unwatched_kinds`]). A non-empty answer means
+    /// the backend refused a root (an unwatchable folder, the inotify
+    /// watch limit) or proved a converged watch dead by refusing its
     /// re-arm (the directory gone for good, the watch lost to a
     /// delete-recreate with the limit blocking the re-add) — the
     /// phantom shapes D-139 recorded, honestly reported here since
     /// the liveness fix — and those files' external edits are
     /// invisible until the backend arms them again (the next
-    /// `set_files` retries unconditionally); the caller's documented
-    /// responses — the warning line and the non-blocking notice —
-    /// read exactly this set. Deliberately NOT a
+    /// `set_files` retries unconditionally). Deliberately NOT a
     /// [`WatchEvent::Backend`] emission: a refused watch is a
     /// persistent fact the next `set_files` re-evaluates, and turning
     /// it into an event would loop (`Backend` → full re-check →
@@ -635,6 +680,36 @@ impl<B: WatchBackend> TargetWatcher<B> {
             .iter()
             .filter(|file| !self.files.contains(*file))
             .cloned()
+            .collect()
+    }
+
+    /// The wanted-but-unwatched files WITH the refusal class that
+    /// explains each — the class-carrying form of
+    /// [`TargetWatcher::unwatched_files`], added when the SYS-010
+    /// notice and warning line became its consumers (D-155, the
+    /// change D-139's round-1 P3-1 and D-148 both deferred until a
+    /// consumer existed): every unwatched file answers the class its
+    /// parent directory's last re-arm refusal carried — `Gone` (the
+    /// directory is not there), `Limit` (the watch budget refused the
+    /// arm), `Other` (some non-evidential refusal, or a file whose
+    /// parent holds no recorded class — the honest catch-all, never a
+    /// guess). The classes are the PASS's own evidence: a directory
+    /// armed `Ok` clears its record, so the answer always describes
+    /// the last `set_files`, never stale history. Same refusal-set
+    /// discipline as [`TargetWatcher::unwatched_files`]: a persistent
+    /// polled fact, not an event.
+    #[must_use]
+    pub fn unwatched_kinds(&self) -> BTreeMap<PathBuf, WatchRefusalKind> {
+        self.wanted
+            .iter()
+            .filter(|file| !self.files.contains(*file))
+            .map(|file| {
+                let kind = file
+                    .parent()
+                    .and_then(|parent| self.refused.get(parent).copied())
+                    .unwrap_or(WatchRefusalKind::Other);
+                (file.clone(), kind)
+            })
             .collect()
     }
 }
@@ -865,6 +940,45 @@ mod tests {
             "a file standing where the directory was is Gone everywhere"
         );
         let _ = std::fs::remove_file(&not_a_directory);
+    }
+
+    #[test]
+    fn a_never_armed_refusal_leaves_no_evidence_once_its_directory_is_unwanted() {
+        // The evidence map's prune (D-155's round-1 P3-1 fix): the
+        // leaving-set loop of `set_files` iterates the CONVERGED map,
+        // which never held a never-armed refused directory, so the
+        // prune must run against the wanted set up front. White-box on
+        // `refused` deliberately: the leak is not observable through
+        // the public queries (every wanted directory's record is
+        // rewritten by the unconditional re-arm before any read), so
+        // this unit module — the one place that can see the field —
+        // owns the pin.
+        struct AlwaysRefusing;
+        impl WatchBackend for AlwaysRefusing {
+            fn watch(&mut self, _dir: &Path) -> Result<(), WatchRefused> {
+                Err(WatchRefused::new(
+                    WatchRefusalKind::Limit,
+                    "always refused".to_owned(),
+                ))
+            }
+            fn unwatch(&mut self, _dir: &Path) {}
+        }
+        let file = std::env::temp_dir()
+            .join("eunomia-sync-watch-unwanted")
+            .join("AGENTS.md");
+        let mut watcher = TargetWatcher::with_backend(AlwaysRefusing);
+        watcher.set_files(std::slice::from_ref(&file));
+        assert_eq!(watcher.unwatched_kinds().len(), 1);
+        assert_eq!(
+            watcher.refused.len(),
+            1,
+            "the never-armed refusal recorded its class"
+        );
+        watcher.set_files(&[]);
+        assert!(
+            watcher.refused.is_empty(),
+            "a directory that left the wanted set leaves no evidence behind"
+        );
     }
 
     /// One event-stream error in notify's own shape. Which variant

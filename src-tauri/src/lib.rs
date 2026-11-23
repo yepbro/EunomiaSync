@@ -640,17 +640,20 @@ pub fn run() {
             // service with the SYS-007 debounce. A watcher backend
             // that fails to start degrades: no watching this session,
             // the launch unaffected (SYS-010's no-crash posture; the
-            // facade warning line is the recorded logging follow-up).
+            // facade warning line is logged in the arm below, D-155).
             file_watch::listen_availability(app.handle());
-            if let Err(_init) = file_watch::spawn_service(
+            if let Err(init) = file_watch::spawn_service(
                 app.handle().clone(),
                 file_watch_commands,
                 file_watch::DEBOUNCE,
             ) {
-                // The degrade is total but silent: the bus's
+                // The degrade is total but no longer silent: the bus's
                 // receiving half was dropped with the refusal, later
                 // `try_send`s fail harmlessly, and the app runs
-                // without external-change detection until restart.
+                // without external-change detection until restart —
+                // the one-line warn the logging follow-up owed
+                // (D-137's follow-up 1, D-155).
+                logging::file_watch_init_failed(&init);
             }
             retention::spawn_daily_cleanup(retention_db);
 

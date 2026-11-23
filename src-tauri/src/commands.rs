@@ -2129,6 +2129,17 @@ pub(crate) struct ProjectColumnEntry {
     /// deleted" marking), from the same [`watch_verdict`] read; the
     /// two flags are mutually exclusive in the service's verdict.
     pub(crate) file_deleted: bool,
+    /// SYS-010's lost-watch notice at this read (the non-blocking
+    /// "this file is not being watched" marking, D-155): the watch
+    /// service's last recorded refusal class for the project's
+    /// target file, in the closed vocabulary `"gone" | "limit" |
+    /// "other"` ([`file_watch::refusal_wire_class`]) — `None` when
+    /// the file is watched (or no full pass has recorded yet). See
+    /// [`unwatched_reason`] for the cache-backed boundary this
+    /// command serves it under; the notice is deliberately a polled
+    /// read, never an event (a refused watch is a persistent fact,
+    /// D-137's P2-4 loop ruling).
+    pub(crate) unwatched_reason: Option<String>,
     /// The last successful sync's time (LOG-007/OUT-020), DB-002 UTC
     /// shape; `None` until the first sync writes it.
     pub(crate) last_synced_at: Option<String>,
@@ -2268,6 +2279,12 @@ async fn projects_list_impl<R: Runtime>(
     // [`watch_verdict`]'s absent ≡ clean, one truth with the
     // service's diff rule.
     let watch_flags = watch_verdicts_of(&app);
+    // The SYS-010 lost-watch notice (D-155): ONE read of the same
+    // session cache's refused-watch recording, taken beside the
+    // verdict snapshot for the same staleness rule, then per-row map
+    // lookups. The notice is a polled read — never an event (a
+    // refused watch is persistent; D-137's P2-4 loop ruling).
+    let lost_watches = unwatched_reasons_of(&app);
     let entries = probed
         .into_iter()
         .map(|(project, available, unavailable_reason)| {
@@ -2275,6 +2292,11 @@ async fn projects_list_impl<R: Runtime>(
             // its fields.
             let dirty = dirty_verdict(dirty_cache.as_deref(), &project);
             let (external_changed, file_deleted) = watch_verdict(&watch_flags, &project, available);
+            let lost_watch = unwatched_reason(
+                lost_watches.get(project.id.as_str()).map(String::as_str),
+                &project,
+                available,
+            );
             ProjectColumnEntry {
                 id: project.id,
                 name: project.name,
@@ -2286,6 +2308,7 @@ async fn projects_list_impl<R: Runtime>(
                 dirty,
                 external_changed,
                 file_deleted,
+                unwatched_reason: lost_watch,
                 last_synced_at: project.last_synced_at,
             }
         })
@@ -2382,6 +2405,57 @@ fn watch_verdict(
             .copied()
             .unwrap_or((false, false)),
     }
+}
+
+/// SYS-010's lost-watch notice as `projects_list` serves it per row
+/// (D-155): the watch service's last recorded refusal class for the
+/// project's target file, `None` when nothing was lost — the
+/// non-blocking notice the UI renders from this carrier. The shape
+/// mirrors [`watch_verdict`] with the same second row-decidable
+/// half: SYS-007's watch set is the ACTIVE, AVAILABLE projects', so
+/// an archived row or a row this response just probed unavailable
+/// reads `None` BEFORE the cache — "lost from observation" would be
+/// a lie for a file that is not supposed to be watched (the stale
+/// window between a folder dying and the next full pass's prune
+/// cannot leak a lost-watch notice onto a column that shows
+/// unavailable/archived). An active, available project the service
+/// has not observed (before its first pass, a service that never
+/// started, recovery mode) reads `None` too — the clean baseline,
+/// one truth with the service's own recording rule. A consumer
+/// re-reading this notice treats the read as the truth; it is a
+/// poll, never an event.
+fn unwatched_reason(
+    recorded: Option<&str>,
+    project: &eunomia_store::projects::Project,
+    available: bool,
+) -> Option<String> {
+    match (project.state, available) {
+        // SYS-007: outside the watch set by design — nothing to lose.
+        (ProjectState::Archived, _) | (ProjectState::Active, false) => None,
+        // Active and available: the recorded refusal class, if any.
+        (ProjectState::Active, true) => recorded.map(str::to_owned),
+    }
+}
+
+/// Takes the one [`file_watch::FileWatchState::unwatched_projects`]
+/// read a `projects_list` call serves its rows from: the recorded
+/// lost-watch classes keyed by project id, in their wire spellings.
+/// A missing state (an uninitialized-app bug — `setup` manages it
+/// before anything that could fail, recovery mode included) answers
+/// the empty map, the no-losses baseline — the [`DirtyState`]
+/// degrade posture, never a failed read over display flags.
+fn unwatched_reasons_of<R: Runtime>(
+    app: &AppHandle<R>,
+) -> std::collections::HashMap<String, String> {
+    app.try_state::<file_watch::FileWatchState>()
+        .map(|state| {
+            state
+                .unwatched_projects()
+                .into_iter()
+                .map(|(id, kind)| (id, file_watch::refusal_wire_class(kind).to_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Takes the one [`file_watch::FileWatchState::snapshot`] read a

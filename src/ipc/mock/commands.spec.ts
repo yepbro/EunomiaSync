@@ -71,6 +71,7 @@ describe('projectsList', () => {
       'name',
       'state',
       'unavailable_reason',
+      'unwatched_reason',
     ])
   })
 
@@ -101,6 +102,19 @@ describe('projectsList', () => {
     expect(byId.get(deleted.id)?.file_deleted).toBe(true)
     expect(byId.get(deleted.id)?.external_changed).toBe(false)
 
+    // The SYS-010 lost-watch notice (D-155) rides the same carrier:
+    // row state mapped onto the wire, in the closed class vocabulary
+    // — a UI test edits the row, exactly like the flag arms above.
+    clean.unwatchedReason = 'limit'
+    modified.unwatchedReason = 'gone'
+    const noticed = await commands.projectsList(null)
+    const noticedById = new Map(noticed.map((p) => [p.id, p]))
+    expect(noticedById.get(clean.id)?.unwatched_reason).toBe('limit')
+    expect(noticedById.get(modified.id)?.unwatched_reason).toBe('gone')
+    expect(noticedById.get(deleted.id)?.unwatched_reason, 'the untouched row keeps its value').toBe(
+      deleted.unwatchedReason,
+    )
+
     // The generator invariants over the fresh pinned world (reset:
     // the edits above must not leak into them). The deterministic
     // picks over seed 21's synced pattern: index 0 (the first synced
@@ -117,9 +131,18 @@ describe('projectsList', () => {
       generated.every((p) => !p.file_deleted || p.last_synced_at !== null),
       'SYS-009: deleted only after a recorded sync',
     ).toBe(true)
+    expect(
+      generated.filter((p) => p.unwatched_reason !== null),
+      'SYS-010: exactly one lost watch, the last watchable row',
+    ).toHaveLength(1)
+    expect(
+      generated.every((p) => p.unwatched_reason === null || p.unwatched_reason === 'limit'),
+      'the notice serves the closed class vocabulary',
+    ).toBe(true)
     const archived = (await commands.projectsList(true)).find((p) => p.state === 'archived')
     expect(archived?.external_changed).toBe(false)
     expect(archived?.file_deleted).toBe(false)
+    expect(archived?.unwatched_reason, 'an archived row is outside the watch set').toBeNull()
   })
 })
 

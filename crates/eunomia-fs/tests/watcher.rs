@@ -24,9 +24,12 @@
 //! backend; the limit class with the seam) stops counting as
 //! watched and reports the gap, while a non-evidential refusal
 //! (`Other`) keeps a converged watch counted — no phantom entry,
-//! and no phantom gap either.
+//! and no phantom gap either. The class-carrying form of the seam
+//! (`unwatched_kinds`, D-155) is pinned beside it: every gap
+//! answers the refusal class that explains it — the data the
+//! SYS-010 warning line and non-blocking notice consume.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -862,4 +865,109 @@ fn target_under(temp: &tempfile::TempDir, name: &str) -> (PathBuf, PathBuf) {
     let target = dir.join("AGENTS.md");
     write(&target, "fixture");
     (dir, target)
+}
+
+// ---- the class-carrying seam (D-155) ------------------------------------
+
+/// The map-of helper, the kinds seam's stable comparison form.
+fn kinds_of(pairs: &[(PathBuf, WatchRefusalKind)]) -> BTreeMap<PathBuf, WatchRefusalKind> {
+    pairs.iter().cloned().collect()
+}
+
+#[test]
+fn the_unwatched_seam_answers_the_refusal_class_of_each_gap() {
+    // The class-carrying form of the SYS-010 seam: the notice and
+    // warning line do not just count the gap, they EXPLAIN it — the
+    // watch budget (`Limit`) reads differently from a vanished
+    // directory (`Gone`) in the UI's non-blocking notice, and the
+    // non-evidential refusal (`Other`) is the honest "for an
+    // unspecified reason". Pinned over the injected backend, the
+    // only driver that can produce a limit refusal on demand: a
+    // mid-set hit answers `Limit` for exactly the refused files, a
+    // never-armed `Other` refusal answers `Other`, and a converged
+    // healthy set answers the empty map — the notice's "nothing
+    // lost" baseline.
+    let temp = tempfile::tempdir().expect("creating a temp directory must work");
+    let (_alpha_dir, alpha) = target_under(&temp, "alpha");
+    let (_beta_dir, beta) = target_under(&temp, "beta");
+    let (_gamma_dir, gamma) = target_under(&temp, "gamma");
+    let all = vec![alpha.clone(), beta.clone(), gamma.clone()];
+    let (backend, _limit_from, _watch_calls) = LimitBackend::refusing_from(2);
+    let mut watcher = TargetWatcher::with_backend(backend);
+
+    watcher.set_files(&all);
+    assert_eq!(
+        watcher.unwatched_kinds(),
+        kinds_of(&[
+            (beta.clone(), WatchRefusalKind::Limit),
+            (gamma.clone(), WatchRefusalKind::Limit),
+        ]),
+        "the mid-set limit hit answers the Limit class for exactly the \
+         refused files"
+    );
+
+    let (other_backend, _plan, _log) = LimitBackend::refusing_from_with(WatchRefusalKind::Other, 1);
+    let mut other_watcher = TargetWatcher::with_backend(other_backend);
+    other_watcher.set_files(&one_file(&alpha));
+    assert_eq!(
+        other_watcher.unwatched_kinds(),
+        kinds_of(&[(alpha.clone(), WatchRefusalKind::Other)]),
+        "a never-armed directory refused without evidence answers Other — \
+         the honest catch-all, never a guess"
+    );
+}
+
+#[test]
+fn a_gone_directory_answers_the_gone_class_through_the_seam() {
+    // The real backend's gone shape (the production classification
+    // is notify's `PathNotFound` or the stat pre-check, platform-
+    // neutrally): a wanted directory deleted for good answers its
+    // file as `Gone` — the class a UI notice can phrase "the folder
+    // is gone" from — and the directory's return clears the map
+    // entirely (an armed watch keeps no refusal explanation).
+    let temp = tempfile::tempdir().expect("creating a temp directory must work");
+    let dir = temp.path().join("root");
+    let target = dir.join("AGENTS.md");
+    write(&target, "one");
+    let (mut watcher, _receiver) = watcher();
+    watcher.set_files(&one_file(&target));
+    assert!(
+        watcher.unwatched_kinds().is_empty(),
+        "a converged set has no gap to explain"
+    );
+
+    std::fs::remove_dir_all(&dir).expect("removing the directory must work");
+    watcher.set_files(&one_file(&target));
+    assert_eq!(
+        watcher.unwatched_kinds(),
+        kinds_of(&[(target.clone(), WatchRefusalKind::Gone)]),
+        "the deleted-for-good directory's file is explained as Gone"
+    );
+
+    write(&target, "the directory exists again");
+    watcher.set_files(&one_file(&target));
+    assert!(
+        watcher.unwatched_kinds().is_empty(),
+        "the healed convergence clears the explanation with the gap"
+    );
+}
+
+#[test]
+fn a_file_with_no_classifiable_parent_answers_other_not_a_guess() {
+    // The total-function half: `wanted_dirs` ignores a path with no
+    // usable parent (malformed input, never the app layer's absolute
+    // file paths), so such a file is unwatched with NO directory on
+    // record — the seam must still answer, and `Other` (not evidence
+    // of anything) is the honest class, never a panic and never a
+    // fabricated Gone/Limit. Driven with a never-refusing backend so
+    // the only cause is the path's own shape.
+    let (backend, _plan, _log) = LimitBackend::refusing_from(usize::MAX);
+    let mut watcher = TargetWatcher::with_backend(backend);
+    let bare = PathBuf::from("bare.md");
+    watcher.set_files(std::slice::from_ref(&bare));
+    assert_eq!(
+        watcher.unwatched_kinds(),
+        kinds_of(&[(bare, WatchRefusalKind::Other)]),
+        "an unclassifiable gap answers Other — the catch-all"
+    );
 }

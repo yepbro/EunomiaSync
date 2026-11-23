@@ -56,6 +56,14 @@ export type MockProjectRow = {
   externalChanged: boolean
   /** §5.7 SYS-009: the target file is gone after a recorded sync. */
   fileDeleted: boolean
+  /**
+   * §5.7 SYS-010: why the target file is NOT being watched — the
+   * closed vocabulary `'gone' | 'limit' | 'other'` (the refusal
+   * class, D-155); `null` when nothing was lost. Row state exactly
+   * like the §5.7 flags: a UI test edits the row, the carrier maps
+   * it onto the wire.
+   */
+  unwatchedReason: string | null
   lastSyncedAt: string | null
 }
 
@@ -92,6 +100,7 @@ export function toColumnEntry(row: MockProjectRow): ProjectColumnEntryWire {
     dirty: row.dirty,
     external_changed: row.externalChanged,
     file_deleted: row.fileDeleted,
+    unwatched_reason: row.unwatchedReason,
     last_synced_at: row.lastSyncedAt,
   }
 }
@@ -294,6 +303,7 @@ function rowsFromFixtures(
     dirty: project.dirty,
     externalChanged: project.external_changed,
     fileDeleted: project.file_deleted,
+    unwatchedReason: project.unwatched_reason,
     lastSyncedAt: project.last_synced_at,
   }))
 }

@@ -16351,3 +16351,306 @@ paragraph quotes the then-current line numbers (9649/13120), stale
 since T-287's insertion shifted the file — a historical record stays
 as written, and this entry's Problem paragraph carries the current
 locations.
+
+### D-155 — T-262: the watcher's diagnostic facade lines (D-137's follow-up 1) and the SYS-010 lost-watch notice on the `projects_list` carrier (follow-up 4) — 2026-11-22
+
+Problem: D-137's follow-ups (1) and (4), both held by frozen windows
+until now. (1) the watch service's failure paths degrade SILENTLY —
+`logging.rs` was frozen across D-137's, D-144's and D-148's windows,
+so D-144 recorded the add-flow refresh degrade as silent and
+`file_watch.rs` carries a module-doc "logging gap" section naming the
+lines it deserves; (4) SYS-010's "shows a non-blocking notice" had no
+backend surface: D-148 made `unwatched_files` truthful (every
+wanted-but-not-live target), but the answer is a path set with no
+refusal class and no poll-able read the UI could notice from — D-148's
+own boundary deferred the class-carrying answer to "when the SYS-010
+notice card wants the reason text", i.e. this card.
+
+Readings recorded BEFORE coding (rule 1):
+
+- _The facade edges: exactly four, the set D-137's follow-up paragraph
+  and the `file_watch.rs` module-doc gap section enumerate, in the
+  D-096 one-edge-per-failure-class shape. All four target
+  `eunomia::file_watch`. (a) `file_watch_init_failed` — `warn`: a
+  watcher backend that fails to construct leaves the app running with
+  no watching (SYS-010's no-crash posture), the `db_backup_daily_
+failed` degrade shape; called from `lib.rs`'s existing
+  `if let Err(_init)` arm (anchor-scoped: the arm's body only). (b)
+  `file_watch_pass_failed(&AppError)` — `error`, the §10 every-error
+  rule and the `availability_check_failed` shape (code/params/os_*
+  fields); called by the service loop for every FAILED pass whose
+  trigger was FIRE-AND-FORGET (`done: None`) — an awaited seam failure
+  (`refresh_after_sync`) is the CALLER's durable half (the sync
+  pipeline's `sync_run_degraded` watch arm since D-138; the add flow's
+  line is T-257's separate card, not absorbed here), so gating on
+  `done.is_none()` logs every failure exactly once instead of
+  double-logging the awaited ones. (c) `file_watch_emit_failed
+(&tauri::Error)` — `warn`, the `availability_emit_failed`/
+  `scan_progress_emit_failed` shape verbatim: a missed UI update, not
+  lost state (the cache deliberately stays unrecorded; the next
+  trigger re-emits at-least-once). (d) `file_watch_refused(gone,
+limit, other)` — `warn`, ONE line for the whole refused set with the
+  per-class COUNTS as fields (the card's "one line with the class in
+  the params" option; N paths would be noise and the notice carries
+  the identity), gated to once per degradation episode by the
+  `log_rotation_failed` precedent: the pass compares the fresh
+  refused map with the previously recorded one and warns only when a
+  NON-EMPTY answer differs — an unchanged refusal repeats nothing, a
+  recovered (empty) pass logs nothing (the D-046/D-054 no-line policy
+  for converged passes), a changed refusal shape is a new episode.
+- _The notice surface: a per-row field on the `projects_list` carrier,
+  NOT a new command and NOT `app_info`._ §7.10's command table is a
+  closed list and names no watch-status query — inventing a command
+  name is an owner-level spec deviation this card does not carry;
+  `app_info` is the About window's static facts, the wrong audience
+  and rarely polled; `projects_list` is the cold-start carrier D-144
+  just landed (`external_changed`/`file_deleted`), the main window's
+  existing re-read anchor, and the MAIN-028 UI card already must
+  re-read it on listener registration. The field:
+  `ProjectColumnEntry::unwatched_reason: Option<String>` — `None` =
+  observed or outside the watch set, `Some(class)` = the target file
+  is wanted but has no live watch, in the closed vocabulary
+  `"gone" | "limit" | "other"` (the snake_case spellings of
+  `WatchRefusalKind`, the `unavailable_reason` precedent for a closed
+  vocabulary on this wire). The row rules mirror `watch_verdict`:
+  an archived or freshly-probed-unavailable row reads `None` (SYS-007
+  removes it from the watch set — "lost" would be a lie), an
+  active+available row reads the recorded class, absent ≡ `None`
+  (before the first pass, a service that never started, recovery
+  mode — the D-144 carrier posture, honest for a session whose
+  watcher never ran). Poll-able by construction, never an event
+  (D-137's P2-4 loop ruling), and reading it never blocks the
+  watcher: one short mutex-guarded clone, the `snapshot()` discipline.
+- _The class reaches the app layer through a new fs query — the type
+  change D-139 P3-1 and D-148 both deferred to exactly this card_
+  ("when the SYS-010 notice card wants the reason text, the `kind` is
+  already on the refusal"). `TargetWatcher::set_files` already reads
+  every refusal's `kind()` for its liveness evidence; it now also
+  records the LAST refusal kind per wanted directory (cleared on a
+  successful arm, dropped when the directory leaves the wanted set),
+  and `unwatched_kinds() -> BTreeMap<PathBuf, WatchRefusalKind>`
+  answers the wanted-but-unwatched files WITH the parent directory's
+  class (a file with no classifiable parent defaults to `Other` —
+  the honest catch-all, not evidence of anything). `unwatched_files()`
+  keeps its path-set shape (the fs battery's oracle). `watcher.rs` is
+  outside this window's frozen zones (the manifests and the
+  lib.rs/main.rs attribute lines belong to T-275); the recording is
+  the app layer's to compose.
+- _The state's recording becomes id-keyed at the seam where both
+  halves live._ `blocking_half` builds the path→id routing table AND
+  converges the watch set, so it composes `unwatched_kinds()` with
+  `by_path` itself (a total mapping — every unwatched file came from
+  the wanted table); `PassOutcome::unwatched` and
+  `FileWatchState`'s cache become `BTreeMap<String,
+WatchRefusalKind>` keyed by project id, the read renamed
+  `unwatched_projects()` (the id-keyed answer both consumers — the
+  warn gate and the notice — actually read; the path-keyed
+  `unwatched_targets()` form is retired with its docs and test
+  updated, no speculative state kept). `note_unwatched` becomes a
+  swap returning the PREVIOUS map — the episode gate's input. The
+  `#[cfg_attr(not(test), allow(dead_code))]` markers fall: both reads
+  now have production consumers.
+- _The gate is a pure function over the two maps, the pump/dispatch
+  extraction precedent (D-139/D-146)_ — because the facade lines that
+  fire from the service task CANNOT be captured by the tests'
+  thread-local subscriber (the D-032/D-143 worker-thread boundary:
+  the service task runs on the async runtime's threads). The LINE
+  tests live in `logging.rs` (driven directly, the way every facade
+  edge is tested); the DECISION (does this transition warn? which
+  counts?) is `fn refused_warn_counts(new, previous) ->
+Option<(usize, usize, usize)>`, pure and unit-tested in
+  `file_watch.rs`; the service-loop call sites are one-line forwards
+  recorded as the honest boundary, the D-146 remainder shape.
+- _The composite proof runs the REAL pass seam over the D-139 fake
+  backend._ `blocking_half`/`refresh_pass` become generic over
+  `B: WatchBackend` (the `TargetWatcher` default parameter already
+  exists; `spawn_service` instantiates `NotifyBackend` — its signature
+  and the `lib.rs` wiring unchanged), so the unit suite drives the
+  real `blocking_half` + recording + gate with a test fake that
+  refuses chosen directories with a chosen kind — the limit seam no
+  kernel fixture can produce (D-139's premise), at the layer that
+  consumes it. A `Gone` or `Limit` refusal is UNREACHABLE at the app
+  layer through the real backend (the pass probes availability first;
+  an available root's parent-directory arm cannot be refused Gone,
+  and a real limit needs the kernel's budget exhausted — D-148's
+  boundary), so the fake is the only honest driver of the refused
+  arm; the ipc level keeps proving the real-service halves it can:
+  a healthy pass → the notice reports none, and the carrier's row
+  rules over a seeded recording (archived/unavailable rows clean).
+
+Solution (the edges table — edge → level → vocabulary, all four
+under the `eunomia::file_watch` target):
+
+| Edge                     | Level | Vocabulary                                                                                              |
+| ------------------------ | ----- | ------------------------------------------------------------------------------------------------------- |
+| `file_watch_init_failed` | warn  | the `WatcherInitError`'s class-only Display — "watching is disabled until the next launch"              |
+| `file_watch_pass_failed` | error | the §10 shape (code literal, params, os_code/os_kind/os_message) — `availability_check_failed`'s fields |
+| `file_watch_emit_failed` | warn  | the tauri error's Display — "the cache stays stale and the next pass re-emits"                          |
+| `file_watch_refused`     | warn  | the per-class COUNTS (`gone`/`limit`/`other`) — "invisible until the backend arms them again"           |
+
+Call sites: the init warn in `lib.rs`'s existing degrade arm
+(anchor-scoped); the pass error in the service loop at its three
+pass sites, gated on the fire-and-forget trigger (`done: None` /
+partial pass); the emit warn in `refresh_pass`'s failed-emit branch;
+the refused warn in `refresh_pass`'s recording block behind
+`refused_warn_counts`. `WatcherInitError` gains the `new(reason)`
+constructor (`WatchRefused::new`'s mirror) so the facade line test —
+and any fake — can state an init failure the backend did not
+produce. The notice's wire vocabulary is `refusal_wire_class`
+("gone"/"limit"/"other", the `unavailable_reason` precedent),
+single-sourced in `file_watch.rs`. The loud-drift chain held: the
+regenerated `bindings.ts` (the export test's rewrite-and-compare
+cycle) forced the fixture generator, `MockProjectRow`,
+`toColumnEntry` and the mock's add-row to carry the field before
+`pnpm typecheck` went green; the mock's `syncRun` deliberately does
+NOT clear the notice (a standing refusal refuses the after-sync
+re-arm too — the class is a fact about the watch, not the file's
+content); the fixture's deterministic pick (the LAST watchable row
+carries `'limit'`, a pure scan over the seed-pinned pattern — no rng
+draws, the dirty pass's sequence stays byte-identical) ships the
+notice in every world with a watchable row, set S included (the
+D-144 round-1 P2-2 lesson), and is deliberately NOT exclusive with
+the §5.7 verdicts (a refused watch does not stop the verdict pass —
+files are read on every full pass, watched or not).
+
+Tests: fs — three integration tests in `crates/eunomia-fs/tests/
+watcher.rs` (the mid-set limit answers `Limit` for exactly the
+refused files and a never-armed `Other` refusal answers `Other`; a
+real-backend gone-for-good directory answers `Gone`, cleared by the
+directory's return; a path with no classifiable parent answers
+`Other`, the total-function catch-all). logging — one line test
+driving all four edges (levels, the code literal, the error texts,
+the per-class counts). app unit — the recording/swap semantics, the
+gate's six transitions (first-refusal Some with counts; reshaped
+Some; changed-class Some; converged None; standing None; recovered
+None), the closed wire vocabulary, and the composite proof
+(`a_limit_refused_target_flows_through_the_real_pass_to_the_gate_
+and_notice`: the REAL `blocking_half` over a fake backend refusing
+one of two real repo roots — the refused target lands id-keyed with
+`Limit`, one episode opens, a repeated pass under the standing
+refusal adds no second episode, the notice seam serves the loss,
+and the healed pass clears everything with no warn). ipc —
+`a_healthy_watch_set_serves_no_lost_watch_notice` (the real service
+over a healthy converged set; the carrier answers `None`) and
+`the_lost_watch_notice_serves_the_class_and_respects_the_row_rules`
+(a recording seeded through the service's own `note_unwatched` seam:
+the class reaches every seeded active/available row, and the stale
+recordings on the archived and freshly-probed-unavailable rows do
+NOT leak — the active+available-with-no-recording arm is the
+healthy test's and the column pin's); the column full-field pin
+carries the cold baseline. Frontend — the field-list pin, the
+row→wire notice pin, the generator invariants (exactly one lost
+watch, only on watchable rows, the closed vocabulary, present in
+set S).
+
+Mutation-verified, each red with the cargo/vitest exit code
+observed, then reverted to green: M1 the kinds query answers Other
+for every gap (the evidence map ignored) → both fs class tests red;
+M2 the gate's standing-refusal silence disabled → the gate test and
+the composite proof red; M3 the gate's recovered-pass silence
+disabled → the gate test red; M4 the carrier's row rule disabled
+(archived/unavailable leak) → the ipc row-rules test red; M5 the
+composition collapses every class to `Gone` → the composite proof
+red; M6 the fixture's lost-watch pick disabled → three frontend
+pins red.
+
+Checks green by exit code: `cargo fmt --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, `cargo test --workspace`
+(1702 tests after the review rounds), `pnpm lint`, `pnpm typecheck`,
+`pnpm run test` (287), `pnpm run format:check`.
+
+Honest boundaries: the facade lines that fire from the service task
+and the `lib.rs` degrade arm are pinned by their line tests, the
+pure gate and — since the round-2 fix — the injectable-emitter
+`finish_pass` test, not by an end-to-end capture: the tests'
+thread-local subscriber cannot see the runtime's threads (the
+D-032/D-143 worker-thread boundary; `log_rotation_failed`'s
+precedent), and the remaining one-line forwards (the service loop's
+pass-failure gate, the `lib.rs` init arm) are the unpinned
+remainder, the D-146 shape. The notice is the carrier's LAST
+RECORDED fact, not a fresh
+probe: a file refused after the service's latest full pass reads
+clean until the next pass records it (the same staleness rule the
+§5.7 verdicts carry), and a refusal that heals between passes never
+shows at all. The refused warn fires per degradation-EPISODE
+TRANSITION, so a refusal that persists across an app restart warns
+again in the new session (the previous-recording state is session
+memory, like every service cache — deliberate). `WatchRefusalKind`
+rides the wire as its snake_case spelling (a string, not an enum —
+the `ProjectColumnEntry` closed-vocabulary convention); a consumer
+that needs the reason TEXT beyond the class still has none (the
+`WatchRefused`'s display string stays crate-private, D-148's
+ruling unchanged). The add-flow refresh-refused warn stays
+T-257's card (not absorbed): this entry's pass-failure line covers
+the failures that REACH the service, the `FileWatchGone` shape
+never does, and the awaited-caller gate keeps every failure logged
+exactly once. D-137's follow-ups (3) (the mock bus emitter), (6)
+(bus drop coalescing) and (7) (Backend injection) remain open on
+their own cards; the facade vocabulary added here is what T-257's
+add-flow warn will consume.
+
+Round-1 review addendum (D-155, same task; report
+`.opencode/reviews/t262-round1.md`, deepseek-v4.1-flash — verdict
+approve-with-fixes: 1×P2, 6×P3; the round re-ran the gate chain
+green by exit code, reproduced mutation M1 red in an isolated copy,
+and white-box-probed the fs evidence map), findings processed here —
+every finding taken:
+
+- P2-1 (taken): `refresh_pass`'s failed-emit early return skipped
+  the refused-watch recording and the episode gate — a first-episode
+  warn could be dropped (a refusal that heals before the next pass
+  would log nothing at all) and the notice described an older watch
+  state than the pass just observed. The recording block moved
+  BEFORE the diff/emit branch: a refused watch is a fact about the
+  WATCH, not about the file's content, and the pass that observed it
+  owes the record whatever the diff delivery does.
+- P3-1 (taken): the fs `refused` evidence map was not pruned for a
+  never-armed directory that left the wanted set (the leaving loop
+  iterates the CONVERGED map, which never held it). Fixed with a
+  `retain` against the wanted set at the top of `set_files`; pinned
+  white-box in the crate's unit module — the leak is unobservable
+  through the public queries, which is exactly why the unit module
+  owns the pin.
+- P3-2 (taken): two `watcher.rs` doc sentences still named
+  `unwatched_files` as "the seam the notice reads"; both now name
+  `unwatched_kinds` and state `unwatched_files`' role (the crate's
+  own battery's oracle).
+- P3-3 (taken, riding P2-1): the recording+gate block extracted as
+  `record_refusals`, and the composite proof now drives THAT (the
+  production sequence) instead of mirroring its two calls — a
+  dropped or reordered half fails the unit suite.
+- P3-4 (taken): the Tests paragraph's ipc description said "`None`
+  on the healthy sibling" — every row is seeded in that test;
+  corrected to what it pins.
+- P3-5 (taken): the module doc's "every failure logs exactly once"
+  now carries the add-flow exception (T-257's card) it already had
+  in `logging.rs`.
+- P3-6 (taken): the init warn's message repeated the error field's
+  own Display prefix ("the file watcher backend failed to start"
+  twice per line); the message now states only the consequence, and
+  the line test pins the single occurrence.
+
+Round-2 review addendum (D-155, same task; report
+`.opencode/reviews/t262-round2.md`, hy4-flash-free — verdict
+approve-with-fixes: 1×P2; the round re-ran the whole gate chain
+green, confirmed all six round-1 fixes real (not cosmetic), and
+reproduced M2–M5 red in an isolated copy), the finding processed
+here:
+
+- F-1/P2 (taken): the round-1 P2-1 ordering fix — and the entire
+  `record_refusals` call site — had NO regression test: the round's
+  isolated-copy mutations showed the full workspace suite green with
+  the recording moved back after the emit branch, or deleted
+  outright (making this entry's "a dropped or reordered half fails
+  the unit suite" claim overstated for the call site). Fixed with
+  the reviewer's shape: the post-pass bookkeeping (refused-watch
+  recording + gate, diff, delivery, verdict recording) factored as
+  `finish_pass` around an INJECTABLE emitter, and the new
+  `a_failed_emit_still_records_the_refused_watch_and_opens_the_
+episode` test drives it with a failing emitter — the recording is
+  the watch's own fact (owed by the pass that observed it), the
+  episode opens, and the verdict cache deliberately stays stale.
+  Mutation-verified red-then-green (M7a the recording moved after
+  the emit branch — the round-1 bug verbatim; M7b the recording
+  call deleted), each with the cargo exit code 101 observed. The
+  review phase is complete after this round (no third round).

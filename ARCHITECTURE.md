@@ -823,17 +823,24 @@ calls, and through that same seam after the project mutations that
 change the watched set — `project_add_manual`'s committed arm today,
 the scheme/name/archive/restore commands as they land, D-144; the
 verdicts are readable by any caller through the `projects_list`
-column carrier). On Linux, the `fs.inotify.max_user_watches` limit
-must be
+column carrier). On Linux, the `fs.inotify.max_user_watches` limit must be
 respected: an event-queue overflow degrades to one full re-check
 through the `Backend` event (SYS-010), while a REFUSED watch (an
 unwatchable root, the watch limit itself, or a refused re-arm the
 backend's refusal class proves fatal to the watch — D-148's liveness
-attribute) leaves the file unwatched —
-silently for events, but recorded as the wanted-but-unwatched set the
-future warning line and SYS-010's non-blocking notice read; neither
-case ever crashes, and the diagnostic log lines are a recorded
-follow-up.
+attribute) leaves the file unwatched — silently for events, but
+recorded per full pass as the wanted-but-unwatched set WITH the
+refusal class that explains each entry (`unwatched_kinds`, D-155):
+a non-empty changed recording warns once through the facade
+(`logging::file_watch_refused`, one line per degradation episode
+with the per-class counts), and the SYS-010 non-blocking notice is
+a poll — the `unwatched_reason` field on the `projects_list`
+carrier, `None` for watched/archived/unavailable rows, never an
+event (D-137's P2-4 loop ruling); neither case ever crashes. The
+watcher's other diagnostic edges — the init-failure warn, the
+pass-failure error (fire-and-forget triggers only; an awaited
+failure's line is the caller's) and the emit-failure warn — flow
+through the same facade (D-155).
 
 ## Updater
 

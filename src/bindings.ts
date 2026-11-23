@@ -1720,6 +1720,19 @@ export type ProjectColumnEntry_Deserialize = {
 	 */
 	file_deleted: boolean,
 	/**
+	 *  SYS-010's lost-watch notice at this read (the non-blocking
+	 *  "this file is not being watched" marking, D-155): the watch
+	 *  service's last recorded refusal class for the project's
+	 *  target file, in the closed vocabulary `"gone" | "limit" |
+	 *  "other"` ([`file_watch::refusal_wire_class`]) — `None` when
+	 *  the file is watched (or no full pass has recorded yet). See
+	 *  [`unwatched_reason`] for the cache-backed boundary this
+	 *  command serves it under; the notice is deliberately a polled
+	 *  read, never an event (a refused watch is a persistent fact,
+	 *  D-137's P2-4 loop ruling).
+	 */
+	unwatched_reason?: string | null,
+	/**
 	 *  The last successful sync's time (LOG-007/OUT-020), DB-002 UTC
 	 *  shape; `None` until the first sync writes it.
 	 */
@@ -1790,6 +1803,19 @@ export type ProjectColumnEntry_Serialize = {
 	 *  two flags are mutually exclusive in the service's verdict.
 	 */
 	file_deleted: boolean,
+	/**
+	 *  SYS-010's lost-watch notice at this read (the non-blocking
+	 *  "this file is not being watched" marking, D-155): the watch
+	 *  service's last recorded refusal class for the project's
+	 *  target file, in the closed vocabulary `"gone" | "limit" |
+	 *  "other"` ([`file_watch::refusal_wire_class`]) — `None` when
+	 *  the file is watched (or no full pass has recorded yet). See
+	 *  [`unwatched_reason`] for the cache-backed boundary this
+	 *  command serves it under; the notice is deliberately a polled
+	 *  read, never an event (a refused watch is a persistent fact,
+	 *  D-137's P2-4 loop ruling).
+	 */
+	unwatched_reason: string | null,
 	/**
 	 *  The last successful sync's time (LOG-007/OUT-020), DB-002 UTC
 	 *  shape; `None` until the first sync writes it.

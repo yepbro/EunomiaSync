@@ -1729,6 +1729,98 @@ pub(crate) fn availability_emit_failed(error: &tauri::Error) {
     );
 }
 
+/// The watch service's backend failed to START (D-137's follow-up 1,
+/// D-155): `file_watch::spawn_service` refused to construct the
+/// watcher (the instances limit at `inotify_init`, a resource error)
+/// and nothing is spawned — no watching this session, the bus's
+/// receiving half dropped with the refusal, later `try_send`s fail
+/// harmlessly, and the app runs without external-change detection
+/// until restart. `warn`, not `error`: the launch deliberately
+/// continues (SYS-010's no-crash posture — an `error` line would
+/// read as a failed launch in log triage, the
+/// `db_backup_daily_failed` reasoning). The payload is the error's
+/// own Display — which itself states the start failure, so the
+/// message states only the consequence and never repeats it (the
+/// round-1 P3-6 fix); the text is the backend's machine-generated
+/// diagnostic, never file content (SEC-008).
+pub(crate) fn file_watch_init_failed(error: &eunomia_fs::watcher::WatcherInitError) {
+    tracing::warn!(
+        target: "eunomia::file_watch",
+        error = %error,
+        "watching is disabled until the next launch"
+    );
+}
+
+/// One pass of the watch service FAILED (D-137's follow-up 1, D-155)
+/// — the §7.10 every-error rule at the fire-and-forget trigger that
+/// has no caller to return to (startup, an availability change, a
+/// debounced batch, the backend's lost-events re-check): the pass
+/// recorded nothing and the next trigger re-runs it (at-least-once),
+/// so the state is never lost, only late. The payload is the
+/// error's own §7.10 vocabulary — the code literal, its
+/// interpolation params, the OS facts — in the
+/// `availability_check_failed` shape. An AWAITED pass failure (the
+/// `refresh_after_sync` seam) is deliberately NOT logged here: the
+/// awaiting caller owns the durable half (the sync pipeline's
+/// `sync_run_degraded` watch arm; the add flow's line is T-257's
+/// card), so every failure is logged exactly once.
+pub(crate) fn file_watch_pass_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::file_watch",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "a file-watch pass failed; nothing was recorded and the next trigger retries"
+    );
+}
+
+/// Emitting the `state://file-changed` event failed (D-137's
+/// follow-up 1, D-155): the pass itself succeeded — its diff was
+/// computed — but the UI update did not leave the process, and the
+/// cache deliberately stays unrecorded so the next trigger
+/// re-detects and re-emits it (at-least-once, the diff contract in
+/// `file_watch.rs`). `warn`, not `error`, for exactly the
+/// `availability_emit_failed` reason: a missed UI update, not lost
+/// state. The tauri error is the whole payload — it carries no user
+/// paths.
+pub(crate) fn file_watch_emit_failed(error: &tauri::Error) {
+    tracing::warn!(
+        target: "eunomia::file_watch",
+        error = %error,
+        "emitting the file-changed event failed; the cache stays stale and the \
+         next pass re-emits"
+    );
+}
+
+/// A full pass found target files it could not put under watch
+/// (SYS-010, D-137's follow-up 1, D-155): the backend refused their
+/// parent directories — `gone` of them because the directory is not
+/// there, `limit` of them because the watch budget refused the arm,
+/// `other` for refusals that prove nothing — so those files'
+/// external edits are invisible until the backend arms them again
+/// (every full pass retries unconditionally). ONE line per
+/// degradation episode, at `warn`: the pass compares the fresh
+/// refused set with the previously recorded one and speaks only when
+/// a NON-EMPTY answer differs (the `log_rotation_failed` gate) — a
+/// standing refusal repeats nothing, and a recovered pass (the set
+/// emptied) logs nothing at all: the no-line policy for converged
+/// passes, the healed convergence speaks for itself. The counts are
+/// the whole payload — class-only, SEC-008: which files were lost is
+/// the non-blocking notice's fact (the `projects_list` carrier),
+/// not the log's.
+pub(crate) fn file_watch_refused(gone: usize, limit: usize, other: usize) {
+    tracing::warn!(
+        target: "eunomia::file_watch",
+        gone,
+        limit,
+        other,
+        "target files are not being watched; their external edits are \
+         invisible until the backend arms them again"
+    );
+}
+
 /// A file operation on a project's library file — the SEC-008 core
 /// event. The upcoming variant, sync and backup tasks log through this
 /// helper: it takes the operation code, the file's path and the numeric
@@ -2830,6 +2922,75 @@ mod tests {
                 && log.contains("code=\"E_DB_LOCKED\"")
                 && log.contains("the rows stay running and the next restart retries"),
             "the refusal line must be an error with the code literal, got: {log}"
+        );
+    }
+
+    #[test]
+    fn file_watch_lines_carry_levels_codes_and_class_counts() {
+        // The watcher's facade quartet (D-137's follow-up 1, D-155),
+        // each driven the way its producer calls it: the init degrade
+        // and the emit degrade are warns (the launch and the pass
+        // deliberately continue), the pass failure is the §10
+        // every-error line with the code literal, and the
+        // refused-watch warn carries the per-class COUNTS alone —
+        // WHICH files were lost is the non-blocking notice's fact
+        // (the `projects_list` carrier), not the log's (SEC-008:
+        // counts and codes).
+        let (_temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Warn)
+            .expect("building the subscriber must work");
+
+        tracing::subscriber::with_default(subscriber, || {
+            file_watch_init_failed(&eunomia_fs::watcher::WatcherInitError::new(
+                "too many open inotify instances (EMFILE-class probe)".to_owned(),
+            ));
+            let mut error = AppError::new(crate::errors::ErrorCode::DbLocked);
+            error.details = Some(crate::errors::ErrorDetails {
+                os_code: None,
+                os_kind: Some("StorageError".to_owned()),
+                os_message: Some("database is locked".to_owned()),
+            });
+            file_watch_pass_failed(&error);
+            file_watch_emit_failed(&tauri::Error::WindowLabelAlreadyExists("main".to_owned()));
+            file_watch_refused(1, 2, 0);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains(" WARN ")
+                && log.contains("the file watcher backend failed to start")
+                && log
+                    .matches("the file watcher backend failed to start")
+                    .count()
+                    == 1
+                && log.contains("watching is disabled until the next launch"),
+            "the init degrade must be a warn whose message names the consequence \
+             exactly once (the error field owns the start-failure text), got: {log}"
+        );
+        assert!(
+            log.contains("EMFILE-class probe"),
+            "the init line carries the backend's own class-only diagnostic, got: {log}"
+        );
+        assert!(
+            log.contains(" ERROR ")
+                && log.contains("code=\"E_DB_LOCKED\"")
+                && log.contains("the next trigger retries"),
+            "the pass failure must be an error with the §10 code literal, got: {log}"
+        );
+        assert!(
+            log.contains(" WARN ")
+                && log.contains("a window with label `main` already exists")
+                && log.contains("the cache stays stale and the next pass re-emits"),
+            "the emit degrade must be a warn with the tauri error's own text, got: {log}"
+        );
+        assert!(
+            log.contains(" WARN ")
+                && log.contains("gone=1")
+                && log.contains("limit=2")
+                && log.contains("other=0")
+                && log.contains("invisible until the backend arms them again"),
+            "the refused-watch warn must carry the per-class counts, got: {log}"
         );
     }
 

@@ -73,10 +73,13 @@
 //! pump's mapping ([`pump_event`]) is pinned per variant since T-259.
 //! A REFUSED watch (an unwatchable root, the inotify limit) is the
 //! other SYS-010 half: not an event but a persistent fact, recorded
-//! per full pass as the wanted-but-unwatched set
-//! ([`FileWatchState::unwatched_targets`]) the future warning line
-//! and non-blocking notice read. A refused RE-ARM counts the same
-//! way (since the watcher's liveness fix, D-139's phantom-entry
+//! per full pass as the wanted-but-unwatched set with the refusal
+//! class that explains each entry
+//! ([`FileWatchState::unwatched_projects`]) — the seam the
+//! refused-watch warn line ([`logging::file_watch_refused`], once
+//! per degradation episode) and the non-blocking notice (the
+//! `projects_list` carrier, D-155) read. A refused RE-ARM counts the
+//! same way (since the watcher's liveness fix, D-139's phantom-entry
 //! follow-up): a watch the backend proves dead — the directory gone
 //! for good, the watch lost with the limit blocking the re-add — is
 //! reported as unwatched, never kept as a phantom entry that
@@ -135,19 +138,30 @@
 //! panic; the service is never spawned there (the `setup` hook
 //! returns before the spawn).
 //!
-//! # The logging gap, recorded honestly
+//! # The diagnostic edges (D-137's follow-up 1, landed D-155)
 //!
-//! This window's parallel task owns `logging.rs`, so the facade lines
-//! this service deserves (`file_watch_pass_failed` /
-//! `file_watch_emit_failed` / a watcher-init warning, the
-//! `availability_*` shape) cannot be added here. The failure paths
-//! degrade safely without them — a failed pass records nothing and
-//! the next trigger re-runs it, a failed watcher start leaves the app
-//! running without watching (SYS-010's no-crash posture) — and the
-//! lines are a recorded follow-up for the first task allowed to edit
-//! `logging.rs` (the D-121 precedent).
+//! The facade lines this service's failure paths flow through, all
+//! in `logging.rs` (SEC-008's structural pin): the watcher-init warn
+//! (`file_watch_init_failed`, `lib.rs`'s degrade arm — no watching
+//! this session, the launch unaffected, SYS-010's no-crash posture),
+//! the pass-failure error (`file_watch_pass_failed`, §10's
+//! every-error rule — logged by the service loop for the
+//! FIRE-AND-FORGET triggers; an awaited seam failure's durable half
+//! is the caller's own line, so every failure logs exactly once —
+//! the add flow's awaited seam stays T-257's line and logs nowhere
+//! until that card lands),
+//! the emit warn (`file_watch_emit_failed`, a missed UI update —
+//! the at-least-once retry contract) and the refused-watch warn
+//! (`file_watch_refused`, once per degradation episode over the
+//! recorded refusal classes — a converged pass logs nothing, the
+//! D-046/D-054 no-line policy). The lines fire from the service
+//! task, where the tests' thread-local subscriber does not exist
+//! (the D-032/D-143 worker-thread boundary): the lines are tested
+//! in `logging.rs`, the gate ([`refused_warn_counts`]) and the
+//! recording are unit-tested here, and the one-line call-site
+//! forwards are the honest unpinned remainder (the D-146 shape).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -169,7 +183,9 @@ use eunomia_core::project::Scheme;
 use eunomia_core::snapshot::{BuildSnapshot, SnapshotProject};
 use eunomia_core::target_file::build_content;
 use eunomia_fs::paths::resolve_target_path;
-use eunomia_fs::watcher::{TargetWatcher, WatchEvent, WatcherInitError};
+use eunomia_fs::watcher::{
+    TargetWatcher, WatchBackend, WatchEvent, WatchRefusalKind, WatcherInitError,
+};
 use eunomia_store::build_snapshot::read as read_build_snapshot;
 use eunomia_store::projects::ListScope;
 use eunomia_store::projects::Project;
@@ -179,6 +195,7 @@ use crate::commands::{managed_db, projects_store_to_app_error};
 use crate::db::join_failure_to_app_error;
 use crate::dirty_recalc::build_snapshot_to_app_error;
 use crate::errors::AppError;
+use crate::logging;
 
 /// SYS-007's debounce: every watch delivery waits this window before
 /// the service sees it. A parameter of [`spawn_service`] only so the
@@ -278,12 +295,17 @@ pub(crate) struct FileWatchState {
     /// Guarded by a short synchronous critical section, never held
     /// across an `.await` or a watch syscall.
     last: Mutex<HashMap<String, FileFlags>>,
-    /// The wanted-but-unwatched target files of the last full pass —
-    /// SYS-010's observable, the seam the future warning log line and
-    /// non-blocking notice read (a refused watch is persistent, not
-    /// an event; the watcher's docs explain why it must not loop).
-    /// Recorded by the service task after each full pass.
-    unwatched: Mutex<BTreeSet<PathBuf>>,
+    /// The wanted-but-unwatched target files of the last full pass,
+    /// keyed by their PROJECT id with the refusal class that explains
+    /// each — SYS-010's observable, the seam the refused-watch warn
+    /// line and the non-blocking notice read (a refused watch is
+    /// persistent, not an event; the watcher's docs explain why it
+    /// must not loop). Recorded by the service task after each full
+    /// pass; the id key is composed at the recording seam itself
+    /// ([`blocking_half`] owns both the watcher's path-keyed answer
+    /// and the path→id routing table), so every consumer reads a
+    /// project-addressed fact.
+    unwatched: Mutex<BTreeMap<String, WatchRefusalKind>>,
     /// The command bus's sending half (capacity
     /// [`BUS_CAPACITY`]). Cloned into the availability listener and
     /// the pump thread; a `try_send` onto a full bus is the intended
@@ -305,7 +327,7 @@ impl FileWatchState {
         (
             Self {
                 last: Mutex::new(HashMap::new()),
-                unwatched: Mutex::new(BTreeSet::new()),
+                unwatched: Mutex::new(BTreeMap::new()),
                 trigger,
                 passes: AtomicU64::new(0),
             },
@@ -337,11 +359,12 @@ impl FileWatchState {
         entries
     }
 
-    /// The wanted-but-unwatched target files of the last full pass —
-    /// SYS-010's observable for the future warning line and the
-    /// non-blocking notice (empty until the first full pass records).
-    #[cfg_attr(not(test), allow(dead_code))] // consumed by the SYS-010 logging/notice follow-ups; tested today
-    pub(crate) fn unwatched_targets(&self) -> BTreeSet<PathBuf> {
+    /// The wanted-but-unwatched target files of the last full pass,
+    /// keyed by project id with the refusal class that explains each
+    /// — SYS-010's observable, the data the refused-watch warn line
+    /// counts and the non-blocking notice serves per row (empty
+    /// until the first full pass records).
+    pub(crate) fn unwatched_projects(&self) -> BTreeMap<String, WatchRefusalKind> {
         self.unwatched
             .lock()
             .expect("the file-watch cache is locked only inside short synchronous sections")
@@ -349,13 +372,26 @@ impl FileWatchState {
     }
 
     /// Records the unwatched set (full passes only; a partial pass
-    /// runs no `set_files`, so its answer would be stale).
-    fn note_unwatched(&self, unwatched: BTreeSet<PathBuf>) {
-        *self
-            .unwatched
-            .lock()
-            .expect("the file-watch cache is locked only inside short synchronous sections") =
-            unwatched;
+    /// runs no `set_files`, so its answer would be stale) and returns
+    /// the PREVIOUS recording — the episode gate's input: the caller
+    /// warns through the facade only when a non-empty answer differs
+    /// from it ([`refused_warn_counts`]). `pub(crate)` because the
+    /// ipc carrier tests seed the recording through this same seam —
+    /// a real refusal is unreachable through the real backend at the
+    /// app layer (D-148's boundary: the availability probe gates the
+    /// watch set), while the composite unit proof below drives the
+    /// real recording path over the fake backend.
+    pub(crate) fn note_unwatched(
+        &self,
+        unwatched: BTreeMap<String, WatchRefusalKind>,
+    ) -> BTreeMap<String, WatchRefusalKind> {
+        std::mem::replace(
+            &mut *self
+                .unwatched
+                .lock()
+                .expect("the file-watch cache is locked only inside short synchronous sections"),
+            unwatched,
+        )
     }
 
     /// Computes the changes `verdicts` carry against the cache,
@@ -676,9 +712,11 @@ struct PassOutcome {
     /// The verdicts computed, in snapshot order.
     verdicts: Vec<(String, FileFlags)>,
     /// The wanted-but-unwatched files of this full pass's
-    /// `set_files` (SYS-010's observable; partial passes run no
-    /// `set_files` and change nothing).
-    unwatched: Option<BTreeSet<PathBuf>>,
+    /// `set_files`, keyed by their PROJECT id with the refusal class
+    /// that explains each (SYS-010's observable, composed here where
+    /// both the watcher's path-keyed answer and the routing table
+    /// live; partial passes run no `set_files` and change nothing).
+    unwatched: Option<BTreeMap<String, WatchRefusalKind>>,
 }
 
 /// The blocking half of every pass: probe availability (the same
@@ -688,9 +726,14 @@ struct PassOutcome {
 /// (SYS-001); the watcher mutex is taken only by this half and only
 /// here — never across an `.await` — and the watcher's own watch map
 /// follows its inner discipline (short critical sections, syscalls
-/// outside them).
-fn blocking_half(
-    watcher: &Arc<Mutex<TargetWatcher>>,
+/// outside them). Generic over [`WatchBackend`] (the `TargetWatcher`
+/// default-parameter shape) so the composite unit proof drives this
+/// same half over the fake backend — the limit seam no kernel
+/// fixture can produce (D-139's premise) at the layer that consumes
+/// it; production instantiates the real `NotifyBackend` through
+/// [`spawn_service`].
+fn blocking_half<B: WatchBackend>(
+    watcher: &Arc<Mutex<TargetWatcher<B>>>,
     snapshot: &BuildSnapshot,
     facts: &[ProjectFact],
     affected: Option<&HashSet<String>>,
@@ -740,7 +783,7 @@ fn blocking_half(
             })
             .collect::<HashMap<PathBuf, String>>()
     });
-    let mut unwatched: Option<BTreeSet<PathBuf>> = None;
+    let mut unwatched: Option<BTreeMap<String, WatchRefusalKind>> = None;
     if let Some(table) = &by_path {
         let files: Vec<PathBuf> = table.keys().cloned().collect();
         let mut watcher = watcher
@@ -748,9 +791,27 @@ fn blocking_half(
             .expect("the watcher is locked only inside short synchronous sections");
         watcher.set_files(&files);
         // SYS-010's observable: the wanted files the backend refused
-        // (an unwatchable root, the inotify limit) — recorded for the
-        // future warning line and non-blocking notice.
-        unwatched = Some(watcher.unwatched_files());
+        // (an unwatchable root, the inotify limit), WITH the refusal
+        // class that explains each — re-keyed by project id here, the
+        // one seam where both the watcher's path-keyed answer and the
+        // path→id routing table live (a total mapping: every
+        // unwatched file came from the wanted table `set_files` was
+        // handed).
+        unwatched = Some(
+            watcher
+                .unwatched_kinds()
+                .into_iter()
+                .map(|(path, kind)| {
+                    (
+                        table
+                            .get(&path)
+                            .expect("every unwatched file came from the wanted table")
+                            .clone(),
+                        kind,
+                    )
+                })
+                .collect(),
+        );
     }
     let classified = available;
     let wanted: HashSet<&str> = classified.iter().map(|fact| fact.id.as_str()).collect();
@@ -824,14 +885,23 @@ fn target_of(fact: &ProjectFact) -> PathBuf {
 /// moment), run the blocking half on the pool, then diff, emit and
 /// record. `affected: None` is the full pass (subscriptions + every
 /// available project); `Some(ids)` re-checks only those projects and
-/// leaves the routing table and the pruning alone.
+/// leaves the routing table and the pruning alone. Generic over
+/// [`WatchBackend`] only so the composite unit proof drives this
+/// half's pieces over the fake backend; production runs the real
+/// backend.
 ///
 /// Failures propagate in the §7.10 `AppError` shape and emit
 /// nothing; nothing is recorded either, so the next trigger re-runs
-/// the pass (at-least-once).
-async fn refresh_pass<R: Runtime>(
+/// the pass (at-least-once). A failed emit is a missed update, not
+/// lost state: the cache deliberately stays unrecorded and the
+/// [`logging::file_watch_emit_failed`] warn marks it. A full pass's
+/// refused-watch set is recorded here and, when a non-empty answer
+/// differs from the previously recorded one, the one-line
+/// [`logging::file_watch_refused`] warn opens the degradation
+/// episode ([`refused_warn_counts`] — the gate).
+async fn refresh_pass<B: WatchBackend + Send + 'static, R: Runtime>(
     app: &AppHandle<R>,
-    watcher: &Arc<Mutex<TargetWatcher>>,
+    watcher: &Arc<Mutex<TargetWatcher<B>>>,
     by_path: &mut HashMap<PathBuf, String>,
     affected: Option<&HashSet<String>>,
 ) -> Result<Vec<ProjectFileChange>, AppError> {
@@ -858,21 +928,54 @@ async fn refresh_pass<R: Runtime>(
     .await
     .map_err(join_failure_to_app_error)?;
 
-    if let Some(new_table) = outcome.by_path {
-        *by_path = new_table;
+    if let Some(ref new_table) = outcome.by_path {
+        *by_path = new_table.clone();
     }
     let state = app.state::<FileWatchState>();
+    let changes = finish_pass(&state, outcome, full_pass, |event| event.emit(app));
+    Ok(changes)
+}
+
+/// The post-pass bookkeeping every pass shares — diff, deliver,
+/// record — factored around an injectable emitter (the round-2 F-1
+/// fix) so the unit suite can drive the production sequence,
+/// failing emitter included:
+///
+/// - The refused-watch fact is recorded and its episode gated BEFORE
+///   the delivery, deliberately outside the at-least-once verdict
+///   discipline: a refused watch is a fact about the WATCH, not about
+///   any file's content, so a failed diff emit must neither drop the
+///   episode's warn nor leave the notice one pass stale (the round-1
+///   P2-1 ordering — pinned by the failing-emitter test, which is the
+///   reason this function exists).
+/// - The diff is delivered through `emit`; a failure logs the
+///   missed-update warn and deliberately records NOTHING — the cache
+///   stays stale so the next trigger re-detects and re-emits
+///   (at-least-once).
+/// - A delivered diff (or an empty one) records the verdicts, a full
+///   pass pruning to its covered set.
+fn finish_pass<F>(
+    state: &FileWatchState,
+    outcome: PassOutcome,
+    full_pass: bool,
+    emit: F,
+) -> Vec<ProjectFileChange>
+where
+    F: FnOnce(&FileChangedEvent) -> Result<(), tauri::Error>,
+{
+    if let Some(unwatched) = outcome.unwatched
+        && let Some((gone, limit, other)) = record_refusals(state, unwatched)
+    {
+        logging::file_watch_refused(gone, limit, other);
+    }
     let changes = state.diff_against_last(&outcome.verdicts);
     if !changes.is_empty() {
         let event = FileChangedEvent {
             changes: changes.clone(),
         };
-        if event.emit(app).is_err() {
-            // Deliberately NOT recording: the cache stays stale so the
-            // next trigger re-detects and re-emits (at-least-once).
-            // The `warn` facade line belongs to the logging follow-up
-            // (module docs — the parallel window owns `logging.rs`).
-            return Ok(changes);
+        if let Err(error) = emit(&event) {
+            logging::file_watch_emit_failed(&error);
+            return changes;
         }
     }
     state.record(
@@ -883,10 +986,64 @@ async fn refresh_pass<R: Runtime>(
             None
         },
     );
-    if let Some(unwatched) = outcome.unwatched {
-        state.note_unwatched(unwatched);
+    changes
+}
+
+/// Records a full pass's refused-watch set into the session state and
+/// answers whether the pass opened (or reshaped) a degradation
+/// episode — the transition [`logging::file_watch_refused`] warns on
+/// ([`refused_warn_counts`] is the pure decision). Extracted as one
+/// step so the composite proof drives the production sequence
+/// (record, then gate on the swap's previous) instead of mirroring it
+/// (the round-1 P3-3 fix): a dropped or reordered half fails the
+/// unit suite, not just the code reader.
+fn record_refusals(
+    state: &FileWatchState,
+    unwatched: BTreeMap<String, WatchRefusalKind>,
+) -> Option<(usize, usize, usize)> {
+    let previous = state.note_unwatched(unwatched.clone());
+    refused_warn_counts(&unwatched, &previous)
+}
+
+/// The refused-watch warn's decision and payload (D-155): a full pass
+/// warns through [`logging::file_watch_refused`] only when its
+/// refused map is NON-EMPTY and differs from the previously recorded
+/// one — the transition opens (or reshapes) a degradation episode,
+/// the `log_rotation_failed` gate — and the payload is the per-class
+/// counts. A standing refusal (`new == previous`, both non-empty)
+/// repeats nothing; a recovered pass (`new` empty) logs nothing at
+/// all: the no-line policy for converged passes, the healed
+/// convergence speaks for itself. Pure over the two maps so the gate
+/// is unit-testable apart from the service task the warn fires from
+/// (the thread-local subscriber cannot capture the runtime's
+/// threads — the D-032/D-143 boundary; the line itself is tested in
+/// `logging.rs`, the call site is a one-line forward).
+fn refused_warn_counts(
+    new: &BTreeMap<String, WatchRefusalKind>,
+    previous: &BTreeMap<String, WatchRefusalKind>,
+) -> Option<(usize, usize, usize)> {
+    if new.is_empty() || new == previous {
+        return None;
     }
-    Ok(changes)
+    let count = |kind: WatchRefusalKind| new.values().filter(|k| **k == kind).count();
+    Some((
+        count(WatchRefusalKind::Gone),
+        count(WatchRefusalKind::Limit),
+        count(WatchRefusalKind::Other),
+    ))
+}
+
+/// The wire spelling of a refusal class — the closed vocabulary the
+/// SYS-010 non-blocking notice serves per row (`"gone" | "limit" |
+/// "other"`, the `unavailable_reason` precedent for a closed
+/// vocabulary on the `projects_list` wire). Single-sourced here so
+/// the notice carrier and any later consumer cannot drift.
+pub(crate) fn refusal_wire_class(kind: WatchRefusalKind) -> &'static str {
+    match kind {
+        WatchRefusalKind::Gone => "gone",
+        WatchRefusalKind::Limit => "limit",
+        WatchRefusalKind::Other => "other",
+    }
 }
 
 // ---- the service ----------------------------------------------------------
@@ -934,12 +1091,13 @@ fn pump_event(event: WatchEvent, trigger: &tauri::async_runtime::Sender<Command>
 
 /// Spawns the service: the fs watcher (failure to start it degrades —
 /// no watching this session, the launch unaffected, SYS-010's
-/// no-crash posture; the diagnostic line is the logging follow-up),
-/// the pump thread that turns debounced [`WatchEvent`]s into
-/// commands, and the single consumer task that serializes every pass
-/// (the no-ticket guarantee of the diff contract). The startup
-/// `Refresh` permit is dropped before the spawn (the dirty service's
-/// precedent).
+/// no-crash posture; the diagnostic line is
+/// [`logging::file_watch_init_failed`], logged by the `lib.rs`
+/// degrade arm), the pump thread that turns debounced
+/// [`WatchEvent`]s into commands, and the single consumer task that
+/// serializes every pass (the no-ticket guarantee of the diff
+/// contract). The startup `Refresh` permit is dropped before the
+/// spawn (the dirty service's precedent).
 ///
 /// # Errors
 ///
@@ -978,6 +1136,15 @@ pub(crate) fn spawn_service<R: Runtime>(
             match command {
                 Command::Refresh { done } => {
                     let result = refresh_pass(&app, &service_watcher, &mut by_path, None).await;
+                    // The §10 every-error line, only for the
+                    // fire-and-forget trigger: an awaited failure's
+                    // durable half is the CALLER's (the sync
+                    // pipeline's `sync_run_degraded` watch arm; the
+                    // add flow's line is T-257's card), so every
+                    // failure is logged exactly once (D-155).
+                    if let (Err(error), None) = (&result, done.as_ref()) {
+                        logging::file_watch_pass_failed(error);
+                    }
                     app.state::<FileWatchState>().note_pass();
                     if let Some(done) = done {
                         let _ = done.try_send(result);
@@ -1011,6 +1178,12 @@ pub(crate) fn spawn_service<R: Runtime>(
                     }
                     if refresh_seen {
                         let result = refresh_pass(&app, &service_watcher, &mut by_path, None).await;
+                        // Same every-error-once rule as the Refresh
+                        // arm: warn here only when no caller awaits
+                        // the failure (D-155).
+                        if let (Err(error), None) = (&result, refresh_done.as_ref()) {
+                            logging::file_watch_pass_failed(error);
+                        }
                         app.state::<FileWatchState>().note_pass();
                         if let Some(done) = refresh_done {
                             let _ = done.try_send(result);
@@ -1024,8 +1197,15 @@ pub(crate) fn spawn_service<R: Runtime>(
                     // Empty after routing = noise (events for files
                     // no longer in the set): no pass, no read.
                     if !affected.is_empty() {
-                        let _ = refresh_pass(&app, &service_watcher, &mut by_path, Some(&affected))
-                            .await;
+                        // A partial pass carries no ack by construction
+                        // — fire-and-forget like its trigger, so the
+                        // durable half of a failure is here (D-155).
+                        if let Err(error) =
+                            refresh_pass(&app, &service_watcher, &mut by_path, Some(&affected))
+                                .await
+                        {
+                            logging::file_watch_pass_failed(&error);
+                        }
                         app.state::<FileWatchState>().note_pass();
                     }
                 }
@@ -1104,11 +1284,13 @@ fn send_error() -> AppError {
 mod tests {
     //! The pure halves of the service — the SYS-008 verdict over
     //! literal file bytes, the diff semantics over the clean
-    //! baseline, the wire name, the debounce literal, and the pump's
-    //! event→command mapping over a bounded channel. The
-    //! mock-runtime halves (the card's criteria, the triggers, the
-    //! subscription changes) live in `ipc_tests.rs`, which owns the
-    //! mock-app harness.
+    //! baseline, the wire name, the debounce literal, the pump's
+    //! event→command mapping over a bounded channel, and the SYS-010
+    //! refused-watch halves (the recording/swap, the warn gate, the
+    //! wire vocabulary, and the composite proof over the fake
+    //! backend). The mock-runtime halves (the card's criteria, the
+    //! triggers, the subscription changes, the notice carrier) live
+    //! in `ipc_tests.rs`, which owns the mock-app harness.
 
     use std::path::Path;
 
@@ -1359,32 +1541,323 @@ mod tests {
     }
 
     #[test]
-    fn the_unwatched_set_is_recorded_and_served_across_full_passes() {
-        // SYS-010's observable seam: the service records the
-        // refused-watch gap after each full pass (`note_unwatched`),
-        // and the warning line / non-blocking notice of the recorded
-        // follow-ups read it back here — the whole reason the refusal
-        // is a polled fact and not an event. Empty before the first
-        // pass, the last full pass's answer afterwards, cleared by a
-        // later healthy convergence.
+    fn the_unwatched_recording_is_served_and_swapped_across_full_passes() {
+        // SYS-010's observable seam (D-155's id-keyed form): the
+        // service records the refused-watch gap after each full pass
+        // (`note_unwatched`), keyed by project id WITH the refusal
+        // class — the shape both consumers read (the warn gate counts
+        // the classes, the notice serves them per row). The swap
+        // returns the PREVIOUS recording (the episode gate's input);
+        // empty before the first pass, the last full pass's answer
+        // afterwards, cleared by a later healthy convergence.
         let state = state_only();
         assert!(
-            state.unwatched_targets().is_empty(),
+            state.unwatched_projects().is_empty(),
             "no full pass yet — no gap to report"
         );
-        let refused: BTreeSet<PathBuf> = [PathBuf::from("/gone/repo/AGENTS.md")]
-            .into_iter()
-            .collect();
-        state.note_unwatched(refused.clone());
-        assert_eq!(
-            state.unwatched_targets(),
-            refused,
-            "the refused watch is the served observable"
-        );
-        state.note_unwatched(BTreeSet::new());
+        let refused = BTreeMap::from([("p1".to_owned(), WatchRefusalKind::Gone)]);
+        let previous = state.note_unwatched(refused.clone());
         assert!(
-            state.unwatched_targets().is_empty(),
+            previous.is_empty(),
+            "the first recording swaps out the empty baseline — the gate \
+             sees a new episode"
+        );
+        assert_eq!(
+            state.unwatched_projects(),
+            refused,
+            "the refused watch is the served observable, class included"
+        );
+        let previous = state.note_unwatched(BTreeMap::new());
+        assert_eq!(
+            previous, refused,
+            "the swap hands back the recording it replaced"
+        );
+        assert!(
+            state.unwatched_projects().is_empty(),
             "a later healthy full pass clears the gap"
+        );
+    }
+
+    #[test]
+    fn the_warn_gate_opens_only_on_a_changed_non_empty_refused_set() {
+        // The refused-watch warn's decision, pure over the two maps
+        // (D-155, the `log_rotation_failed` episode precedent): a
+        // NON-EMPTY answer that DIFFERS from the previous recording
+        // warns with the per-class counts; a standing refusal repeats
+        // nothing; a converged or recovered pass (empty) logs nothing
+        // at all — the no-line policy for converged passes.
+        let empty = BTreeMap::new();
+        let one_limit = BTreeMap::from([("p1".to_owned(), WatchRefusalKind::Limit)]);
+        let one_gone = BTreeMap::from([("p1".to_owned(), WatchRefusalKind::Gone)]);
+        let two = BTreeMap::from([
+            ("p1".to_owned(), WatchRefusalKind::Limit),
+            ("p2".to_owned(), WatchRefusalKind::Gone),
+            ("p3".to_owned(), WatchRefusalKind::Other),
+        ]);
+        // The episode transitions that DO warn, with their counts.
+        assert_eq!(
+            refused_warn_counts(&one_limit, &empty),
+            Some((0, 1, 0)),
+            "the first refusal opens the episode with its class count"
+        );
+        assert_eq!(
+            refused_warn_counts(&two, &one_limit),
+            Some((1, 1, 1)),
+            "a reshaped refusal is a new episode — gone/limit/other counted"
+        );
+        assert_eq!(
+            refused_warn_counts(&one_gone, &one_limit),
+            Some((1, 0, 0)),
+            "a changed class on the same project is a new episode too"
+        );
+        // The transitions that stay silent.
+        assert_eq!(
+            refused_warn_counts(&empty, &empty),
+            None,
+            "a converged world logs nothing"
+        );
+        assert_eq!(
+            refused_warn_counts(&one_limit, &one_limit),
+            None,
+            "a standing refusal repeats nothing — the episode is already open"
+        );
+        assert_eq!(
+            refused_warn_counts(&two, &two),
+            None,
+            "an unchanged multi-file refusal repeats nothing"
+        );
+        assert_eq!(
+            refused_warn_counts(&empty, &one_limit),
+            None,
+            "a recovered pass logs nothing — the healed convergence speaks \
+             for itself"
+        );
+    }
+
+    #[test]
+    fn the_wire_refusal_vocabulary_is_the_closed_snake_case_set() {
+        // The notice's closed vocabulary (the `unavailable_reason`
+        // precedent): exactly the three snake_case spellings of the
+        // refusal classes, single-sourced in `refusal_wire_class` so
+        // the column and any later consumer cannot drift.
+        assert_eq!(refusal_wire_class(WatchRefusalKind::Gone), "gone");
+        assert_eq!(refusal_wire_class(WatchRefusalKind::Limit), "limit");
+        assert_eq!(refusal_wire_class(WatchRefusalKind::Other), "other");
+    }
+
+    // ---- the composite SYS-010 proof over the fake backend ---------------
+
+    /// The composite proof's backend (the D-139 `WatchBackend` seam):
+    /// refuses exactly the directories the shared plan names, with
+    /// the chosen class — everything else arms. The plan is shared
+    /// with the test so the refusal can be lifted with the watcher
+    /// already built, exactly the LimitBackend battery's shape.
+    struct RefusingBackend {
+        plan: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>>,
+        kind: WatchRefusalKind,
+    }
+
+    impl WatchBackend for RefusingBackend {
+        fn watch(
+            &mut self,
+            dir: &std::path::Path,
+        ) -> Result<(), eunomia_fs::watcher::WatchRefused> {
+            if self
+                .plan
+                .lock()
+                .expect("only the watcher calls this backend")
+                .contains(dir)
+            {
+                Err(eunomia_fs::watcher::WatchRefused::new(
+                    self.kind,
+                    "the synthetic refusal (SYS-010 composite proof)".to_owned(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn unwatch(&mut self, _dir: &std::path::Path) {}
+    }
+
+    /// A repository root that passes the D-084 availability probe —
+    /// the pass probes before it watches, so the fixture must be a
+    /// real available root (the ipc suite's `repo_dir` shape).
+    fn repo_root(temp: &tempfile::TempDir, name: &str) -> PathBuf {
+        let root = temp.path().join(name);
+        std::fs::create_dir_all(root.join(".git"))
+            .expect("creating the repository root and its .git entry must work");
+        root
+    }
+
+    #[test]
+    fn a_limit_refused_target_flows_through_the_real_pass_to_the_gate_and_notice() {
+        // The card's composite proof: the REAL `blocking_half` probes,
+        // converges and composes over the fake backend's limit seam —
+        // the refusal shape no kernel fixture can produce on demand
+        // (D-139's premise) and, at the app layer, no real backend
+        // can produce at all (D-148's boundary: the availability
+        // probe gates the watch set first). A limit-refused target
+        // flows to the recording WITH its class, opens exactly one
+        // warn episode, is served by the notice seam, and the healed
+        // pass clears everything with no second warn.
+        let temp = tempfile::tempdir().expect("creating a temp directory must work");
+        let healthy_root = repo_root(&temp, "healthy");
+        let limited_root = repo_root(&temp, "limited");
+        let project = |id: &str, root: &std::path::Path| SnapshotProject {
+            id: ProjectId::new(id.to_owned()),
+            name: format!("project {id}"),
+            root: root.to_owned(),
+            settings: ProjectWriteSettings {
+                scheme: Scheme::A,
+                base_name: BaseName::AgentsMd,
+                extra_local: off(),
+                extra_project: off(),
+            },
+        };
+        let snapshot = BuildSnapshot::new(
+            vec![
+                project("healthy", &healthy_root),
+                project("limited", &limited_root),
+            ],
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("the fixture is a valid snapshot");
+        let facts = facts_of(&snapshot, &[]);
+        let plan = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
+            limited_root.clone(),
+        ])));
+        let watcher = Arc::new(Mutex::new(TargetWatcher::with_backend(RefusingBackend {
+            plan: std::sync::Arc::clone(&plan),
+            kind: WatchRefusalKind::Limit,
+        })));
+
+        // The refused pass: the healthy sibling stays clean, the
+        // refused target lands in the seam id-keyed with its class.
+        let outcome = blocking_half(&watcher, &snapshot, &facts, None);
+        let refused = outcome
+            .unwatched
+            .expect("a full pass composes the SYS-010 seam");
+        assert_eq!(
+            refused,
+            BTreeMap::from([("limited".to_owned(), WatchRefusalKind::Limit)]),
+            "exactly the limit-refused target, keyed by its project, class \
+             included — the healthy sibling is watched"
+        );
+
+        // The recording and the gate, through the production step
+        // (record_refusals — the same call refresh_pass makes, the
+        // round-1 P3-3 fix): one episode opens, a repeated pass under
+        // the standing refusal adds no second warn.
+        let state = state_only();
+        assert_eq!(
+            record_refusals(&state, refused.clone()),
+            Some((0, 1, 0)),
+            "the first refused pass opens the warn episode with the class \
+             count — the facade line the service task fires"
+        );
+        let outcome = blocking_half(&watcher, &snapshot, &facts, None);
+        let refused_again = outcome
+            .unwatched
+            .expect("a full pass composes the SYS-010 seam");
+        assert_eq!(
+            record_refusals(&state, refused_again),
+            None,
+            "the standing refusal repeats nothing"
+        );
+
+        // The notice seam: the poll-able read serves the loss with
+        // its class — the data the `projects_list` carrier maps onto
+        // the row.
+        assert_eq!(
+            state.unwatched_projects(),
+            refused,
+            "the notice reads exactly what the pass recorded"
+        );
+
+        // The healed pass: the plan lifts, everything arms, the
+        // recording clears and the gate stays silent — the converged
+        // no-line policy.
+        plan.lock()
+            .expect("the plan handle is the test's own")
+            .clear();
+        let outcome = blocking_half(&watcher, &snapshot, &facts, None);
+        let healed = outcome
+            .unwatched
+            .expect("a full pass composes the SYS-010 seam");
+        assert!(healed.is_empty(), "the lifted refusal converges everything");
+        assert_eq!(
+            record_refusals(&state, healed),
+            None,
+            "the healed pass logs nothing"
+        );
+        assert!(
+            state.unwatched_projects().is_empty(),
+            "the notice reports no lost files after the heal"
+        );
+    }
+
+    #[test]
+    fn a_failed_emit_still_records_the_refused_watch_and_opens_the_episode() {
+        // The round-2 F-1 pin, the reason `finish_pass` exists: the
+        // round-1 P2-1 property — the refused-watch fact is recorded
+        // and its episode opened even when the diff emit FAILS — was
+        // correct in code but nothing drove its call site (the
+        // round's isolated-copy mutations proved the whole suite
+        // green with the recording moved after the emit branch, or
+        // deleted). Driving the production bookkeeping with a failing
+        // emitter makes both regressions red: the recording is the
+        // watch's own fact, owed by the pass that observed it,
+        // while the VERDICT cache deliberately stays stale
+        // (at-least-once).
+        let state = state_only();
+        let refusal = BTreeMap::from([("p2".to_owned(), WatchRefusalKind::Limit)]);
+        let outcome = PassOutcome {
+            by_path: None,
+            covered: vec!["p1".to_owned()],
+            verdicts: vec![verdict("p1", modified())],
+            unwatched: Some(refusal.clone()),
+        };
+        let changes = finish_pass(&state, outcome, true, |_event| {
+            Err(tauri::Error::WindowLabelAlreadyExists("main".to_owned()))
+        });
+        assert_eq!(
+            changes,
+            vec![change("p1", modified())],
+            "the undelivered diff is still the pass's answer"
+        );
+        assert_eq!(
+            state.unwatched_projects(),
+            refusal,
+            "the refused-watch fact is recorded DESPITE the failed emit — \
+             the notice is not left a pass stale"
+        );
+        assert_eq!(
+            record_refusals(&state, refusal),
+            None,
+            "the failed-emit pass opened the episode: an identical repeated \
+             recording would not re-warn"
+        );
+        assert!(
+            state.snapshot().is_empty(),
+            "the verdict cache stays stale on the failed emit (at-least-once)"
+        );
+
+        // The delivered control: the same world through a healthy
+        // emitter records the verdicts and prunes to the covered set.
+        let state = state_only();
+        let outcome = PassOutcome {
+            by_path: None,
+            covered: vec!["p1".to_owned(), "p2".to_owned()],
+            verdicts: vec![verdict("p1", modified())],
+            unwatched: Some(BTreeMap::from([("p2".to_owned(), WatchRefusalKind::Limit)])),
+        };
+        let _ = finish_pass(&state, outcome, true, |_event| Ok(()));
+        assert_eq!(
+            state.snapshot(),
+            vec![change("p1", modified())],
+            "a delivered diff records its verdicts"
         );
     }
 

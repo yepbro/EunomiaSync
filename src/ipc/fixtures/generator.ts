@@ -265,10 +265,11 @@ export function generateFixtures(profile: FixtureProfile): FixtureBundle {
       unavailable_reason: unavailable ? UNAVAILABLE_REASONS[i % UNAVAILABLE_REASONS.length] : null,
       // Placeholder: assignments decide dirtiness in the second pass.
       dirty: false,
-      // Placeholders: the watch pass decides both §5.7 markings in
-      // the final pass.
+      // Placeholders: the watch pass decides both §5.7 markings and
+      // the SYS-010 lost-watch notice in the final pass.
       external_changed: false,
       file_deleted: false,
+      unwatched_reason: null,
       last_synced_at: synced ? isoUtc(BASE_TS_MS - rng.int(1, 30) * DAY_MS) : null,
     })
   }
@@ -413,11 +414,27 @@ export function generateFixtures(profile: FixtureProfile): FixtureBundle {
   // externally-modified one — so every world with two active
   // available rows, one of them synced (set S included, pinned by
   // the spec), shows exactly one marking of each kind.
+  //
+  // Lost watch (SYS-010, D-155): the LAST watchable row carries
+  // `unwatched_reason: 'limit'` — the non-blocking notice's fixture
+  // twin (the backend serves the recorded refusal class; the watch
+  // budget refusal is the representative shape). Deliberately NOT
+  // exclusive with the §5.7 verdicts: a refused watch does not stop
+  // the backend's verdict pass (files are read on every full pass,
+  // watched or not), so the same row may be both externally modified
+  // and lost from observation. The D-144 round-1 P2-2 lesson applies:
+  // a marking the default world can never show is one no dev session
+  // or UI test ever sees — set S's two watchable rows guarantee the
+  // pick exists.
   const firstDeleted = projects.findIndex(
     (project) => project.state === 'active' && project.available && project.last_synced_at !== null,
   )
   const firstChanged = projects.findIndex(
     (project, i) => project.state === 'active' && project.available && i !== firstDeleted,
+  )
+  const lastWatchable = projects.reduce(
+    (last, project, i) => (project.state === 'active' && project.available ? i : last),
+    -1,
   )
   const finalProjects = projects.map((project, i) => {
     const watchable = project.state === 'active' && project.available
@@ -427,6 +444,7 @@ export function generateFixtures(profile: FixtureProfile): FixtureBundle {
       ...project,
       external_changed: externalChanged,
       file_deleted: fileDeleted,
+      unwatched_reason: watchable && i === lastWatchable ? 'limit' : null,
       dirty: project.state === 'active' && dirtyProjects.has(i) ? rng.bool() : false,
     }
   })

@@ -14,9 +14,9 @@ import type { ProjectColumnEntryWire } from '../contract'
 
 /**
  * One project column on the wire — the exact shape `projects_list` returns
- * (T-072 + T-257 fields: id, name, label, color, state, available,
+ * (T-072 + T-257 + T-262 fields: id, name, label, color, state, available,
  * unavailable_reason, dirty, external_changed, file_deleted,
- * last_synced_at).
+ * unwatched_reason, last_synced_at).
  */
 export type ProjectFixture = ProjectColumnEntryWire
 

@@ -292,6 +292,7 @@ describe('generateFixtures: watch rules (§5.7)', () => {
       if (project.state !== 'active' || !project.available) {
         expect(project.external_changed, `${project.name} is outside the watch set`).toBe(false)
         expect(project.file_deleted, `${project.name} is outside the watch set`).toBe(false)
+        expect(project.unwatched_reason, `${project.name} is outside the watch set`).toBeNull()
       }
     }
   })
@@ -314,6 +315,19 @@ describe('generateFixtures: watch rules (§5.7)', () => {
     expect(projects.filter((p) => p.external_changed)).toHaveLength(1)
   })
 
+  it('flags exactly one lost watch, in the closed class vocabulary (SYS-010)', () => {
+    // The notice's deterministic pick (the generator's comment): the
+    // LAST watchable row carries the class. The vocabulary is the
+    // backend's closed set (`gone | limit | other`) — never free
+    // text — and the pick is deliberately NOT exclusive with the
+    // §5.7 verdicts (a refused watch does not stop the verdict
+    // pass).
+    const projects = generateFixtures(PROFILE).projects
+    const lost = projects.filter((p) => p.unwatched_reason !== null)
+    expect(lost).toHaveLength(1)
+    expect(['gone', 'limit', 'other']).toContain(lost[0]?.unwatched_reason)
+  })
+
   it('ships both markings in the default dev world (set S)', () => {
     // The round-1 review's P2-2: a marking the default world can
     // never show is a marking no dev session or UI test ever sees.
@@ -325,6 +339,10 @@ describe('generateFixtures: watch rules (§5.7)', () => {
     expect(s.filter((p) => p.external_changed)).toHaveLength(1)
     const deleted = s.find((p) => p.file_deleted)
     expect(deleted?.last_synced_at).not.toBeNull()
+    expect(
+      s.filter((p) => p.unwatched_reason !== null),
+      'set S shows the lost-watch notice too — the same lesson',
+    ).toHaveLength(1)
   })
 })
 

@@ -1975,6 +1975,11 @@ fn projects_list_serves_active_columns_in_sort_order_over_ipc() {
         !first.external_changed && !first.file_deleted,
         "without a watch service every column reads the clean baseline"
     );
+    assert_eq!(
+        first.unwatched_reason, None,
+        "without a watch service no file reads as lost from observation — \
+         the notice's cold baseline, the same absent ≡ clean rule"
+    );
     assert_eq!(first.last_synced_at, None);
     let vanished_column = &columns[3];
     assert!(!vanished_column.available, "the missing folder is a flag");
@@ -7049,6 +7054,167 @@ fn an_unavailable_row_never_carries_watch_flags_even_from_a_stale_cache_entry() 
             .pass_count(),
         1,
         "no further pass ran — the stale cache entry is the premise"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_healthy_watch_set_serves_no_lost_watch_notice() {
+    // SYS-010's notice, the poll-able half (D-155): a real service
+    // over a healthy converged set records NO lost files, so the
+    // `projects_list` carrier — the notice's surface — answers
+    // `unwatched_reason: None` for every row. The refused arm cannot
+    // be produced through the real backend at this layer (D-148's
+    // boundary: the availability probe gates the watch set, and a
+    // real limit needs the kernel's budget exhausted); its composite
+    // proof lives in the `file_watch` unit suite over the fake
+    // backend, and the read path's class mapping is pinned by the
+    // seeded test below.
+    let (temp, app, commands) = file_watch_app();
+    let database = watch_database_of(&app);
+    let root = repo_dir(temp.path(), "healthy");
+    let project_id = seed_watched_project(
+        &database,
+        root.display().to_string(),
+        "/healthy",
+        eunomia_store::settings::Scheme::A,
+    );
+    seed_assigned_instruction(&database, project_id, "Style", "Be brief.");
+
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    let _events = listen_file_changed(&app);
+    wait_for_watch_passes(&app, 1);
+
+    let webview = main_webview(&app);
+    let columns =
+        invoke_projects_list(&webview, serde_json::Value::Null).expect("the read must succeed");
+    assert_eq!(columns.len(), 1);
+    assert_eq!(
+        columns[0].unwatched_reason, None,
+        "a converged set lost nothing — the notice reports no losses"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_lost_watch_notice_serves_the_class_and_respects_the_row_rules() {
+    // The notice's read path over the real command (D-155): a
+    // recording seeded through the service's own `note_unwatched`
+    // seam (the way a refused pass records it — a real refusal is
+    // unreachable through the real backend here, D-148's boundary)
+    // serves the refusal class on the affected row, `None` on the
+    // healthy sibling, and — the `watch_verdict` row rules mirrored —
+    // `None` on archived and freshly-probed-unavailable rows whose
+    // stale recordings the response must not leak: SYS-007's watch
+    // set is the active, available projects', so "lost from
+    // observation" is a lie for a file not supposed to be watched.
+    let (temp, app, _commands) = file_watch_app();
+    let database = watch_database_of(&app);
+    let healthy_root = repo_dir(temp.path(), "healthy");
+    let healthy_id = seed_watched_project(
+        &database,
+        healthy_root.display().to_string(),
+        "/healthy",
+        eunomia_store::settings::Scheme::A,
+    );
+    let refused_root = repo_dir(temp.path(), "refused");
+    let refused_id = seed_watched_project(
+        &database,
+        refused_root.display().to_string(),
+        "/refused",
+        eunomia_store::settings::Scheme::A,
+    );
+    let dying_root = repo_dir(temp.path(), "dying");
+    let dying_id = seed_watched_project(
+        &database,
+        dying_root.display().to_string(),
+        "/dying",
+        eunomia_store::settings::Scheme::A,
+    );
+    let archived_root = repo_dir(temp.path(), "archived");
+    let archived_id = seed_watched_project(
+        &database,
+        archived_root.display().to_string(),
+        "/archived",
+        eunomia_store::settings::Scheme::A,
+    );
+
+    // The stale recording: EVERY project carries a refusal class —
+    // the premise the row rules must hold back.
+    let state = app.state::<crate::file_watch::FileWatchState>();
+    let mut seeded = std::collections::BTreeMap::new();
+    seeded.insert(
+        healthy_id.clone(),
+        eunomia_fs::watcher::WatchRefusalKind::Limit,
+    );
+    seeded.insert(
+        refused_id.clone(),
+        eunomia_fs::watcher::WatchRefusalKind::Limit,
+    );
+    seeded.insert(
+        dying_id.clone(),
+        eunomia_fs::watcher::WatchRefusalKind::Gone,
+    );
+    seeded.insert(
+        archived_id.clone(),
+        eunomia_fs::watcher::WatchRefusalKind::Gone,
+    );
+    let _previous = state.note_unwatched(seeded);
+
+    // The world moves on without a pass: one folder dies (the D-084
+    // probe's .git shape), one row archives (no command exists — the
+    // store call is it, T-109's seam).
+    std::fs::remove_dir_all(dying_root.join(".git")).expect("removing the .git entry must work");
+    archive_project(&database, archived_id.clone());
+
+    // Act: the same response that probes availability serves the
+    // notice.
+    let webview = main_webview(&app);
+    let columns = invoke_projects_list(&webview, serde_json::Value::Bool(true))
+        .expect("the widened read must succeed");
+    let by_id = |id: &str| {
+        columns
+            .iter()
+            .find(|entry| entry.id == id)
+            .unwrap_or_else(|| panic!("the row must be served: {id}"))
+    };
+    // Assert: the class reaches the row it describes; every rule
+    // that must NOT carry it holds.
+    assert_eq!(
+        by_id(&healthy_id).unwatched_reason.as_deref(),
+        Some("limit"),
+        "the recorded limit refusal serves its class on the row"
+    );
+    assert_eq!(
+        by_id(&refused_id).unwatched_reason.as_deref(),
+        Some("limit"),
+        "the wire vocabulary is the class spelling (limit)"
+    );
+    assert!(
+        !by_id(&dying_id).available,
+        "the D-084 probe sees the dead folder"
+    );
+    assert_eq!(
+        by_id(&dying_id).unwatched_reason,
+        None,
+        "an unavailable row is outside SYS-007's watch set — its stale \
+         recording must not leak a lost-watch notice"
+    );
+    assert_eq!(
+        by_id(&archived_id).state,
+        "archived",
+        "the archive took the row"
+    );
+    assert_eq!(
+        by_id(&archived_id).unwatched_reason,
+        None,
+        "an archived row is outside SYS-007's watch set — its stale \
+         recording must not leak a lost-watch notice"
     );
     // Windows teardown rule.
     drop(app);

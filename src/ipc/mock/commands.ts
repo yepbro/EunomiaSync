@@ -349,6 +349,10 @@ export const mockCommands: IpcCommands = {
       // watch-service mock twin would compute exactly this.
       externalChanged: false,
       fileDeleted: false,
+      // And no lost watch: the file was never observed, so nothing
+      // was lost from observation (the notice's cold baseline,
+      // D-155).
+      unwatchedReason: null,
       lastSyncedAt: null,
     }
     state.projects.push(row)
@@ -711,6 +715,11 @@ export const mockCommands: IpcCommands = {
       // post-sync pass (D-137/D-144): a written file matches its
       // build again, so the §5.7 markings clear with `dirty` — the
       // real `state://file-changed` diff would carry the clearing.
+      // The lost-watch notice deliberately does NOT clear: the
+      // backend's after-sync full pass re-arms every wanted
+      // directory, and a standing refusal (the watch budget) simply
+      // refuses again — the class is a fact about the WATCH, not
+      // about the file's content (D-155).
       row.dirty = false
       row.externalChanged = false
       row.fileDeleted = false
