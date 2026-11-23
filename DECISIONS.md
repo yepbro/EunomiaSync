@@ -19046,3 +19046,149 @@ verified history — the very failure mode the card is about, caught
 by the ledger's own review. P3s: D-172's claims carry file:line
 anchors, the check record moved into the `Checks:` paragraph, and
 the header sentence's comma splice became a semicolon.
+
+### D-173 — T-310: the one-time "destructive" definition in §12.7's NFR-021 — the recovery pair `db_recreate`/`db_restore_backup` classified by the definition, not by the UI-010 enumeration — 2026-11-23
+
+Problem: D-170's round-1 P2-2 resolved the recovery pair's
+"destructive" status only by dropping the enumeration's completeness
+claim: the pair (ARCHITECTURE.md 595 calls it "the destructive pair")
+stays outside UI-010's list by design, and the class term "destructive
+UI actions" (§10's general rules, §12.7's NFR-021) carried no
+definition — the card (a T-303 follow-up) asked for exactly this small
+spec sweep.
+
+Solution:
+
+- _Census first (Rule 2)._ The word "destructive" appears in the spec
+  exactly twice — §10's general rules ("…and destructive UI actions
+  (NFR-021)") and NFR-021 itself ("A destructive UI action never
+  executes…") — both normative uses of the class, no definition
+  anywhere. §7.10's command notes: `db_restore_backup` keeps the
+  damaged database as `db-backups/pre-recovery-<UTC>.sqlite3`,
+  replaces it with the chosen copy and reopens it; `db_recreate` does
+  the same but starts with an empty database; the trio
+  `db_backups_list`/`db_restore_backup`/`db_recreate` "backs the
+  recovery screen for `E_DB_CORRUPT` (section 10)" — the only screen
+  that lists `db-backups/` copies, and recovery mode is entered only
+  from `E_DB_CORRUPT` (§10's row); the project Backups tab (BKP-004)
+  lists `backups/` file copies, not DB copies. So in a healthy app no
+  screen offers the pre-recovery copy back. The frontend recovery
+  screen does not exist yet (ARCHITECTURE.md's honest boundary: "the
+  frontend screen itself is the recovery-UI task's"), so the pair's
+  confirmations are spec-side requirements today.
+- _The definition lives in NFR-021's bullet_ (the home D-170 created;
+  §12.7 keeps its one-bullet shape): «"Destructive" means one thing in
+  this spec: the action's outcome destroys stored data such that, in
+  the app's normal operation, no way back to the lost state exists — a
+  way back is an in-app restore command, a kept copy the app offers to
+  restore, or the replaced value still being selectable in the UI.»
+  The criterion is recoverability through the app's own interface in
+  normal operation, not severity: overwriting onto a restorable state
+  (a sync write goes over a BKP-001 copy; BKP-007 backs up the current
+  file before a restore) is not destructive; destroying without an
+  in-app way back is.
+- _The pair's resolution is now by definition, not by enumeration._
+  NFR-021's bullet names the pair destructive — each command replaces
+  the database wholesale (an empty database, or the chosen copy),
+  while the `pre-recovery-<UTC>` copy is a file on disk that no normal
+  screen offers back (recovery mode itself is reached only from
+  `E_DB_CORRUPT`, section 10) — and states the consequence:
+  both are confirmed on the recovery screen (section 10) before they
+  run, outside UI-010's list. That confirmation sentence is the
+  requirement the future recovery-UI task implements; the Rust-side
+  guards (the triple `E_VALIDATION` gate, ARCHITECTURE.md 595) are
+  untouched and are not confirmations.
+- _Class census under the definition_ (each member verified against
+  its own requirement). Destructive: deleting per-project custom text
+  (MAIN-007, UI-010 — no history for it: 9.8's snapshots cover
+  instructions and variants, and the custom text bypasses the variant
+  model), deleting an excluded path (6.4, UI-010 — a manual entry has
+  no way back; a scan-found one is re-created by a rescan, PRJ-017),
+  deleting a heading (6.4, UI-010 — the heading itself has no restore
+  command; its instructions stay), a heading rename or move (6.2's
+  close: "Section headings have no revisions", recorded only in
+  `action_log`; the old name is not selectable anywhere, and
+  LIB-030/031's one dialog confirms nothing — NFR-021 as amended now
+  requires a confirmation the library requirements do not yet
+  provide; adding it is requirement authoring and is reported as a
+  follow-up card, not written here), the P1 purge of hidden
+  instructions (D-11 — "with confirmation"), and the pair. Not
+  destructive: edits of instructions and variants (the previous state
+  stays in the version history, 9.8 — ALG-070 snapshots changes
+  deduped by hash, ALG-072 never deletes the latest; S8 restores a
+  version), assignment changes (the definition's third way-back arm —
+  the variant stays in the library and selectable; verified against
+  MAIN-001…005's confirmation-free toggle, LIB-017…022's
+  removal-without-deletion, and the 6.2 CHECK that makes a toggle-off
+  a row delete, with no assignment arm in the `revisions` CHECK),
+  archiving, hiding, variant soft delete (PRJ-013…018, LIB-005…007,
+  `variant_restore`), the file and version restores (S11/S8 — both
+  keep the old state), sync writes (regenerable build output over a
+  BKP-001 copy), the empty sync result (§10 treats it as its own case
+  beside the destructive class; the lost content is restorable — the
+  backup plus BKP-007), the unsaved-changes discard (UI-003 — not yet
+  stored data), import (P1 — a merge per D-18's row: "items with a
+  matching name are not overwritten but get a suffix"; its "summary
+  is shown before the import" is UI-010's P1 confirmation for
+  effect). Every destructive member except the heading rename/move
+  keeps a confirmation home — UI-010/D-11 for the deletions, the new
+  sentence for the pair; the heading gap is the follow-up above. No
+  existing requirement's meaning changed.
+- _Residue recorded, not forced._ "In the app's normal operation" is
+  read over the spec's whole v1 surface, not per phase: in a P0-only
+  install the file backups are restorable only by hand (in-app restore
+  is BKP-007 P1), so the empty-result case would qualify under a
+  per-phase reading, and the same per-phase caveat applies to edits
+  (version storage is ALG-070…072 P0; the restore command is S8/UI-010
+  P1). The definition follows the product-level reading; the
+  empty-result case keeps D-25's own confirmation either way, and the
+  confirmed-anyway members do not hinge on the classification. §10's
+  "only two cases" sentence is now contradicted outright — archiving,
+  hiding and the other UI-010 items are non-destructive by the
+  definition yet confirmed — and stays v1.0 text owned by the D-170
+  follow-up card, not this one.
+- _UI-010 untouched; the enumeration caveat is gone with the tail it
+  lived in._ UI-010 already cites NFR-021 in its leading clause
+  (D-170's P2-1 placement), and its own text carries no completeness
+  claim (D-170's P2-2 dropped it). NFR-021's closing sentence — kept
+  verbatim from D-170 in the first draft of this entry — said "UI-010
+  enumerates the actions that require this confirmation", which round
+  1 (P2-1) showed false in both directions once the pair sits outside
+  the list and the list's non-destructive members are confirmed "for
+  their effect"; the sentence is rescoped to what the file supports:
+  UI-010 lists the actions the main UI confirms, a set wider than the
+  destructive class, and destructive actions outside it take the
+  requirement from the definition. The `E_DB_CORRUPT` row (section 10) now names the confirmation beside the screen it belongs to.
+
+Checks: md-only diff (`docs/spec.md`, this file; the §10 change is one
+table cell plus prettier's mechanical re-padding of that table);
+prettier green; batch regime (owner instruction 2026-11-23) — tests
+not run, the orchestrator runs the suite centrally after the flash
+batch; one review round per the md-only exception.
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t310-round1.md`, deepseek-v4.1-flash):
+request-changes — one P1, two P2s, four P3s; all taken in the amend.
+P1-1: "Edits are not destructive" was false for headings — 6.2's
+close and the `revisions` CHECK give headings no history, so a
+heading rename/move destroys the old name with no way back while
+LIB-030/031's dialog confirms nothing; the spec sentence is scoped to
+instruction and variant edits, and the census classifies heading
+rename/move as destructive with the confirmation gap reported as a
+follow-up card (the dialog itself is requirement authoring, outside
+this card). P2-1: D-170's tail sentence ("UI-010 enumerates the
+actions that require this confirmation") was false in both directions
+after the pair moved outside the list and the list's members are
+confirmed for their effect — the sentence is rescoped (the UI-010
+bullet above). P2-2: assignments were classified non-destructive on a
+storage-mechanics reason ("re-pointing rows") the definition did not
+support; the definition now carries the three way-back arms and the
+assignment's resolution follows from the third, verified against
+MAIN-001…005, LIB-017…022 and the 6.2 CHECK. P3-1: the "normal
+operation" qualifier moved into the definition — the pair's own
+preserved copy is listed by the recovery screen within recovery mode.
+P3-2: this entry now says §10's two-cases sentence is contradicted
+outright and owned by the D-170 follow-up, not "tense". P3-3: the
+`E_DB_CORRUPT` row names the confirmation (NFR-021) beside the
+screen. P3-4: import classified — a merge per D-18, non-destructive.
+None refused.
