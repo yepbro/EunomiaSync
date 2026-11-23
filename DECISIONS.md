@@ -19257,3 +19257,147 @@ header-quote truncation → the board follow-up above, not fixed here
 itself rates the sentence defensible (checks vs. the artifact, and
 §15.5 now lists both) and the sentence mirrors §15.5's condition
 structure.
+
+### D-175 — T-315: the manual smoke checklist carries the scenario runs S1–S7, S9, S10 — the spec §15.5 release list gets its in-repo executable form; every entry written against the spec's surfaces with the not-yet-landed UI marked pending — 2026-11-23
+
+Problem: T-277's follow-up report (the origin of this card): D-169
+closed the checklist with exactly the three Windows log items and an
+explicit scoping decision — "the S1–S7/S9/S10 scenario runs stay
+defined in the spec and are not reproduced here (out of scope per the
+card)". The report flagged the gap: spec §15.5 conditions the release
+on the manual checklist for scenarios S1–S7, S9, S10 being done on
+each OS (§15.1 keeps the runs manual because e2e drives a mocked IPC,
+not the real shell), and those runs had no in-repo executable form —
+the release run would walk a checklist that did not say what to do.
+The card asked for the scenario runs in the same file (or a separate
+release-checklist doc; the same file chosen — one home for manual
+checks, per D-169's naming rationale).
+
+Solution:
+
+- _New section "Scenario runs S1–S7, S9, S10" appended to
+  `docs/manual-smoke.md`; the header rewritten to describe both
+  parts._ The old header paragraph ("those scenario runs are defined
+  in the spec and are not reproduced here") is superseded — the file
+  now carries both the D-143 Windows items and the scenario runs, and
+  states the relation: a release run walks both. S8 and S11 are named
+  as deliberately absent, not forgotten (P1, post-1.0 per §15.1's e2e
+  row and §16's next stage — the header promises nothing about them).
+- _Structure: one entry per scenario, the D-169 Prepare/Do/Pass-when
+  shape._ Each entry carries a Source line (the spec §8 scenario plus
+  the requirement sections it exercises: §7.1 for S1/S2, §7.3/§7.4 for
+  S3–S6, §9.4 + §7.5 for S7, §6.6 + MAIN-024…028 for S9, §7.6 + §9.4
+  phase 2 + T-F1 for S10) and pass criteria tied to requirement IDs,
+  `E_*` codes and concrete paths — no criterion without a spec source
+  (Rule 2). The section preamble adds a Pending-surfaces paragraph and
+  a per-OS common preparation (data-dir paths for all three OSes,
+  throwaway-repo hygiene, §6.5 defaults).
+- _Pending surfaces marked, not pretended (Rule 11)._ The main-window
+  UI has not landed: `src/App.vue` is the shell (title, version,
+  project count — verified at this commit), and the library/assignment
+  commands are not registered (`src-tauri/src/lib.rs`'s
+  collect_commands carries 18 commands; the scenario-relevant
+  `project_add_manual`, `scan_start`/`scan_cancel`, `sync_run`,
+  `settings_get`/`settings_set` are among them). So every entry
+  carries a Pending line naming its surfaces and the owning §16
+  milestone (the milestone table's own mapping: S1/S2 → M1, S3/S5 →
+  M2, S4–S6 → M3, S9 → M4, S7/S10 → M5), and the preamble states
+  plainly that no entry below is executable until its surfaces land.
+  The entries are still written to be executable then — against the
+  spec's named controls, not today's code.
+- _Platform mechanics are means, not claims._ Where an entry needs a
+  real-OS state the spec only names (a denied folder for S2's "no
+  access" skip, a blocked backup subfolder for S10), the mechanics are
+  the same class D-169 used: icacls deny ACEs and chmod on Unix, a
+  `.git`-file stand-in for ALG-052's submodule/worktree reason, a
+  folder rename for D-09's unavailable state. The added discipline
+  beyond the card's ask: S10's prepare syncs TWICE so BKP-010's dedup
+  cannot blur the run (phase 2's dedup decision creates no copy and
+  the abort sweep deletes only copies the run created —
+  `sync_phase2.rs`'s module docs — so a pass criterion of "the
+  subfolder is empty" would be false; the honest criterion is "holds
+  exactly what it held before the run").
+- _§15.5's list is the authoritative scope._ The card said S1–S7/S9/
+  S10 "per spec §15.1"; the file's own header cites §15.5 as the
+  release condition, and §15.1's sentence (the manual run stays in the
+  release checklist because e2e is mocked) moved into the header as
+  the why.
+- _Scope addition folded in (the orchestrator, mid-task, from T-313's
+  merged review; the ruling is D-174's board follow-up)._ T-313
+  (fc5aad6) amended the §15.5 bullet while this task ran — it now
+  reads "…is done on each OS, and the manual smoke checks tracked in
+  `docs/manual-smoke.md` pass" — which made the header's verbatim
+  quote (D-169's old wording) a truncation. The header quote is
+  re-based on the merged bullet, the same quote fixed in this
+  section's own preamble, and the header's two standing claims kept
+  (the file is not the release checklist itself; a release run walks
+  both). One consequence taken deliberately: the new section title is
+  plain "Scenario runs S1–S7, S9, S10" — D-174's "the file is never
+  called the release checklist" rules out titling the section "the
+  §15.5 release checklist"; the preamble's "the scenario runs the
+  spec owns" carries the relation instead.
+
+Checks: md-only diff (`docs/manual-smoke.md`, this file); prettier
+green (two failures found and fixed: a multi-line inline code span
+for ALG-032's marker template tripped the lazy-continuation rule —
+the template now sits on one physical line — and this entry's trailing
+blank line); batch regime (owner instruction 2026-11-23) — tests not
+run, the orchestrator runs the suite centrally after the flash batch;
+ONE review round.
+
+Honest boundaries: written without a real machine run — no scenario
+below has been executed, on any OS; the pass criteria rest on the spec
+and on code reading (the phase-2 dedup/discard order,
+`collect_commands`' list, `src/App.vue`'s shell state — each verified
+by grep/read at this commit, line numbers not pinned because they
+move). The icacls/chmod mechanics inherit D-169's boundary: cited from
+the sources' own analysis, not verified on the target OS. The first
+executable run becomes possible only when the §16 UI milestones land;
+until then this section is the release checklist's form, not a
+completed check.
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t315-round1.md`, deepseek-v4.1-flash):
+request-changes — two P1s, six P2s, four P3s; all twelve verified
+against the spec and code, all taken in the amend. P1-1: S7's run 3
+was impossible as ordered — (b)'s marker and (c)'s folder stayed
+broken, so the third sync would repeat run 2's skips; the Do now
+repairs both byte for byte before run 3, and the pass reframes the
+heal as `unchanged` (a byte-identical repair matches under ALG-033).
+P1-2: S10's "synced TWICE" never produced a backup — with
+`sync.skip_identical` on and no edit between the syncs, sync 2 is
+`unchanged` and phase 2's copy loop is never entered; the prepare now
+states the variant edit between sync 1 and sync 2. P2-3: S4's pass
+contradicted its own step 2 (project 2 "still shows `Main`" after
+being assigned the empty variant) — the criteria are sequenced to the
+step that observes them. P2-4: S7's (d) was not isolated from the
+edited variant — it now carries an instruction step 2 never touches.
+P2-5: the D-13 cross-reference pointed at an S7 file check with no
+empty variant in S7's setup — the build half is now stated inside S4
+(the heading survives with no text block at the next sync). P2-6: S5
+claimed the "(changed)" cell marker for a variant-text edit — §11.2
+marks assignment changes only, so the criterion now pins the true
+pair: project dirty (DB-021), cell unmarked. P2-7: S3's probes didn't
+fit their surfaces — the duplicate-name probe gained the pre-existing
+instruction it needs, and the 101-character variant-name probe moved
+to the editor's variant rename (the create dialog auto-names the
+variant `Main`). P2-8: S10's "the Activity window carries the run's
+cancel/error entries" was falsified by the landed backend — an aborted
+run never reaches phase 4's journaling and the action vocabulary has
+no cancel member (D-138, `logging.rs`'s `sync_run_aborted`); the
+criterion now checks the file log's `E_BACKUP_FAILED` error line (§10)
+and states the gap honestly. P3-1: LIB-025's disable is unreachable
+through the UI (LIB-024 fires first) — reworded as such. P3-2: the
+preamble's Pending paragraph gained the cross-milestone rule (an entry
+becomes executable when every surface it names has landed; the
+Activity window is M6). P3-3: S9's singular pill wording had no
+producing step — one added (a single-project dirt). P3-4: S1 gained
+the read-denied folder (S1's Alt "no read rights", §6.9's path
+validation) and lost its stepless DEF-005 citation. Two further fixes
+taken while verifying the findings against the code: S7's run-1 backup
+criterion claimed a copy "per written project" when scheme-A files are
+created by run 1 and so have nothing to back up — the prepare now
+plants a hand-written `AGENTS.md` in (a)/(c)/(d) (OUT-005); and (b)
+gained its assigned instruction explicitly, closing a D-25 trap (an
+unassigned project's empty build over a non-empty file returns
+NeedsConfirmation instead of writing). None refused.
