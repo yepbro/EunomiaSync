@@ -67,9 +67,8 @@
 //! honest `NoDatabase` answers — the gate does not reinterpret
 //! recovery mode.
 //!
-//! No `sync_run` writer exists yet (T-112+): `try_acquire` is the
-//! tested-today/consumed-later seam the pipeline will call, the same
-//! posture `errors.rs` kept for the first fallible commands.
+//! `begin_sync` (commands.rs) consumes [`SyncRunning::try_acquire`]:
+//! it is what the pipeline's phase 0 step 1 calls (T-118/D-138).
 
 use std::sync::{
     Arc,
@@ -116,7 +115,7 @@ impl SyncRunning {
     /// exclusion (the conservative Acquire/Release pair around the
     /// flag, the `availability.rs` slot orderings: no other memory is
     /// published through it).
-    #[allow(dead_code)] // consumed by the sync pipeline task (T-112+); tested today
+    #[allow(dead_code)] // consumed by begin_sync, the pipeline's phase 0 step 1; tested today
     pub(crate) fn try_acquire(&self) -> Result<SyncGuard, AlreadyRunning> {
         self.flag
             .running

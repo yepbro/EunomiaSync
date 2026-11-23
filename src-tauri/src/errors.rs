@@ -160,7 +160,6 @@ impl ErrorCode {
     /// here instead of re-matching twenty strings or going through
     /// serde. The literal test pins `as_str`, the serde output and the
     /// spec table to one another, so the three cannot drift.
-    #[allow(dead_code)] // inert: the facade and the command layer read the literal through it
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             ErrorCode::SyncRunning => "E_SYNC_RUNNING",
@@ -193,7 +192,6 @@ impl ErrorCode {
     /// (`E_VALIDATION`) override it per-instance. The returned strings
     /// are part of the frontend contract (NFR-006): renaming one is a
     /// coordinated, test-pinned change, never a drive-by.
-    #[allow(dead_code)] // inert: `AppError::new` installs it in production
     pub(crate) fn message_key(self) -> &'static str {
         match self {
             ErrorCode::SyncRunning => "errors.sync_running",
@@ -258,7 +256,6 @@ impl ErrorDetails {
     /// when there is one, plus the portable kind and the message (which
     /// always exist). §10's "OS code" reaches the UI and the log through
     /// this constructor — never through `params`.
-    #[allow(dead_code)] // inert: `with_os_error` captures through it in production
     pub(crate) fn from_io_error(error: &std::io::Error) -> Self {
         ErrorDetails {
             os_code: error.raw_os_error(),
@@ -300,7 +297,6 @@ impl AppError {
     /// Builds the error for `code` with its default `message_key`, no
     /// params, and no details — the base every command extends
     /// (`.params.insert(...)`, [`Self::with_os_error`]).
-    #[allow(dead_code)] // inert: the commands construct through it at their boundaries
     pub(crate) fn new(code: ErrorCode) -> Self {
         AppError {
             code,

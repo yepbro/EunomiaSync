@@ -1,6 +1,6 @@
 //! Behavior tests of the DB executor (SYS-001, SYS-002, NFR-008;
-//! DECISIONS.md D-037), driven through the same seam the future
-//! commands will use: [`crate::db::Db`] opened over a real database
+//! DECISIONS.md D-037), driven through the same seam the registered
+//! commands drive: [`crate::db::Db`] opened over a real database
 //! file under a `tempfile` root — real pragmas, real WAL, real
 //! transactions, real rollback. No store internals are touched: the
 //! probe table is created by the tests themselves, so these tests
@@ -166,7 +166,7 @@ fn a_failing_mid_operation_rolls_back_every_change() {
 fn a_sqlite_failure_mid_operation_rolls_back_and_maps_to_the_wire() {
     // Arrange: one committed row, and an operation whose second
     // insert trips a real UNIQUE constraint — a genuine rusqlite
-    // error taking the classifier path future commands will use.
+    // error taking the classifier path the registered commands use.
     let (_temp, db) = probe_db();
     let seed = db.clone();
     async_runtime::block_on(seed.run(|tx| {
@@ -457,7 +457,7 @@ fn a_panicking_operation_rolls_back_and_the_next_one_still_works() {
 fn sqlite_failures_map_to_registry_codes_and_the_wire_form() {
     // Arrange: the §10 situations the classifier covers, built from
     // real SQLite result codes through rusqlite's own error shape —
-    // the exact input `BEGIN`/`COMMIT` and future command statements
+    // the exact input `BEGIN`/`COMMIT` and command statements
     // produce. Expected literals are pinned from the §10 table, never
     // read from the enum. All nine mapped classes are here: the
     // or-groups of the classifier (corrupt+notadb,

@@ -19554,3 +19554,136 @@ paragraph. P3-2 declined for the same mandate (the reviewer called
 it defensible: §7.3 is where LIB-025 lives); duplicating
 `variant_delete` semantics into §7.10's command notes would be a
 one-line follow-up for a later spec task, not this flash card.
+
+### D-177 — T-321: the five inert `dead_code` allows dropped and the "future" fossils swept outside T-311's five files — the landed-truth rewordings in `sync_phase0.rs`/`sync_running.rs`/`db.rs`/`db_tests.rs` — 2026-11-23
+
+Problem: T-311's comment-only scope (D-census in a58b9d0's message)
+kept four `errors.rs` allows and one `commands.rs` allow that its own
+census had proven production-consumed — attributes whose removal was
+deferred as a code change. The same fossil class — "future"/"no
+consumer yet" claims about things that have since landed — also lives
+in the files T-311 did not sweep: `sync_phase0.rs` (three "the future
+`sync_run` command (T-118)" sites), `sync_running.rs` (the "No
+`sync_run` writer exists yet (T-112+)" paragraph, whose cross-reference
+to "the same posture `errors.rs` kept" began dangling the moment this
+task removed exactly that posture, plus the "(T-112+)" allow comment),
+`db.rs` (the "# Tested today, consumed later" module section claiming
+"No registered command uses the executor yet", two "future command
+tasks" mentions, three "consumed by the first database command task"
+allow comments, and "every future database command"), and `db_tests.rs`
+(three "the future commands" mentions). Rule 11: the claims are false
+today.
+
+Solution: one code task (the owner's cargo exception for this card).
+The five attributes removed — each re-verified inert in the current
+tree before the cut, then proven by a warning-free compile:
+
+- `ErrorCode::as_str` (errors.rs): the logging facade reads it —
+  `error.code.as_str()` at logging.rs 857/877/903/985/1165… (the
+  production region; the module's `#[cfg(test)]` starts at 2064).
+- `ErrorCode::message_key` (errors.rs): `AppError::new` calls it
+  (errors.rs:303), and `new` is production-consumed (below).
+- `ErrorDetails::from_io_error` (errors.rs): `with_os_error` calls
+  it at errors.rs:316 (production; the enum's cfg(test) region
+  starts at 321), and so does `failure_of` at sync_phase3.rs:466
+  (production; that module's tests start at 496).
+- `AppError::new` (errors.rs): `dirty_fallback` (dirty_recalc.rs:610,
+  production — the module's test cfgs start at 658/689) and
+  `fingerprint_missing_refusal` (sync_phase3.rs:484).
+- `begin_sync` (commands.rs): `sync_phase0::run`'s step 1
+  (sync_phase0.rs:177), which the registered `sync_run` command
+  drives (commands.rs:1095).
+
+The zero-warning build after the cuts (`CARGO_BUILD_JOBS=2 cargo
+test -p eunomia-sync --lib --no-run`) is supporting evidence only,
+not the oracle: that invocation compiles the lib once, as its
+cfg(test) unit-test harness, where a test-only use counts as live —
+so a genuinely production-dead item would not warn there. Liveness
+of the five rests on the production call sites cited above; CI's
+all-targets `cargo clippy --workspace --all-targets -- -D warnings`
+(.github/workflows/ci.yml:41) is the warning gate. The fossil
+comments reworded to what landed (the card's list, found by content —
+three same-class sites beyond the card's line numbers added:
+sync_phase0.rs :70 and :134, and db.rs:21): sync_phase0.rs's three
+"future sync_run" claims now name the landed command (T-118/D-138),
+and the "No `sync_run` command exists yet" paragraph became "The
+`sync_run` command (T-118/D-138) calls [`run`] as the pipeline's
+first phase — after the cancel-token publication (T-258's step 0)";
+sync_running.rs's paragraph states `begin_sync` consumes
+`try_acquire` as the pipeline's phase 0 step 1, the dangling
+errors.rs-posture sentence dropped; db.rs's module section became
+"# Consumed today" naming the verified consumers (the sync pipeline's
+run rows through `managed_db` — sync_phase0.rs:228/265,
+commands.rs:1384/1407/1451; the store-backed commands —
+`projects_list` commands.rs:2224, `activity_list` commands.rs:1511,
+`scan_start` scan.rs:747, `settings_get`/`settings_set`
+commands.rs:1808/1861, the project/exclusion mutations
+commands.rs:2943/3384/3458/3722) read and write through it,
+with the `db_*` recovery pair and `db_backups_list` deliberately NOT claimed
+as executor consumers (they handle the database file, not its
+contents: `run_recovery` copies files and reopens through `Db::open`,
+commands.rs:248; `db_backups_list` lists the directory on the
+blocking pool, commands.rs:133) — the module doc states the
+exclusion explicitly; db_tests.rs's "the same seam the future
+commands will use" now reads "the same seam the registered commands
+drive".
+
+- _The four non-listed allow attributes stay, with truthful
+  comments._ `try_acquire` (sync_running.rs:118), `Db.connection`
+  (db.rs:210), `Db::run` (db.rs:546) and `sqlite_error_to_app_error`
+  (db.rs:1087) are inert by the same evidence (production callers:
+  commands.rs:623; db.rs:557; commands.rs's ~15 `managed_db(...).run`
+  sites; db.rs:478/481/649/651 + the command mappers at commands.rs
+  :1696/2005/2034/2514, dirty_recalc.rs:561, retention.rs:537) — but
+  the card scoped attribute removals to the five, so their comments
+  were reworded to name the landed consumers instead ("consumed by
+  begin_sync, the pipeline's phase 0 step 1", "read by Db::run…",
+  "consumed by the registered commands through managed_db",
+  "consumed by the executor's edges and the command mappers").
+  Dropping these four is an available follow-up, not a defect.
+- _Honest pendings left alone._ The card's exclusions hold:
+  `sync_last_result`, `sync_cancel` (T-120), `project_restore`
+  (T-109), `update_*`, `project_relink` are genuinely unlanded, and
+  the "future screen" mentions (db.rs:1302, db_tests.rs:1309/1382)
+  describe UI surfaces no milestone has delivered — the census
+  excluded them and this sweep agrees. The db.rs:21 bullet's own
+  landing is "the executor the store-backed commands go through"
+  ("every database command" would overreach: the recovery pair and
+  `db_backups_list` never touch the executor), and the connection
+  field's comment reads "read by Db::run and the direct-connection
+  Db methods" — `mark_interrupted_runs`/`ensure_daily_backup` lock
+  the connection without `Db::run` (db.rs:475/:757).
+
+Verification: the build (`--no-run`) exit 0 with zero warnings; the
+scoped suites of the touched modules, all exit 0 — `errors` 10
+passed, `sync_running` 6, `sync_phase0` 9, `db` 55 (`CARGO_BUILD_JOBS=2
+cargo test -p eunomia-sync --lib <filter>`, synchronous). No clippy,
+no e2e, no full-workspace run — the batch regime's scoped exception
+only.
+
+Round-1 review addendum (D-177, same task; report
+`.opencode/reviews/t321-round1.md`, deepseek-v4.1-flash, exit 0):
+REQUEST CHANGES, 0×P0, 0×P1, 2×P2, 5×P3 — all seven taken. P2-1:
+db.rs:21's de-futured claim ("every database command goes through
+`Db::run`") was itself false — the recovery pair and
+`db_backups_list` bypass the executor — now "the store-backed
+commands", with the module section's enumeration extended
+(`activity_list`, `scan_start` — both verified on the executor,
+commands.rs:1511/scan.rs:747) and the file-not-contents exclusion
+stated in the doc; the connection field's comment widened to the
+direct-connection readers. P2-2: the carried-over "calls [`run`] as
+its body's first act" was false ordering — `sync_run_with` resolves
+`data_root` (commands.rs:1076) and publishes the cancel token
+(:1087, T-258's step 0) before phase 0 (:1095) — now "as the
+pipeline's first phase — after the cancel-token publication". P3-1:
+six line cites corrected to the post-shift tree (db.rs 478/481/649/651,
+commands.rs 1696/2005/2034/2514). P3-2: "two same-class sites" →
+three. P3-3: the zero-warning compile re-attributed — a `--lib
+--no-run` build compiles the cfg(test) harness, where test-only uses
+count as live; the call sites (and CI's all-targets clippy) are the
+oracle. P3-4: the 131-column prettier-joined line rewrapped (the
+unbreakable inline span dropped). P3-5: folded into P2-1's
+enumeration fix. The reviewer's static inertness table matches this
+entry's; no test was touched (their audit agrees); the round ran
+before this addendum, so the cited line numbers above are the
+post-fix tree's.

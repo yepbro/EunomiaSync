@@ -614,7 +614,6 @@ fn managed_sync_flag<'a, R: Runtime>(
 /// builds MUST be one `Db::run` read transaction — the
 /// serialization argument in `sync_running.rs`'s module docs rests
 /// on it.
-#[allow(dead_code)] // inert: the sync pipeline's phase 0 consumes it (sync_phase0)
 pub(crate) fn begin_sync<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<sync_running::SyncGuard, AppError> {

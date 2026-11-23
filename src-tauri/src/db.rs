@@ -18,7 +18,7 @@
 //!   The app shell applies no SQLite flags or pragmas itself beyond
 //!   the gates' read-only `busy_timeout`, and the store crate stays
 //!   the only schema owner (D-010/D-017).
-//! - [`Db::run`] is the executor every future database command goes
+//! - [`Db::run`] is the executor the store-backed commands go
 //!   through: it moves the operation onto the blocking thread pool
 //!   with [`tauri::async_runtime::spawn_blocking`] (SYS-001), locks
 //!   the connection, opens one transaction, hands the operation a
@@ -110,7 +110,7 @@
 //! The executor classifies the storage errors it can see at its own
 //! edges — `BEGIN`/`COMMIT` failures and a panic inside the operation
 //! — with [`sqlite_error_to_app_error`], which is also the shared
-//! base classifier future command tasks start from when mapping their
+//! base classifier the command tasks start from when mapping their
 //! own statement errors. D-034 keeps the *contextual* choice with the
 //! operation: which code a failure deserves is a command-level
 //! decision, and the classifier's verdict can be refined there.
@@ -143,15 +143,18 @@
 //! which know the project/path context the log line must carry
 //! (SEC-008's facade vocabulary, D-032); the executor has none of it.
 //!
-//! # Tested today, consumed later
+//! # Consumed today
 //!
-//! No registered command uses the executor yet: §7.10/D-009 fix
-//! every command name, and none of them belongs to this task (the
-//! `db_*` names are the recovery-screen task's, `settings_*` the
-//! settings task's, …). Until the first such task lands, the
-//! executor is exercised by the behavior tests below against real
-//! database files — the same shape `errors.rs` (D-034) and
-//! `logging::file_event` (D-032) already use.
+//! The registered commands drive the executor through `managed_db`:
+//! the sync pipeline records its run rows through it (T-118/D-138),
+//! and the store-backed commands (`projects_list`, `activity_list`,
+//! `scan_start`, `settings_get`/`settings_set`, the project/exclusion
+//! mutations) read and write through it, mapping their store errors
+//! through the classifier below. The `db_*` recovery pair and
+//! `db_backups_list` do not: they handle the database file itself,
+//! not its contents. The behavior tests below exercise the same
+//! seam against real database files — the same shape `errors.rs`
+//! (D-034) and `logging::file_event` (D-032) already use.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -204,7 +207,7 @@ pub(crate) struct Db {
     /// The one connection (SYS-002). `std::sync::Mutex` — see the
     /// module docs for why not the async one: the guard never crosses
     /// an await point.
-    #[allow(dead_code)] // consumed by the first database command task; tested today
+    #[allow(dead_code)] // read by Db::run and the direct-connection Db methods; tested today
     connection: Arc<Mutex<Connection>>,
     /// The `db-backups/` directory of the same data directory the
     /// connection was opened from (§5.5) — kept so the ERR-001 daily
@@ -540,7 +543,7 @@ impl Db {
     /// `AppError` carrying the panic message — in release builds the
     /// workspace's `panic = "abort"` ends the process before this
     /// mapping could run, so that branch is a dev/test path.
-    #[allow(dead_code)] // consumed by the first database command task; tested today
+    #[allow(dead_code)] // consumed by the registered commands through managed_db; tested today
     pub(crate) async fn run<T, F>(&self, operation: F) -> Result<T, AppError>
     where
         F: FnMut(&Transaction<'_>) -> Result<T, AppError> + Send + 'static,
@@ -1065,7 +1068,7 @@ pub(crate) fn join_failure_to_app_error(error: tauri::Error) -> AppError {
 
 /// The base-layer classifier from SQLite failures to the §10 wire
 /// contract — the shared starting point for the executor's own
-/// `BEGIN`/`COMMIT` errors and for future command tasks mapping their
+/// `BEGIN`/`COMMIT` errors and for the command tasks mapping their
 /// statement errors. D-034 keeps the *contextual* choice with the
 /// operation: which code a failure deserves is a command-level
 /// decision, and the classifier's verdict can be refined there.
@@ -1081,7 +1084,7 @@ pub(crate) fn join_failure_to_app_error(error: tauri::Error) -> AppError {
 /// facts a §10 log line and UI-011's Details section are for. The
 /// unmapped classes land on the recorded fallback (see the module
 /// docs and DECISIONS.md D-037).
-#[allow(dead_code)] // consumed by the first database command task; tested today
+#[allow(dead_code)] // consumed by the executor's edges and the command mappers; tested today
 pub(crate) fn sqlite_error_to_app_error(error: rusqlite::Error) -> AppError {
     let code = match &error {
         rusqlite::Error::SqliteFailure(sqlite_error, _) => match sqlite_error.code {

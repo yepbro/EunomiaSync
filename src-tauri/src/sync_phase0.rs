@@ -67,7 +67,7 @@
 //! stop an in-flight write transaction; the record may still commit,
 //! leaving a `running` row behind a run nobody drives. That row is
 //! exactly what the startup `interrupted` recovery exists for, and
-//! the future `sync_run` command (T-118) owns the cancellation
+//! the `sync_run` command (T-118/D-138) owns the cancellation
 //! policy; nothing here can do better without breaking the executor's
 //! own contract.
 //!
@@ -97,10 +97,10 @@
 //! guard's drop releases the flag on the way out, so a syncless app
 //! cannot wedge the flag behind a refusal.
 //!
-//! No `sync_run` command exists yet (T-118 will add it, calling
-//! [`run`] as its body's first act): this module is the
-//! tested-today/consumed-later seam the flag (T-105) and the
-//! snapshot read (T-100) already keep.
+//! The `sync_run` command (T-118/D-138) calls [`run`] as the
+//! pipeline's first phase — after the cancel-token publication
+//! (T-258's step 0) — so this module is a consumed seam, like the
+//! flag (T-105) and the snapshot read (T-100) before it.
 
 use tauri::{AppHandle, Runtime};
 
@@ -131,8 +131,8 @@ pub(crate) type PreparedProject = BuiltProject;
 /// What phase 0 hands the pipeline: the flag lease, the run record,
 /// and the built content, in the snapshot's `sort_order`.
 ///
-/// The guard is a field, not a side effect, so the caller (the future
-/// `sync_run` command, T-118) cannot lose it between phases: it holds
+/// The guard is a field, not a side effect, so the caller (the
+/// `sync_run` command, T-118/D-138) cannot lose it between phases: it holds
 /// the flag for phases 1–4 by holding this value, and whatever path
 /// the pipeline takes to its end, the guard's `Drop` performs §9.4
 /// phase 4 step 5.
