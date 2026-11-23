@@ -1,19 +1,19 @@
 // The mock event bus (T-141) — the subscription seam for §7.10 events.
 //
-// `src/bindings.ts` carries its first generated event since T-079/D-112:
-// `events.stateProjectAvailability` over the wire name
-// `state://project-availability`; `events.scanProgress` over
-// `scan://progress` joined it with T-076/D-153. The bus below is
-// therefore keyed by
+// `src/bindings.ts` generates four of §7.10's five events today — all but
+// `sync://progress`: `events.stateProjectAvailability` (T-079/D-112),
+// `events.scanProgress` (T-076/D-153), `events.stateDirty` (T-101) and
+// `events.stateFileChanged` (T-102). The bus below is keyed by
 // `IpcEventMap` — the spec's event names mapped to their generated payload
 // types (re-exported through `../contract`, D-003) — so mock emits and
 // subscriptions are payload-typed against the real wire, and `mockEvents`
 // exposes one typed accessor per event, named after the camelCase accessor
 // the generated `events` object uses (the facade task will serve the real
-// and mock sides behind one `ipc.events`). The remaining §7.10 names
-// (`sync://progress`, `state://dirty`, `state://file-changed`,
-// D-009's registry) join the map with their own
-// generated payload types as their emitting backend tasks land.
+// and mock sides behind one `ipc.events`). The map carries the two events
+// the mock emits today (`state://project-availability`,
+// `scan://progress`); `state://dirty` and `state://file-changed` join it
+// — their payload types and Rust registrations already exist — when their
+// mock sources land, and `sync://progress` with its emitting backend task.
 //
 // The bus itself stays deliberately plain: a small typed publish/subscribe
 // bus with listener lifetimes (subscribe → unsubscribe), payload-typed per
@@ -77,8 +77,10 @@ export function createEventBus<Events extends Record<string, unknown>>(): EventB
  * `src/bindings.ts` (re-exported through `../contract` as the
  * `*_Serialize` wire halves — the shapes the Rust side emits).
  * `state://project-availability` (T-079/D-112) and `scan://progress`
- * (T-076/D-153); every later event task adds its key here together
- * with its Rust registration in `specta_builder().events(...)`.
+ * (T-076/D-153). The next members join with their mock sources, not with
+ * their Rust registration — `state://dirty` and `state://file-changed`
+ * are already generated and registered (`collect_events!` in `lib.rs`),
+ * `sync://progress` still waits for its emitting backend task.
  */
 export type IpcEventMap = {
   'state://project-availability': ProjectAvailabilityEventWire
