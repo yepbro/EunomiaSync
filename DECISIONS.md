@@ -6248,6 +6248,16 @@ one real folder, a symlink to it, ONE `path_key` through both
 `canonical_path_key` and the canonicalize+key halves, with the
 `assert_ne` proving only canonicalization collapses the alias.
 
+Addendum (2026-11-23, T-316): the add flow landed composing the
+primitives directly — `project_add_manual` calls `validate_ui_path` →
+`find_git_root` → `path_key` (src-tauri's commands.rs:2887/2892/2932;
+`canonicalize` runs inside the first two helpers, session_paths.rs:186
+and paths.rs:878, not at the command body); `canonical_path_key`'s
+callers today are the tests only; `project_relink` has not landed (named
+by spec §7.10/SYS-005, no such command registered). This covers the
+entry-points half only — the non-UTF-8 ruling known as "the D-086
+addendum" remains D-120's.
+
 ### D-087 — The repository scan walker: probe-based ALG-052 classification, Quit-token cancellation, and parameters-not-configuration — 2026-11-19
 
 Problem: T-061 implements the folder traversal of §9.6 (ALG-050..054,
