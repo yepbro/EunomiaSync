@@ -2,7 +2,7 @@
 name = "eunomia-load"
 version.workspace = true
 edition.workspace = true
-description = "Load benchmarks for EunomiaSync (spec 12.2, criterion): building one project up to 1000 items and recalculating dirty over data set L, on the generated data sets of D-109. A local tool: CI runs the crate's tests but never the benchmarks."
+description = "Load benchmarks for EunomiaSync (spec 12.2, criterion): building one project up to 1000 items, recalculating dirty over data set L, and saving an assignment toggle on set L, on the generated data sets of D-109. A local tool: CI runs the crate's tests but never the benchmarks."
 license.workspace = true
 publish = false
 
@@ -54,4 +54,8 @@ harness = false
 
 [[bench]]
 name = "dirty_recalc"
+harness = false
+
+[[bench]]
+name = "assignment_toggle"
 harness = false

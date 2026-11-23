@@ -16933,3 +16933,176 @@ tracked — two cards in the board's INBOX ("Follow-up T-280: …" — the
 T-278 class-set decision note; the dedicated timeout-code rule for
 the first surfacing consumer). The cards are the tracking unit; this
 note only records their existence.
+
+### D-157 — T-138: the assignment-toggle save benchmark — §12.2's third budget row measured through the store's own `reassign`, the alternation keeping every iteration a real write — 2026-11-22
+
+Problem: T-138 turns §15.1's Load row toward §12.2's third budget
+row — "Saving an assignment toggle (p95, set L): no more than 50 ms"
+(spec §12.2's table). Open points: what the store write behind a
+toggle even is (the `assignment_set` IPC command, T-097, is not
+landed — a grep of `src-tauri/src/commands.rs` finds no assignment
+surface); what one iteration honestly measures given `reassign`'s
+verified no-write no-op on the held variant; which pair to toggle on
+set L; whether this bench needs a mirror/tripwire like the read-side
+benches; and how the row's p95 framing maps onto criterion's
+mean/median report.
+
+Solution: `benches/eunomia-load` gains its third bench target,
+`assignment_toggle`, on the D-135/D-145 discipline: no new
+dependencies (criterion `=0.8.2` minimal already pinned), the
+harness measures the store's own code — no mirror to keep honest.
+
+- _The write measured._ The store half of §7.10's `assignment_set`
+  is `library::reassign` (`crates/eunomia-store/src/library.rs`):
+  read the current row by the composite key, DB-012's
+  active-sibling verification, the `UPDATE project_instructions`
+  variant flip with the `updated_at` restamp (one autocommit
+  transaction over the fixture's WAL/`synchronous=FULL` connection —
+  NFR-007's fsync is inside the measured cost), the stored row read
+  back. No STOP: the store HAS the toggle-shaped write (a real
+  UPDATE, not delete+insert); no store API was added or changed. The
+  command's `action_log` entry and event emit are the IPC layer's
+  (T-097) and are cut here — the same seam D-135 cut for the two
+  read rows; the store function itself writes no journal row, so
+  nothing else is being skipped.
+- _One iteration = ONE real save._ `reassign` naming the held
+  variant is a verified no-write no-op (pinned in the store's own
+  suite), so a fixed A→B target would measure the no-op from the
+  second iteration on. The harness `AssignmentToggle` alternates
+  A→B→A… — every measured iteration performs the real write path.
+  Two `LoadError` variants joined the harness boundary: `Library`
+  carrying the store's error, and `TogglePremise` carrying a
+  `PremiseHalf` discriminator (missing shape / no assignment /
+  variant mismatch) plus the held and promised ids — the refusal
+  names its cause without free text (rule 8).
+- _The pair._ The generator's own first: project ordinal 0, `k=0` →
+  instruction ordinal 0, initial variant ordinal 0 (D-109's closed
+  form at the origin — scale-independent, so the pins run on a
+  4-project fixture while the bench itself runs `data_sets::L`). The
+  flip target is the instruction's second variant, an active sibling
+  by construction. `AssignmentToggle::new` verifies the premise in
+  setup only — never inside a measured iteration.
+- _No mirror, no tripwire._ Unlike the two read-side benches (born
+  mirroring production compositions), this iteration IS the store's
+  own call — the D-145 direct-to-core posture applied to a store
+  write, so there is no mirrored constant or spelling to pin by
+  source-scan. What needs guarding is the bench's own premise, and
+  `tests/assignment_toggle_pins.rs` does: the premise (the first
+  pair holds the generator's variant ordinal 0; the sibling
+  differs), the typed refusal after an external move names both ids,
+  the alternation verified through `get_assignment` on the database
+  (never the toggle's return alone), and the no-op diagnostic
+  targeting the truly held variant (byte-identical row, no restamp —
+  a desynced target would be a real flip and differ in `variant_id`
+  and `updated_at`). All mutation-verified red: the four
+  original pins by this task's three mutations plus round-1's
+  independent six-mutation table, the two round-2 refusal pins by
+  round-2's two targeted mutations (each failing only its intended
+  arm's pin).
+- _Measurements (bench profile, this 8-core box, 14 GiB free,
+  fixture DB under tmpfs — D-135's condition; numbers re-run on the
+  delivered revision after the round-1 fixes)._ The bench sets its
+  own sample size (100) and measurement time (20 s per benchmark);
+  those programmatic settings override criterion's CLI flags, so the
+  "bounded" check run was the full measurement.
+  `assignment_toggle/save_set_L`: **64.290 µs** [63.691, 64.937],
+  100 samples (318,150 collected iterations); the per-iteration
+  distribution read off the recorded sample data: p50 63.1 µs,
+  **p95 68.8 µs**, max 84.5 µs — the worst observed iteration sits
+  ~590× below the 50 ms budget, so the row is inside it on this
+  machine at p95 too.
+  `assignment_toggle/noop_same_variant_set_L`: **9.623 µs**
+  [9.429, 9.828], p95 11.5 µs. The no-op path is the current-row
+  read plus the early return — the store checks DB-012 only _after_
+  that return — so the diagnostic is ~15 % of the save, and the
+  residual ~55 µs is DB-012's verify read + UPDATE + commit +
+  read-back (round-1 review's P3-2 relabelling). Honest boundaries:
+  criterion's console report is mean/median/CI, the p95/max above
+  come from the recorded sample data of this run, not the report —
+  and neither is the reference machine: the §15.5 rerun (D-135's
+  open gate, now covering three rows) stays the confirmation; the
+  tmpfs fixture makes the per-commit fsync cheap, so an SSD-backed
+  data directory shows a higher per-save floor; and the number is
+  the STORE half — the full save path (command transaction +
+  `action_log` insert + emit, T-097) lands above it by the journal
+  write's cost.
+
+Testing: the six assignment-toggle pins (four born with the bench,
+the two refusal-arm pins added by the round-1 review's P3-3) join
+the six mirror pins and the profile unit test in `cargo test
+--workspace` (1709 passed workspace-wide, zero failures); the bench
+itself ran green with the numbers above. ARCHITECTURE.md's workspace
+tree and the crate description now name the third bench (rule 11).
+
+Follow-ups: when T-097 lands `assignment_set`, its composition
+(store write + journal entry in one transaction) should be measured
+against this row or the bench extended to compose it; the §15.5
+reference-machine rerun now covers all three §12.2 budget rows this
+crate measures.
+
+Round-1 review addendum (D-157, same task; report
+`.opencode/reviews/t138-round1.md`, deepseek-v4.1-flash — verdict
+approve-with-fixes: 1×P2, 4×P3, all taken here; the reviewer
+independently re-ran fmt/clippy/the workspace suite (1707 then),
+re-ran the bench, read the recorded criterion artifacts (verifying
+the quoted figures, the sample counts and the programmatic-override
+claim against criterion 0.8.2's own sources), and mutation-tested
+all four original pins in a scratch copy — six mutations, each red
+in the claimed pins, including the generator's variant-ordinal
+shift, which is the premise pin's stated purpose):
+
+- P2-1 (taken): the crate's module docs still said "two criterion
+  benchmarks", "the two production passes" and "three seams" — the
+  toggle is a third target a store write no production pass mirrors,
+  and its journal/emit cut is a fourth seam. The header, the
+  "What is measured" section and the seam list now say three/two+one
+  write/four.
+- P3-2 (taken): the no-op diagnostic was labelled "the read/verify
+  half" — but `reassign` returns _before_ the DB-012 check, so the
+  no-op measures the current-row read alone, and the residual is
+  verify + UPDATE + commit + read-back. Corrected in the harness
+  docs, `noop_save`'s docs, the bench file and this entry.
+- P3-3 (taken): the shape-refusal arm of `TogglePremise` reported
+  two empty strings while a comment claimed the refusal "names which
+  shape" — and no pin exercised it. `TogglePremise` now carries a
+  `PremiseHalf` discriminator (missing shape / no assignment /
+  variant mismatch) with `Display`; two pins cover the previously
+  dead arms (a `variants_per_instruction: 1` profile →
+  `MissingShape`; `unassign` of the pair → `NoAssignment` with the
+  promised id still named).
+- P3-4 (taken): the entry's exact figures came from a revision one
+  edit older than the delivered file. The bench was re-run on the
+  final tree and the entry now carries those numbers (64.290 µs /
+  9.623 µs), plus the per-iteration p95/max the reviewer suggested
+  adding from the recorded sample data (68.8 / 84.5 µs), clearly
+  marked as this box.
+- P3-5 (taken): "the state never desyncs from the row" held only by
+  virtue of `reassign` raising every error before its UPDATE — an
+  unstated dependency that T-097 could break. The `holds_a` field
+  doc now states the invariant and the revisit rule (derive the held
+  variant from the returned row if the measured call ever gains a
+  fallible post-write step).
+
+Round-2 review addendum (D-157, same task; report
+`.opencode/reviews/t138-round2.md`, hy4-flash-free — verdict
+APPROVE, no findings at any level): the round re-verified with fresh
+eyes that all five round-1 fixes are real (the docs' old literals
+gone, the no-op relabelling present in all four places, the
+discriminator wired, the criterion artifacts regenerated after the
+last source edit and reproducing the entry's figures exactly, the
+desync invariant stated), mutation-tested the two new refusal pins
+(each red on its targeted mutation, only its own pin failing),
+re-ran the whole gate chain green (fmt, clippy, the workspace suite
+at 1709, prettier), and recomputed the per-iteration percentiles
+from the recorded sample data — matching the entry. Two non-finding
+notes were taken here: the iteration count now quotes the collected
+318,150 (criterion's console "~323k" was a pre-collection
+estimate), and the mutation sentence now attributes which round
+verified which pins. The review phase is complete after this round
+(no third round).
+
+Orchestrator addendum (merge, 2026-11-22): the follow-ups above are
+tracked — two cards in the board's INBOX ("Follow-up T-138: …" — the
+T-097 composition measurement note; the §15.5 reference rerun now
+covering three rows). The cards are the tracking unit; this note only
+records their existence.

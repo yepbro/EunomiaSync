@@ -75,8 +75,8 @@ crates/
     migrations/                #   Embedded SQL migration files
 benches/
   eunomia-load/           # §12.2 load benchmarks (criterion; local tool — CI runs its tests, never the benches)
-    src/lib.rs            #   Fixtures (TempRepos + data_sets) + the reads + the parallel bench substrate
-    benches/              #   project_build, dirty_recalc (the two §12.2 budget rows)
+    src/lib.rs            #   Fixtures (TempRepos + data_sets) + the reads + the parallel bench substrate + the assignment toggle
+    benches/              #   project_build, dirty_recalc, assignment_toggle (the three §12.2 budget rows)
 src-tauri/
   src/availability.rs      # Availability service: re-probes + state://project-availability (working)
   src/commands.rs          # IPC commands, the §7.10 registered set (working)
