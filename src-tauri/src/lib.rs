@@ -175,8 +175,9 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // `dialog_pick_folder` (T-073), the Projects module's
         // `project_add_manual` (T-074), the Projects module's
         // `exclusions_list`/`exclusion_remove` (T-078), the Projects
-        // module's `projects_reorder` (T-080) and the Projects
-        // module's `scan_start`/`scan_cancel` (T-076). Every later
+        // module's `projects_reorder` (T-080), the Projects
+        // module's `scan_start`/`scan_cancel` (T-076) and the Sync
+        // module's `sync_run` (T-118, D-138). Every later
         // command task (library, …) lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
         // commands that take an `AppHandle`), so the registration pins
