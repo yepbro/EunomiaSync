@@ -2339,6 +2339,15 @@ fails the no-op test (the rerun test stays green through the
 hard-link no-clobber — the double enforcement working as designed);
 widening the name pattern fails the pattern unit test.
 
+Addendum (2026-11-23, T-271/D-180): the "retention stays uncapped per
+D-038" parenthetical above is no longer true (it was true when this
+entry was written — D-046 predates D-129): pre-migration copies retire
+by D-129's 7-day age rule (newest of the kind protected) at every
+successful `Db::open`, as D-038's own T-253 addendum records; D-180 is
+the discharge record of the follow-up that re-raised it. The cap half
+of the sentence stands unchanged: the daily count rule still neither
+counts nor deletes `pre-migration-*`.
+
 ### D-048 — SEC-007 modes: both backups dirs 0700, DB file and every copy 0600; the layer that creates the artifact enforces its mode, re-asserted on every run — 2026-11-18
 
 Problem: spec §13 SEC-007 ("Rights: backups folder `0700`, DB file
@@ -19711,6 +19720,159 @@ title — no counter correction (`set_counter` stays forbidden).
 Checks: the 13 affected cards were re-titled T-288…T-300 in the
 same session; all later numbering (T-301…T-321, D-161…D-178) went
 through `.result` with zero recurrences.
+
+### D-180 — T-271: D-142's "pre-migration copies' uncapped accumulation" follow-up closed by owner ruling as already discharged — D-129/T-253's age rule governed `pre-migration-*` before the line was written (D-038's own addendum said so); D-046's "retention stays uncapped" parenthetical annotated beside it — 2026-11-23
+
+Problem: the card (source: D-142's follow-ups paragraph and D-038;
+observation T-256) read: pre-migration copies accumulate without
+limit, the first real v1→v2 upgrade wave will make it observable in
+production, the cause is unbounded growth of `db-backups/` — the
+options were a retention owner "by analogy with D-129 for protective
+copies (an age window, the newest protected)" or consciously leaving
+it; the owner's decision. The owner ruled on 2026-11-23: close the
+card as already resolved — the premise is stale.
+
+Solution: closed, no code change. The card's "by analogy with D-129"
+framing was itself the misconception: D-129 is not an analogue of a
+missing retention, it IS the retention of these copies — the
+`pre-migration-*` scheme (D-038) is one of the two protective kinds
+that decision put under the age rule, together with `pre-recovery-*`
+(D-049). Verified in this tree before writing (Rule 2):
+
+- _What covers the copies._ `cleanup_db_backups` dispatches on
+  `PRE_MIGRATION_PREFIX` = `"pre-migration-v"` (`retention.rs:191`,
+  the dispatch at :384-385) into `ProtectiveCopyKind::PreMigration`;
+  the window is `PROTECTIVE_COPY_WINDOW`, 7 days (`retention.rs:206`);
+  a copy is deleted iff its name stamp is strictly older than
+  `now − 7d` (`retention.rs:407`) and it is not the newest of its
+  kind — max stamp, the variant breaking ties (`retention.rs:415-421`,
+  the skip at :426). The pass is best-effort: an unreadable directory
+  or an unremovable file logs a `warn` through the facade and the
+  pass moves on (`retention.rs:357-363`, :449-451).
+- _Trigger (corrected during this task)._ The pass has a single
+  trigger — the end of every successful `Db::open` after the
+  migration run (`db.rs:367`); the LOG-006 daily tick deliberately
+  does NOT run it (D-129, `DECISIONS.md:11147`, `:11166-11171`). The
+  daily loop (`cleanup_loop`, `retention.rs:119-148`) calls only
+  `run_once`, which prunes the journal and the sync runs
+  (`retention.rs:131`, :172) — `db.rs:367` is the pass's only
+  production call site. One trigger suffices for the card's premise:
+  a pre-migration copy is created only inside the migration run
+  (`vacuum_into_backup`, `storage.rs:739`, called from `migrate` at
+  :619, which `run_migrations` calls at :554), and `Db::open` calls
+  that run at `db.rs:352`, immediately before the pass — so every
+  copy a successful open writes is followed by a pass in that same
+  open. The rest wait for the next successful open, on D-129's
+  recorded boundaries: a copy whose migration run then fails (the
+  copy is written before each step, `storage.rs:617-621`, and the
+  failed step propagates out of the open, `db.rs:352-358` — the
+  pass at :367 is never reached; `DECISIONS.md:11173-11177`) or a
+  copy crossing the 7-day line mid-run ("retired at the next open,
+  not at the crossing moment", `DECISIONS.md:11172-11173`).
+- _The follow-up line was stale when written._ The primary proof is
+  D-038's own dated addendum (2026-11-21, T-253/D-129,
+  `DECISIONS.md:1500-1506`): "the app-layer retention this entry
+  deferred has landed — `retention.rs` retires pre-migration copies
+  older than 7 days at every successful `Db::open`, newest of the
+  kind protected". D-142's line cites "D-038's known open"
+  (`DECISIONS.md:13665-13667`) — the open at `:1457-1461`
+  ("Retention: pre-migration copies accumulate without a cap") had
+  been closed by that addendum first. Secondary corroboration, the
+  commit order: `90dd3ec` (2026-11-21T12:29:52-08:00, T-253)
+  introduces both `PROTECTIVE_COPY_WINDOW` and the `### D-129`
+  heading; `c408cbc` (2026-11-22T02:50:30-08:00, T-256) introduces
+  `### D-142` — roughly fourteen hours apart. The line was written
+  without checking `retention.rs` or D-038's addendum.
+- _Pinned._ `a_successful_open_runs_the_protective_copy_retention_pass`
+  (`db_tests.rs:2813`) seeds a 12-day-old `pre-migration-v1-*` and a
+  10-day-old `pre-migration-v3-*` copy (`:2826-2837`), opens, and
+  pins the verdict (`:2844-2855`): the aged non-newest copy goes, the
+  newest of the kind survives past the window (versions do not split
+  the kind), the daily scheme is untouched.
+- _Residual — by design, accepted with the ruling._ Exactly the
+  newest `pre-migration-*` copy of the kind is never deleted
+  (`retention.rs:426`) — among the names the creating scheme writes.
+  It survives indefinitely, so the permanent footprint of
+  scheme-written copies is bounded at one database-sized file per
+  install (a `VACUUM INTO` copy of the database), plus — for at most
+  7 days — any younger copies. A name the pass cannot date
+  (hand-renamed, foreign) is left alone as well, by D-129's
+  conservative half (`retention.rs:274-281`). This is D-129's
+  protected-newest rule (the card's "новейшая защищена"), and it
+  operationalizes D-038's "never delete the copy UPD-004 points at":
+  the pointer is always the newest pre-migration copy
+  (`DECISIONS.md:1503-1505`). The ERR-001 daily-copy count rule
+  (D-046) still never touches these copies: `prune_daily_backups`
+  counts and deletes `daily-*` names only (`storage.rs:1038-1059`,
+  its `is_daily_copy_name` filter at :1044), so the assertion
+  message "the retention never deletes pre-migration copies"
+  (`db_tests.rs:2091`,
+  inside `the_eighth_daily_copy_through_the_db_seam_keeps_the_last_seven`,
+  :2055) is a claim about the count pass, not about the T-253 pass.
+- _Ledger footprint._ D-046's "pre-migration retention stays uncapped
+  per D-038" parenthetical (`DECISIONS.md:2257-2259`) is no longer
+  true either, but for a different reason than D-142's line: it was
+  true when D-046 was written (2026-11-18) and was superseded when
+  D-129 landed (2026-11-21), whereas D-142's line was false from the
+  day it was written. A dated addendum beside it points here (the
+  D-173/T-320 posture — no separate D-number for it). D-142's line is
+  left as written (a historical record stays as written); this entry
+  is its discharge record.
+- _Stale claims remaining in code, out of this card's md-only scope —
+  tracked as a board follow-up._ `storage.rs:896-897` ("the
+  pre-migration copies are outside it and accumulate uncapped") and
+  the `db_tests.rs:2091` assertion message above. Neither is edited
+  here: both are `.rs` files, and touching them would turn this into
+  a code task.
+
+Checks: md-only diff (`DECISIONS.md` — this entry and the D-046
+addendum); no code, no test suites run — the md-only regime this
+card was dispatched under (the brief dated its owner ruling
+2026-11-22; this file records no such date, so none is asserted
+here). `pnpm run format:check` green. One review round per the
+md-only exception (its addendum is the last paragraph of this entry).
+The task brief's first statement of the trigger — "`Db::open` plus a
+daily loop (`spawn_daily_cleanup`)", attributed to D-129 — did not
+match the tree, and the task stopped on it before writing anything;
+the corrected single-trigger fact is the orchestrator's ruling after
+that report.
+
+Honest boundary: the retention is stated from the source, the tests
+and the ledger, not from a production observation — the card's "first
+real upgrade wave" has not happened, and nothing here observes a
+production `db-backups/` directory.
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t271-round1.md`, deepseek-v4.1-flash): request-changes
+— 0×P0, 0×P1, 4×P2, 5×P3; all nine taken in the amend, none refused,
+each re-verified in this session before acting. P2-1: the three D-129
+cites carried this file's pre-addendum numbering — the D-046 addendum
+of this same commit sits above D-129, so the cited text had moved
+(and the review prompt's own premise, that every cite lay above the
+insertion point, was false with it); the cites now resolve in the
+committed file, where that addendum inserts nine lines above them
+(eight at the reviewed commit). P2-2: the D-142 cite was a hundred
+lines low — a transcription slip (13656 typed as 13556) already
+present in the executor's first report and carried into the entry;
+corrected. P2-3: "every copy is followed by a pass in the same open"
+was false for a migration run that fails after writing its copy —
+the step's error propagates out of `Db::open` (`db.rs:352-358`) and
+the pass is never reached; now "every copy a successful open writes",
+the rest on D-129's two recorded boundaries. P2-4: the heading quoted
+D-142 with words D-142 does not contain; now its verbatim
+"pre-migration copies' uncapped accumulation". P3-1: "exactly the
+newest … is never deleted" read as the whole of what survives — a
+name the pass cannot date is left alone too (`retention.rs:274-281`);
+stated. P3-2: "stale the same way its source was" read as
+stale-when-written, which is false for D-046 (true when written,
+superseded by D-129); reworded here and in the D-046 addendum. P3-3:
+the dangling "(below)" now names its target. P3-4: the Checks
+paragraph dated the md-only regime to an owner ruling of 2026-11-22,
+a date nothing in this file records (the ledger dates the batch
+regime's owner instruction 2026-11-23); the entry now attributes the
+regime to the dispatching brief and asserts no date. P3-5: the
+count-rule cites pointed at doc comments; now the pass itself
+(`storage.rs:1038-1059`).
 
 ### D-181 — CI 45235995817: the macOS watch batteries' startup race — FSEvents can deliver the pre-spawn fixture writes after the stream starts; the batteries now converge the startup before the act — 2026-11-23
 
