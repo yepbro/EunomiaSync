@@ -10913,6 +10913,76 @@ all findings adjudicated and taken:
 - P3-4 taken by making the "(changed)" suffix visible cell text (a
   non-color cue), not only an accessible-name suffix.
 
+Addendum (2026-11-23, T-327): A1's "`project_instructions` now has a
+nullable `variant_id` plus `custom_text` with an exactly-one-target
+CHECK, and `instruction_id` a direct FK to `library_items`" is true of
+the spec's §6.2 DDL and was never true of the shipped database — the
+2026-11-21 ruling was folded into `docs/spec.md` 1.2, into no
+migration, store type or command (found by the 2026-11-23 project
+review, its P3-4 — not this entry's own round-1 P3-4; every line below
+verified in the tree before writing, Rule 2):
+
+- _Holds — the spec side._ `docs/spec.md:285-295` carries exactly the
+  quoted shape: the direct FK
+  `instruction_id TEXT NOT NULL REFERENCES library_items(id) ON DELETE RESTRICT`
+  (:287), the nullable `variant_id TEXT` (:288),
+  `custom_text TEXT CHECK (…)` (:289), the composite FK (:292-293) and
+  the exactly-one-target CHECK (:294-295).
+  A1's other claims are spec text too and check out: the §6.9
+  custom-text row (`docs/spec.md:426`), the MAIN-007/LIB-018 editor
+  row (`docs/spec.md:476`), `assignment_set_custom` (`docs/spec.md:579`,
+  `:587`), the §11.2 custom-text cell row and "+" affordance
+  (`docs/spec.md:794`, `:799`), the build line (`docs/spec.md:636`),
+  DB-012 and DB-016 (`docs/spec.md:354`, `:358`).
+- _Stale — read as a statement about the database._ The shipped table
+  (`crates/eunomia-store/migrations/0001_init.sql:125-134`) has five
+  columns: `instruction_id TEXT NOT NULL` with no `REFERENCES` clause
+  (:127), so no direct FK; `variant_id TEXT NOT NULL` (:128); and the
+  composite FK `(instruction_id, variant_id)` as its only link to
+  `instruction_variants` (:132-133). No `custom_text` column exists
+  in any migration or store type: the identifier occurs in this tree
+  only in the spec DDL (`docs/spec.md:289`, `:294`, `:295`), in A1's
+  sentence above and in this addendum, and no commit under `crates/`,
+  `src-tauri/` or `src/` ever carried it (`git log -S`). The migrations
+  directory (`crates/eunomia-store/migrations/`) holds exactly two
+  files, and `0002_backup_records_pair_index.sql`, the later one, is a
+  single `CREATE INDEX` on `backup_records` (:27-28) — "No table data,
+  constraint or v1 object changes" (:21). The store type is
+  non-optional end to end: `Assignment.variant_id: String`
+  (`crates/eunomia-store/src/library.rs:555`),
+  `NewAssignment.variant_id: &'a str` (:542), inserted as a plain value
+  (:1985-1994), mirrored as `VariantId` in
+  `crates/eunomia-core/src/assignment.rs:42`. `0001_init.sql` was last
+  touched 2026-11-18 (bb11921), before the ruling's commit (c78253c,
+  2026-11-21).
+
+Landing the target schema is future work, not a present fact: §16's M3
+row lists per-project custom text (`docs/spec.md:994`), and DB-004
+admits it only as a new migration — "go forward only"
+(`docs/spec.md:220`), in `0002`'s reading "never edited after
+shipping" (`0002_backup_records_pair_index.sql:21-22`). Per this
+card's agreed resolution, that migration is its own future task and
+nothing schema-side is landed here. Follow-up for the board, not done
+here: §6.2's preamble still presents the DDL as "the conceptually
+approved version 1 schema" (`docs/spec.md:226`), and the section
+carries no note that the `project_instructions` shape awaits its
+migration.
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t327-round1-report.md`, deepseek-v4.1-flash):
+APPROVE — no P0/P1, one P2, one P3; both taken in the amend, each
+re-verified in this session before acting. P2-1: "No `custom_text`
+column exists anywhere" was false twice over as written — the spec's
+DDL declares that column, and the identifier census's "only … and in
+A1 itself" omitted the addendum's own mentions (three at the reviewed
+commit); now "in any migration or store type", the census closed (the
+spec DDL, A1's sentence, this addendum). P3-1: `docs/spec.md:801` was
+cited among A1's §11.2 claims — it is the changed-cell paragraph,
+A2's rule; A1's lines there are the custom-text cell row (:794) and
+the "+" affordance (:799), and the cite now names :799. Checks:
+md-only diff — this addendum; no test suites run, the md-only regime;
+`pnpm run format:check` green.
+
 ### D-126 — NUL rejected in every user-facing name field: the D-076 validators-wide promise, kept positionally — 2026-11-21
 
 Problem: D-076 left an open item — the three §6.9 library name rows
