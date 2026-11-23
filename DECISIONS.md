@@ -19687,3 +19687,27 @@ enumeration fix. The reviewer's static inertness table matches this
 entry's; no test was touched (their audit agrees); the round ran
 before this addendum, so the cited line numbers above are the
 post-fix tree's.
+
+### D-178 — the task-id MCP returns an object, not a number — sessions must read `.result` — 2026-11-23
+
+Problem: during the 2026-11-23 flash batch (T-288…T-321) the
+orchestrator's first numbering pass called `next_id` and string-
+interpolated the raw return value into 13 card titles, producing
+`T-[object Object]` on the board (the numbers themselves were
+consumed correctly and deterministically; no collision resulted).
+Executor subagents calling the same tool for `d`-numbers would hit
+the identical trap and could write `D-[object Object]` into this
+ledger.
+
+Solution: the tool returns `{"result": N}` — every caller (main
+session and executors) reads `.result` at the moment of writing, as
+every brief in the batch already instructed after the incident. This
+entry makes the contract durable for future sessions instead of
+relying on brief folklore. Recovery from a broken interpolation:
+`peek` the counter to reconstruct the consumed range (the issued
+numbers are consecutive), verify no board/repo collision, then re-
+title — no counter correction (`set_counter` stays forbidden).
+
+Checks: the 13 affected cards were re-titled T-288…T-300 in the
+same session; all later numbering (T-301…T-321, D-161…D-178) went
+through `.result` with zero recurrences.
