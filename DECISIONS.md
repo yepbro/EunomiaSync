@@ -14090,6 +14090,12 @@ tracked — one card in the board INBOX ("Follow-up T-275: the stale
 deny(print_stderr) reference in commands.rs:4691-4694"). The card is
 the tracking unit; this note only records its existence.
 
+Addendum (2026-11-23, T-277/D-169): the smoke steps above now live in
+`docs/manual-smoke.md` — the "no smoke-checklist file exists in the
+repo" clause and the ARCHITECTURE.md pointer are superseded; this
+entry's rotation/name/degradation claims stand as the T-255 state they
+described.
+
 ### D-144 — T-257: the watcher refresh wired into `project_add_manual` and the `projects_list` column carrier — D-137's follow-ups 2 and 5 closed — 2026-11-22
 
 Problem: D-137 recorded two follow-ups this card closes. (2) the
@@ -18564,3 +18570,99 @@ four OS legs" as the invariant evidence — the stale count is dropped,
 the substance quoted; and the Problem paragraph no longer attributes
 one wording to both spec sites (D-26 said "22.04+", NFR-001…003 said
 "22.04 and newer"). None refused.
+
+### D-169 — T-277: the manual smoke checklist created (docs/manual-smoke.md) — D-143's three Windows GUI log items made first-person-executable; the in-repo home for what CI cannot prove — 2026-11-23
+
+Problem: D-143's honest boundaries closed T-255 with three smoke items
+that automation cannot prove, carried only in its prose and
+ARCHITECTURE.md's Logging section — "no smoke-checklist file exists in
+the repo; this entry and ARCHITECTURE.md's Logging section carry the
+steps". Spec §15.5 conditions the release on manual checklists whose
+in-repo home did not exist either. The card asked for the file: a
+first-person-executable Windows GUI checklist with the three items as
+its first entries.
+
+Solution:
+
+- _New file `docs/manual-smoke.md`._ Name chosen from the vocabulary
+  the sources already use (D-143 "manual smoke list",
+  ARCHITECTURE.md "the manual smoke run") — "smoke" and not "checklist"
+  in the file name because the release checklist of spec §15.5 is a
+  different, larger artifact the spec owns; this file is the home for
+  individual manual proofs. The header states the relation explicitly:
+  a release run walks both, the S1–S7/S9/S10 scenario runs stay
+  defined in the spec and are not reproduced here (out of scope per
+  the card). Room for future items is structural — every item carries
+  its source and the same Prepare/Do/Pass-when shape.
+- _Scope: exactly the three D-143 items, nothing invented._ Each pass
+  criterion restates a verified source (Rule 2): 10 MiB = 10,485,760
+  bytes and five files (`MAX_LOG_FILE_BYTES`/`MAX_LOG_FILES`,
+  `src-tauri/src/logging.rs:215`/:206); the name scheme (the day's
+  first file keeps the exact §5.5 name, same-day parts `.2.log`/`.3.log`
+  decimal from 2, no leading zeros; UTC stamps); the startup
+  degradation (one `error` event, "file log unavailable; logging to
+  stderr", `logging.rs:794`); the mid-run blocked rotation (one warn
+  per episode, "the file log could not rotate; writing continues into
+  the current file" with `step=open|prune`, `logging.rs:2042-2050`;
+  lines keep landing in the current file; a healed disk heals the
+  log); the locked-file prune resilience (the `step=prune` warn, the
+  rotation still happens, convergence after the hold is released);
+  `log_level` values and the default-config creation
+  (`src-tauri/src/config.rs`, `load_or_create`). D-143's
+  construction-prune-failure-is-silent boundary is encoded as
+  guidance — item 3 locks the file mid-run, because only the mid-run
+  prune can show its verdict.
+- _Item 2 deliberately split into 2a/2b._ D-143's item (2) is the
+  startup half ("a read-only `logs/` starts the app in the stderr
+  degradation without aborting"); the card's parenthetical ("строки
+  идут в старый файл, warn через фасад") is the mid-run rotation half.
+  Neither source states both, so both variants are written down with
+  their own sources rather than blending one into the other.
+- _Windows mechanics made executable._ The read-only case is driven by
+  an icacls deny ACE (`/deny "user:(WD,AD)"`), not the DOS read-only
+  attribute — the attribute does not stop file creation, an ACL deny
+  does; the locked file with an `[IO.File]::Open` handle opened with
+  share mode `None` (an exclusive hold: deletions fail while it
+  lives); the stderr degradation is made observable by launching from
+  a console with `2>` redirection (a GUI-subsystem executable
+  inherits redirected handles), with the honest note that without it
+  the missing log file is the only observable half.
+
+Checks: md-only diff (`docs/manual-smoke.md`, this file); prettier
+green; batch regime (owner instruction 2026-11-23) — tests not run,
+the orchestrator runs the suite centrally after the flash batch; one
+review round.
+
+Honest boundaries: written without a Windows machine — the platform
+mechanics above (icacls deny syntax, share-mode-None locking,
+stderr-handle inheritance) are standard-platform behavior cited from
+the sources' own analysis (D-099's manufactured sharing violations,
+D-032's Windows-GUI/stderr work), not verified on the target; the
+first real pass on the owner's machine is the proof. The spec §15.5
+cross-reference (pointing "the release checklist" at this file) would
+be a `docs/spec.md` edit — owned by the parallel T-299 in this batch —
+so it is reported as a follow-up card, not done here.
+
+Round-1 review (deepseek-v4.1-flash, report
+`.opencode/reviews/t277-round1.md`, VERDICT: request-changes —
+2 × P1, 3 × P2, 3 × P3, all taken in the amend): P1-1 — item 2a's
+deny blocks creation only, so an existing day file would reopen in
+place and the stderr degradation would never fire; Prepare now deletes
+the current day's parts first (and notes that an outright launch abort
+would mean the deny reached the data-layout step, a different
+failure). P1-2 — item 3's "`.2.log` appears" ignored per-day part
+continuation; the criterion now reads "the next part
+`eunomiasync.<date>.<N+1>.log`". P2-1 — the "no file exceeds the cap"
+criterion carries the documented lone-line exception now. P2-2 —
+item 3's Prepare states the app must already be running when the seeds
+and the hold are made (the startup prune is the silent one). P2-3 —
+accepted via the repo's addendum habit: a one-line addendum on D-143
+supersedes its "no smoke-checklist file exists" clause, and
+ARCHITECTURE.md's Logging boundary sentence now points at
+`docs/manual-smoke.md` (both edits Rule 11 — the new file made the old
+claims false in the same change). P3-1 — the five-file criterion now
+counts canonical names, not a wider glob. P3-2 — item 3's warn may
+land on either side of the file switch (async queue); the criterion
+says to grep both. P3-3 — the header no longer attributes all three
+items to the no-stderr exposure; the real clock and the worker-thread
+path are named. None refused.

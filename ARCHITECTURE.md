@@ -840,7 +840,8 @@ degradation policy are (driven through a real subscriber over
 the real files back); the rollover itself, the production path of the
 rotation-degradation warn (it fires on the worker thread, where the
 tests' thread-local subscriber does not exist) and the file
-location on each OS rest on the manual smoke run — a Windows GUI
+location on each OS rest on the manual smoke run — the steps live in
+`docs/manual-smoke.md`. A Windows GUI
 smoke should confirm: a normal session logs into
 `logs/eunomiasync.<date>.log` and rolls into `.2.log` parts past 10 MB
 with at most five files total; a read-only `logs/` directory starts
