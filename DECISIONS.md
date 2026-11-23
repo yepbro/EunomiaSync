@@ -18211,3 +18211,55 @@ append, the md-only scope and the no-test-touch. Findings fixed —
   today's defect.
 - P3-5 (taken): "the Logging row" → "the Logging section"
   (ARCHITECTURE.md has sections, not rows).
+
+### D-164 — T-291: the paths.rs module header states the landed
+
+responsibility — 2026-11-23
+
+Problem: D-150's follow-up bullet — paths.rs:3's `//!` header still said
+"Planned responsibility" over an implemented module. Reading the header
+found five planning-era sentences, not one, and two of them had become
+flat-out false (Rule 11), not just planning-framed: "Still planned: the
+SEC-003 allowlist path checks" (they landed in the app layer —
+src-tauri/src/session_paths.rs "owns both halves" of SEC-003, built on
+eunomia_fs::paths::canonicalize and path_key), and the recorded follow-up
+"docs/spec.md's skip-reason vocabulary … does not yet list the new
+reason" (it does now — docs/spec.md:446 PRJ-002 row lists "non-UTF-8
+path", :714 ALG-055 adds the no-OS-code fact).
+
+What changed (module `//!` doc only, no code): "Planned responsibility"
+→ "Responsibility"; "Implemented so far:" → "The module implements:"
+(the itemized surface verified present first — check_project_available,
+canonicalize/canonical_path_key, path_key/PathKeyRule, find_git_root,
+resolve_target_path); the "Still planned" tail dropped in favor of the
+Responsibility paragraph naming the landed split — the SEC-003 check
+itself and both allowlists live in the app and database layers
+(`session_paths` in src-tauri, the store's `find_by_path_key`); this
+module supplies the primitives, not the check or the allowlist policy;
+the spec-vocabulary sentence rewritten to the landed truth; the Testing
+plan's "SEC-003 checks keep their planned coverage" reworded — the
+checks and their coverage are the app layer's, not this module's test
+surface.
+
+Judgment calls (rules 2/11): the card suggested one line, but the drift
+was a header block, and every replacement was verified against the code
+before writing (session_paths.rs:1-3, 27-37; docs/spec.md:446, 714).
+Review round 1 (batch regime, one round:
+`.opencode/reviews/t291-round1.md`, deepseek-v4.1-flash —
+request-changes; 1×P2, 2×P3, all taken in the amend) exposed that
+fixing the tail alone left the paragraph's older "provide the path
+checks used when validating paths that arrive from the UI" claim
+contradicting the new sentence — P2-1 taken: the paragraph now names
+this module's share as the primitives only (spec 5.2's eunomia-fs row
+names no UI-path checks; ARCHITECTURE.md:94 puts the UI path check in
+session_paths.rs). P3-1 taken: the elliptical "their coverage with
+them" clause got a verb. P3-2 taken: this entry, discharging D-150's
+bullet. Tests not run (batch regime — the orchestrator runs the suite
+centrally); the pre-commit hook (fmt/eslint/prettier/vue-tsc) green.
+
+Follow-up for the board (main session creates the card): item-level
+`///` drift at paths.rs:441-444 — canonical_path_key still predicts
+"the composition the add-project flow will call (the flows land in a
+later task)"; the flows landed without it (commands.rs composes
+validate_ui_path → find_git_root → path_key; the composition's only
+callers are tests).

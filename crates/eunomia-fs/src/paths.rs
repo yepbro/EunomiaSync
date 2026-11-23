@@ -1,24 +1,24 @@
 //! Path normalization and validation.
 //!
-//! Planned responsibility (docs/spec.md 5.2): canonicalize and normalize
+//! Responsibility (docs/spec.md 5.2): canonicalize and normalize
 //! repository paths so that they compare equal across platforms and app
 //! restarts — `dunce` keeps canonical Windows paths free of verbatim
-//! (`\\?\`) prefixes — and provide the path checks used when validating
-//! paths that arrive from the UI (spec 5.6, SEC-003: every UI-supplied
-//! path is checked in Rust). The registered-project and session-picked
-//! allowlists that feed those checks live in the app and database layers;
-//! this module supplies the normalization primitives and checks, not the
-//! allowlist policy.
+//! (`\\?\`) prefixes — and supply the canonicalization and path-key
+//! primitives the UI-path checks rest on (spec 5.6, SEC-003: every
+//! UI-supplied path is checked in Rust). The SEC-003 check itself, and
+//! the registered-project and session-picked allowlists that feed it,
+//! live in the app and database layers (`session_paths` in src-tauri,
+//! the store's `find_by_path_key`); this module supplies the
+//! primitives, not the check or the allowlist policy.
 //!
-//! Implemented so far: the project-folder availability check
+//! The module implements: the project-folder availability check
 //! ([`check_project_available`], spec 6.9's project-path row, 9.4
 //! preflight step 1), the project-path canonicalization with the
 //! `path_key` identity key (DB-030, DB-031, D-07), the Git
 //! repository root lookup ([`find_git_root`], PRJ-003's walk-up from a
 //! chosen subfolder, D-08), and the sync target-path resolution with
 //! its symlink checks ([`resolve_target_path`], 9.4 preflight step 2,
-//! 9.5 step 1, T-F6). Still planned: the SEC-003 allowlist path
-//! checks.
+//! 9.5 step 1, T-F6).
 //!
 //! # Canonicalization and the path_key (DB-030, DB-031, D-07)
 //!
@@ -84,12 +84,10 @@
 //! stored in SQLite and compared across app versions, so changing
 //! the fold flavor, the normalization, or the separator shape later
 //! would silently split or merge project identities (the
-//! DECISIONS.md D-082 posture for snapshot hashes). One follow-up
-//! obligation is recorded rather than done here: docs/spec.md's
-//! skip-reason vocabulary (PRJ-002's parenthetical, ALG-051/052) does
-//! not yet list the new reason — spec edits ship as their own
-//! `docs:` commits after the ruling (the D-086 precedent), to land
-//! before the `scan_start` UI consumes the vocabulary.
+//! DECISIONS.md D-082 posture for snapshot hashes). The spec's
+//! skip-reason vocabulary now lists the reason: PRJ-002's
+//! skipped-reason set and ALG-055 name the non-UTF-8 skip — a fact
+//! about the text, no OS code.
 //!
 //! # Testing plan
 //!
@@ -122,8 +120,9 @@
 //! independently of the function under test), and the refusal
 //! classifications — a denied probe under a folder without the search
 //! bit (loud root skip), a missing input, and a plain-file input. The
-//! SEC-003 checks keep their planned coverage: rejection of
-//! paths outside the registered or session-allowed set. The
+//! SEC-003 allowlist checks are the app layer's (`session_paths`), and
+//! their coverage is the app layer's too — not this module's test
+//! surface. The
 //! target-path resolution is tested through the public function
 //! against real fixtures: the absent-target creation case and the
 //! regular-file pass-through, the `CLAUDE.md` → `AGENTS.md` acceptance
