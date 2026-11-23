@@ -3240,12 +3240,12 @@ fn stored_projects(database: &crate::db::Db) -> Vec<eunomia_store::projects::Pro
 }
 
 /// Archives a project through the repository (§6.4) — the state the
-/// DB-015 restore offer answers from.
-fn archive_project(database: &crate::db::Db, id: String) {
+/// DB-015 restore offer answers from. Returns the stored row so a
+/// test can assert the state transition itself.
+fn archive_project(database: &crate::db::Db, id: String) -> eunomia_store::projects::Project {
     let database = database.clone();
     tauri::async_runtime::block_on(database.run(move |tx| {
         eunomia_store::projects::archive(tx, &id)
-            .map(|_| ())
             .map_err(crate::commands::projects_store_to_app_error)
     }))
     .expect("archiving through the repository must work")
@@ -6603,48 +6603,10 @@ fn an_external_edit_marks_the_project_externally_modified_without_writing_anythi
         cleared.iter().all(|change| *change == expected_clearing),
         "any diff the seam does return is the clearing itself: {cleared:?}"
     );
-    // Drain the wire for the clearing (whoever produced it) …
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut clearings: Vec<crate::file_watch::ProjectFileChange> = Vec::new();
-    while clearings.is_empty() {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        match events.recv_timeout(remaining) {
-            Ok(event) => clearings.extend(
-                event
-                    .changes
-                    .into_iter()
-                    .filter(|change| !change.external_changed && !change.file_deleted),
-            ),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("the event listener died mid-test")
-            }
-        }
-    }
-    assert_eq!(
-        clearings,
-        vec![expected_clearing],
-        "the clearing arrives exactly once — T-118's half, proven on \
-         the seam it will call"
-    );
-    // … and once the debounce settles, no duplicate clearing follows.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let mut duplicates = Vec::new();
-    while let Ok(event) = events.try_recv() {
-        duplicates.extend(
-            event
-                .changes
-                .into_iter()
-                .filter(|change| !change.external_changed && !change.file_deleted),
-        );
-    }
-    assert!(
-        duplicates.is_empty(),
-        "the clearing is emitted exactly once: {duplicates:?}"
-    );
+    // Drain the wire for the clearing (whoever produced it) and pin
+    // exactly-once — the shared shape, extracted with this test's own
+    // race note (round-1 review's P2-2) in its doc.
+    drain_the_clearing(&events, expected_clearing);
     // Windows teardown rule: the app's managed `Db` closes first.
     drop(app);
     drop(temp);
@@ -8284,6 +8246,659 @@ fn the_file_changed_event_and_its_wiring_are_registered_with_the_specta_builder(
     );
 }
 
+// ---- the after-sync and membership transitions (T-104: the four the
+// landed batteries left unpinned — every earlier pin named below) ----
+
+/// T-F13's "between syncs" precondition through the REAL pipeline: one
+/// scheme-A project a real `sync_run` has just written (the file, the
+/// stored hash, the stamps) under a live watcher whose passes have
+/// settled — the world an external edit or deletion lands in. Returns
+/// the app world, the target, the project id, the whole file the
+/// first run left, and the event wire. Cross-run comparison is the
+/// MANAGED BLOCK only (`split_written_target`): every run writes its
+/// own marker timestamp, so raw byte equality across runs is never
+/// the oracle.
+fn synced_world_between_syncs(
+    n: usize,
+) -> (
+    tempfile::TempDir,
+    tauri::App<tauri::test::MockRuntime>,
+    tauri::WebviewWindow<tauri::test::MockRuntime>,
+    std::path::PathBuf,
+    String,
+    String,
+    std::sync::mpsc::Receiver<crate::file_watch::FileChangedEvent>,
+) {
+    let (temp, app, commands) = sync_watch_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        n,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let target = repo.join("AGENTS.md");
+    // The watcher goes live BEFORE the first run: the run's finish
+    // awaits the after-sync seam's ack, and only a live service can
+    // answer it (the harness doc's hang note).
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    let events = listen_file_changed(&app);
+    wait_for_watch_passes(&app, 1); // the startup pass: no file yet, no flag
+    // The first real sync: the file, the hash, the stamps.
+    let webview = main_webview(&app);
+    let outcome =
+        invoke_sync_run(&webview, serde_json::json!(null)).expect("the first run must complete");
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the non-empty build runs without the D-25 ask");
+    };
+    assert_eq!(
+        summary.projects_written, 1,
+        "the creation run wrote the target"
+    );
+    // Settle: the run's write fired the debouncer, and a matching file
+    // is silent — the drain proves the silence instead of assuming it.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        events.try_recv().is_err(),
+        "the freshly synced file matches its build — no event"
+    );
+    let synced = std::fs::read_to_string(&target).expect("the synced file must be readable");
+    (temp, app, webview, target, project, synced, events)
+}
+
+/// Splits a written scheme-A target into `(managed block, marker
+/// line)` — the cross-run oracle: every sync writes its own ALG-032
+/// marker timestamp, so "the next run left the same build" means the
+/// same MANAGED BLOCK, never byte equality across runs (SYNC_MARKER's
+/// "the timestamp never decides").
+fn split_written_target(bytes: &str) -> (&str, &str) {
+    let without_break = bytes
+        .strip_suffix('\n')
+        .expect("the written file ends with exactly one line break");
+    let (body, marker) = without_break
+        .rsplit_once("\n\n")
+        .expect("the managed block and the marker are separated by a blank line");
+    (body, marker)
+}
+
+/// Drains the wire until one clearing (`external_changed` and
+/// `file_deleted` both false) arrives or the deadline passes, then
+/// asserts it is exactly `expected` — the race-free shape of "the
+/// state clears" from the T-F13 criterion test: whichever pass emits
+/// the clearing (the awaited full pass or the write's own debounced
+/// re-read) is a scheduling race, so the facts asserted are "it lands,
+/// exactly once, and nothing else does".
+fn drain_the_clearing(
+    events: &std::sync::mpsc::Receiver<crate::file_watch::FileChangedEvent>,
+    expected: crate::file_watch::ProjectFileChange,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut clearings = Vec::new();
+    while clearings.is_empty() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match events.recv_timeout(remaining) {
+            Ok(event) => clearings.extend(
+                event
+                    .changes
+                    .into_iter()
+                    .filter(|change| !change.external_changed && !change.file_deleted),
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the event listener died mid-test")
+            }
+        }
+    }
+    assert_eq!(
+        clearings,
+        vec![expected],
+        "the clearing arrives exactly once"
+    );
+    // … and once the debounce settles, no duplicate follows.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let mut later = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        later.extend(event.changes);
+    }
+    assert!(later.is_empty(), "nothing follows the clearing: {later:?}");
+}
+
+#[test]
+fn a_real_sync_run_overwrites_the_external_edit_backs_it_up_and_clears_the_state() {
+    // T-F13's second sentence, verbatim through the REAL pipeline —
+    // the half T-102 could only simulate (the pipeline's own write +
+    // hash store + the seam): after a real run's sync, an external
+    // edit lights the column (the criterion's first sentence, shown
+    // through the carrier, MAIN-028), and the NEXT REAL `sync_run`
+    // overwrites the file with the same build bytes, keeps a backup of
+    // the external bytes, and clears the state on the same wire — the
+    // run's own `refresh_after_sync` arm (commands.rs), unpinned until
+    // now: the `sync_app` doc's "the one test that wants a converging
+    // refresh spawns the real service itself" finally has its test.
+    let (temp, app, webview, target, project, synced, events) = synced_world_between_syncs(8);
+
+    // The external edit, completely outside the app. The pass-count
+    // baseline is captured BEFORE the write: the debounced pass it
+    // waits for must be strictly after the baseline, whatever the
+    // scheduler does with the 40 ms window (the race-free-facts rule).
+    let base = app
+        .state::<crate::file_watch::FileWatchState>()
+        .pass_count();
+    let external = "My own edit, made in an editor.\n";
+    std::fs::write(&target, external).expect("the external edit must work");
+    wait_for_watch_passes(&app, base + 1);
+    assert_eq!(
+        events
+            .try_recv()
+            .expect("the external edit must be reported"),
+        crate::file_watch::FileChangedEvent {
+            changes: vec![crate::file_watch::ProjectFileChange {
+                project_id: project.clone(),
+                external_changed: true,
+                file_deleted: false,
+            }],
+        },
+        "SYS-008's flag, flipped by the debounced re-read"
+    );
+    // The criterion's first sentence — "the project SHOWS the
+    // externally modified state" — through the real carrier read, in
+    // the external-ONLY world: the library never moved, so the dirty
+    // flag stays down (SYS-008's independence, this direction).
+    let columns = invoke_projects_list(&webview, serde_json::Value::Null)
+        .expect("the carrier read must succeed");
+    assert_eq!(columns.len(), 1, "one project in the world");
+    assert!(
+        columns[0].external_changed && !columns[0].file_deleted,
+        "MAIN-028's externally modified column — got {:?}",
+        columns[0]
+    );
+    assert!(
+        !columns[0].dirty,
+        "the library did not move: the external-only world (SYS-008)"
+    );
+
+    // The next sync — the REAL run, no simulation.
+    let outcome = invoke_sync_run(&webview, serde_json::json!(null))
+        .expect("the overwrite run must complete");
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the differing file asks no confirmation (D-25 is the empty-build gate)");
+    };
+    assert_eq!(
+        summary.projects_written, 1,
+        "the externally edited file was rewritten"
+    );
+    // T-F13's sentence, clause by clause: the overwrite …
+    let rewritten =
+        std::fs::read_to_string(&target).expect("the overwritten file must be readable");
+    let (rewritten_body, rewritten_marker) = split_written_target(&rewritten);
+    let (synced_body, _) = split_written_target(&synced);
+    assert_eq!(
+        rewritten_body, synced_body,
+        "the run left the same managed block (each run writes its own \
+         marker timestamp — the build never changed)"
+    );
+    assert!(
+        rewritten_marker.starts_with("<!-- Created by EunomiaSync ")
+            && rewritten_marker.ends_with(" -->"),
+        "the ALG-032 marker shape, got: {rewritten_marker:?}"
+    );
+    // … and makes a backup — of the external bytes.
+    let backups = sync_backup_files(temp.path());
+    assert_eq!(backups.len(), 1, "the overwritten file was backed up");
+    assert_eq!(
+        std::fs::read(&backups[0]).expect("the copy must be readable"),
+        external.as_bytes(),
+        "the backup holds the externally edited bytes"
+    );
+    // … and the state clears through the same wire.
+    drain_the_clearing(
+        &events,
+        crate::file_watch::ProjectFileChange {
+            project_id: project,
+            external_changed: false,
+            file_deleted: false,
+        },
+    );
+    // The column shows clean again.
+    let columns = invoke_projects_list(&webview, serde_json::Value::Null)
+        .expect("the carrier read must succeed");
+    assert!(
+        !columns[0].external_changed && !columns[0].file_deleted,
+        "MAIN-028's column cleared by the real run — got {:?}",
+        columns[0]
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_real_sync_run_recreates_a_deleted_target_and_clears_the_hint() {
+    // SYS-009's second sentence, the recreation half, through the REAL
+    // pipeline: a synced project whose target is deleted externally
+    // shows the hint (the flag itself is pinned by the earlier
+    // battery), and the NEXT REAL run recreates the file with the same
+    // build bytes — nothing to back up, the file was gone — and clears
+    // the hint on the same wire. The deleted→clean transition was
+    // unpinned: the batteries stopped at the flag being set.
+    let (temp, app, webview, target, project, synced, events) = synced_world_between_syncs(9);
+
+    // The external deletion, with the baseline captured before it
+    // (the same race-free-facts rule as the overwrite test).
+    let base = app
+        .state::<crate::file_watch::FileWatchState>()
+        .pass_count();
+    std::fs::remove_file(&target).expect("the external deletion must work");
+    wait_for_watch_passes(&app, base + 1);
+    assert_eq!(
+        events.try_recv().expect("the deletion must be reported"),
+        crate::file_watch::FileChangedEvent {
+            changes: vec![crate::file_watch::ProjectFileChange {
+                project_id: project.clone(),
+                external_changed: false,
+                file_deleted: true,
+            }],
+        },
+        "SYS-009's hint for a file a sync once left behind"
+    );
+
+    // The next sync recreates it (this is scheme A; C writes the same
+    // way, B would skip with E_MARKERS_INVALID — the pipeline's own
+    // pinned half).
+    let outcome = invoke_sync_run(&webview, serde_json::json!(null))
+        .expect("the recreation run must complete");
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the non-empty build asks no confirmation");
+    };
+    assert_eq!(
+        summary.projects_written, 1,
+        "a missing A/C target is written, not skipped (OUT-005)"
+    );
+    let recreated = std::fs::read_to_string(&target).expect("the recreated file must be readable");
+    let (recreated_body, recreated_marker) = split_written_target(&recreated);
+    let (synced_body, _) = split_written_target(&synced);
+    assert_eq!(
+        recreated_body, synced_body,
+        "the recreation left the same managed block (its own marker \
+         timestamp — the build never changed)"
+    );
+    assert!(
+        recreated_marker.starts_with("<!-- Created by EunomiaSync ")
+            && recreated_marker.ends_with(" -->"),
+        "the ALG-032 marker shape, got: {recreated_marker:?}"
+    );
+    assert!(
+        sync_backup_files(temp.path()).is_empty(),
+        "a deleted file has nothing to back up"
+    );
+    // The hint clears through the same wire, and the column with it.
+    drain_the_clearing(
+        &events,
+        crate::file_watch::ProjectFileChange {
+            project_id: project,
+            external_changed: false,
+            file_deleted: false,
+        },
+    );
+    let columns = invoke_projects_list(&webview, serde_json::Value::Null)
+        .expect("the carrier read must succeed");
+    assert!(
+        !columns[0].external_changed && !columns[0].file_deleted,
+        "SYS-009's hint cleared by the real run — got {:?}",
+        columns[0]
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn an_archived_projects_edits_no_longer_reach_the_wire_while_its_active_sibling_reports() {
+    // SYS-007's third removal rule — "removed when a project is
+    // archived" — the one membership transition no battery had pinned
+    // end to end (the record-level prune and the carrier row rule are
+    // pinned; the transition's observable never was): a project
+    // archived between passes leaves the classified world on the next
+    // full pass (the active-only snapshot prunes it, its routing entry
+    // goes), so later edits to ITS file never reach the wire — while
+    // its ACTIVE sibling's edit in the same window still reports. The
+    // archive goes through the store directly (no archive command
+    // exists yet, T-109's card) — the exact call that command will run
+    // (the archived-row test's precedent); the full pass is driven by
+    // the after-sync seam, the same Refresh every full pass runs.
+    let (temp, app, commands) = file_watch_app();
+    let database = watch_database_of(&app);
+    let off = eunomia_core::project::ExtraFile {
+        enabled: false,
+        position: eunomia_core::project::ExtraFilePosition::End,
+    };
+    let marker = eunomia_core::marker::creation_marker_line(
+        eunomia_core::marker::MarkerTime {
+            year: 2026,
+            month: 11,
+            day: 22,
+            hour: 11,
+            minute: 0,
+            second: 0,
+        },
+        None,
+        0,
+    );
+    let synced = eunomia_core::target_file::build_content(
+        eunomia_core::project::Scheme::A,
+        "Be brief.",
+        &eunomia_core::extra_files::extra_file_lines(
+            eunomia_core::project::BaseName::AgentsMd,
+            off,
+            off,
+        ),
+        &marker,
+    );
+    let seed_synced = |name: &'static str, key: &'static str| {
+        let root = repo_dir(temp.path(), name);
+        let target = root.join("AGENTS.md");
+        std::fs::write(&target, &synced).expect("the synced fixture must work");
+        let id = seed_watched_project(
+            &database,
+            root.display().to_string(),
+            key,
+            eunomia_store::settings::Scheme::A,
+        );
+        seed_assigned_instruction(&database, id.clone(), name, "Be brief.");
+        simulate_sync_hash(
+            &database,
+            id.clone(),
+            eunomia_core::hash::build_hash(
+                eunomia_core::project::Scheme::A,
+                &target,
+                off,
+                off,
+                "Be brief.",
+            ),
+        );
+        (id, target)
+    };
+    let (alpha, alpha_target) = seed_synced("alpha", "/alpha");
+    let (bravo, bravo_target) = seed_synced("bravo", "/bravo");
+
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    let events = listen_file_changed(&app);
+    wait_for_watch_passes(&app, 1);
+    assert!(
+        events.try_recv().is_err(),
+        "two matching files are silent at startup"
+    );
+
+    // Archive alpha between passes — the store call the future archive
+    // command will run (the shared helper).
+    let archived_project = archive_project(&database, alpha);
+    assert!(
+        matches!(
+            archived_project.state,
+            eunomia_store::projects::ProjectState::Archived
+        ),
+        "the store confirmed the archive"
+    );
+    let diff = tauri::async_runtime::block_on(crate::file_watch::refresh_after_sync(app.handle()))
+        .expect("the full pass must succeed");
+    assert!(
+        diff.is_empty(),
+        "the prune is silent — an archived project has no column: {diff:?}"
+    );
+
+    // Both files edited externally in the same window: only the active
+    // sibling may report. The baseline goes before the writes (the
+    // race-free-facts rule — a debounced pass landing between a write
+    // and a late baseline read is the timeout the rule exists to
+    // prevent).
+    let base = app
+        .state::<crate::file_watch::FileWatchState>()
+        .pass_count();
+    std::fs::write(&alpha_target, "Edited in an editor.\n")
+        .expect("the archived project's edit must work");
+    std::fs::write(&bravo_target, "Edited in an editor.\n")
+        .expect("the active project's edit must work");
+    wait_for_watch_passes(&app, base + 1);
+    // A settle window past the debounce, then the wire must hold
+    // exactly bravo's change — alpha's absence is the pin.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let mut delivered = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        delivered.extend(event.changes);
+    }
+    assert_eq!(
+        delivered,
+        vec![crate::file_watch::ProjectFileChange {
+            project_id: bravo.clone(),
+            external_changed: true,
+            file_deleted: false,
+        }],
+        "only the active sibling's edit reaches the wire — the archived \
+         project's events no longer do (SYS-007's removal; the set \
+         convergence itself is the fs crate's `set_files` pin, \
+         unreachable from this layer — `spawn_service` builds its own \
+         watcher)"
+    );
+    // The carrier agrees: the default read carries the active column
+    // only, and it shows the edit.
+    let webview = main_webview(&app);
+    let columns = invoke_projects_list(&webview, serde_json::Value::Null)
+        .expect("the carrier read must succeed");
+    assert_eq!(columns.len(), 1, "the archived row left the default read");
+    assert_eq!(columns[0].id, bravo);
+    assert!(
+        columns[0].external_changed,
+        "the active sibling's column shows the edit — got {:?}",
+        columns[0]
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
+/// [`file_watch_app`]'s world plus the dirty service's state managed:
+/// the SYS-008 independence pin needs BOTH verdicts live on one
+/// carrier row — the watch service's `external_changed` and the dirty
+/// service's `dirty` — each recorded by its own pass over its own
+/// oracle. Both service buses are returned **unspawned** (the
+/// [`sync_watch_app`] shape): the world must be seeded BEFORE either
+/// service goes live, so the dirty service's startup pass records the
+/// seeded world's verdict — a baseline read of a RECORDED clean
+/// verdict, not the absent-≡-clean default.
+fn dirty_watch_app() -> (
+    tempfile::TempDir,
+    tauri::App<tauri::test::MockRuntime>,
+    tauri::async_runtime::Receiver<crate::file_watch::Command>,
+    tauri::async_runtime::Receiver<crate::dirty_recalc::Trigger>,
+) {
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::commands::projects_list])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    let (watch_state, commands) = crate::file_watch::FileWatchState::new();
+    app.manage(watch_state);
+    let (dirty_state, triggers) = crate::dirty_recalc::DirtyState::new();
+    app.manage(dirty_state);
+    tauri_specta::Builder::<tauri::test::MockRuntime>::new()
+        .events(tauri_specta::collect_events![
+            crate::file_watch::FileChangedEvent,
+            crate::availability::ProjectAvailabilityEvent,
+            crate::dirty_recalc::DirtyEvent,
+        ])
+        .mount_events(&app);
+    (temp, app, commands, triggers)
+}
+
+/// Waits until the dirty service ran `at_least` passes — the dirty
+/// twin of [`wait_for_watch_passes`] (the same counter rationale: an
+/// empty diff is silent on the wire, so the counter is the only
+/// deterministic "a pass happened").
+fn wait_for_dirty_passes(app: &tauri::App<tauri::test::MockRuntime>, at_least: u64) {
+    let state = app.state::<crate::dirty_recalc::DirtyState>();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let passes = state.pass_count();
+        if passes >= at_least {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dirty service ran only {passes} passes, waiting for {at_least}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_project_can_be_dirty_and_externally_modified_at_once() {
+    // SYS-008's last sentence (DB-021): "It is independent of the
+    // dirty flag: a project can be dirty, externally modified, or
+    // both." The both-world, unpinned until now (the T-F13 criterion
+    // test pins the external-only world; the dirty suite pins dirty
+    // worlds with no watch service live): the library moves under a
+    // synced project (the dirty oracle — the current build's hash vs
+    // the stored one) AND the file is edited outside the app (the
+    // watch oracle — the file vs the current build). Two independent
+    // services, two independent oracles, ONE carrier row carrying both
+    // flags: neither verdict may suppress the other.
+    let (temp, app, commands, triggers) = dirty_watch_app();
+    let database = watch_database_of(&app);
+    let root = repo_dir(temp.path(), "both");
+    let target = root.join("AGENTS.md");
+    let project_id = seed_watched_project(
+        &database,
+        root.display().to_string(),
+        "/both",
+        eunomia_store::settings::Scheme::A,
+    );
+    seed_assigned_instruction(&database, project_id.clone(), "Style", "Be brief.");
+    // The synced world: the file a sync would leave, the hash it
+    // would store (the T-F13 fixture shape).
+    let off = eunomia_core::project::ExtraFile {
+        enabled: false,
+        position: eunomia_core::project::ExtraFilePosition::End,
+    };
+    let synced_file = eunomia_core::target_file::build_content(
+        eunomia_core::project::Scheme::A,
+        "Be brief.",
+        &eunomia_core::extra_files::extra_file_lines(
+            eunomia_core::project::BaseName::AgentsMd,
+            off,
+            off,
+        ),
+        &eunomia_core::marker::creation_marker_line(
+            eunomia_core::marker::MarkerTime {
+                year: 2026,
+                month: 11,
+                day: 21,
+                hour: 9,
+                minute: 30,
+                second: 5,
+            },
+            None,
+            0,
+        ),
+    );
+    std::fs::write(&target, &synced_file).expect("the synced fixture must work");
+    simulate_sync_hash(
+        &database,
+        project_id.clone(),
+        eunomia_core::hash::build_hash(
+            eunomia_core::project::Scheme::A,
+            &target,
+            off,
+            off,
+            "Be brief.",
+        ),
+    );
+    // Both services go live over the SEEDED world (the harness returns
+    // their buses unspawned for exactly this ordering), and each runs
+    // its startup pass over it: the baseline row must read RECORDED
+    // verdicts — a wrong simulated hash would flip the baseline dirty
+    // right here, before any cause exists.
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    let events = listen_file_changed(&app);
+    crate::dirty_recalc::spawn_service(app.handle().clone(), triggers);
+    wait_for_watch_passes(&app, 1);
+    assert!(
+        events.try_recv().is_err(),
+        "the matching file emits nothing at startup"
+    );
+    wait_for_dirty_passes(&app, 1);
+    let webview = main_webview(&app);
+    let columns = invoke_projects_list(&webview, serde_json::Value::Null)
+        .expect("the carrier read must succeed");
+    assert_eq!(columns.len(), 1, "one project in the world");
+    assert!(
+        !columns[0].dirty && !columns[0].external_changed,
+        "the synced baseline: neither flag — got {:?}",
+        columns[0]
+    );
+
+    // Both causes, independently: the library gains an instruction
+    // (dirty's cause) and the file is edited by hand (external's
+    // cause). The dirty trigger is the commit-hook seam's permit —
+    // the documented test way to fire a pass (this harness installs
+    // no hook on its own handle); the watch pass is observed through
+    // its own event, the deterministic proof it ran and recorded (a
+    // pass-count baseline captured here would race the 40 ms
+    // debounce).
+    seed_assigned_instruction(&database, project_id.clone(), "Tone", "Be terse.");
+    std::fs::write(&target, "Hand-edited while unsynced.\n").expect("the external edit must work");
+    let dirty_base = app.state::<crate::dirty_recalc::DirtyState>().pass_count();
+    app.state::<crate::dirty_recalc::DirtyState>()
+        .trigger(crate::dirty_recalc::Trigger::Commit);
+    wait_for_dirty_passes(&app, dirty_base + 1);
+    assert_eq!(
+        events
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the external edit must flip the watch verdict"),
+        crate::file_watch::FileChangedEvent {
+            changes: vec![crate::file_watch::ProjectFileChange {
+                project_id: project_id.clone(),
+                external_changed: true,
+                file_deleted: false,
+            }],
+        },
+        "the watch oracle spoke — independent of the dirty pass beside it"
+    );
+
+    // SYS-008's "or both": one row, both flags, each from its own
+    // oracle — and the watch flags stay mutually exclusive.
+    let columns = invoke_projects_list(&webview, serde_json::Value::Null)
+        .expect("the carrier read must succeed");
+    assert!(
+        columns[0].dirty,
+        "the library moved since the sync — DB-021's unsynced changes"
+    );
+    assert!(
+        columns[0].external_changed,
+        "the file no longer matches the current build — SYS-008's own oracle"
+    );
+    assert!(
+        !columns[0].file_deleted,
+        "the file exists — the watch flags stay mutually exclusive"
+    );
+    // Windows teardown rule.
+    drop(app);
+    drop(temp);
+}
+
 // ---------------------------------------------------------------------------
 // `sync_run` (T-118, §7.10 Sync module, §9.4 the pipeline, D-25,
 // SYS-004/SYS-005, MAIN-024/030)
@@ -8298,16 +8913,43 @@ fn the_file_changed_event_and_its_wiring_are_registered_with_the_specta_builder(
 /// after-sync refresh). The watch bus's RECEIVING half is dropped on
 /// purpose: with no service spawned the refresh answers its honest
 /// `FileWatchGone` refusal immediately (never a hang), which every
-/// test here reads as the never-fatal aftermath it is — the one test
-/// that wants a converging refresh spawns the real service itself.
+/// test here reads as the never-fatal aftermath it is; the positive
+/// proof — a run whose refresh CONVERGES — runs in the watch
+/// section's [`sync_watch_app`] with the real service live
+/// (the `add_manual_app` wording's precedent). This is a delegating
+/// wrapper (the `file_watch_app_with_budget` shape): the shared body
+/// is [`sync_watch_app`]'s.
 fn sync_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+    let (temp, app, _no_service) = sync_watch_app();
+    (temp, app)
+}
+
+/// The [`sync_app`] world widened for the watcher's after-sync
+/// transitions (T-104) — and the SHARED body [`sync_app`] delegates
+/// to: every state the run's seams read, `projects_list` registered
+/// beside `sync_run` (the MAIN-028 carrier read; registering a
+/// command a plain sync test never calls changes nothing), and the
+/// watch command bus's receiving half returned **unspawned**, so the
+/// fixture can seed its world and go live in the order the awaited
+/// seam requires: the service must be spawned before any `sync_run`,
+/// because a run awaits [`file_watch::refresh_after_sync`]'s ack and
+/// that await carries no budget — a bus nobody consumes is the D-137
+/// session-history hang, not a test shape.
+fn sync_watch_app() -> (
+    tempfile::TempDir,
+    tauri::App<tauri::test::MockRuntime>,
+    tauri::async_runtime::Receiver<crate::file_watch::Command>,
+) {
     let temp = tempfile::tempdir().expect("failed to create a temp directory");
     data_dirs::ensure_data_layout(temp.path())
         .expect("creating the data-directory layout in a temp directory must work");
     let database = crate::db::Db::open(temp.path())
         .expect("opening a fresh database in a temp directory must work");
     let app = mock_builder()
-        .invoke_handler(tauri::generate_handler![crate::commands::sync_run])
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::sync_run,
+            crate::commands::projects_list
+        ])
         .build(mock_context(noop_assets()))
         .expect("failed to build mock app");
     app.manage(database);
@@ -8316,7 +8958,7 @@ fn sync_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
     app.manage(crate::commands::SyncCancelSlot::new());
     app.manage(crate::availability::AvailabilityState::new());
     app.manage(crate::dirty_recalc::DirtyState::new().0);
-    let (watch_state, _no_service) = crate::file_watch::FileWatchState::new();
+    let (watch_state, commands) = crate::file_watch::FileWatchState::new();
     app.manage(watch_state);
     tauri_specta::Builder::<tauri::test::MockRuntime>::new()
         .events(tauri_specta::collect_events![
@@ -8325,7 +8967,7 @@ fn sync_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
             crate::file_watch::FileChangedEvent,
         ])
         .mount_events(&app);
-    (temp, app)
+    (temp, app, commands)
 }
 
 /// The ALG-032 example marker, verbatim — the old-run fixture shape the

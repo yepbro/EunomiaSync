@@ -17106,3 +17106,208 @@ tracked — two cards in the board's INBOX ("Follow-up T-138: …" — the
 T-097 composition measurement note; the §15.5 reference rerun now
 covering three rows). The cards are the tracking unit; this note only
 records their existence.
+
+### D-158 — T-104: the watcher-test card closed as a gap analysis — four unpinned §5.7 transitions given their tests (the real-pipeline T-F13 half, SYS-009's recreation clearing, SYS-007's archive removal, SYS-008's both-flags world) — 2026-11-22
+
+Problem: T-104 is an original-plan-era card ("write the watcher
+tests: T-F13 and the state transitions") that assumed the watcher
+would land without them; in the actual history T-102 (D-137) landed
+the watcher WITH its battery, and T-103/T-259/T-260/T-262
+(D-139/D-146/D-148/D-155) extended it. The card's first job was the
+gap analysis: map every §5.7 requirement onto the landed tests and
+close only what is genuinely unpinned. The mapping (requirement →
+existing pin): the T-F13 flag/display half + the SIMULATED
+next-sync clearing → `an_external_edit_marks_the_project_externally_
+modified_without_writing_anything`; deletion vs never-synced →
+`deleting_a_synced_target_file_reports_target_deleted…`; the
+verdict battery (A/B/C, body/marker/outside edits, broken markers,
+non-UTF-8, CRLF, pre-existing files) → the 15-test unit battery in
+`file_watch.rs`; the debounce/wire literals → the two literal pins;
+startup computation → `projects_list_carries_the_watch_service_
+verdicts_from_its_snapshot`; unavailable→unwatch→rewatch →
+`an_unavailable_project_is_unwatched_until_its_folder_returns`;
+SYS-010 in full → the D-139/D-148/D-155 batteries; the
+overwrite+backup write itself → the sync battery
+(`sync_run_with_confirm_empty…`, phase-3's creation case). FOUR
+transitions had no pin anywhere:
+
+1. T-F13's second sentence through the REAL pipeline — the clearing
+   was proven only on a simulated sync, and no `sync_run` test ever
+   ran with the watch service live (the `sync_app` doc's "the one
+   test that wants a converging refresh spawns the real service
+   itself" was aspirational since T-118: no test in that section
+   ever called `spawn_service`).
+2. SYS-009's second half — the deleted→recreated-by-next-sync→hint-
+   clears transition (the batteries stop at the flag being SET).
+3. SYS-007's third removal rule — archived→watch-removed (only the
+   record-level prune and the carrier row rule were pinned; the
+   watch-set removal and its silence never were).
+4. SYS-008's last sentence (DB-021) — the both-flags world ("dirty,
+   externally modified, or both"): no test ever showed both flags on
+   one row.
+
+Solution: four tests + six helpers in `ipc_tests.rs` (watch section;
+the `sync_watch_app` harness is the shared body `sync_app` now
+delegates to), no production change — every seam the tests need
+already existed:
+
+- _`sync_watch_app` / `synced_world_between_syncs`_ — the sync
+  battery's app widened with `projects_list` and the watch command
+  bus returned UNSPAWNED: the service must go live before any
+  `sync_run`, because the run awaits `refresh_after_sync`'s ack and
+  that await has NO budget (a held-but-unconsumed receiver is the
+  D-137 session-history hang; `sync_app` avoids it only by dropping
+  the receiver). The fixture builds T-F13's "between syncs" world
+  with a REAL first run — file, hash, stamps — under the live
+  watcher, settles past the debounce, and returns the whole file the
+  run left; the callers compare the MANAGED BLOCK only
+  (`split_written_target`), because cross-run byte equality is
+  deliberately NOT the oracle: every run writes its own ALG-032
+  marker timestamp (SYNC_MARKER's "the timestamp never decides").
+- _`a_real_sync_run_overwrites_the_external_edit_backs_it_up_and_
+clears_the_state`_ — T-F13 verbatim: external edit → the event,
+  the external-ONLY carrier row (dirty stays down — independence's
+  one direction), then the REAL run rewrites the same managed
+  block, keeps exactly one backup holding the external bytes, and
+  the clearing lands exactly once (`drain_the_clearing`, the
+  D-137 round-1 P2-2 race-free shape) with the column clean after.
+- _`a_real_sync_run_recreates_a_deleted_target_and_clears_the_hint`_
+  — SYS-009's second sentence: delete → the hint event, the REAL
+  run recreates (OUT-005's missing-A/C-is-written), no backup
+  exists to make, the hint clears through the same wire.
+- _`an_archived_projects_edits_no_longer_reach_the_wire_while_its_
+active_sibling_reports`_ — SYS-007's archive rule: archive through
+  the store (the
+  exact call the future command will run — no archive command
+  exists, T-109's card), the after-sync seam's full pass answers an
+  EMPTY diff (the prune is silent), and edits to BOTH siblings'
+  files in the same window deliver exactly the active one's change —
+  the archived project's edits no longer reach the WIRE (the
+  observable this layer has; the set convergence itself is
+  `eunomia-fs`'s `set_files` pin — `spawn_service` builds its own
+  watcher, so no app-layer seam exposes the live set).
+- _`a_project_can_be_dirty_and_externally_modified_at_once`_ —
+  SYS-008/DB-021's both-world over two real services (the
+  `dirty_watch_app` harness returns BOTH buses unspawned, so the
+  seeded world exists before either startup pass — the baseline row
+  reads RECORDED verdicts, not the absent-≡-clean default): the
+  library gains an instruction (dirty's oracle: build hash vs
+  stored) while the file is hand-edited (the watch oracle: file vs
+  current build); one carrier row, both flags, neither suppressing
+  the other. The dirty pass is fired through `DirtyState::trigger`
+  (the documented test seam — the harness installs no commit hook),
+  the watch pass observed through its own event.
+
+Two harness lessons are pinned in comments because they cost a red
+run each: `main_webview` is one-per-app (the helper returns it; a
+second call panics `WebviewLabelAlreadyExists`), and every
+pass-count baseline is captured BEFORE the file mutation it waits
+behind (a baseline read after the write can already include the
+debounced pass — the flake this card's stability loop caught once in
+sixteen, fixed everywhere before the mutations ran).
+
+Mutation-verified, each red with the cargo exit code 101 observed,
+then reverted to green (the first attempt at M4 mutated
+`file_watch.rs`'s own `ListScope::Active` and stayed GREEN — the
+watch set derives from the BUILD SNAPSHOT (ALG-001's active-only
+read), not the hash rows; the effective mutation is
+`build_snapshot.rs`'s scope): M1 phase 1's unchanged-gate ignores
+the bytes → the overwrite test red at `projects_written`; M2 phase
+2's copy loop makes nothing → red at the backup assert; M3 the
+watch record keeps stale verdicts (`or_insert`) → the recreation
+test red at "the clearing arrives exactly once"; M4 the snapshot
+reads All → the archive test red at the prune-silence assert; M5
+`classify` always Matches → the both-flags test red at the watch
+event; M6 `chunk_verdicts` always false → red at the dirty assert.
+
+Stability: the four tests 16/16 green in a consecutive loop after
+the baseline-ordering fix (one flake in sixteen BEFORE it, none
+after). Checks green by exit code: `cargo fmt --check` (after one
+`cargo fmt` application), `cargo clippy --workspace --all-targets
+-- -D warnings`, `cargo test --workspace` (the app lib 549→553).
+
+Honest boundaries: SYS-007's "scheme or file name changes" watch
+update is UNIMPLEMENTED production behavior (no `project_update`
+command exists) — a test would pin a feature that cannot go green
+and belongs to that command's card, not this one; the same holds
+for the archive COMMAND's own refresh wiring (the seam call is
+T-109's to make; this entry pins the mechanism the call will run).
+The both-flags test constructs the world with both causes present —
+under SYS-008's literal oracle a library edit alone also flips
+`external_changed` (the file stops matching the CURRENT build),
+which is the spec's own reading, not interference. The composite
+tests run the real pipeline with the real watcher but the mock
+runtime's synchronous emit — the webview listener path, not a
+rendered UI (the E2E layer's job). No frontend surface changed; no
+bindings regenerated (no command or event touched).
+
+Round-1 review addendum (D-158, same task; report
+`.opencode/reviews/t104-round1.md`, deepseek-v4.1-flash — verdict
+approve with fixes: 2×P2, 5×P3; no P0/P1, the four pins judged
+sound), findings processed here — every finding taken:
+
+- P2-1 (taken): the both-flags test's clean baseline was VACUOUS —
+  the harness spawned the dirty service before the world existed,
+  so the startup pass ran over an empty database, the baseline
+  `!dirty` read the absent-≡-clean default, and the first Commit
+  trigger coalesced into the second's pass (one pass total over the
+  post-cause world; "clean, then the library moved" never executed).
+  `dirty_watch_app` now returns BOTH buses unspawned (the
+  `sync_watch_app` shape): the world is seeded first, each startup
+  pass records the seeded world, the baseline reads a RECORDED
+  verdict, and the Commit trigger meets an empty bus. Verified two
+  ways: the restructured test 8/8 green, and a negative control (a
+  deliberately wrong simulated hash) flips the BASELINE red —
+  reverted after observation; M6 re-checked red against the final
+  assert through the same restructure.
+- P2-2 (taken): `sync_app`'s doc still pointed at "the one test that
+  wants a converging refresh" living in ITS harness — impossible
+  there (the receiver is dropped) and obsolete the moment this
+  card's tests landed. The doc now names `sync_watch_app` (the
+  `add_manual_app` wording's precedent).
+- P3-1 (taken): the T-F13 criterion test's inline drain was the
+  verbatim source of `drain_the_clearing`; the test now calls the
+  helper and the copy is gone.
+- P3-2 (taken): the archive test claimed "the watch is gone" — only
+  wire silence is observable at this layer (the routing table alone
+  produces it; the set convergence is `eunomia-fs`'s `set_files`
+  pin, and `spawn_service` builds its own watcher). Comment, assert
+  message, and this entry reworded to the observable; the accessor
+  option would be a production change a tests-only card does not
+  carry.
+- P3-3 (taken): `sync_watch_app` was a copy of `sync_app`; `sync_app`
+  is now a delegating wrapper (the `file_watch_app_with_budget`
+  shape the entry cited), the shared body carrying both handlers.
+- P3-4 (taken): the shared `archive_project` helper (which existed)
+  returns the stored `Project` now, and the test reuses it instead
+  of re-spelling the store call.
+- P3-5 (taken): the fixture docs said "the EXACT bytes … the oracle
+  the next run must reproduce" while the oracle is the managed
+  block only — reworded here and in the helper's doc.
+
+Checks after the fixes, green by exit code: `cargo fmt --check`,
+prettier on DECISIONS.md, `cargo clippy --workspace --all-targets
+-- -D warnings`, `cargo test --workspace` (34 suites ok, 0 failed);
+the six touched/new watch tests green together, the restructured
+both-flags test 8/8 in a stability loop.
+
+Round-2 review addendum (D-158, same task; report
+`.opencode/reviews/t104-round2.md`, hy4-flash-free — verdict
+approve: no P0/P1/P2, one optional P3), the round independently
+re-verified all seven round-1 fixes against the service code (the
+unspawned-bus ordering, `note_pass`-after-record, the empty-bus
+Commit trigger, the strictly-stronger `drain_the_clearing` second
+assert, the delegating harness, the eight inert `archive_project`
+callers) and audited the diff clean on all four test-audit checks.
+The one finding is taken: the archive test's NAME still stated the
+unobservable half ("leaves the watch set") after P3-2 reworded the
+comment, assert, and this entry — renamed to the observable
+(`an_archived_projects_edits_no_longer_reach_the_wire_while_its_
+active_sibling_reports`), this card being the
+test-behavior-not-implementation principle applied to itself. Two
+precision notes the round flagged as not-findings are recorded
+here: `drain_the_clearing` is the extraction of the deleted inline
+block with its second assert deliberately STRONGER (nothing at all
+follows, not just no clearings), and M3's observed red was the
+drain's first assert ("the clearing arrives exactly once", zero
+arrivals) — as recorded above, the observed output.
