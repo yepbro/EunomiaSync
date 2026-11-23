@@ -924,7 +924,7 @@ Requirements SEC-001…003 are in 5.6. In addition:
 | E2E                                | Scenarios S1–S7, S9, S10 (P1: S8, S11)                                                                                                                                                                                                                                                                                                                                                                      | Playwright against the Vite dev server with a mocked IPC backend, identical on all OSes |
 | Load                               | Section 12.2 metrics on sets M and L                                                                                                                                                                                                                                                                                                                                                                        | `criterion` benchmarks and e2e scripts                                                  |
 
-E2E runs the same way on all three OSes (D-007): Playwright drives the UI in a browser against the Vite dev server with a mocked IPC backend. The IPC contract itself is covered by Rust-side tests over the mock Tauri runtime, and the committed `bindings.ts` keep the frontend type-checked against the real commands. The real shell (native dialogs, updater, window behavior) is covered by the CI build smoke check, and a manual run of scenarios S1–S7, S9, S10 on each OS stays in the release checklist. `tauri-driver` is not used in v1; it may be revisited after 1.0 if real-shell e2e becomes necessary.
+E2E runs the same way on all three OSes (D-007): Playwright drives the UI in a browser against the Vite dev server with a mocked IPC backend. The IPC contract itself is covered by Rust-side tests over the mock Tauri runtime, and the committed `bindings.ts` keep the frontend type-checked against the real commands. The real shell (native dialogs, updater, window behavior) is covered by the CI build smoke check, and a manual run of scenarios S1–S7, S9, S10 on each OS stays in the release checklist, together with the manual smoke checks tracked in `docs/manual-smoke.md`. `tauri-driver` is not used in v1; it may be revisited after 1.0 if real-shell e2e becomes necessary.
 
 ### 15.2. Required Failure Scenarios
 
@@ -979,7 +979,7 @@ E2E runs the same way on all three OSes (D-007): Playwright drives the UI in a b
 - All P0 tests pass on the three OSes.
 - The section 12.2 metrics are confirmed on set L.
 - There are no known defects that lead to data loss or partial writes.
-- The manual checklist for scenarios S1–S7, S9, S10 is done on each OS.
+- The manual checklist for scenarios S1–S7, S9, S10 is done on each OS, and the manual smoke checks tracked in `docs/manual-smoke.md` pass.
 - Help, `CHANGELOG.md`, and the dependency license list are up to date.
 
 ## 16. Implementation Plan

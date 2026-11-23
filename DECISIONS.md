@@ -19192,3 +19192,58 @@ outright and owned by the D-170 follow-up, not "tense". P3-3: the
 `E_DB_CORRUPT` row names the confirmation (NFR-021) beside the
 screen. P3-4: import classified — a merge per D-18, non-destructive.
 None refused.
+
+### D-174 — T-313: spec's release-checklist mentions cross-referenced to docs/manual-smoke.md — the file named as the release checklist's in-repo companion, never as the checklist itself — 2026-11-23
+
+Problem: T-277's report asked for a cross-reference "in spec §15.5 —
+«the release checklist» → docs/manual-smoke.md" (D-169), but the
+verified premise differs (Rule 2): the literal phrase never occurs in
+§15.5 — it occurs in §15.1's prose (`docs/spec.md:927`), the §16 M8
+plan cell (`:999`) and the Risks table (`:1011`, already pointing at
+"(15.1)"); §15.5's manual condition is `:982`. And pointing the phrase
+at the file literally would contradict the repo's own records: D-169
+and the file header (`docs/manual-smoke.md:17-21`) state the file is
+NOT the spec's release checklist and does not reproduce the
+S1–S7/S9/S10 scenario runs — "the release checklist of spec §15.5 is a
+different, larger artifact the spec owns". Following the card verbatim
+would make the spec lie (Rule 11).
+
+Solution:
+
+- §15.1 (`:927`) and §15.5 (`:982`) now name the file as the release
+  checklist's companion: "…stays in the release checklist, together
+  with the manual smoke checks tracked in `docs/manual-smoke.md`"
+  (§15.1) and "…is done on each OS, and the manual smoke checks tracked
+  in `docs/manual-smoke.md` pass" (§15.5). The wording implements the
+  file header's own "A release run walks both" — without it the spec's
+  release conditions and the committed file disagreed (the Rule-11-sync
+  gap the card targeted). "tracked in" asserts nothing about the file's
+  inventory, so both sentences stay true before and after the parallel
+  T-315 populates the scenario runs into the file; the file is never
+  called "the release checklist".
+- Left alone deliberately: §16 M8's cell (`:999`) is a padded
+  plan-table deliverable, and the Risks mitigation (`:1011`) resolves
+  through §15.1, which now names the file.
+
+Follow-up for the board: the file header's verbatim quote of the §15.5
+bullet (`docs/manual-smoke.md:18-20`, "…is done on each OS") is now a
+truncation of the amended bullet — fold the quote update into T-315's
+pass over the file (review P3-1; the file is this task's frozen zone,
+Rule 10).
+
+Checks: md-only diff (`docs/spec.md`, this file); prettier green; the
+pre-commit hook green (cargo fmt --check, eslint, prettier --check,
+vue-tsc); batch regime (owner instruction 2026-11-23) — tests not run,
+the orchestrator runs the suite centrally after the flash batch.
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t313-round1.md`, deepseek-v4.1-flash): approve —
+no P0/P1; one P2, two P3s. P2-1: the rulings above (premise
+correction, companion-not-checklist, T-315-robust wording) lived only
+in the commit body — this entry added in the amend. P3-1: the
+header-quote truncation → the board follow-up above, not fixed here
+(the file is T-315's frozen zone). P3-2 (an optional stricter split of
+:927's "together with" into a separate clause) refused: the reviewer
+itself rates the sentence defensible (checks vs. the artifact, and
+§15.5 now lists both) and the sentence mirrors §15.5's condition
+structure.
