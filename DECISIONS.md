@@ -18794,3 +18794,188 @@ requirement cites". P3-3: the telemetry sentence's citation corrected
 to (§1.3, D-28) — D-28's row names telemetry only, §1.3's out-of-scope
 line adds automatic error reports — and the wording brought to the
 sourced terms. None refused.
+
+### D-171 — T-304: the eight test-side `LibraryError` seed helpers consolidated onto one `dirty_recalc.rs` seam routed through the production `Library` arm, the non-`Sql` arms two documented panics — 2026-11-23
+
+Problem: D-162's follow-up card. The card's census
+(`sync_library_seed_error` in `ipc_tests.rs` 9306 plus five per-phase
+`library_seed_error` helpers) did not match reality: find-by-content
+sweeps (the `"LibrarySeed"` literal and the `LibraryError) ->`
+signatures, Rule 2) found EIGHT copies, the census D-161 had already
+inventoried — the card's six plus `library_seed_error` in
+`dirty_recalc_tests.rs` 170 (the sixth sibling the card itself
+anticipated) and `library_watch_seed_error` in `ipc_tests.rs` 6442
+(the eighth, which neither the card nor D-162's follow-up list
+named; both included here as members of the class). All eight carried
+the same two-arm mapping — identical once each file's import
+spelling resolves (three textual forms: the phase 1–4 local-import
+form, phase 0's mixed form, the fully qualified ipc/dirty form; only
+the `Sql` arm line is byte-identical in all eight):
+`Sql` → `sqlite_error_to_app_error`, an `other =>` catch-all →
+`DbLocked` + `os_kind: "LibrarySeed"` + the error's `Display` —
+eight copies able to drift from the production spelling. 29 call
+sites (phase 0: 5; phases 1–4: 3 each; `dirty_recalc_tests`: 6;
+`ipc_tests`: 6). Three readings were open before coding: the seam's
+home (unlike the sync-run family, NO whole-enum production
+`LibraryError → AppError` mapper exists — the only production
+mapping is the nested `BuildSnapshotError::Library` arm of
+`build_snapshot_to_app_error`, dirty_recalc.rs 556–603); what the
+enum's other fifteen arms become (the card's "documented panic" is
+written for a two-variant enum); and whether the dirty and watch
+siblings belong to the family at all.
+
+Solution: one seam function under `#[cfg(test)] pub(crate)` —
+`library_seed_error_for_tests(LibraryError) -> AppError` — in
+`dirty_recalc.rs`, directly after `dirty_fallback` — beside
+[`build_snapshot_to_app_error`], whose `Library` arm IS the
+production `LibraryError` mapping. No new module; the dirty sibling
+and the watch sibling are in (the same mapping, same input enum,
+same class of hand-rolled copies).
+
+- _The home is the family convention, applied where the family
+  lives._ D-162's law is "the helper belongs beside the mapper it
+  delegates to"; the mapper this family delegates to for `Sql` is
+  the shared base classifier, but the enum's production mapping
+  lives in `dirty_recalc.rs`, so the seam is co-located with it.
+  `db.rs` (T-289's home) was rejected: it hosts the sync-run family
+  and the classifier, but no `LibraryError` production code —
+  placing the seam there would co-locate it with the wrong family.
+  The seam sits after `dirty_fallback` so the mapper and its private
+  helper stay contiguous (D-162's R1-P3-3 ruling), and directly
+  before the module's own `#[cfg(test)] mod tests`.
+- _The `Sql` arm routes through the production mapping — D-162's
+  one-spelling law, applied where the family lives._ The card's
+  "delegating to the PRODUCTION mapper" resolves here to
+  `build_snapshot_to_app_error(BuildSnapshotError::Library(error))`:
+  the production `Library` arm (dirty_recalc.rs 560–562) IS the
+  enum's production mapping, its `Sql` treatment today the shared
+  base classifier, and routing the seam's `Sql` arm through it keeps
+  the classifier call reachable only through the mapper (the D-162
+  Solution's exact wording) — if production's `Sql` treatment ever
+  changes, the suites follow it without a re-spell. Wrapping in
+  `BuildSnapshotError::Library` is the only route (the mapper takes
+  the snapshot enum, not a `LibraryError`), is behavior-identical
+  today (the wrapped call unpacks to the same classifier call the
+  eight copies spelled), and never sees the other arms — those panic
+  in the seam before any delegation, so the class-only wire fallbacks
+  of the production `Member`/write-path arms (the D-149 wire-vs-
+  assertion split) are unreachable from the seam by construction.
+- _The non-`Sql` arms are two documented panics, not one catch-all._
+  The exhaustive match names all seventeen variants (a new store
+  variant is a compile error at the seam — the pat-exhaustive law;
+  `LibraryError` is not `#[non_exhaustive]`). The fifteen write-path
+  outcomes and the `Member` envelope panic with distinct reasons —
+  `Member`: the seeds write only through the sanctioned library
+  writers (D-149's ruling); write-path outcomes: the seeds construct
+  valid-by-construction inputs (ids read back from the rows they
+  just wrote; titles unique within the test's database — the
+  process-unique counter titles of the phase 1–4/ipc-sync fixtures,
+  distinct fixture titles verified per call site for the rest,
+  `seed_extra_variant`'s `is_main: false` only ever after
+  `seed_instruction` created the main, and the delete/move/reassign
+  writers that produce `LastVariant`/`ReplacementRequired`/
+  `ReplacementInvalid`/`NoActiveMain`/`PositionOutOfRange`/
+  `VariantNotActive` never appear at these `map_err` sites). Both
+  panics name the arm and embed the error's `Display`; the `# Panics`
+  doc section carries the contract, and the wire's class-only rule
+  stays in the production mapping (SEC-008).
+- _Behavior preservation, argued per call site._ The five library
+  functions the seeds map are `create_item`, `create_variant`,
+  `assign`, `hide_item`, `update_variant`; on every error they can
+  produce that the suites cannot (everything but `Sql`), the old
+  helpers' silent `DbLocked`+`LibrarySeed`+`Display` envelope was
+  never observed by any test, so on every input the suites can
+  produce the seam returns exactly what the old helpers returned.
+  Reachability evidence: the 29 call sites' arguments are ids
+  returned by earlier seeds in the same test's fresh per-test
+  database (`dirty_app()`/the mock-app fixtures), and the title
+  uniqueness was verified caller by caller (phase 0: one
+  `seed_instruction` per test, distinct titles; dirty: the
+  hidden-instruction test seeds "Assigned"/"Buried" once each, and
+  749's burst writes "First"/"Second"/"Third" once each; ipc watch:
+  "alpha"/"bravo"/"charlie" and the per-test-distinct pairs).
+- _The migration map._ Eight definitions deleted, 29 call sites
+  re-pointed (phase 0: 5 — 209, 219, 244, 266, 285; phase 1: 3 —
+  205, 215, 224; phase 2: 3 — 279, 289, 298; phase 3: 3 — 235, 245,
+  254; phase 4: 3 — 240, 250, 259; `dirty_recalc_tests`: 6 — 228,
+  238, 257, 268, 286, 749; `ipc_tests`: 6 — 6416, 6426, 6435, 9279,
+  9289, 9298; pre-edit line numbers). Import styles kept per file:
+  the phase suites import the seam by name (phase 0 joins its
+  existing group import); `dirty_recalc_tests.rs` extends its
+  existing `crate::dirty_recalc` group import; `ipc_tests.rs` fully
+  qualified (its style for crate items, T-289's precedent). The
+  helpers' doc comments went with the definitions. Orphaned imports
+  cleaned where the helper was a name's only user: phase 0 dropped
+  `AppError`, phase 1 dropped `AppError`+`ErrorDetails`, phase 3
+  dropped `ErrorDetails`, phase 4 dropped `ErrorCode`+`ErrorDetails`
+  (each verified by a per-file grep census before the deletion).
+  No production code changed: `build_snapshot_to_app_error`,
+  `dirty_fallback`, and the store enum are byte-identical to the
+  parent commit; the seam exists only in `cfg(test)` builds.
+
+Tests: three pins in `dirty_recalc_tests.rs`'s new "the library
+seed seam (T-304)" section, T-289's shape adapted to this enum.
+`the_library_seed_helper_routes_sql_through_the_classifier` drives
+one representative §10 class (`SQLITE_FULL`) through the seam with
+the wire literals as the oracle (`E_DISK_FULL`, `errors.disk_full`,
+`DiskFull` — the §10 table, not a comparison against the mapper,
+which would mirror the implementation). The two `#[should_panic]`
+pins hold the guards to their documented texts — "hit the `Member`
+envelope" and "hit a write-path outcome" (`NotFound` the
+representative arm). Mutation reasoning: returning any other
+envelope for the routing pin's class turns it red; re-mapping either
+panic arm into a returned envelope, or rewording the panic texts,
+turns the respective pin red.
+
+Honest boundaries: the batch regime (owner instruction 2026-11-23)
+defers suite runs to the orchestrator's central run — the
+consolidated helpers' green run is not proven in this task, and the
+pins' mutation check is argued above, not executed;
+`cargo fmt --check` and `cargo check --tests -p eunomia-sync`
+(type check, no test run) are green by exit code, zero warnings.
+The panic messages' `Display` would embed a hostile stored value if
+an arm ever fired; that is test-side assertion wording only, never a
+diagnostic surface, and the function does not exist outside
+`cfg(test)` builds (a production caller is impossible by
+construction).
+
+Round-1 review addendum (D-171, same task; report
+`.opencode/reviews/t304-round1.md`, deepseek-v4.1-flash — APPROVE,
+no P0/P1; 1×P2, 3×P3, all in this entry's prose): the round
+re-derived the behavior preservation per call site (the ids/titles
+each caller passes, the store functions' error variants, the per-test
+database isolation), hashed the eight deleted bodies against
+`HEAD^` (finding P2-1's three textual forms), verified the
+exhaustive match, the pin oracles, and the clean tail append.
+Findings fixed here —
+
+- P2-1 (taken): "byte-identical bodies" was false as written — the
+  eight are identical only after each file's import spelling
+  resolves (three textual forms; only the `Sql` arm line is
+  byte-identical). The Problem and Solution paragraphs above now say
+  so.
+- P3-1 (taken): the heading was split by a blank line (the date and
+  half the title rendered as body text), two code spans were broken
+  across line ends (one continuation at column 0 — the defect class
+  of D-162's R1-P3-1), the panic texts carried escaped backticks
+  inside a code span, and two spaces were missing. All reflowed;
+  prettier does not catch span semantics, so these were manual.
+- P3-2 (taken): the "Assigned"/"Buried" two-call evidence was
+  attributed to phase 0 but lives in the dirty suite's
+  hidden-instruction test; the reachability bullet now says so (the
+  underlying claim — titles unique per call site — was true; only
+  the attribution moved).
+- P3-3 (taken, the reviewer's alternative adopted): "cannot delegate
+  to [`build_snapshot_to_app_error`]" overstated the constraint —
+  `BuildSnapshotError` is public, and the `Sql` arm can route through
+  the production mapping wrapped as `BuildSnapshotError::Library`.
+  The seam's `Sql` arm now does exactly that (behavior-identical
+  today — the wrapped call unpacks to the same classifier envelope,
+  so the routing pin's §10 oracle still passes; the `Member`/write-
+  path arms still panic before any delegation), the Solution bullet
+  and the seam's doc were rewritten to the routing-through-the-
+  production-arm wording, and the pin's mutation note now claims
+  only what the envelope oracle can observe ("returning any other
+  envelope for this class turns this red" — a re-spelled
+  character-identical delegation is not observable by it, which is
+  the point of keeping the spelling shared).

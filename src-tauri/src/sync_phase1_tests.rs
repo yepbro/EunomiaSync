@@ -47,7 +47,8 @@ use crate::commands::begin_sync;
 use crate::data_dirs;
 use crate::db::Db;
 use crate::db::sync_runs_app_error_for_tests;
-use crate::errors::{AppError, ErrorCode, ErrorDetails};
+use crate::dirty_recalc::library_seed_error_for_tests;
+use crate::errors::ErrorCode;
 use crate::sync_phase0::{self, Phase0Outcome};
 use crate::sync_phase1::{self, Phase1Outcome, PreflightVerdict};
 use crate::sync_running::SyncRunning;
@@ -165,24 +166,6 @@ fn seed_repo_project(
     (id, canonical)
 }
 
-/// Maps a library seeding failure onto the wire shape the executor
-/// needs (the D-093 fallback family, the `sync_phase0_tests.rs`
-/// shape).
-fn library_seed_error(error: eunomia_store::library::LibraryError) -> AppError {
-    match error {
-        eunomia_store::library::LibraryError::Sql(sql) => crate::db::sqlite_error_to_app_error(sql),
-        other => {
-            let mut app_error = AppError::new(ErrorCode::DbLocked);
-            app_error.details = Some(ErrorDetails {
-                os_code: None,
-                os_kind: Some("LibrarySeed".to_owned()),
-                os_message: Some(other.to_string()),
-            });
-            app_error
-        }
-    }
-}
-
 /// Seeds one active instruction with its main variant and assigns it
 /// to the project: the project's built managed text is then `content`
 /// verbatim (extras off, the `sync_phase0_tests.rs` shape). The title
@@ -202,7 +185,7 @@ fn seed_assigned_instruction(
             tx,
             &eunomia_store::library::NewLibraryItem::Instruction { title },
         )
-        .map_err(library_seed_error)?;
+        .map_err(library_seed_error_for_tests)?;
         let variant = eunomia_store::library::create_variant(
             tx,
             &eunomia_store::library::NewVariant {
@@ -212,7 +195,7 @@ fn seed_assigned_instruction(
                 is_main: true,
             },
         )
-        .map_err(library_seed_error)?;
+        .map_err(library_seed_error_for_tests)?;
         eunomia_store::library::assign(
             tx,
             &eunomia_store::library::NewAssignment {
@@ -221,7 +204,7 @@ fn seed_assigned_instruction(
                 variant_id: &variant.id,
             },
         )
-        .map_err(library_seed_error)?;
+        .map_err(library_seed_error_for_tests)?;
         Ok(())
     }))
     .expect("seeding the assigned instruction must work");

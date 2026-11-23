@@ -41,8 +41,8 @@ use crate::commands::begin_sync;
 use crate::data_dirs;
 use crate::db::Db;
 use crate::db::sync_runs_app_error_for_tests;
-use crate::dirty_recalc::{DirtyEvent, DirtyState, recalc_and_emit};
-use crate::errors::{AppError, ErrorCode};
+use crate::dirty_recalc::{DirtyEvent, DirtyState, library_seed_error_for_tests, recalc_and_emit};
+use crate::errors::ErrorCode;
 use crate::sync_phase0::{self, PreparedProject};
 use crate::sync_running::SyncRunning;
 
@@ -117,24 +117,6 @@ fn run_row_of(
 
 // ---- seeding ----------------------------------------------------------
 
-/// Maps a library seeding failure onto the wire shape the executor
-/// needs — test-local, the D-093 fallback family (the
-/// `dirty_recalc_tests.rs` shape).
-fn library_seed_error(error: eunomia_store::library::LibraryError) -> AppError {
-    match error {
-        eunomia_store::library::LibraryError::Sql(sql) => crate::db::sqlite_error_to_app_error(sql),
-        other => {
-            let mut app_error = AppError::new(ErrorCode::DbLocked);
-            app_error.details = Some(crate::errors::ErrorDetails {
-                os_code: None,
-                os_kind: Some("LibrarySeed".to_owned()),
-                os_message: Some(other.to_string()),
-            });
-            app_error
-        }
-    }
-}
-
 /// Seeds one project with the given scheme (both extra files off),
 /// returning its row id. Owned inputs — the executor's closure is
 /// `'static`.
@@ -206,7 +188,7 @@ fn seed_instruction(
             tx,
             &eunomia_store::library::NewLibraryItem::Instruction { title },
         )
-        .map_err(library_seed_error)?;
+        .map_err(library_seed_error_for_tests)?;
         let variant = eunomia_store::library::create_variant(
             tx,
             &eunomia_store::library::NewVariant {
@@ -216,7 +198,7 @@ fn seed_instruction(
                 is_main: true,
             },
         )
-        .map_err(library_seed_error)?;
+        .map_err(library_seed_error_for_tests)?;
         Ok((item.id, variant.id))
     }))
     .expect("seeding an instruction with its main variant must work")
@@ -241,7 +223,7 @@ fn seed_extra_variant(
             },
         )
         .map(|variant| variant.id)
-        .map_err(library_seed_error)
+        .map_err(library_seed_error_for_tests)
     }))
     .expect("seeding the extra variant must work")
 }
@@ -263,7 +245,7 @@ fn seed_assignment(
             },
         )
         .map(|_| ())
-        .map_err(library_seed_error)
+        .map_err(library_seed_error_for_tests)
     }))
     .expect("seeding an assignment through the repository must work")
 }
@@ -282,7 +264,7 @@ fn edit_variant(app: &tauri::App<tauri::test::MockRuntime>, variant_id: String, 
             },
         )
         .map(|_| ())
-        .map_err(library_seed_error)
+        .map_err(library_seed_error_for_tests)
     }))
     .expect("editing the variant must work")
 }

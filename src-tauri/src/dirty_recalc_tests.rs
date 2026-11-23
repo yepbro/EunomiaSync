@@ -56,7 +56,8 @@ use eunomia_store::storage::{open_db, run_migrations};
 use crate::data_dirs;
 use crate::db::Db;
 use crate::dirty_recalc::{
-    self, DirtyEvent, DirtyState, ProjectDirtyChange, Trigger, recalc_and_emit,
+    self, DirtyEvent, DirtyState, ProjectDirtyChange, Trigger, library_seed_error_for_tests,
+    recalc_and_emit,
 };
 
 // ---- the harness ------------------------------------------------------
@@ -165,23 +166,6 @@ fn simulate_sync(database: &Db, project_id: String, hash: String) {
     .expect("storing the synced hash must work");
 }
 
-/// Maps a library seeding failure onto the wire shape the executor
-/// needs — test-local, the D-093 fallback family.
-fn library_seed_error(error: eunomia_store::library::LibraryError) -> crate::errors::AppError {
-    match error {
-        eunomia_store::library::LibraryError::Sql(sql) => crate::db::sqlite_error_to_app_error(sql),
-        other => {
-            let mut app_error = crate::errors::AppError::new(crate::errors::ErrorCode::DbLocked);
-            app_error.details = Some(crate::errors::ErrorDetails {
-                os_code: None,
-                os_kind: Some("LibrarySeed".to_owned()),
-                os_message: Some(other.to_string()),
-            });
-            app_error
-        }
-    }
-}
-
 /// Seeds one scheme-A project with both extra files off (the unit
 /// fixture's settings), returning its row id. The path arrives owned
 /// — the executor's closure is `'static`.
@@ -225,7 +209,7 @@ fn seed_instruction(database: &Db, title: &'static str, content: &'static str) -
             tx,
             &eunomia_store::library::NewLibraryItem::Instruction { title },
         )
-        .map_err(library_seed_error)?;
+        .map_err(library_seed_error_for_tests)?;
         let variant = eunomia_store::library::create_variant(
             tx,
             &eunomia_store::library::NewVariant {
@@ -235,7 +219,7 @@ fn seed_instruction(database: &Db, title: &'static str, content: &'static str) -
                 is_main: true,
             },
         )
-        .map_err(library_seed_error)?;
+        .map_err(library_seed_error_for_tests)?;
         Ok((item.id, variant.id))
     }))
     .expect("seeding an instruction with its main variant must work")
@@ -254,7 +238,7 @@ fn seed_assignment(database: &Db, project_id: String, instruction_id: String, va
             },
         )
         .map(|_| ())
-        .map_err(library_seed_error)
+        .map_err(library_seed_error_for_tests)
     }))
     .expect("seeding an assignment through the repository must work")
 }
@@ -265,7 +249,7 @@ fn hide_instruction(database: &Db, instruction_id: String) {
     tauri::async_runtime::block_on(database.run(move |tx| {
         eunomia_store::library::hide_item(tx, &instruction_id)
             .map(|_| ())
-            .map_err(library_seed_error)
+            .map_err(library_seed_error_for_tests)
     }))
     .expect("hiding the instruction must work")
 }
@@ -283,7 +267,7 @@ fn edit_variant(database: &Db, variant_id: String, content: String) {
             },
         )
         .map(|_| ())
-        .map_err(library_seed_error)
+        .map_err(library_seed_error_for_tests)
     }))
     .expect("editing the variant must work")
 }
@@ -305,6 +289,71 @@ fn off() -> ExtraFile {
         enabled: false,
         position: ExtraFilePosition::End,
     }
+}
+
+// ---- the library seed seam (T-304) ------------------------------------
+
+#[test]
+fn the_library_seed_helper_routes_sql_through_the_classifier() {
+    // Arrange: the `Sql` arm of the seeding seam
+    // (`library_seed_error_for_tests`, the one helper the eight
+    // per-suite copies dissolved into, T-304/D-162's play) — the arm
+    // routes through the production `LibraryError` mapping
+    // (`build_snapshot_to_app_error`'s `Library` arm, today the
+    // shared base classifier), so a suite's mapped envelope is
+    // exactly what production puts on the wire. The oracle is the
+    // §10 table's literal for one representative class (DiskFull →
+    // `E_DISK_FULL`), never a comparison against the mapper itself —
+    // that would mirror the implementation (the project's rule 4).
+    // Mutation: returning any other envelope for this class turns
+    // this red.
+    use rusqlite::ffi::{Error as SqliteError, SQLITE_FULL};
+
+    // Act & Assert: the classified store failure reaches the wire
+    // shaped by the §10 literals.
+    let app_error = library_seed_error_for_tests(eunomia_store::library::LibraryError::Sql(
+        rusqlite::Error::SqliteFailure(
+            SqliteError::new(SQLITE_FULL),
+            Some("the library table says no".to_owned()),
+        ),
+    ));
+    let wire = serde_json::to_value(&app_error).expect("a classified error must serialize");
+    assert_eq!(wire["code"], serde_json::json!("E_DISK_FULL"));
+    assert_eq!(wire["message_key"], serde_json::json!("errors.disk_full"));
+    assert_eq!(wire["details"]["os_kind"], serde_json::json!("DiskFull"));
+}
+
+#[test]
+#[should_panic(expected = "hit the `Member` envelope")]
+fn the_library_seed_helper_panics_on_the_unreachable_member_envelope() {
+    // The `# Panics` contract of the seeding seam, pinned directly:
+    // the seeds write only through the sanctioned library writers, so
+    // a corrupt-vocabulary `Member` envelope cannot reach the helper —
+    // when it does anyway, the panic is the loud failure, not the
+    // silently mapped envelope the eight deleted per-suite copies
+    // used to produce. The oracle is the documented contract text
+    // itself (the `# Panics` section and the panic message):
+    // re-mapping the arm, or rewording the panic into a return, turns
+    // this red. T-304/D-162.
+    let _ = library_seed_error_for_tests(eunomia_store::library::LibraryError::Member {
+        column: "kind",
+        found: "paused".to_owned(),
+    });
+}
+
+#[test]
+#[should_panic(expected = "hit a write-path outcome")]
+fn the_library_seed_helper_panics_on_an_unreachable_write_path_outcome() {
+    // The second documented guard: the seeds construct
+    // valid-by-construction inputs (ids read back from the rows they
+    // just wrote, titles unique within the test's database), so a
+    // write-path outcome cannot reach the helper — a fresh id cannot
+    // miss, so `NotFound` is the representative arm here. The
+    // Display-embedded value is assertion-side wording only, never a
+    // wire surface. T-304/D-162.
+    let _ = library_seed_error_for_tests(eunomia_store::library::LibraryError::NotFound {
+        id: "library-item-1".to_owned(),
+    });
 }
 
 // ---- the direct entry: the card's criteria ---------------------------
@@ -746,7 +795,7 @@ fn a_write_burst_coalesces_into_one_debounced_pass() {
                 &eunomia_store::library::NewLibraryItem::Instruction { title },
             )
             .map(|_| ())
-            .map_err(library_seed_error)
+            .map_err(library_seed_error_for_tests)
         }))
         .expect("the burst write must work");
     }

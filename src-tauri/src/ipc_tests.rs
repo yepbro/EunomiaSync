@@ -6413,7 +6413,7 @@ fn seed_assigned_instruction(
             tx,
             &eunomia_store::library::NewLibraryItem::Instruction { title },
         )
-        .map_err(library_watch_seed_error)?;
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)?;
         let variant = eunomia_store::library::create_variant(
             tx,
             &eunomia_store::library::NewVariant {
@@ -6423,7 +6423,7 @@ fn seed_assigned_instruction(
                 is_main: true,
             },
         )
-        .map_err(library_watch_seed_error)?;
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)?;
         eunomia_store::library::assign(
             tx,
             &eunomia_store::library::NewAssignment {
@@ -6432,28 +6432,9 @@ fn seed_assigned_instruction(
                 variant_id: &variant.id,
             },
         )
-        .map_err(library_watch_seed_error)
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)
     }))
     .expect("seeding the assignment through the repository must work");
-}
-
-/// Maps a library seeding failure onto the wire shape — test-local,
-/// the `library_seed_error` shape of the dirty suite.
-fn library_watch_seed_error(
-    error: eunomia_store::library::LibraryError,
-) -> crate::errors::AppError {
-    match error {
-        eunomia_store::library::LibraryError::Sql(sql) => crate::db::sqlite_error_to_app_error(sql),
-        other => {
-            let mut app_error = crate::errors::AppError::new(crate::errors::ErrorCode::DbLocked);
-            app_error.details = Some(crate::errors::ErrorDetails {
-                os_code: None,
-                os_kind: Some("LibrarySeed".to_owned()),
-                os_message: Some(other.to_string()),
-            });
-            app_error
-        }
-    }
 }
 
 /// The DB-024 simulation of the sync pipeline (the `simulate_sync`
@@ -9276,7 +9257,7 @@ fn sync_seed_instruction(
             tx,
             &eunomia_store::library::NewLibraryItem::Instruction { title },
         )
-        .map_err(sync_library_seed_error)?;
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)?;
         let variant = eunomia_store::library::create_variant(
             tx,
             &eunomia_store::library::NewVariant {
@@ -9286,7 +9267,7 @@ fn sync_seed_instruction(
                 is_main: true,
             },
         )
-        .map_err(sync_library_seed_error)?;
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)?;
         eunomia_store::library::assign(
             tx,
             &eunomia_store::library::NewAssignment {
@@ -9295,27 +9276,10 @@ fn sync_seed_instruction(
                 variant_id: &variant.id,
             },
         )
-        .map_err(sync_library_seed_error)?;
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)?;
         Ok(())
     }))
     .expect("seeding the assigned instruction must work");
-}
-
-/// Maps a library seeding failure onto the wire shape the executor
-/// needs (the D-093 fallback family).
-fn sync_library_seed_error(error: eunomia_store::library::LibraryError) -> crate::errors::AppError {
-    match error {
-        eunomia_store::library::LibraryError::Sql(sql) => crate::db::sqlite_error_to_app_error(sql),
-        other => {
-            let mut app_error = crate::errors::AppError::new(crate::errors::ErrorCode::DbLocked);
-            app_error.details = Some(crate::errors::ErrorDetails {
-                os_code: None,
-                os_kind: Some("LibrarySeed".to_owned()),
-                os_message: Some(other.to_string()),
-            });
-            app_error
-        }
-    }
 }
 
 /// The run row through the app's database (the assertion-side read).

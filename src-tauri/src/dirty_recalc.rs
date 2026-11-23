@@ -616,6 +616,76 @@ fn dirty_fallback(kind: &str, message: &str) -> AppError {
     app_error
 }
 
+/// The assertion-side seam of the library seeding failures for the
+/// test suites (T-304, D-162's play over the sibling family): the
+/// eight per-suite `LibraryError` → `AppError` seed helpers (the
+/// `library_seed_error` of the five `sync_phase*_tests.rs` suites and
+/// of `dirty_recalc_tests.rs`, `sync_library_seed_error` and
+/// `library_watch_seed_error` in `ipc_tests.rs` — the census D-161
+/// already inventoried) each hand-rolled their own copy of the
+/// mapping; they all route through here now. The `Sql` arm routes
+/// through the production mapping — [`build_snapshot_to_app_error`]'s
+/// `Library` arm, wrapped as `BuildSnapshotError::Library` — so a
+/// suite's mapped `Sql` envelope is exactly the envelope production
+/// puts on the wire (the D-149/D-162 one-spelling law, now on the
+/// library test side too; the arm's treatment there today is the
+/// shared base classifier). The other arms cannot be produced by the
+/// suites and panic instead of inventing an envelope (the D-162
+/// documented-panic shape): the old helpers' silent
+/// `DbLocked`+`LibrarySeed`+`Display` fallback was never observed by
+/// any test.
+///
+/// # Panics
+///
+/// Panics if `error` carries the `Member` envelope — the seeds write
+/// only through the sanctioned library writers, so no suite can hand
+/// the helper a corrupt vocabulary cell — or a write-path outcome
+/// (`NotFound`, `DuplicateInstructionTitle`, `AlreadyAssigned`, and
+/// the rest): the seeds construct valid-by-construction inputs (ids
+/// read back from the rows they just wrote; titles unique within the
+/// test's database — the process-unique counter titles of the phase
+/// 1–4/ipc fixtures, distinct fixture titles per call site
+/// elsewhere). The panic names the arm and embeds the error's
+/// `Display` (deliberately value-embedding — assertion-side wording
+/// that never reaches the wire; the wire's class-only rule stays in
+/// the production mapping, SEC-008). The guards are pinned by
+/// `dirty_recalc_tests`'s
+/// `the_library_seed_helper_panics_on_the_unreachable_member_envelope`
+/// and
+/// `the_library_seed_helper_panics_on_an_unreachable_write_path_outcome`;
+/// the `Sql` delegation by
+/// `the_library_seed_helper_routes_sql_through_the_classifier`.
+#[cfg(test)]
+pub(crate) fn library_seed_error_for_tests(
+    error: eunomia_store::library::LibraryError,
+) -> AppError {
+    match error {
+        error @ eunomia_store::library::LibraryError::Sql(_) => {
+            build_snapshot_to_app_error(BuildSnapshotError::Library(error))
+        }
+        error @ eunomia_store::library::LibraryError::Member { .. } => panic!(
+            "the assertion-side library seed hit the `Member` envelope, which the suites cannot produce (the seeds write only through the sanctioned library writers): {error}"
+        ),
+        error @ (eunomia_store::library::LibraryError::NotFound { .. }
+        | eunomia_store::library::LibraryError::NotAnInstruction { .. }
+        | eunomia_store::library::LibraryError::NotAHeading { .. }
+        | eunomia_store::library::LibraryError::DuplicateInstructionTitle { .. }
+        | eunomia_store::library::LibraryError::DuplicateVariantName { .. }
+        | eunomia_store::library::LibraryError::MainVariantExists { .. }
+        | eunomia_store::library::LibraryError::MainRequired { .. }
+        | eunomia_store::library::LibraryError::LastVariant { .. }
+        | eunomia_store::library::LibraryError::ReplacementRequired { .. }
+        | eunomia_store::library::LibraryError::ReplacementInvalid { .. }
+        | eunomia_store::library::LibraryError::NoActiveMain { .. }
+        | eunomia_store::library::LibraryError::PositionOutOfRange { .. }
+        | eunomia_store::library::LibraryError::AlreadyAssigned { .. }
+        | eunomia_store::library::LibraryError::VariantNotAssignable { .. }
+        | eunomia_store::library::LibraryError::VariantNotActive { .. }) => panic!(
+            "the assertion-side library seed hit a write-path outcome, which the suites cannot produce (the seeds construct valid-by-construction inputs — ids read back from the rows they just wrote, titles unique within the test's database): {error}"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The service's own pure halves — the diff semantics over the
