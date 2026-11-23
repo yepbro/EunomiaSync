@@ -468,10 +468,18 @@ fn a_completed_scan_answers_the_four_classes_and_writes_nothing() {
     std::fs::create_dir_all(root.join("plain"))
         .expect("the plain folder fixture must be creatable");
     let submodule = git_file_under(&root, "submodule");
+    // The walk root is the CANONICAL form the SEC-003 check returns
+    // (the scan module doc's contract — walked paths spell the
+    // identity that way), so every spelling this test compares
+    // against is the canonical one, never the raw tempdir form: the
+    // raw spelling diverges from the resolved one on macOS
+    // (`/var` → `/private/var`) and on Windows (the a19fe45 class).
+    let walk_root =
+        eunomia_fs::paths::canonicalize(&root).expect("the scan root fixture canonicalizes");
     seed_active_project(&app, &repo_known, "Known");
     seed_archived_project(&app, &repo_archived, "Arch");
     seed_exclusion(&app, &repo_excluded);
-    let picked = pick_folder(&app, &eunomia_fs::paths::canonicalize(&root).unwrap());
+    let picked = pick_folder(&app, &walk_root);
     let before = stored_counts(&app);
     let progress = listen_progress(&app);
 
@@ -593,7 +601,11 @@ fn a_completed_scan_answers_the_four_classes_and_writes_nothing() {
         assert!(
             payload
                 .current_path
-                .starts_with(root.to_string_lossy().as_ref())
+                .starts_with(walk_root.to_string_lossy().as_ref()),
+            "the walk reports paths under the canonical walk root; got {:?} \
+             against the root {:?}",
+            payload.current_path,
+            walk_root
         );
         assert!(payload.checked <= checked);
         assert!(payload.found <= found);

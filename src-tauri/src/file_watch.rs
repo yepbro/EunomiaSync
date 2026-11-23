@@ -1890,8 +1890,20 @@ mod tests {
         )
         .expect("the fixture is a valid snapshot");
         let facts = facts_of(&snapshot, &[]);
+        // The pass names watch dirs through the §9.4 resolution's
+        // CANONICAL spelling (`resolve_target_path` canonicalizes the
+        // root before the join), so the plan must name the refused
+        // dir the same way: the raw tempdir spelling diverges from
+        // the resolved form on macOS (`/var` → `/private/var`; on
+        // Windows the resolved form need not equal the env spelling
+        // either), and the refusal would never fire off ubuntu
+        // (the a19fe45 class — fixtures spell paths the way the
+        // production pass resolves them, whatever the platform
+        // does to spellings).
+        let refused_dir = eunomia_fs::paths::canonicalize(&limited_root)
+            .expect("the fresh fixture canonicalizes");
         let plan = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
-            limited_root.clone(),
+            refused_dir,
         ])));
         let watcher = Arc::new(Mutex::new(TargetWatcher::with_backend(RefusingBackend {
             plan: std::sync::Arc::clone(&plan),

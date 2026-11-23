@@ -17688,3 +17688,158 @@ problems from the fixes. The one finding: the bench file
 now names `classify_entry` and the tracker's per-event costs, or
 points at the harness docs' complete list. The review phase is
 complete after this round (no third round).
+
+### D-160 — CI 45120662560: two platform-assumption test bugs — the refusal plan and the progress prefix now spell paths the way production resolves them — 2026-11-22
+
+Problem: CI run 45120662560 (push 837dc8f..a2ba5d8): test-matrix
+green on ubuntu-latest, red on macos-15, macos-15-intel and
+windows-latest — exactly two tests on all three legs (both green
+locally on ubuntu):
+
+1. `file_watch::tests::a_limit_refused_target_flows_through_the_real_pass_to_the_gate_and_notice` (T-262/D-155's composite proof)
+   panicked at the pre-fix file_watch.rs:1907 — `left: {}` against
+   `right: {"limited": Limit}`: the SYS-010 seam's unwatched map came
+   back EMPTY, the synthetic limit refusal never fired.
+2. `scan_tests::a_completed_scan_answers_the_four_classes_and_writes_nothing` (T-076) panicked at the pre-fix scan_tests.rs:593 —
+   `payload.current_path.starts_with(root.to_string_lossy().as_ref())`
+   failed.
+
+Diagnosis — both are TEST platform-assumption bugs; production was
+verified correct, no production defect:
+
+1. The composite proof builds `TargetWatcher::with_backend(
+RefusingBackend)` (the pre-fix :1896-1899), so the REAL notify
+   backend never runs and D-148's refusal classification (the stat
+   pre-check, notify's kind mapping — notify's windows.rs:557-564,
+   inotify.rs:451-457) is NOT in play: the fake refuses iff its plan
+   set CONTAINS the directory `set_files` hands it (file_watch.rs
+   `RefusingBackend::watch`, :1830-1843). The plan was seeded with
+   the RAW tempdir path (`limited_root.clone()`), but the real pass
+   names watch dirs through the §9.4 resolution's canonical
+   spelling: `blocking_half` → `target_of` (file_watch.rs:920-926) →
+   `resolve_target_path` canonicalizes the root first (paths.rs:1235
+   through `canonicalize_raw` = `dunce::canonicalize`, :1359-1371;
+   that function's own doc :1229-1231 names the macOS
+   `/var` = `/private/var` temp-fixture case), the absent target is
+   the lexical join under the canonical root (paths.rs:1330-1333),
+   and `wanted_dirs` hands `backend.watch` the canonical root
+   (watcher.rs:853-864, the call at :610). On macOS the tempdir
+   lives behind the `/var` symlink (`dunce::canonicalize` IS std
+   `fs::canonicalize` on unix — dunce-1.0.5/src/lib.rs:65-76 —
+   realpath resolves to `/private/var/…`); on Windows the resolved
+   final form (std canonicalize is GetFinalPathNameByHandleW; dunce
+   lib.rs:79-86 strips the `\\?\` prefix where safe) need not equal
+   the env spelling of the tempdir — the exact divergence was not
+   observed verbatim, only that the raw-vs-canonical comparisons
+   failed on that leg too (see Honest boundaries). `plan.contains(dir)` is
+   then false → no refusal → the empty map. On ubuntu `/tmp` is a
+   real directory: canonical == raw, the strings match — exactly
+   why the ubuntu leg and local runs were green.
+2. The scan walks the CANONICAL root by contract (scan.rs:39-45:
+   the SEC-003 check "returns the CANONICAL form, which becomes the
+   walk root"), and the test already feeds the canonical form to
+   the picker (the pre-fix :474, now scan_tests.rs:482, the
+   a19fe45 discipline) with
+   every other assertion built on canonical fixtures (`repo_under`
+   and `git_file_under` return canonical, :177-190 — which is why
+   the by_path and skip assertions PASSED on the failing legs).
+   Only the progress assertion compared against the RAW `root`
+   spelling — a plain string prefix check cannot match
+   `/private/var/…` against `/var/…` (or Windows' resolved form
+   against the short-named spelling).
+
+Solution — a19fe45's class, Project Rules 3 (expectations built
+with the project's own `eunomia_fs::paths::canonicalize`, never the
+raw tempdir spelling):
+
+1. file_watch.rs: the plan is seeded with
+   `canonicalize(&limited_root)` — the fake refuses the dir under
+   the spelling the pass actually names. This is fixture CONFIG,
+   not the oracle: the oracle assertions (the id-keyed map with its
+   class, one episode for a standing refusal, the notice
+   read-back, the healed pass clearing everything) are untouched.
+2. scan_tests.rs: `walk_root = canonicalize(&root)` once, used both
+   for the pick and as the progress prefix expectation, which also
+   gains a failure message naming both spellings (the red run
+   printed only the bare assertion text).
+
+Falsifiability (Rule 4; mutations observed red, then reverted):
+discarding the refusal-CLASS RECORDING in `set_files`' Err arm
+makes the composite proof fail at its map assertion
+(`{"limited": Other}` against `{"limited": Limit}` — the class
+flow is pinned); poisoning `ProgressTracker::on_event`'s `current_path` with a prefix outside
+the root makes the scan test fail naming both paths. (A first
+scan-mutation attempt through `Path::join` was ineffective — `join`
+with an absolute path REPLACES the base; redone as string
+concatenation.)
+
+Honest boundaries: macOS/Windows cannot be executed here. The
+mechanism is proven from sources (dunce lib.rs cited; std
+canonicalize semantics; the project's own docs at paths.rs:1229-1231
+and scan.rs:39-45) and, for the scan test, by the controlled
+comparison inside it (the canonically-built by_path/skip assertions
+passed on the failing legs while the raw-built prefix failed); the
+file_watch proof rests on the traced pass chain plus the identical
+empty-map red on all three legs. The exact Windows spelling
+divergence was not observed verbatim (the old assertion printed no
+values; the run log carries no temp path): what is proven is that
+both raw-vs-canonical comparisons failed on every non-ubuntu leg
+while the canonical-built assertions passed — the divergence family
+(resolved form vs env spelling) follows from std/dunce semantics
+and a19fe45's recorded Windows class, and the fix is identity-based
+(every expectation built through the project's own canonicalize),
+so it does not depend on the exact mechanism. The three platform
+legs' green is CI's to confirm on the merge push. No gating was
+introduced (no `#[cfg]`, no `#[ignore]`)
+and no assertion weakened: on ubuntu both assertions are exactly as
+strong as before (canonical == raw there); on the failing legs they
+change from always-red to checking the real contract. Swept for
+siblings: scan_tests.rs holds no other raw-root comparison (every
+other pick/assertion already goes through the canonical helpers);
+file_watch.rs has the one `with_backend` fake.
+
+Checks: `CARGO_BUILD_JOBS=2 cargo fmt --check`,
+`CARGO_BUILD_JOBS=2 cargo clippy --workspace --all-targets
+-- -D warnings`, and `CARGO_BUILD_JOBS=2 cargo test --workspace` —
+all green on ubuntu (37 suites).
+
+Round-1 review addendum (D-160, same task; report
+`.opencode/reviews/ci-platform-tests-round1.md`, deepseek-v4.1-flash
+— verdict APPROVE, no P0/P1, 1×P2 + 3×P3, all taken here): the
+reviewer independently re-pulled the run's logs and confirmed the
+CI facts, re-checked every citation against dunce-1.0.5's sources
+and the project files, verified no gating and no production line
+in the diff, and re-ran fmt/clippy/the two tests green. P2-1
+(taken): the two new comments stated the Windows divergence as the
+"resolved final form of the short-named `$TMPDIR`" — a mechanism
+this entry itself records as unobserved; both comments and the
+entry's diagnosis now hedge it (macOS named, Windows
+unobserved-verbatim, the fix identity-based). P3-1..P3-3 (taken):
+backslash line-continuations inside the entry's code spans;
+"discarding the refusal" (it was the class RECORDING); the
+"controlled comparison inside each test" overstatement (the
+comparison is the scan test's; the file_watch proof is the traced
+chain plus the identical empty-map red). Note: the reviewer's own
+counter-evidence for P2-1 ("the failing job's log shows a plain
+`D:\a\_temp`") is NOT in the run's log (verified by grep — the log
+carries no temp path); the finding stood on its other leg, and the
+hedging is honest either way.
+
+Round-2 review addendum (D-160, same task; report
+`.opencode/reviews/ci-platform-tests-round2.md`, hy4-flash-free —
+verdict APPROVE, no P0/P1/P2, 4×P3 all taken here): fresh-eyes
+re-verification — all four round-1 fixes confirmed real against
+the current files; the diagnosis chain traced end-to-end
+(`blocking_half` → `target_of` → `resolve_target_path` →
+`set_files` → `wanted_dirs` → `backend.watch` →
+`plan.contains`); citations, no-gating, no-weakening and both
+mutations' falsifiability re-derived from code; fmt and the two
+tests re-run green. P3-1..P3-4 (taken): the stale post-fix `:474`
+picker citation (now labelled pre-fix, with the current `:482`);
+the "notice map" mislabel (it is the seam's UNWATCHED map — the
+notice read-back is a later, never-reached assertion); the scan
+comment's "builds from it" overstatement (the compared fixtures
+canonicalize independently — now "is the canonical one"); the
+wrapped identifiers' rendered embedded space (both test
+identifiers now single lines). The review phase is complete after
+this round (no third round).
