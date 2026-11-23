@@ -79,8 +79,8 @@
 //! desktop dialog and is the recorded untestable seam (the
 //! `app_open_data_folder` treatment), pinned as wiring by the
 //! registration test. The SEC-003 check (`validate_ui_path`) is
-//! driven directly: it is the reusable boundary the upcoming
-//! path-consuming commands call, not a command of its own. Together
+//! driven directly: it is the reusable boundary the path-consuming
+//! commands call, not a command of its own. Together
 //! they pin the card's criterion — a path from nowhere is rejected —
 //! plus both allowlist halves (session pick, registered project in
 //! either state), the canonical-form matching (an aliased spelling of
@@ -131,7 +131,7 @@
 //! nothing — the baseline rule), DB-032's startup and window-focus
 //! triggers through their seams (`spawn_recheck` awaited by handle,
 //! `on_window_event` ruling on constructed window events), the
-//! future sync pipeline's direct entry, the in-flight coalescing
+//! sync pipeline's direct entry, the in-flight coalescing
 //! slot (both a real pass parked mid-run on the gated database and
 //! the simpler externally-held slot), the empty active list, the
 //! honest no-database answer, and the registration pins.
@@ -152,8 +152,8 @@
 //!
 //! The `sync_running` gate tests (T-105, §5.4 SYS-004/SYS-005, §7.4
 //! MAIN-030, §9.4 phase 0/phase 4, §10 `E_SYNC_RUNNING`) drive the
-//! global flag through the acquire seam the future sync pipeline
-//! (T-112+) will call: the card's criterion (a second start while
+//! global flag through the acquire seam the sync pipeline
+//! (T-112+) calls: the card's criterion (a second start while
 //! one runs is refused, and the refusal renders as the §7.10
 //! `E_SYNC_RUNNING` envelope the commands answer with), each
 //! project-changing command refused while an externally-held guard
@@ -1288,13 +1288,14 @@ fn settings_set_applies_without_a_restart_and_journals_each_changed_key() {
     assert_eq!(value_of(&applied, "backup.retention"), "10");
 
     // Assert (2): DEF-001…004's "each setting applies without a
-    // restart", honestly adapted (no scanner exists yet — the
-    // T-012/D-032 precedent): the NEXT read — a new command call over
-    // the same session's `Db` — returns the new values. The mechanism
-    // the criterion stands on is exactly this: every reader goes
-    // through the repository to the table, nothing caches in between,
-    // so the future scanner's "next scan takes the new depth" follows
-    // from the same read path this pins.
+    // restart", pinned at the read path: the NEXT read — a new command
+    // call over the same session's `Db` — returns the new values. The
+    // mechanism the criterion stands on is exactly this: every reader
+    // goes through the repository to the table, nothing caches in
+    // between — the scanner included (T-076: its per-scan snapshot
+    // reads the settings through the repository at every scan start),
+    // so "the next scan takes the new depth" follows from the same
+    // read path this pins.
     let items = invoke_settings_get(&webview).expect("the read must succeed");
     assert_eq!(value_of(&items, "scan.max_depth"), "9");
     assert_eq!(value_of(&items, "ui.language"), "\"cs\"");
@@ -1552,8 +1553,10 @@ fn a_failed_settings_set_rolls_back_its_journal_entries() {
 #[test]
 fn changing_default_settings_never_touches_existing_projects() {
     // DEF-005/PRJ-012 at the IPC boundary, in the D-039 store-suite
-    // shape: a real project row (seeded directly — no project command
-    // exists yet, the boundary this test records) survives a change of
+    // shape: a real project row (seeded through the store directly —
+    // the tests' recorded boundary; the row-creating command
+    // `project_add_manual` (T-074) exists but is not what this test
+    // exercises) survives a change of
     // all four `default.*` settings untouched. The second half of the
     // boundary is structural: `settings_set` only ever addresses the
     // thirteen §6.5 keys (the unknown-key rejection), and the settings
@@ -1868,8 +1871,9 @@ fn projects_list_serves_active_columns_in_sort_order_over_ipc() {
     // through the repository to Alpha-Beta-Gamma — the list must
     // follow `sort_order`, not insertion or id order; plus a fourth
     // project whose folder was never created (the D-09 unavailable
-    // case) and a seeded `last_synced_at` on one row (no sync writer
-    // exists yet — the seeding path the tests record).
+    // case) and a seeded `last_synced_at` on one row (a real run
+    // stamps it only through `sync_phase3`'s `record_last_synced`,
+    // and no sync runs here — the seeding path the tests record).
     let (temp, app) = projects_app();
     let database = app.state::<crate::db::Db>().inner().clone();
     let gamma = seed_project(
@@ -1920,8 +1924,9 @@ fn projects_list_serves_active_columns_in_sort_order_over_ipc() {
             .map_err(crate::commands::projects_store_to_app_error)
     }))
     .expect("reordering through the repository must work");
-    // `last_synced_at` has no writer yet (OUT-020: the sync tasks own
-    // it); seed the wire fact directly, the way the corrupt-cell
+    // the only `last_synced_at` writer is a real run (OUT-020:
+    // `sync_phase3`'s `record_last_synced`), and none runs here —
+    // seed the wire fact directly, the way the corrupt-cell
     // tests seed their cells.
     let vanished_for_stamp = vanished_id.clone();
     tauri::async_runtime::block_on(database.run(move |tx| {
@@ -2820,7 +2825,7 @@ fn seed_registered_project(
 #[test]
 fn a_foreign_path_is_rejected_by_the_sec003_check() {
     // The card's acceptance criterion, driven at the boundary the
-    // future path-consuming commands will call: a path that was NOT
+    // path-consuming commands call: a path that was NOT
     // picked in the dialog this session and is NOT a registered
     // project is rejected — whether the folder exists on disk (a
     // neighbor anyone could name) or not at all (a path that cannot
@@ -4776,8 +4781,8 @@ fn moving_a_project_folder_marks_it_unavailable_and_emits_the_change() {
     // again. Also pins the diff-only contract around it: the first
     // healthy probe emits NOTHING (the baseline rule — a healthy
     // startup has nothing to tell the UI) and an unchanged recheck is
-    // silent. This direct `recheck_and_emit` await is also the future
-    // sync pipeline's entry (§9.4/T-118 will call it as DB-032's
+    // silent. This direct `recheck_and_emit` await is also the sync
+    // pipeline's entry (§9.4/T-118: `sync_run` calls it as DB-032's
     // before-sync checkpoint).
     let (temp, app) = availability_app();
     let database = app.state::<crate::db::Db>().inner().clone();

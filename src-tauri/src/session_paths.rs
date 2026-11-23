@@ -14,9 +14,9 @@
 //!   is one app process: nothing clears the list — the process exit
 //!   is the clear — so every restart starts with an empty allowlist
 //!   exactly as the spec word "session" reads.
-//! - [`validate_ui_path`] is the reusable check the upcoming
-//!   path-consuming commands (`project_add_manual`, `scan_start`, …)
-//!   call at their boundary before touching any folder the UI named:
+//! - [`validate_ui_path`] is the reusable check the path-consuming
+//!   commands (`project_add_manual`, `scan_start`, …) call at their
+//!   boundary before touching any folder the UI named:
 //!   canonicalized match against a registered project (through the
 //!   projects repository's own identity, `find_by_path_key`) **or**
 //!   presence in the session list. Everything else is a typed
@@ -193,7 +193,7 @@ pub(crate) async fn validate_ui_path<R: Runtime>(
         return Ok(canonical);
     }
     // The registered-project half: the repository's own identity
-    // lookup, keyed the way the add flow will key it (DB-030). The
+    // lookup, keyed the way the add flow keys it (DB-030). The
     // key cannot refuse here — canonicalize's UTF-8 gate produced
     // `canonical` — but the guarantee is enforced, not assumed (the
     // shared encoding envelope answers if it ever does).

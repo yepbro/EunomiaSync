@@ -13,7 +13,7 @@
 //! displays backend-composed prose). Which code an OS-level failure maps
 //! to is context-dependent (a permission error is `E_NO_WRITE_ACCESS`
 //! during preflight but `E_BACKUP_FAILED` during the backup phase), so
-//! there is deliberately no blanket `From<std::io::Error>` — future
+//! there is deliberately no blanket `From<std::io::Error>` — the
 //! command tasks construct the error explicitly and attach the OS facts
 //! with [`AppError::with_os_error`].
 //!
@@ -31,7 +31,7 @@
 //!   stable default every code maps to (the `errors.<snake_case>`
 //!   namespace, matching the UI-020 key style `project.settings.title`);
 //!   [`AppError::new`] installs it. The key strings are a contract with
-//!   the (future) locale file — renaming one is a coordinated change,
+//!   the locale file — renaming one is a coordinated change,
 //!   pinned by tests on both sides.
 //! - `params` — interpolation values for the localized message: the
 //!   "where" of UI-011 (path, project name) and similar user-visible
@@ -62,18 +62,19 @@
 //! # What this module does *not* do
 //!
 //! It does not log. §10's "every error is written to the log with its
-//! code, project, path, and OS code" is the producing task's duty
-//! (sync, backup, DB — all upcoming), and SEC-008/D-032 pin every
-//! tracing event to the `logging.rs` facade; when those tasks land they
-//! log through typed helpers there, with this type's fields as the
-//! vocabulary. Until the first fallible command exists, the module has
-//! no production caller: it is registered with the tauri-specta builder
-//! (`Builder::typ`, the documented mechanism for types not reachable
-//! from a command signature — no registered command exists yet, and
-//! the first real ones return `Result<T, AppError>` through the DB
-//! executor, `db::Db::run`), exported to `src/bindings.ts`, and
-//! exercised by the tests below — the same tested-today/consumed-
-//! later shape as the `logging.rs` SEC-008 facade.
+//! code, project, path, and OS code" is the producing commands' duty
+//! (sync, backup, DB — all landed: the `sync_run` pipeline, the
+//! backup/recovery commands, and the DB-backed commands' failure edges
+//! log through typed helpers), and SEC-008/D-032 pin every tracing
+//! event to the `logging.rs` facade, whose `AppError` failure helpers
+//! take `&AppError` — this type's fields are the vocabulary (the
+//! facade's other helpers log their own types). The module has
+//! production callers today: every registered command returns
+//! `Result<T, AppError>` (the DB-backed ones through the DB executor,
+//! `db::Db::run`), the type is registered with the tauri-specta
+//! builder (`Builder::typ`, keeping the type in the export even if a
+//! command-set change would otherwise drop it), exported to
+//! `src/bindings.ts`, and exercised by the tests below.
 
 use std::collections::BTreeMap;
 
@@ -155,11 +156,11 @@ impl ErrorCode {
     /// The code's spec §10 literal (`"E_SYNC_RUNNING"`, …) — the wire
     /// form the serde renames produce and the word §10's log line and
     /// UI-011's "why" carry. Single source for logging helpers and
-    /// diagnostics: the future facade (D-032) reads the literal from
+    /// diagnostics: the facade (D-032) reads the literal from
     /// here instead of re-matching twenty strings or going through
     /// serde. The literal test pins `as_str`, the serde output and the
     /// spec table to one another, so the three cannot drift.
-    #[allow(dead_code)] // consumed by the first fallible command task; tested today
+    #[allow(dead_code)] // inert: the facade and the command layer read the literal through it
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             ErrorCode::SyncRunning => "E_SYNC_RUNNING",
@@ -192,7 +193,7 @@ impl ErrorCode {
     /// (`E_VALIDATION`) override it per-instance. The returned strings
     /// are part of the frontend contract (NFR-006): renaming one is a
     /// coordinated, test-pinned change, never a drive-by.
-    #[allow(dead_code)] // consumed by the first fallible command task; tested today
+    #[allow(dead_code)] // inert: `AppError::new` installs it in production
     pub(crate) fn message_key(self) -> &'static str {
         match self {
             ErrorCode::SyncRunning => "errors.sync_running",
@@ -257,7 +258,7 @@ impl ErrorDetails {
     /// when there is one, plus the portable kind and the message (which
     /// always exist). §10's "OS code" reaches the UI and the log through
     /// this constructor — never through `params`.
-    #[allow(dead_code)] // consumed by the first fallible command task; tested today
+    #[allow(dead_code)] // inert: `with_os_error` captures through it in production
     pub(crate) fn from_io_error(error: &std::io::Error) -> Self {
         ErrorDetails {
             os_code: error.raw_os_error(),
@@ -272,7 +273,7 @@ impl ErrorDetails {
 /// for the field-by-field rationale and the no-`From` policy.
 ///
 /// Invariant for direct constructors (the fields are `pub(crate)` for the
-/// future command tasks): `message_key` must belong to `code` — its
+/// command tasks that build them): `message_key` must belong to `code` — its
 /// [`ErrorCode::message_key`] default, or a deliberate member of the
 /// code's message family (`E_VALIDATION`). A key from a different code
 /// would render the wrong localized text with the wrong params; the UI
@@ -297,9 +298,9 @@ pub(crate) struct AppError {
 
 impl AppError {
     /// Builds the error for `code` with its default `message_key`, no
-    /// params, and no details — the base every future command extends
+    /// params, and no details — the base every command extends
     /// (`.params.insert(...)`, [`Self::with_os_error`]).
-    #[allow(dead_code)] // consumed by the first fallible command task; tested today
+    #[allow(dead_code)] // inert: the commands construct through it at their boundaries
     pub(crate) fn new(code: ErrorCode) -> Self {
         AppError {
             code,
@@ -324,7 +325,7 @@ impl AppError {
 #[cfg(test)]
 mod tests {
     //! Behavior tests of the error contract, through the public surface
-    //! future commands will use: construction, serialization to the §10
+    //! the commands use: construction, serialization to the §10
     //! wire form, and the OS-code attachment. Expected literals are
     //! pinned as strings derived from the spec table — never computed
     //! from the enum — so a mutated rename or message key fails its own
@@ -427,7 +428,7 @@ mod tests {
     #[test]
     fn message_keys_are_stable_and_follow_the_errors_namespace() {
         // Arrange & Act: the default key of every code, pinned to its
-        // literal — the contract with the (future) locale file. The
+        // literal — the contract with the locale file. The
         // spellings follow UI-020's key style: lowercase, dot-separated
         // namespace, snake_case segment.
         //
@@ -505,7 +506,7 @@ mod tests {
         // EACCES), the way `std::fs` surfaces a permission failure.
         let os_error = std::io::Error::from_raw_os_error(13);
 
-        // Act: the constructor a future command runs at its boundary.
+        // Act: the constructor the commands run at their boundaries.
         let wire =
             serde_json::to_value(AppError::new(ErrorCode::NoWriteAccess).with_os_error(&os_error))
                 .expect("serializing an AppError must work");

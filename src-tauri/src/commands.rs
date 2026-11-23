@@ -600,8 +600,8 @@ fn managed_sync_flag<'a, R: Runtime>(
     })
 }
 
-/// The SYS-004 start seam: what the future `sync_run` command
-/// (T-112+) calls as §9.4 phase 0 step 1 — "atomically take
+/// The SYS-004 start seam: what the `sync_run` command (T-118/D-138)
+/// calls as §9.4 phase 0 step 1 — "atomically take
 /// `sync_running`; otherwise `E_SYNC_RUNNING`". `Ok` carries the
 /// [`sync_running::SyncGuard`] the pipeline holds for the whole run,
 /// snapshot to summary (phase 4 step 5's "Reset `sync_running`" is
@@ -614,7 +614,7 @@ fn managed_sync_flag<'a, R: Runtime>(
 /// builds MUST be one `Db::run` read transaction — the
 /// serialization argument in `sync_running.rs`'s module docs rests
 /// on it.
-#[allow(dead_code)] // consumed by the sync-run command task (T-112+); tested today
+#[allow(dead_code)] // inert: the sync pipeline's phase 0 consumes it (sync_phase0)
 pub(crate) fn begin_sync<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<sync_running::SyncGuard, AppError> {
@@ -4058,8 +4058,8 @@ pub(crate) fn app_info_impl<R: Runtime>(app: &AppHandle<R>, uid: u32) -> Result<
 /// Opens the system folder picker from Rust (§7.10 System module
 /// `dialog_pick_folder`, the D-009 fixed name; §5.6) and remembers
 /// the picked folder for the session: the answer is the picked path
-/// in its canonical form (DB-030 — the form the future
-/// `project_add_manual`/`scan_start` will register and probe), or
+/// in its canonical form (DB-030 — the form
+/// `project_add_manual`/`scan_start` register and probe), or
 /// `None` when the user cancelled, in which case nothing is
 /// remembered.
 ///

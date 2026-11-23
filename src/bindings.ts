@@ -80,8 +80,8 @@ export const commands = {
 	 *  Opens the system folder picker from Rust (§7.10 System module
 	 *  `dialog_pick_folder`, the D-009 fixed name; §5.6) and remembers
 	 *  the picked folder for the session: the answer is the picked path
-	 *  in its canonical form (DB-030 — the form the future
-	 *  `project_add_manual`/`scan_start` will register and probe), or
+	 *  in its canonical form (DB-030 — the form
+	 *  `project_add_manual`/`scan_start` register and probe), or
 	 *  `None` when the user cancelled, in which case nothing is
 	 *  remembered.
 	 * 
@@ -952,7 +952,7 @@ export type AddedProject_Serialize = {
  *  for the field-by-field rationale and the no-`From` policy.
  * 
  *  Invariant for direct constructors (the fields are `pub(crate)` for the
- *  future command tasks): `message_key` must belong to `code` — its
+ *  command tasks that build them): `message_key` must belong to `code` — its
  *  [`ErrorCode::message_key`] default, or a deliberate member of the
  *  code's message family (`E_VALIDATION`). A key from a different code
  *  would render the wrong localized text with the wrong params; the UI
@@ -966,7 +966,7 @@ export type AppError = AppError_Serialize | AppError_Deserialize;
  *  for the field-by-field rationale and the no-`From` policy.
  * 
  *  Invariant for direct constructors (the fields are `pub(crate)` for the
- *  future command tasks): `message_key` must belong to `code` — its
+ *  command tasks that build them): `message_key` must belong to `code` — its
  *  [`ErrorCode::message_key`] default, or a deliberate member of the
  *  code's message family (`E_VALIDATION`). A key from a different code
  *  would render the wrong localized text with the wrong params; the UI
@@ -1003,7 +1003,7 @@ export type AppError_Deserialize = {
  *  for the field-by-field rationale and the no-`From` policy.
  * 
  *  Invariant for direct constructors (the fields are `pub(crate)` for the
- *  future command tasks): `message_key` must belong to `code` — its
+ *  command tasks that build them): `message_key` must belong to `code` — its
  *  [`ErrorCode::message_key`] default, or a deliberate member of the
  *  code's message family (`E_VALIDATION`). A key from a different code
  *  would render the wrong localized text with the wrong params; the UI

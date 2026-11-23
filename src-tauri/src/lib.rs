@@ -45,8 +45,8 @@ pub(crate) mod commands;
 
 // The SEC-003 session allowlist and the reusable UI-path check (spec
 // §5.6, T-073): the "picked in this session" half of the trust rule
-// behind `dialog_pick_folder`, and the validator the upcoming
-// path-consuming commands call at their boundary.
+// behind `dialog_pick_folder`, and the validator the path-consuming
+// commands call at their boundary.
 pub(crate) mod session_paths;
 
 // The Markdown preview renderer (spec §7.10 Library module
@@ -64,7 +64,7 @@ pub(crate) mod availability;
 
 // The global `sync_running` flag (spec §5.4 SYS-004/MAIN-030, §9.4
 // phase 0/phase 4, §10's `E_SYNC_RUNNING` row; T-105): the atomic
-// take-once flag the future sync pipeline (T-112+) acquires at its
+// take-once flag the sync pipeline (T-112+) acquires at its
 // start and releases by RAII at its finish, plus the status read the
 // project-changing commands' SYS-005 gate checks.
 pub(crate) mod sync_running;
@@ -303,7 +303,7 @@ pub fn run() {
     let tauri_builder = tauri_builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     // `opener` (SEC-001): "open the data folder" runs in Rust behind the
-    // `app_open_data_folder` app command (upcoming task); the webview has
+    // `app_open_data_folder` app command (T-024); the webview has
     // no `opener:` permission and cannot open arbitrary URLs/paths.
     let tauri_builder = tauri_builder.plugin(tauri_plugin_opener::init());
 
@@ -370,7 +370,7 @@ pub fn run() {
             app.manage(session_paths::SessionPaths::new());
 
             // The global sync-running flag (SYS-004/MAIN-030, T-105):
-            // taken atomically by the future sync pipeline's start
+            // taken atomically by the sync pipeline's start
             // (§9.4 phase 0 step 1), released by the guard's RAII drop
             // at its finish (phase 4 step 5), and read by the
             // project-changing commands' SYS-005 gate. Managed here
