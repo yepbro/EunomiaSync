@@ -132,11 +132,11 @@
 //! - The helpers' signatures are the vocabulary: paths, operation codes
 //!   and numeric IDs. There is deliberately **no parameter** that can
 //!   carry instruction text or file content — [`file_event`], the
-//!   primitive the upcoming variant/sync/backup tasks will log through,
-//!   takes a [`FileOp`] code, a path and an optional numeric ID, and
-//!   that is the whole payload (pinned by the module tests: a file event
-//!   carries the path and the ID while the instruction text of the very
-//!   operation stays out of the file).
+//!   tested, still-unused primitive (its docs carry the full D-163
+//!   status), takes a [`FileOp`] code, a path and an optional numeric
+//!   ID, and that is the whole payload (pinned by the module tests: a
+//!   file event carries the path and the ID while the instruction text
+//!   of the very operation stays out of the file).
 //! - The one intentional exception is [`config_load_warning`]: a config
 //!   parse error may quote the offending bytes of `config.toml` itself, per
 //!   D-028 ("the warning points at the exact bytes that failed") — the
@@ -1073,16 +1073,21 @@ pub(crate) fn db_busy_retry(attempt: usize, pause_ms: u64) {
 ///   journal as the entry's single home.
 /// - The one shape that does **not** mirror: `info` + `user` + a
 ///   non-error result. That is the "Activity" window's own data (the
-///   database journal already holds it), and mirroring every one
-///   would double the file's volume with lines the per-event facade
-///   functions (`file_event`, `db_backup_daily`, …) already write.
+///   database journal already holds it), and mirroring every such
+///   entry would double the file's volume with the window's own
+///   lines. The per-event facade functions write their lines
+///   directly, not as mirrors of journal entries (`db_backup_daily`
+///   today; `file_event` once its first producer lands — D-163).
 ///
 /// The first production caller is `settings_set` (T-030), which
 /// journals its `settings.changed` entries inside the operation's
-/// transaction and calls this once per entry — the info+user+ok shape
-/// it writes today is the unmirrored one, so the mirror arms first
-/// serve a future producer that writes warn/error/diagnostic
-/// entries.
+/// transaction and calls this once per entry — the info+user+ok shape,
+/// i.e. the unmirrored one. The sync pipeline (phase 4) is the
+/// warn/error producer today: each `sync.project_result` row and the
+/// `sync.run_finished` summary ride their outcome's level at user
+/// visibility (`project_entry_shape`), so the mirror arms serve it —
+/// a skipped or failed row's warning or error reaches the file log
+/// through them.
 pub(crate) fn action_logged(entry: &eunomia_store::action_log::LogEntry<'_>) {
     // The payload block is repeated across the three level arms: the
     // tracing macro requires a constant level (its callsite caches
@@ -1883,17 +1888,21 @@ pub(crate) fn file_watch_mutation_refresh_degraded(error: &AppError) {
 }
 
 /// A file operation on a project's library file — the SEC-008 core
-/// event. The upcoming variant, sync and backup tasks log through this
-/// helper: it takes the operation code, the file's path and the numeric
+/// event. It takes the operation code, the file's path and the numeric
 /// ID of the entity involved (variant ID, project ID — whatever the
 /// operation is about), and *nothing else*. There is no content
 /// parameter, so the instruction text being saved or synced cannot leak
 /// into the log — the module tests pin exactly that contract.
 ///
-/// No production caller exists yet (the variant/sync tasks are upcoming);
-/// the SEC-008 test suite is the consumer that keeps this signature
-/// honest until they land. Remove the `allow` when the first task calls
-/// this.
+/// A tested, still-unused facet (the keep ruling D-163): the sync and
+/// backup tasks landed without it — sync journals its file-write
+/// outcomes in the `action_log` journal mirrored by [`action_logged`]
+/// plus the `sync_*` diagnostic facets, and the phase-2 backups record
+/// theirs in `backup_records` rows — so the prospective consumers are
+/// the pending file-operation producers outside the sync journal (the
+/// variant library tasks, `backup_restore`/BKP-007). The first such
+/// producer either adopts this helper (removing the `allow`) or
+/// consciously retires the primitive by its own ruling.
 // SEC-008: no content parameter, by design — see `file_event` docs.
 #[allow(dead_code)]
 pub(crate) fn file_event(op: FileOp, path: &Path, entity_id: Option<u64>) {
@@ -1915,8 +1924,11 @@ pub(crate) fn file_event(op: FileOp, path: &Path, entity_id: Option<u64>) {
 /// operation; SEC-006 (backup paths from IDs and slugs, not user
 /// strings) keeps these operations' *paths* safe too.
 ///
-/// Same status as [`file_event`]: tested today, first produced by the
-/// upcoming variant/sync/backup tasks.
+/// Same status as [`file_event`]: tested today, unused in production
+/// (D-163). The landed sync/backup producers routed around it (the
+/// journal and `backup_records`), leaving the `Synced`/`BackedUp`
+/// members already superseded — the adopt-or-retire ruling decides
+/// their fate along with the enum's.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FileOp {
@@ -2235,12 +2247,12 @@ mod tests {
         // Arrange: everything a real variant-save/sync implementation
         // holds: the instruction text (a realistic AGENTS.md body with
         // distinctive markers), the project's target-file path, and the
-        // variant's database ID. The SEC-008 criterion, adapted to the
-        // code that exists today: the features are not implemented yet,
-        // so the test drives the facade exactly the way those tasks will
-        // (the content stays in their local scope; only the path, the
-        // operation code and the ID cross into the logging API — there
-        // is no parameter that could carry the content).
+        // variant's database ID. The SEC-008 criterion, pinned at the
+        // facade: this test stands in for a producer and drives
+        // `file_event` the way one would (the content stays in the
+        // caller's local scope; only the path, the operation code and
+        // the ID cross into the logging API — there is no parameter
+        // that could carry the content).
         let (temp, root) = logs_dir();
         let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
             .expect("building the subscriber must work");
@@ -2256,8 +2268,8 @@ mod tests {
             .join("eunomia")
             .join("AGENTS.md");
 
-        // Act: a variant save and a sync run, logged the way the tasks
-        // will log them — the text exists in scope the whole time and
+        // Act: a variant save and a sync run as `file_event` would
+        // log them — the text exists in scope the whole time and
         // has nowhere to go.
         tracing::subscriber::with_default(subscriber, || {
             file_event(FileOp::VariantSaved, &target_file, Some(42));
