@@ -2727,6 +2727,76 @@ fn the_open_reports_orphaned_backup_copies_after_the_retention_pass() {
     );
 }
 
+/// Every `.rs` file under the crate's `src/` (the walk recurses, so a
+/// nested module directory cannot hide a file from the census).
+fn crate_source_files() -> Vec<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("the crate's src/ must be listable") {
+            let entry = entry.expect("a readable src/ entry");
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    files.sort();
+    files
+}
+
+#[test]
+fn the_test_suites_register_without_path_attributes() {
+    // T-341's structural fact: every `*_tests.rs` module is registered
+    // by its own name in `lib.rs`'s test block, and no source file
+    // carries a `#[path]` module registration any more (the one such
+    // attribute existed because `lib.rs` was a sibling task's frozen
+    // zone when T-126's pipeline suite landed).
+    //
+    // The scan is string-literal-safe by construction: a live Rust
+    // attribute sits at statement position, so it starts its own line
+    // after whitespace — `config_tests::strip_comments` is not
+    // string-aware and a probe showed a `#[path` inside a string after
+    // `//` could hollow the check out. Reading the RAW sources and
+    // requiring every line to not START with the attribute can only err
+    // toward a false red (a comment that begins a line with it), never
+    // toward a vacuous pass.
+    let source_files = crate_source_files();
+    let mut offenders: Vec<String> = Vec::new();
+    for path in &source_files {
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("{} must read: {err}", path.display()));
+        if text
+            .lines()
+            .any(|line| line.trim_start().starts_with("#[path"))
+        {
+            offenders.push(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    offenders.sort();
+    assert_eq!(
+        offenders,
+        Vec::<String>::new(),
+        "no source file registers a module through `#[path]` (T-341)"
+    );
+
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert!(
+        lib.contains("mod sync_pipeline_tests;"),
+        "lib.rs registers the pipeline suite like every other test module"
+    );
+}
+
 // ---- SEC-007 modes after the real first run (Unix only) -------------------//
 // The T-022 acceptance criterion: a Linux/macOS test checks the modes
 // after the first run. The "first run" here is the real startup seam —

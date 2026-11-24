@@ -927,6 +927,14 @@ mod sync_phase3_tests;
 #[cfg(test)]
 mod sync_phase4_tests;
 
+// T-126's cross-phase suite: the whole §9.4 pipeline on temporary Git
+// repositories in all three schemes. Registered here, beside the phase
+// suites, since T-341; it lived under a `#[path]` attribute inside
+// `sync_phase4_tests` only because this block was a sibling task's
+// frozen zone when the suite landed (DECISIONS.md D-183).
+#[cfg(test)]
+mod sync_pipeline_tests;
+
 #[cfg(test)]
 mod scan_tests;
 

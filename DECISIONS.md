@@ -20873,6 +20873,16 @@ was written.
   `mod sync_phase4_tests;`) and delete the `#[path]` block — two
   lines, no test change.
 
+  **2026-11-24 addendum (T-341):** the follow-up landed exactly as
+  written — the `#[path]` block is gone from `sync_phase4_tests.rs`,
+  `lib.rs`'s test block registers `mod sync_pipeline_tests;` beside
+  the phase suites, and the suite's file and test bodies are
+  unchanged (13 tests before and after). The module's qualified path
+  moved with the declaration, `sync_phase4_tests::sync_pipeline_tests`
+  → `sync_pipeline_tests`; nothing in the tree referenced the nested
+  path, so no call site changed. A `db_tests.rs` pin keeps the tree
+  free of `#[path]` module registrations (T-341).
+
 - _What counts as a library operation._ The §7.10 library commands are
   not landed (the command tasks ahead). The seven operations of the
   DoD-7 test go through the store writers those commands will call over
