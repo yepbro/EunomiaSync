@@ -13765,7 +13765,9 @@ Follow-ups for the board (the orchestrator cards them): pin the
 retention window's query plan the same way if its scan ever matters;
 the pre-migration copies' uncapped accumulation (D-038's known open)
 becomes observable in production with the first real upgrade wave —
-a retention owner may now be worth its card; the dangling "D-141"
+a retention owner may now be worth its card (discharged — D-180: the
+T-253 age rule governed these copies before this line was written);
+the dangling "D-141"
 references (the never-written mock-layer loud-drift entry:
 DECISIONS.md 9649/13120, `src/ipc/mock/commands.ts:6`) need their
 entry written under a fresh `next_id` number.

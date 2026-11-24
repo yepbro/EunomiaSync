@@ -2088,7 +2088,8 @@ fn the_eighth_daily_copy_through_the_db_seam_keeps_the_last_seven() {
     );
     assert!(
         pre_migration.is_file(),
-        "the retention never deletes pre-migration copies"
+        "the daily-copy count pass never deletes pre-migration copies \
+         (their own 7-day age rule is a separate pass, D-129)"
     );
 }
 

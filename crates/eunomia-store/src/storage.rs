@@ -893,8 +893,10 @@ fn stage_and_link_copy(
 
 /// How many daily copies are kept (spec §10 ERR-001: "keeps the last
 /// 7"). The cap applies to the `daily-*.sqlite3` names only — the
-/// pre-migration copies are outside it and accumulate uncapped (their
-/// retention is a separate concern, D-038).
+/// pre-migration copies are outside it: their retention is the
+/// separate 7-day age rule, newest of each kind protected, run once
+/// per successful open by the app layer (D-129/T-253), so they do not
+/// accumulate uncapped (D-180 closed the old "known open").
 const DAILY_BACKUPS_KEPT: usize = 7;
 
 /// The daily copy name for the UTC day of `now`:
