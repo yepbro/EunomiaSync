@@ -207,7 +207,6 @@ pub(crate) struct Db {
     /// The one connection (SYS-002). `std::sync::Mutex` — see the
     /// module docs for why not the async one: the guard never crosses
     /// an await point.
-    #[allow(dead_code)] // read by Db::run and the direct-connection Db methods; tested today
     connection: Arc<Mutex<Connection>>,
     /// The `db-backups/` directory of the same data directory the
     /// connection was opened from (§5.5) — kept so the ERR-001 daily
@@ -557,7 +556,6 @@ impl Db {
     /// `AppError` carrying the panic message — in release builds the
     /// workspace's `panic = "abort"` ends the process before this
     /// mapping could run, so that branch is a dev/test path.
-    #[allow(dead_code)] // consumed by the registered commands through managed_db; tested today
     pub(crate) async fn run<T, F>(&self, operation: F) -> Result<T, AppError>
     where
         F: FnMut(&Transaction<'_>) -> Result<T, AppError> + Send + 'static,
@@ -1098,7 +1096,6 @@ pub(crate) fn join_failure_to_app_error(error: tauri::Error) -> AppError {
 /// facts a §10 log line and UI-011's Details section are for. The
 /// unmapped classes land on the recorded fallback (see the module
 /// docs and DECISIONS.md D-037).
-#[allow(dead_code)] // consumed by the executor's edges and the command mappers; tested today
 pub(crate) fn sqlite_error_to_app_error(error: rusqlite::Error) -> AppError {
     let code = match &error {
         rusqlite::Error::SqliteFailure(sqlite_error, _) => match sqlite_error.code {

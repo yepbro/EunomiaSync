@@ -115,7 +115,6 @@ impl SyncRunning {
     /// exclusion (the conservative Acquire/Release pair around the
     /// flag, the `availability.rs` slot orderings: no other memory is
     /// published through it).
-    #[allow(dead_code)] // consumed by begin_sync, the pipeline's phase 0 step 1; tested today
     pub(crate) fn try_acquire(&self) -> Result<SyncGuard, AlreadyRunning> {
         self.flag
             .running

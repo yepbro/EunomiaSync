@@ -19744,8 +19744,9 @@ exclusion explicitly; db_tests.rs's "the same seam the future
 commands will use" now reads "the same seam the registered commands
 drive".
 
-- _The four non-listed allow attributes stay, with truthful
-  comments._ `try_acquire` (sync_running.rs:118), `Db.connection`
+- _The four non-listed allow attributes stayed then, with truthful
+  comments (dropped by T-334, see the addendum below)._ `try_acquire`
+  (sync_running.rs:118), `Db.connection`
   (db.rs:210), `Db::run` (db.rs:546) and `sqlite_error_to_app_error`
   (db.rs:1087) are inert by the same evidence (production callers:
   commands.rs:623; db.rs:557; commands.rs's ~15 `managed_db(...).run`
@@ -19754,9 +19755,16 @@ drive".
   the card scoped attribute removals to the five, so their comments
   were reworded to name the landed consumers instead ("consumed by
   begin_sync, the pipeline's phase 0 step 1", "read by Db::run…",
-  "consumed by the registered commands through managed_db",
+  "consumed by the registered commands through managed_db" — the
+  commands that drive `Db::run`, not the two recorded exclusions
+  (`db_backups_list` and the recovery pair, above),
   "consumed by the executor's edges and the command mappers").
   Dropping these four is an available follow-up, not a defect.
+  **2026-11-24 addendum (T-334):** the follow-up landed — all four
+  attributes are gone, the same consumer evidence re-verified in the
+  current tree, and an all-targets `clippy -D warnings` run with them
+  removed is the proof they suppressed nothing (no new D-number; this
+  finishes D-177's class).
 - _Honest pendings left alone._ The card's exclusions hold:
   `sync_last_result`, `sync_cancel` (T-120), `project_restore`
   (T-109), `update_*`, `project_relink` are genuinely unlanded, and
