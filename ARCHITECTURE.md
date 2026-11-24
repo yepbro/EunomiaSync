@@ -810,11 +810,14 @@ makes the range filters correct). The `activity_list` command
 (§7.10 History module) serves that query through the `Db::run`
 executor with LOG-005 enforced at the IPC boundary: user entries by
 default, `diagnostic` only on the explicit `include_diagnostic`
-request (D-052 records the DTO design). The journal is
-mirrored into the file log by one facade function,
-`logging::action_logged` — everything mirrors except the
-info+user+non-error shape, with codes and ids only (the policy
-reasoning lives with the function). LOG-006's retention/cleanup
+request (D-052 records the DTO design). The journal reaches the file
+log through one facade function, `logging::action_logged`, which owns
+the selection policy: an `error` or `warn` row mirrors whatever its
+visibility (an `info` row whose result is an error included), a
+diagnostic `info` mirrors, and the one shape that does not is an
+`info` + `user` + non-error row — the Activity window's own data,
+already in the database journal. The payload is codes and ids only
+(the policy reasoning lives with the function). LOG-006's retention/cleanup
 lives in the same module since T-029: `cleanup(conn, limits, now)`
 enforces the §6.4 "Log and runs" row over the caller's transaction
 (see the Database section above for the full semantics and the

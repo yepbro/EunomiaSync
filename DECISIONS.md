@@ -18390,6 +18390,19 @@ append, the md-only scope and the no-test-touch. Findings fixed —
 - P3-5 (taken): "the Logging row" → "the Logging section"
   (ARCHITECTURE.md has sections, not rows).
 
+Addendum (2026-11-24, T-336): the "mirrored by `action_logged`"
+anchor above (and ARCHITECTURE.md's "The journal is mirrored into the
+file log" sentence) read as "every written entry is duplicated into
+the file log", which the facade never promised: `logging::action_logged` owns a
+selection policy, and only its picks mirror — an `error` or `warn` row
+whatever its visibility (an `info` row whose result is an error
+included), a diagnostic `info`, and nothing else; the
+`info` + `user` + non-error shape is the Activity window's own data
+and stays in the database journal alone.
+The wording is corrected in place in ARCHITECTURE.md and in the
+facade's own doc opening, and this addendum is the D-record's half
+(the dated-record posture: the entry's text above stays as written).
+
 ### D-164 — T-291: the paths.rs module header states the landed responsibility — 2026-11-23
 
 Problem: D-150's follow-up bullet — paths.rs:3's `//!` header still said

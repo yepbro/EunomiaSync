@@ -1114,8 +1114,10 @@ pub(crate) fn db_busy_retry(attempt: usize, pause_ms: u64) {
 }
 
 /// An `action_log` entry was written to the database journal (spec
-/// §7.7), duplicated into the file log — the journal's diagnostic
-/// half. The entry itself is the payload: the action code, the result
+/// §7.7) and, when the selection policy below picks it, mirrored into
+/// the file log — the journal's diagnostic half. Not every entry
+/// mirrors: the policy is this function's, not the callers'. The
+/// entry itself is the payload: the action code, the result
 /// code, and the object/project/run IDs it carries, all already
 /// curated by the store's typed [`LogEntry`] (SEC-008 — its `details`
 /// is the typed enum that cannot hold instruction text, and this line
