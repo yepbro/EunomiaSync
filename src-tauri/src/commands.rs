@@ -66,18 +66,25 @@
 //! backend: paths come from the managed [`crate::data_dirs::DataRoot`]
 //! (resolved once at startup, before the open could fail), files are
 //! handled by [`crate::recovery`], and after a successful
-//! recreate/restore the command itself performs the reopen: `Db::open`
-//! over the replaced path, the ERR-001 daily copy, and
-//! `app.manage(database)` — the §7.10 wording "replaces it with the
-//! chosen copy, and reopens it", so the app continues without a
-//! restart.
+//! recreate/restore the command itself performs the reopen — `Db::open`
+//! over the replaced path — and then runs
+//! [`crate::start_database_session`], the tail the `setup` hook runs
+//! over a healthy launch: the §9.4 sweep, the DB-022 commit hook, the
+//! ERR-001 daily copy, `app.manage(database)`, and the state services
+//! over the published database (dirty recalculation, target-file
+//! watch, availability startup pass, daily retention). The §7.10
+//! wording "replaces it with the chosen copy, and reopens it", so the
+//! app continues without a restart — armed like a launch, which until
+//! T-322 it was not: the recovery published a database and nothing
+//! else, and the session ran without its services until a restart.
 //!
 //! # SYS-001
 //!
-//! The file work and the reopen run inside
+//! The file work, the reopen and the session tail run inside
 //! `tauri::async_runtime::spawn_blocking` — the same executor policy
 //! as `db::Db::run` (D-037): quick_check scans and file copies are
-//! blocking I/O and never run on the async workers.
+//! blocking I/O and never run on the async workers, and the tail's
+//! ERR-001 daily copy is a `VACUUM INTO` — a file copy too.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -118,10 +125,19 @@ use eunomia_store::storage::StorageError;
 use eunomia_store::sync_runs::abort_run;
 
 /// Serializes the two destructive recovery commands against each
-/// other: both end in `app.manage(database)`, and tauri's `manage`
-/// panics on a duplicate state — two concurrent recreates would race
-/// into that panic. A caller that finds the gate locked gets a
-/// validation error ("recovery already in progress") instead.
+/// other: both end in the shared session tail, which publishes the
+/// reopened database with `app.manage(database)`, and tauri's
+/// `manage` keeps the FIRST state of a type and answers `false` for a
+/// duplicate — it neither replaces nor panics (2.12.6, `src/state.rs`
+/// `StateManager::set`). Without the gate two concurrent calls would
+/// interleave their preserve/replace/reopen steps over the one
+/// database path, and only whichever reached the publication first
+/// would have its handle managed — the other's reopen, silently
+/// discarded. A caller that finds the gate locked gets a validation
+/// error ("recovery already in progress") instead. The gate is taken
+/// BEFORE the recovery-mode guard, which then runs under it: a guard
+/// is a fact only at the moment it is checked, and only the gate keeps
+/// that moment and the tail in one uninterrupted region.
 /// The async mutex (not `std`): its guard is `Send`, so it can be held
 /// across the `.await` of the blocking work — exactly the window the
 /// gate must cover (the inverse of D-037's std-mutex reasoning, which
@@ -190,41 +206,58 @@ pub(crate) async fn app_open_data_folder<R: Runtime>(app: AppHandle<R>) -> Resul
 }
 
 /// Which recovery operation `run_recovery` performs — and, for
-/// `Restore`, the selection the UI made. Cloned into the blocking
-/// closure (`'static`), while the original stays for the success
-/// logging below.
-#[derive(Clone)]
+/// `Restore`, the selection the UI made. Moved into the blocking
+/// closure (`'static`): the file mechanics and the audit lines that
+/// name the selection both run there.
 enum Recovery {
     Recreate,
     Restore { backup_name: String },
 }
 
 /// The shared body of `db_recreate` and `db_restore_backup`: guard,
-/// blocking file work + reopen, then publication of the reopened
-/// database as managed state (the order the `setup` hook uses:
-/// daily copy first, manage last — D-046).
+/// blocking file work + reopen, then the session tail every open path
+/// runs — [`crate::start_database_session`], the function the `setup`
+/// hook runs over a healthy launch (T-322). Until it was shared, the
+/// recovery mirrored only the sweep, the daily copy and the
+/// publication and armed none of the state services: the recovered
+/// session ran without a commit hook, a dirty service, a watcher, an
+/// availability startup pass or a retention task until a restart.
 async fn run_recovery<R: Runtime>(app: &AppHandle<R>, operation: Recovery) -> Result<(), AppError> {
-    // Recovery-mode guard: with a healthy database managed there is
-    // nothing to recover, and proceeding would rename a *working*
-    // database away — the §10 screen that owns these buttons is not
-    // shown in that state, so the call is a UI bug or a stale screen,
-    // and a validation rejection is the honest answer.
-    if app.try_state::<Db>().is_some() {
-        let error = rejected("a database is already running");
-        logging::recovery_failed(&error);
-        return Err(error);
-    }
-    // Serialize concurrent calls (see `RECOVERY_OPERATION`); the
-    // locked-out caller gets the same shape of honest rejection.
+    // Serialize concurrent calls FIRST (see `RECOVERY_OPERATION`); the
+    // locked-out caller gets the same shape of honest rejection. The
+    // gate deliberately precedes the recovery-mode guard below: the
+    // guard is a check, and a check is a fact only at the moment it is
+    // made. Under the old order, the guard checked first, and that
+    // left a window — a restore that passed it, waited, and then took
+    // the gate after a concurrent recovery had
+    // finished would preserve that recovery's WORKING database away,
+    // publish nothing (the tail manages no second `Db`), and answer
+    // success while the session's handle kept pointing at the file
+    // just renamed away; only `db_recreate`'s own healthy-file guard
+    // stood in that window's way (T-322's round-1 review, P2-1). Under
+    // the gate no other recovery can exist between the check and the
+    // tail.
     let _guard = RECOVERY_OPERATION.try_lock().map_err(|_| {
         let error = rejected("a recovery operation is already in progress");
         logging::recovery_failed(&error);
         error
     })?;
+    // Recovery-mode guard, held with the gate for the whole operation:
+    // with a healthy database managed there is nothing to recover, and
+    // proceeding would rename a *working* database away — the §10
+    // screen that owns these buttons is not shown in that state, so
+    // the call is a UI bug or a stale screen, and a validation
+    // rejection is the honest answer. The same guard is what keeps the
+    // session's one-shot service start one-shot: a retry from a stale
+    // screen never reaches the tail.
+    if app.try_state::<Db>().is_some() {
+        let error = rejected("a database is already running");
+        logging::recovery_failed(&error);
+        return Err(error);
+    }
 
     let data_dir = data_root(app).inspect_err(logging::recovery_failed)?;
-    let working_dir = data_dir.clone();
-    let operation_moved = operation.clone();
+    let tail_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         // The step orders are `recovery::recreate_files`/`restore_files`
         // themselves (the seams the behavior tests pin); the restore
@@ -234,16 +267,16 @@ async fn run_recovery<R: Runtime>(app: &AppHandle<R>, operation: Recovery) -> Re
         // between the two renames still leaves the "where did my old
         // database go?" trail in the log (the facade is usable from a
         // blocking thread; tracing is global).
-        let preserved = match &operation_moved {
-            Recovery::Recreate => recovery::recreate_files(&working_dir, jiff::Timestamp::now())?,
+        let preserved = match &operation {
+            Recovery::Recreate => recovery::recreate_files(&data_dir, jiff::Timestamp::now())?,
             Recovery::Restore { backup_name } => recovery::restore_files(
-                &working_dir,
+                &data_dir,
                 backup_name,
                 jiff::Timestamp::now(),
                 |preserved| logging::recovery_preserved(&preserved.from, &preserved.to),
             )?,
         };
-        if let Recovery::Recreate = &operation_moved
+        if let Recovery::Recreate = &operation
             && let Some(preserved) = &preserved
         {
             // `recreate_files` only preserves — logging here is still
@@ -254,68 +287,46 @@ async fn run_recovery<R: Runtime>(app: &AppHandle<R>, operation: Recovery) -> Re
         // gate chain runs over the replaced path, so a copy that was
         // damaged between validation and publication is still caught
         // here — the command never manages a database it did not open.
-        let database = Db::open(&working_dir).map_err(recovery::RecoveryError::from)?;
-        Ok::<_, recovery::RecoveryError>((preserved, database))
+        let database = Db::open(&data_dir).map_err(recovery::RecoveryError::from)?;
+        let db_path = data_dirs::db_file_path(&data_dir);
+        match &operation {
+            // The audit lines carry both paths: where the damaged
+            // database went, and what the database is now (the copy's
+            // own path is derivable from the name the UI sent, which
+            // the failure paths log through their params). Emitted
+            // right after the reopen and before the tail, as before.
+            Recovery::Recreate => logging::recovery_recreated(&db_path),
+            Recovery::Restore { backup_name } => logging::recovery_restored(
+                &data_dirs::db_backups_dir(&data_dir).join(backup_name),
+                &db_path,
+            ),
+        }
+        // The session tail, inside the blocking closure with the rest
+        // of the file work (SYS-001): the §9.4 sweep, the commit hook,
+        // the ERR-001 daily copy (a `VACUUM INTO` — a file copy), the
+        // publication and the state services — the same function, in
+        // the same order, as a healthy startup. The tail is infallible
+        // (every refusal degrades through the facade), so the command
+        // answers success exactly when the database is published AND
+        // armed; a failure above leaves nothing published and the
+        // parked start untouched for the user's next attempt (T-322).
+        crate::start_database_session(&tail_app, database);
+        Ok::<_, recovery::RecoveryError>(())
     })
     .await;
-    // The preserve audit line was already emitted inside the closure,
-    // in the window between the preserve and the publish — the
-    // documented point (a second one here would read as two preserves
-    // and land after the replacement, the timing round 1 rejected).
-    let (_preserved, database) = match result {
-        Ok(Ok(opened)) => opened,
+    match result {
+        Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => {
             let error = error.app_error();
             logging::recovery_failed(&error);
-            return Err(error);
+            Err(error)
         }
         Err(join_error) => {
             let error = db::join_failure_to_app_error(join_error);
             logging::recovery_failed(&error);
-            return Err(error);
+            Err(error)
         }
-    };
-    let db_path = data_dirs::db_file_path(&data_dir);
-    match &operation {
-        // The audit lines carry both paths: where the damaged database
-        // went, and what the database is now (the copy's own path is
-        // derivable from the name the UI sent, which the failure paths
-        // log through their params).
-        Recovery::Recreate => logging::recovery_recreated(&db_path),
-        Recovery::Restore { backup_name } => logging::recovery_restored(
-            &data_dirs::db_backups_dir(&data_dir).join(backup_name),
-            &db_path,
-        ),
     }
-    // The §9.4 crash-recovery sweep, the same step, order and posture
-    // as the `setup` hook (T-258): the reopened database may carry
-    // `running` rows a dead process left — a daily copy taken
-    // mid-run, or any file the user restored — and recovery mode is
-    // the one state where no run can be live (no `Db` was managed
-    // until this command), so every `running` row is a corpse by the
-    // same definition as startup. Before the ERR-001 baseline copy
-    // (the day's copy should capture the truthful state), degrading
-    // like it when refused (the next restart retries the idempotent
-    // sweep).
-    match database.mark_interrupted_runs(&eunomia_store::values::now_utc()) {
-        Ok(0) => {}
-        Ok(count) => logging::sync_runs_interrupted(count),
-        Err(error) => logging::sync_runs_interrupt_failed(error.code.as_str()),
-    }
-    // The ERR-001 daily baseline of the recovered database, the same
-    // step and degrade-never-abort policy as the `setup` hook
-    // (D-046): the recovered database is the day's working state, and
-    // the copy that produced it may itself be pruned by later
-    // retention — the baseline must not depend on that.
-    match database.ensure_daily_backup(jiff::Timestamp::now()) {
-        Ok(eunomia_store::storage::DailyBackupOutcome::Written(path)) => {
-            logging::db_backup_daily(&path);
-        }
-        Ok(eunomia_store::storage::DailyBackupOutcome::AlreadyPresent(_)) => {}
-        Err(error) => logging::db_backup_daily_failed(&error),
-    }
-    app.manage(database);
-    Ok(())
 }
 
 /// Opens `path` in the OS file manager through the opener plugin's

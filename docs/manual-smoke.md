@@ -16,9 +16,10 @@ The file carries two parts. Part one: the three Windows GUI smoke
 checks from D-143 (the file log's size half, T-255) — what the unit
 suite cannot reach: the real clock, the production worker-thread path
 of the degradation warn, and Windows' GUI stderr and file locking.
-Part two: the scenario runs S1–S7, S9, S10 that spec §15.5 conditions
-the release on (added by T-315). Items for other OSes and other
-subsystems may join below.
+Section 4 (D-186) is the first any-OS item that joined them: the
+recovery path's re-arm of the state services. Part two: the scenario
+runs S1–S7, S9, S10 that spec §15.5 conditions the release on (added
+by T-315). Items for other OSes and other subsystems may join below.
 
 This file is the in-repo home for manual smoke checks — it is not the
 spec's release checklist itself; a release run walks both. Since T-315
@@ -207,6 +208,43 @@ open.
   restart the app): the previously locked file is now deleted — a
   healed disk heals the log, and the retention converges without a
   restart dedicated to it.
+
+## 4. Recovery re-arms the state services (any OS)
+
+Source: D-186, ARCHITECTURE.md's "Recovery mode" paragraph, spec §10's
+`E_DB_CORRUPT` row. The recovery commands run the same session tail a
+healthy launch runs. The IPC suite proves it over the mock runtime
+(`ipc_tests.rs`, the T-322 batteries); the one thing it cannot reach is
+the real `setup` hook's recovery-mode return followed by the real
+screen's command — this run. Pending the recovery screen (the
+recovery-UI task): until it lands, the item waits.
+
+**Prepare.** App closed. A project with one assigned instruction,
+synced once — its unsynced-changes dot clear, no external-change mark.
+Overwrite `<data dir>\db\eunomiasync.sqlite3` with bytes that are not
+a database (any text file's content). For the second run keep a
+`daily-*` copy in `<data dir>\db-backups\` — every earlier launch
+leaves one per UTC day.
+
+**Do.** Launch the app and pick "Start with empty database" on the
+recovery screen (then: add the project again, create an instruction,
+assign it). Repeat from the preparation with a copy instead — pick
+the `daily-*` copy — and skip the re-add: the restored projects are
+the ones to watch. In both runs, once the matrix shows the project,
+edit its target file in an editor outside the app.
+
+**Pass when.**
+
+- No restart in between: the project's unsynced-changes dot lights
+  after the assignment by itself — no focus change, no manual refresh.
+- The external-change mark appears once the editor saves the target
+  file.
+- The log carries the recovery's own audit lines — "recovery: the
+  damaged database was preserved (renamed, not deleted)", then
+  "recovery: started with an empty database …" or "recovery: the
+  chosen copy replaced the database …" — and after them neither the
+  "watching is disabled until the next launch" warning nor a
+  "state not managed" panic.
 
 ## Scenario runs S1–S7, S9, S10
 

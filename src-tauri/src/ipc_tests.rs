@@ -18,12 +18,26 @@
 //! `recovery_tests.rs`; the recorded untested seam is the opener call
 //! itself (manual smoke runs).
 //!
-//! The three tests that invoke the destructive commands share the
+//! The tests that invoke the destructive commands — the recovery
+//! round trips, the T-322 recovery batteries included — share the
 //! process-wide `RECOVERY_OPERATION` gate with each other (tests run
 //! in parallel inside one binary), so they serialize on their own
 //! lock: a locked-out call would answer "recovery already in
 //! progress" — the gate working as designed, but not what these tests
 //! exist to observe.
+//!
+//! The `db_restore_arms…`/`db_recreate_arms…` batteries (T-322, P1-1
+//! of the 2026-11-23 project review) pin the recovery tail's re-arm:
+//! after a successful recovery the session runs the commit hook and
+//! the four state services exactly as a healthy startup does — a
+//! database commit drives the dirty recalculation onto
+//! `state://dirty`, an external target-file change reaches
+//! `state://file-changed`, the availability startup pass reports a
+//! gone folder, and the retention task's startup run prunes an
+//! over-limit journal — plus the one-shot semantics: a second
+//! recovery in one session and a repeated call of the shared tail
+//! arm nothing twice, and a failed recovery leaves the start unspent
+//! for the retry.
 //!
 //! The `activity_list` tests build the healthy-app state instead (a
 //! real `Db` managed over a temp root, seeded through the `Db::run`
@@ -175,10 +189,15 @@ use crate::data_dirs;
 /// RECOVERY_OPERATION`, which parallel test bodies would contend on.
 static IPC_RECOVERY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// A mock app with the recovery commands registered and the
-/// `DataRoot` state managed at a fresh temp root — the recovery-mode
-/// state the `setup` hook produces (layout up, `DataRoot` published,
-/// no `Db`).
+/// A mock app with the recovery commands registered, in the
+/// recovery-mode state the `setup` hook produces: the layout up, the
+/// `DataRoot` published, no `Db` — and the session states the armed
+/// services read (`DirtyState`, `FileWatchState`,
+/// `AvailabilityState`) with their buses' receiving halves parked in
+/// `StateServices` exactly where the hook parks them, plus the three
+/// state events mounted the way the hook's first line mounts them
+/// (the emit/listen round trip needs the `EventRegistry`, exactly
+/// like every other harness here).
 fn recovery_mode_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
     let temp = tempfile::tempdir().expect("failed to create a temp directory");
     data_dirs::ensure_data_layout(temp.path())
@@ -192,6 +211,22 @@ fn recovery_mode_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntim
         .build(mock_context(noop_assets()))
         .expect("failed to build mock app");
     app.manage(data_dirs::DataRoot(temp.path().to_path_buf()));
+    let (dirty_state, dirty_triggers) = crate::dirty_recalc::DirtyState::new();
+    app.manage(dirty_state);
+    let (file_watch_state, file_watch_commands) = crate::file_watch::FileWatchState::new();
+    app.manage(file_watch_state);
+    app.manage(crate::availability::AvailabilityState::new());
+    app.manage(crate::StateServices::parked(
+        dirty_triggers,
+        file_watch_commands,
+    ));
+    tauri_specta::Builder::<tauri::test::MockRuntime>::new()
+        .events(tauri_specta::collect_events![
+            crate::availability::ProjectAvailabilityEvent,
+            crate::dirty_recalc::DirtyEvent,
+            crate::file_watch::FileChangedEvent,
+        ])
+        .mount_events(&app);
     (temp, app)
 }
 
@@ -606,6 +641,907 @@ fn db_restore_sweeps_the_corpse_rows_of_the_restored_copy() {
         Some("2026-11-21T11:01:00.000Z"),
         "the settled row keeps its own finish stamp"
     );
+    drop(temp);
+}
+
+// ---------------------------------------------------------------------------
+// The recovery tail arms the state services (T-322 — P1-1 of the
+// 2026-11-23 project review; D-121's "the recovery commands' task
+// re-arms the services", discharged)
+// ---------------------------------------------------------------------------
+//
+// Until T-322 a successful `db_restore_backup`/`db_recreate` published
+// a live database and nothing else: no commit hook, no dirty service,
+// no watcher, no availability startup pass, no retention task — the
+// session silently under-reported unsaved and external changes until
+// a restart. The recovery path now runs the same tail a healthy
+// startup runs, and these tests drive it over mock IPC. The halves
+// are the card's definition of done (a commit drives the dirty
+// recalculation, an external target-file change emits
+// `state://file-changed`) plus the other two services' startup runs,
+// the one-shot semantics (a second recovery in one session, a failed
+// recovery followed by a retry), and the shared tail itself.
+
+/// Subscribes the typed listener the frontend's generated
+/// `events.stateDirty` mirrors, returning the receiver every emitted
+/// payload lands on (the `listen_file_changed` shape). Delivery to
+/// Rust listeners is synchronous inside `emit`.
+fn listen_dirty(
+    app: &tauri::App<tauri::test::MockRuntime>,
+) -> std::sync::mpsc::Receiver<crate::dirty_recalc::DirtyEvent> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    tauri_specta::Event::listen(app, move |event| {
+        let _ = sender.send(event.payload);
+    });
+    receiver
+}
+
+/// How long a test waits for one wire event it knows must come. The
+/// production services debounce (150 ms dirty, 300 ms watch) and the
+/// passes run on the global runtime, so the wait is real; the bound
+/// is generous for a loaded runner and finite so a missing service
+/// fails the test instead of hanging it.
+const EVENT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The quiescence window the one-shot tests hold before and after
+/// their act: every service starts with its own trigger, which runs
+/// its pass within milliseconds, so a duplicated start moves the
+/// pass counters well inside this window while an idle session moves
+/// none of them.
+const START_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The `log.max_entries` value the restored copy carries — the §6.5
+/// range's own floor, written through the settings repository.
+const RECOVERY_JOURNAL_LIMIT: i64 = 1000;
+
+/// How many journal rows the restored copy carries: over the limit by
+/// a margin no off-by-one could hide.
+const RECOVERY_JOURNAL_SEEDED: i64 = 1050;
+
+/// The T-F13 fixture shape: the target file a sync would leave for a
+/// scheme-A project whose build text is `body`, and the DB-020 hash it
+/// would store — the real builder, the real marker, so the watch and
+/// dirty oracles both read the world as "synced, matching".
+fn synced_scheme_a(target: &std::path::Path, body: &str) -> (String, String) {
+    let off = eunomia_core::project::ExtraFile {
+        enabled: false,
+        position: eunomia_core::project::ExtraFilePosition::End,
+    };
+    let lines = eunomia_core::extra_files::extra_file_lines(
+        eunomia_core::project::BaseName::AgentsMd,
+        off,
+        off,
+    );
+    (
+        eunomia_core::target_file::build_content(
+            eunomia_core::project::Scheme::A,
+            body,
+            &lines,
+            &eunomia_core::marker::creation_marker_line(
+                eunomia_core::marker::MarkerTime {
+                    year: 2026,
+                    month: 11,
+                    day: 21,
+                    hour: 9,
+                    minute: 30,
+                    second: 5,
+                },
+                None,
+                0,
+            ),
+        ),
+        eunomia_core::hash::build_hash(eunomia_core::project::Scheme::A, target, off, off, body),
+    )
+}
+
+/// Seeds one project AND its first assigned instruction in ONE
+/// transaction — the commit the dirty half of each test makes: a
+/// never-synced project with a non-empty build is dirty on its first
+/// observation (DB-021's first clause), so the recalculation the
+/// commit triggers has a change to put on the wire. The display
+/// fields are fixed (the `seed_watched_project` convention: the
+/// dirty oracle reads none of them); the title is a parameter because
+/// the library's titles are unique (DB-010). Returns the row id.
+fn seed_assigned_project(
+    database: &crate::db::Db,
+    path: String,
+    path_key: &'static str,
+    title: &'static str,
+    content: &'static str,
+) -> String {
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        let new = column_project(&path, path_key, "Demo", "DEM", "red");
+        let project = eunomia_store::projects::create(tx, &new)
+            .map_err(crate::commands::projects_store_to_app_error)?;
+        let item = eunomia_store::library::create_item(
+            tx,
+            &eunomia_store::library::NewLibraryItem::Instruction { title },
+        )
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)?;
+        let variant = eunomia_store::library::create_variant(
+            tx,
+            &eunomia_store::library::NewVariant {
+                instruction_id: &item.id,
+                name: "Main",
+                content,
+                is_main: true,
+            },
+        )
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)?;
+        eunomia_store::library::assign(
+            tx,
+            &eunomia_store::library::NewAssignment {
+                project_id: &project.id,
+                instruction_id: &item.id,
+                variant_id: &variant.id,
+            },
+        )
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)?;
+        Ok(project.id)
+    }))
+    .expect("seeding the assigned project through the repositories must work")
+}
+
+/// Leaves the journal over its limit: `log.max_entries` at the range
+/// floor through the settings repository, then
+/// [`RECOVERY_JOURNAL_SEEDED`] user entries through the journal's own
+/// writer in one transaction (the `activity_list` fixture shape).
+fn seed_journal_over_the_limit(database: &crate::db::Db) {
+    seed_setting(
+        database,
+        eunomia_store::settings::SettingKey::LogMaxEntries,
+        eunomia_store::settings::SettingValue::Int(RECOVERY_JOURNAL_LIMIT),
+    );
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        use eunomia_store::action_log::{Action, Level, LogEntry, Outcome, Visibility, insert};
+        for _ in 0..RECOVERY_JOURNAL_SEEDED {
+            insert(
+                tx,
+                &LogEntry::new(
+                    Action::ProjectAdded,
+                    Level::Info,
+                    Visibility::User,
+                    Outcome::Ok,
+                ),
+            )
+            .map_err(crate::commands::activity_log_to_app_error)?;
+        }
+        Ok(())
+    }))
+    .expect("seeding the journal through its writer must work");
+}
+
+/// How many rows the journal holds — raw SQL: the oracle is the
+/// schema, and the retention task's observable is the count itself.
+fn journal_size(database: &crate::db::Db) -> i64 {
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.query_row("SELECT COUNT(*) FROM action_log", [], |row| row.get(0))
+            .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("counting the journal must work")
+}
+
+/// Polls the journal until it holds `expected` rows, or the deadline
+/// passes; answers the last count read — the caller's `assert_eq!`
+/// names the shortfall, never a swallowed timeout.
+fn wait_for_journal_size(database: &crate::db::Db, expected: i64) -> i64 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut counted = journal_size(database);
+    while counted != expected && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        counted = journal_size(database);
+    }
+    counted
+}
+
+/// Waits until no availability recheck holds the in-flight slot —
+/// the startup pass the recovery tail spawns must have finished
+/// before a test triggers its own, or the coalescing slot would
+/// swallow it (`spawn_recheck`'s contract).
+fn wait_for_availability_slot(app: &tauri::App<tauri::test::MockRuntime>) {
+    let slot = app.state::<crate::availability::AvailabilityState>();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while slot.running.is_taken() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !slot.running.is_taken(),
+        "the startup availability recheck never released its slot"
+    );
+}
+
+/// The managed database handle, cloned AFTER the recovery published
+/// it — the commit hook is a per-clone field (`Db::set_commit_hook`),
+/// so a clone of the managed handle carries exactly the hook the
+/// recovery installed: writes through it are the "a database commit"
+/// the dirty half of each test makes.
+fn recovered_database_of(app: &tauri::App<tauri::test::MockRuntime>) -> crate::db::Db {
+    app.state::<crate::db::Db>().inner().clone()
+}
+
+/// Writes the session-identity probe: a `probe` table holding one
+/// row, through the executor (a committed write — through a handle
+/// that carries the hook, it is also a commit trigger). Replay-safe
+/// for the executor's busy-retry: the table is dropped first.
+fn write_probe_marker(database: &crate::db::Db, value: &'static str) {
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.execute("DROP TABLE IF EXISTS probe", [])
+            .and_then(|_| tx.execute("CREATE TABLE probe (name TEXT)", []))
+            .and_then(|_| tx.execute("INSERT INTO probe (name) VALUES (?1)", [value]))
+            .map(|_| ())
+            .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("writing the probe marker must work");
+}
+
+/// Reads the probe table's single row — raw SQL: the oracle is what
+/// the test itself wrote.
+fn read_probe_marker(database: &crate::db::Db) -> String {
+    let database = database.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.query_row("SELECT name FROM probe", [], |row| row.get(0))
+            .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("reading the probe marker must work")
+}
+
+/// One expected `state://dirty` diff entry — the typed payload's own
+/// shape, spelled out per test, never computed from the code under
+/// test.
+fn dirty_change(project_id: &str, dirty: bool) -> crate::dirty_recalc::ProjectDirtyChange {
+    crate::dirty_recalc::ProjectDirtyChange {
+        project_id: project_id.to_owned(),
+        dirty,
+    }
+}
+
+#[test]
+fn the_setup_hook_runs_the_shared_tail_and_the_recovery_path_mirrors_none_of_it() {
+    // The wiring pin (the config_tests.rs style) for the two calls
+    // that make the tail shared. Before T-322 the hook's BODY was the
+    // wiring, so the other `lib.rs` scans meant "startup arms the
+    // services"; now they only see the tail's body, and a hook that
+    // opened its database and never called the tail would leave every
+    // one of them green (T-322's round-1 review, P2-2). So: the hook
+    // calls the tail exactly once, after the open, and nothing in the
+    // hook follows the call; and the recovery path has no mirrored
+    // tail of its own in `commands.rs` — it calls the same function.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    let call = "start_database_session(app.handle(), database);";
+    for marker in ["db::Db::open(&data_dir)", call] {
+        assert_eq!(
+            lib.matches(marker).count(),
+            1,
+            "lib.rs must contain `{marker}` exactly once, live"
+        );
+    }
+    let opened_at = lib.find("db::Db::open(&data_dir)").expect("checked above");
+    let called_at = lib.find(call).expect("checked above");
+    assert!(
+        opened_at < called_at,
+        "the hook must run the shared tail after the database opens"
+    );
+    let after_the_call = lib[called_at + call.len()..].trim_start();
+    assert!(
+        after_the_call.starts_with("Ok(())"),
+        "nothing may follow the tail inside the hook — it is the hook's \
+         whole post-open tail; got: {}",
+        after_the_call.lines().next().unwrap_or_default()
+    );
+
+    let commands = crate::config_tests::strip_comments(include_str!("commands.rs"));
+    assert_eq!(
+        commands.matches("crate::start_database_session(").count(),
+        1,
+        "the recovery path must call the shared tail exactly once"
+    );
+    for mirrored in [
+        "app.manage(",
+        "set_commit_hook(",
+        "mark_interrupted_runs(",
+        "ensure_daily_backup(",
+        "spawn_service(",
+        "listen_availability(",
+        "spawn_daily_cleanup(",
+        "spawn_recheck(",
+    ] {
+        assert!(
+            !commands.contains(mirrored),
+            "commands.rs must not carry `{mirrored}` — the session tail has \
+             one spelling, the shared function"
+        );
+    }
+}
+
+#[test]
+fn the_recovery_gate_is_taken_before_the_recovery_mode_guard() {
+    // The order pin (the config_tests.rs style) for the window
+    // T-322's round-1 review found (P2-1): the recovery-mode guard is
+    // a check, and a check is a fact only at the moment it is made.
+    // Taken before the gate, a call could pass it, wait, and take the
+    // gate after a concurrent recovery had finished — then run over
+    // that recovery's working database. The gate must come first, so
+    // the guard and the whole operation sit in one uninterrupted
+    // region. The interleaving itself cannot be staged on the mock
+    // runtime (it is a preemption between two adjacent statements),
+    // which is why the order is pinned as text.
+    let commands = crate::config_tests::strip_comments(include_str!("commands.rs"));
+    let start = commands
+        .find("async fn run_recovery<R: Runtime>")
+        .expect("the shared recovery body must exist");
+    let body = &commands[start..];
+    let gated_at = body
+        .find("RECOVERY_OPERATION.try_lock()")
+        .expect("the operation gate must be taken");
+    let guarded_at = body
+        .find("if app.try_state::<Db>().is_some() {")
+        .expect("the recovery-mode guard must exist");
+    assert!(
+        gated_at < guarded_at,
+        "the gate must be taken before the recovery-mode guard is checked"
+    );
+}
+
+#[test]
+fn db_restore_arms_the_state_services_over_the_restored_world() {
+    // The card's definition of done, restore half, over mock IPC —
+    // with the restored world carrying every service's startup
+    // observable: a synced project (clean and matching), a project
+    // whose folder is gone, and a journal over its limit. After
+    // `db_restore_backup` the session must run exactly what a healthy
+    // startup runs over that world.
+    let _serial = IPC_RECOVERY_TESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (temp, app) = recovery_mode_app();
+    let backups = temp.path().join("db-backups");
+    let db_path = temp.path().join("db").join("eunomiasync.sqlite3");
+    // The copy's world, built in a scratch root through the real
+    // seams: the project row, its first instruction, the file a sync
+    // would leave, the hash it would store.
+    let alpha = repo_dir(temp.path(), "alpha");
+    let target = alpha.join("AGENTS.md");
+    let scratch_root = temp.path().join("scratch-root");
+    crate::data_dirs::ensure_data_layout(&scratch_root)
+        .expect("creating the scratch layout must work");
+    let scratch =
+        crate::db::Db::open(&scratch_root).expect("opening the scratch database must work");
+    let project_id = seed_watched_project(
+        &scratch,
+        alpha.display().to_string(),
+        "/alpha",
+        eunomia_store::settings::Scheme::A,
+    );
+    seed_assigned_instruction(&scratch, project_id.clone(), "Style", "Be brief.");
+    let (synced_file, synced_hash) = synced_scheme_a(&target, "Be brief.");
+    std::fs::write(&target, &synced_file).expect("writing the synced fixture file must work");
+    simulate_sync_hash(&scratch, project_id.clone(), synced_hash);
+    let gone_id = seed_project(
+        &scratch,
+        temp.path().join("gone").display().to_string(),
+        "/gone",
+        "Gone",
+        "GONE",
+        "blue",
+    );
+    seed_journal_over_the_limit(&scratch);
+    let copy = match scratch.ensure_daily_backup(
+        "2026-11-22T12:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .expect("the fixed fixture timestamp must parse"),
+    ) {
+        Ok(eunomia_store::storage::DailyBackupOutcome::Written(path)) => path,
+        other => panic!("the scratch copy must be written, got {other:?}"),
+    };
+    // The scratch handles close before the root goes (the Windows
+    // sharing-violation rule, CI 45064887502).
+    drop(scratch);
+    std::fs::rename(&copy, backups.join("daily-20261122.sqlite3"))
+        .expect("placing the copy must work");
+    std::fs::remove_dir_all(&scratch_root).expect("removing the scratch root must work");
+    std::fs::write(&db_path, b"this is not a database at all")
+        .expect("writing the damaged fixture must work");
+    // The UI's listeners, subscribed while the recovery screen is
+    // up — a listener that exists before the services start cannot
+    // miss their startup events.
+    let dirty_events = listen_dirty(&app);
+    let file_events = listen_file_changed(&app);
+    let availability_events = listen_availability(&app);
+
+    // Act
+    let webview = main_webview(&app);
+    tauri::test::get_ipc_response(
+        &webview,
+        invoke_request(
+            "db_restore_backup",
+            serde_json::json!({ "backupName": "daily-20261122.sqlite3" }),
+        ),
+    )
+    .expect("restore must succeed over IPC")
+    .deserialize::<()>()
+    .expect("the success payload is the unit value");
+
+    // Assert — the four services' startup points over the restored
+    // world. The availability recheck reports the gone folder at
+    // startup (DB-032's first check point; the baseline rule makes a
+    // first missing verdict news):
+    assert_eq!(
+        availability_events
+            .recv_timeout(EVENT_DEADLINE)
+            .expect("the startup availability recheck must report the gone folder"),
+        crate::availability::ProjectAvailabilityEvent {
+            changes: vec![expected_change(&gone_id, false, Some("missing"))],
+        },
+        "the recovery armed the availability startup pass"
+    );
+    // The dirty and watch startup passes ran. The first dirty pass is
+    // the service's own startup permit: it is queued before the
+    // retention task below even exists, so the prune's commit cannot
+    // be what this wait sees.
+    wait_for_dirty_passes(&app, 1);
+    wait_for_watch_passes(&app, 1);
+    // The retention task's startup run prunes the over-limit journal
+    // the copy carried (LOG-006's "at startup"):
+    let database = recovered_database_of(&app);
+    assert_eq!(
+        wait_for_journal_size(&database, RECOVERY_JOURNAL_LIMIT),
+        RECOVERY_JOURNAL_LIMIT,
+        "the recovery armed the daily retention task — its startup \
+         run must bring the journal back under log.max_entries"
+    );
+    // And the restored world is clean on both oracles: silent by
+    // contract — through the startup passes and through the pass the
+    // prune's commit triggers.
+    assert!(
+        dirty_events.try_recv().is_err(),
+        "a clean restored world emits no dirty verdict at startup"
+    );
+    assert!(
+        file_events.try_recv().is_err(),
+        "a matching target file emits nothing at startup"
+    );
+
+    // The watch half of the criterion: the target file changes
+    // outside the app and `state://file-changed` carries the project
+    // as externally modified. The startup convergence first (CI
+    // 45235995817, D-181: FSEvents can deliver the pre-spawn fixture
+    // write late); its rewrites keep the file matching, so the wire
+    // stays silent through them.
+    let settled = converge_startup_watch(&app, &target);
+    let external = "My own edit, made in an editor.\n";
+    std::fs::write(&target, external).expect("the external edit must work");
+    wait_for_watch_passes(&app, settled + 1);
+    assert_eq!(
+        next_flagged_changes(&file_events),
+        vec![crate::file_watch::ProjectFileChange {
+            project_id: project_id.clone(),
+            external_changed: true,
+            file_deleted: false,
+        }],
+        "the recovery armed the target-file watcher — the external edit \
+         reached the wire through the debounced re-read"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("the file must still be readable"),
+        external,
+        "a watch event never writes the file back (OUT-014)"
+    );
+
+    // The dirty half of the criterion: a database commit — the
+    // library gains an instruction under the restored project, the
+    // write path a library command takes — moves the build, and the
+    // commit hook's debounced recalculation puts the dirty verdict on
+    // the wire (DB-022's "after each committed transaction").
+    let before = app.state::<crate::dirty_recalc::DirtyState>().pass_count();
+    seed_assigned_instruction(&database, project_id.clone(), "Tone", "Be terse.");
+    wait_for_dirty_passes(&app, before + 1);
+    assert_eq!(
+        dirty_events
+            .recv_timeout(EVENT_DEADLINE)
+            .expect("the commit's recalculation must report the dirty verdict"),
+        crate::dirty_recalc::DirtyEvent {
+            changes: vec![dirty_change(&project_id, true)],
+        },
+        "the recovery installed the commit hook — the commit drove a \
+         recalculation pass and its diff reached the wire"
+    );
+
+    // Teardown order (the Windows rule): the app and its handles go
+    // before the temp root. The armed retention task keeps a handle
+    // of its own for the rest of the process by design, so on Windows
+    // the root may be left behind — a leaked temp directory, never a
+    // failed assertion.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn db_recreate_arms_the_state_services_over_the_fresh_database() {
+    // The recreate half of the criterion: the empty start is armed
+    // the same way. The first thing a user does after it is add a
+    // project and edit the library — one commit here, project and
+    // first assignment together — and the dirty verdict must reach
+    // the wire without a restart; the external edit of that project's
+    // target file must reach it too once the watch set has caught up
+    // through the after-sync seam (the refresh point a real sync is).
+    let _serial = IPC_RECOVERY_TESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (temp, app) = recovery_mode_app();
+    let db_path = temp.path().join("db").join("eunomiasync.sqlite3");
+    std::fs::write(&db_path, b"this is not a database at all")
+        .expect("writing the damaged fixture must work");
+    // The repository the commit registers, with the target file a
+    // sync would leave for its one instruction — written BEFORE the
+    // recovery, so the watcher's start is the same cold-start shape
+    // production has.
+    let beta = repo_dir(temp.path(), "beta");
+    let target = beta.join("AGENTS.md");
+    let (synced_file, _synced_hash) = synced_scheme_a(&target, "Be brief.");
+    std::fs::write(&target, &synced_file).expect("writing the synced fixture file must work");
+    let dirty_events = listen_dirty(&app);
+    let file_events = listen_file_changed(&app);
+
+    // Act
+    let webview = main_webview(&app);
+    tauri::test::get_ipc_response(
+        &webview,
+        invoke_request("db_recreate", serde_json::json!({})),
+    )
+    .expect("recreate must succeed over IPC")
+    .deserialize::<()>()
+    .expect("the success payload is the unit value");
+
+    // Assert: both startup passes ran over the empty database and
+    // said nothing.
+    wait_for_dirty_passes(&app, 1);
+    wait_for_watch_passes(&app, 1);
+    assert!(
+        dirty_events.try_recv().is_err(),
+        "an empty database has no dirty verdict to report"
+    );
+    assert!(
+        file_events.try_recv().is_err(),
+        "an empty database has no target file to report"
+    );
+
+    // The dirty half: the commit.
+    let database = recovered_database_of(&app);
+    let before = app.state::<crate::dirty_recalc::DirtyState>().pass_count();
+    let project_id = seed_assigned_project(
+        &database,
+        beta.display().to_string(),
+        "/beta",
+        "Style",
+        "Be brief.",
+    );
+    wait_for_dirty_passes(&app, before + 1);
+    assert_eq!(
+        dirty_events
+            .recv_timeout(EVENT_DEADLINE)
+            .expect("the commit's recalculation must report the new project"),
+        crate::dirty_recalc::DirtyEvent {
+            changes: vec![dirty_change(&project_id, true)],
+        },
+        "the commit drove a recalculation pass — a never-synced project \
+         with a build is dirty on its first observation"
+    );
+
+    // The watch half: the watch set catches up through the seam the
+    // sync pipeline calls, then the external edit lands on the wire.
+    tauri::async_runtime::block_on(crate::file_watch::refresh_after_sync(app.handle()))
+        .expect("the full watch pass must succeed");
+    let settled = converge_startup_watch(&app, &target);
+    std::fs::write(&target, "My own edit, made in an editor.\n")
+        .expect("the external edit must work");
+    wait_for_watch_passes(&app, settled + 1);
+    assert_eq!(
+        next_flagged_changes(&file_events),
+        vec![crate::file_watch::ProjectFileChange {
+            project_id: project_id.clone(),
+            external_changed: true,
+            file_deleted: false,
+        }],
+        "the watcher is live after the recreate — the external edit \
+         reached the wire"
+    );
+
+    // Teardown order (the Windows rule): the app and its handles go
+    // before the temp root. The armed retention task keeps a handle
+    // of its own for the rest of the process by design, so on Windows
+    // the root may be left behind — a leaked temp directory, never a
+    // failed assertion.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_second_recovery_in_one_session_arms_no_second_set_of_services() {
+    // Double recovery in one session: the recovery-mode guard
+    // rejects the stale screen's retry (a working database is
+    // managed), and the rejection must leave the armed services
+    // exactly as they were. Every service begins with its own startup
+    // trigger, which runs a pass at once — so over the idle empty
+    // database a duplicated spawn would move a pass counter inside
+    // the settle window, and the availability listener registered
+    // twice would turn one recheck diff into two full watch passes.
+    let _serial = IPC_RECOVERY_TESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (temp, app) = recovery_mode_app();
+    let db_path = temp.path().join("db").join("eunomiasync.sqlite3");
+    std::fs::write(&db_path, b"this is not a database at all")
+        .expect("writing the damaged fixture must work");
+    let webview = main_webview(&app);
+    tauri::test::get_ipc_response(
+        &webview,
+        invoke_request("db_recreate", serde_json::json!({})),
+    )
+    .expect("the first recreate must succeed")
+    .deserialize::<()>()
+    .expect("the success payload is the unit value");
+    wait_for_dirty_passes(&app, 1);
+    wait_for_watch_passes(&app, 1);
+    wait_for_availability_slot(&app);
+    std::thread::sleep(START_SETTLE);
+    let dirty_settled = app.state::<crate::dirty_recalc::DirtyState>().pass_count();
+    let watch_settled = app
+        .state::<crate::file_watch::FileWatchState>()
+        .pass_count();
+
+    // Act: the retry.
+    let error = tauri::test::get_ipc_response(
+        &webview,
+        invoke_request("db_recreate", serde_json::json!({})),
+    )
+    .expect_err("a second recreate in the same session must be rejected");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(
+        error["params"]["reason"],
+        serde_json::json!("a database is already running")
+    );
+
+    // Assert: nothing started a second time.
+    std::thread::sleep(START_SETTLE);
+    assert_eq!(
+        app.state::<crate::dirty_recalc::DirtyState>().pass_count(),
+        dirty_settled,
+        "the rejected retry started no second dirty service (its own \
+         startup trigger would have run a pass)"
+    );
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>()
+            .pass_count(),
+        watch_settled,
+        "the rejected retry started no second watch service"
+    );
+    // And the one set that exists still answers — the listener
+    // exactly once: a recheck that reports a gone folder reaches the
+    // watch service as ONE full pass (the folder is never watched, so
+    // the listener is the pass's only source).
+    let database = recovered_database_of(&app);
+    seed_project(
+        &database,
+        temp.path().join("gone").display().to_string(),
+        "/gone",
+        "Gone",
+        "GONE",
+        "blue",
+    );
+    tauri::async_runtime::block_on(crate::availability::spawn_recheck(app.handle().clone()))
+        .expect("the recheck must not fail");
+    wait_for_watch_passes(&app, watch_settled + 1);
+    std::thread::sleep(START_SETTLE);
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>()
+            .pass_count(),
+        watch_settled + 1,
+        "exactly one full pass per availability diff — the listener is \
+         registered once, and still registered"
+    );
+
+    // Teardown order (the Windows rule): the app and its handles go
+    // before the temp root. The armed retention task keeps a handle
+    // of its own for the rest of the process by design, so on Windows
+    // the root may be left behind — a leaked temp directory, never a
+    // failed assertion.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_failed_recovery_arms_nothing_and_a_later_recovery_still_arms() {
+    // The start is spent by a recovery that succeeds, never by one
+    // that fails: a restore of a copy that is not there is rejected
+    // before anything is touched, and the session must still be
+    // unarmed — then the user's next attempt (the other command)
+    // must arm it exactly as a first success would. A start consumed
+    // on the failure path would leave the retry managing a live
+    // database with no services, the very defect T-322 closes.
+    let _serial = IPC_RECOVERY_TESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (temp, app) = recovery_mode_app();
+    let db_path = temp.path().join("db").join("eunomiasync.sqlite3");
+    std::fs::write(&db_path, b"this is not a database at all")
+        .expect("writing the damaged fixture must work");
+    let beta = repo_dir(temp.path(), "beta");
+    let dirty_events = listen_dirty(&app);
+    let file_events = listen_file_changed(&app);
+    let webview = main_webview(&app);
+
+    // Act 1: the failed attempt.
+    let error = tauri::test::get_ipc_response(
+        &webview,
+        invoke_request(
+            "db_restore_backup",
+            serde_json::json!({ "backupName": "daily-19990101.sqlite3" }),
+        ),
+    )
+    .expect_err("a restore of a missing copy must be rejected");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+
+    // Assert: nothing was published or started.
+    assert!(
+        app.try_state::<crate::db::Db>().is_none(),
+        "the failed recovery published no database"
+    );
+    assert_eq!(
+        app.state::<crate::dirty_recalc::DirtyState>().pass_count(),
+        0,
+        "the failed recovery started no dirty service"
+    );
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>()
+            .pass_count(),
+        0,
+        "the failed recovery started no watch service"
+    );
+
+    // Act 2: the retry through the other command.
+    tauri::test::get_ipc_response(
+        &webview,
+        invoke_request("db_recreate", serde_json::json!({})),
+    )
+    .expect("the recreate after the failed restore must succeed")
+    .deserialize::<()>()
+    .expect("the success payload is the unit value");
+
+    // Assert: armed like a first success — both startup passes ran,
+    // and a commit still drives the recalculation onto the wire.
+    wait_for_dirty_passes(&app, 1);
+    wait_for_watch_passes(&app, 1);
+    assert!(
+        dirty_events.try_recv().is_err() && file_events.try_recv().is_err(),
+        "the empty start is silent on both wires"
+    );
+    let database = recovered_database_of(&app);
+    let before = app.state::<crate::dirty_recalc::DirtyState>().pass_count();
+    let project_id = seed_assigned_project(
+        &database,
+        beta.display().to_string(),
+        "/beta",
+        "Style",
+        "Be brief.",
+    );
+    wait_for_dirty_passes(&app, before + 1);
+    assert_eq!(
+        dirty_events
+            .recv_timeout(EVENT_DEADLINE)
+            .expect("the commit after the retry must reach the wire"),
+        crate::dirty_recalc::DirtyEvent {
+            changes: vec![dirty_change(&project_id, true)],
+        },
+        "the retry armed the commit hook and the dirty service"
+    );
+
+    // Teardown order (the Windows rule): the app and its handles go
+    // before the temp root. The armed retention task keeps a handle
+    // of its own for the rest of the process by design, so on Windows
+    // the root may be left behind — a leaked temp directory, never a
+    // failed assertion.
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_shared_tail_publishes_a_database_and_arms_the_services_once_per_session() {
+    // The tail as the `setup` hook drives it. The hook itself cannot run
+    // on the mock runtime (it lives inside `run()`), so this is the
+    // test that calls the shared function the way the hook does —
+    // a first call over a freshly opened database must publish it and
+    // arm the services — and then the way nothing in production can:
+    // a second call with another database must change nothing. The
+    // commands' guards keep that second call unreachable (the hook
+    // runs once, the recovery refuses while a database runs — pinned
+    // over IPC above); this pins the tail's own half of the one-shot
+    // contract, the layer that would still hold if a guard regressed.
+    let (temp, app) = recovery_mode_app();
+    let dirty_events = listen_dirty(&app);
+
+    // Act 1: the startup-shaped call.
+    let database =
+        crate::db::Db::open(temp.path()).expect("opening the session database must work");
+    crate::start_database_session(app.handle(), database);
+
+    // Assert: published and armed — both startup passes ran, and the
+    // managed handle is this call's: it answers the marker written
+    // through it.
+    wait_for_dirty_passes(&app, 1);
+    wait_for_watch_passes(&app, 1);
+    let managed = recovered_database_of(&app);
+    write_probe_marker(&managed, "first");
+    assert_eq!(read_probe_marker(&managed), "first");
+    wait_for_availability_slot(&app);
+    std::thread::sleep(START_SETTLE);
+    let dirty_settled = app.state::<crate::dirty_recalc::DirtyState>().pass_count();
+    let watch_settled = app
+        .state::<crate::file_watch::FileWatchState>()
+        .pass_count();
+
+    // Act 2: the repeated start over another database.
+    let other_root = temp.path().join("other-root");
+    crate::data_dirs::ensure_data_layout(&other_root).expect("creating the other layout must work");
+    let other = crate::db::Db::open(&other_root).expect("opening the other database must work");
+    write_probe_marker(&other, "second");
+    crate::start_database_session(app.handle(), other);
+
+    // Assert: the session kept its first database and its one set of
+    // services — the second database was not published, and no
+    // service started again (a duplicated spawn would run its startup
+    // pass inside the settle window). The marker is read through a
+    // handle fetched AFTER the second call — the state as it is now,
+    // not a clone taken before it (a clone of the first handle would
+    // answer "first" whatever the second call did): had the second
+    // database been published, this read would answer "second".
+    std::thread::sleep(START_SETTLE);
+    assert_eq!(
+        read_probe_marker(&recovered_database_of(&app)),
+        "first",
+        "the second database was not published — the first stays the session's"
+    );
+    assert_eq!(
+        app.state::<crate::dirty_recalc::DirtyState>().pass_count(),
+        dirty_settled,
+        "the second call armed no second dirty service"
+    );
+    assert_eq!(
+        app.state::<crate::file_watch::FileWatchState>()
+            .pass_count(),
+        watch_settled,
+        "the second call armed no second watch service"
+    );
+    // And the one set that exists is the first call's: a commit
+    // through the managed handle still reaches the wire.
+    let beta = repo_dir(temp.path(), "beta");
+    let project_id = seed_assigned_project(
+        &managed,
+        beta.display().to_string(),
+        "/beta",
+        "Style",
+        "Be brief.",
+    );
+    wait_for_dirty_passes(&app, dirty_settled + 1);
+    assert_eq!(
+        dirty_events
+            .recv_timeout(EVENT_DEADLINE)
+            .expect("the commit must reach the wire after the repeated start"),
+        crate::dirty_recalc::DirtyEvent {
+            changes: vec![dirty_change(&project_id, true)],
+        },
+        "the first call's commit hook and service still serve the session"
+    );
+
+    // Teardown order (the Windows rule): the app and its handles go
+    // before the temp root. The armed retention task keeps a handle
+    // of its own for the rest of the process by design, so on Windows
+    // the root may be left behind — a leaked temp directory, never a
+    // failed assertion.
+    drop(app);
     drop(temp);
 }
 
@@ -10037,11 +10973,17 @@ fn the_first_run_code_reader_collapses_both_no_code_spellings() {
 #[test]
 fn the_startup_interrupted_sweep_is_wired_before_the_first_command() {
     // The wiring pin (the config_tests.rs style): the §9.4
-    // crash-recovery sweep runs inside `setup`, synchronously after
+    // crash-recovery sweep runs inside `setup` — since T-322 through
+    // the shared `start_database_session` tail — synchronously after
     // the database opens and BEFORE the commit hook, the `manage`
     // publish and every spawned service — the only moment "every
     // running row is a corpse" holds by definition (a later pass
     // could race this process's own first sync and mark a LIVE run).
+    // Since T-322 the steps this pin orders live in the shared
+    // `start_database_session` tail, which the hook calls (pinned
+    // separately, with the recovery path's lack of a mirror, by
+    // `the_setup_hook_runs_the_shared_tail_…`); this pin's markers
+    // read `lib.rs` alone, so it says nothing about `commands.rs`.
     let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
     let markers = [
         "db::Db::open(&data_dir)",

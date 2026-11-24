@@ -10446,6 +10446,12 @@ follow-up. The DB-022 payload reading is made explicit: the spec's
 clean baseline makes every dirty project a first change) and as diffs
 afterwards — D-112's event shape, now stated rather than implied.
 
+Addendum (2026-11-23, T-322/D-186): the recovery gap routed above is
+closed — the recovery commands now run the same session tail the
+`setup` hook runs (the commit hook and every state service, through
+one shared function). The sentence above stands as the record of what
+T-101 found.
+
 ### D-122 — Backup retention as a store service: the ok-only window per "project—file" pair, delete-first marking, and best-effort FS failures reported not raised — 2026-11-21
 
 Problem: T-114 lands BKP-003/BKP-006 — after a run finishes, at
@@ -11141,6 +11147,10 @@ light this session — already D-121's routed follow-up, now with the
 read side named (follow-up card: the recovery-commands task must
 re-arm the service, not only the hook); no code change in this task's
 frozen-zone-bound scope.
+
+Addendum (2026-11-23, T-322/D-186): the follow-up routed above landed
+— after a recovery the dots can light this session: the recovered
+database carries the commit hook and the dirty service runs over it.
 
 Round-2 review addendum (D-128, same task; report
 `.opencode/reviews/t254-round2.md`, hy4-flash-free): findings fixed
@@ -13064,6 +13074,15 @@ reissued through task-id-mcp (this entry is D-137), and the commit
 was amended by the executor. AGENTS.md §4 (subagent sessions) since
 codifies the underlying rules.
 
+Addendum (2026-11-23, T-322/D-186): still true of recovery mode — no
+database managed, no service — and the hang this session hit is now
+unreachable in production from either side: before a recovery the
+command seams answer `NoDatabase` before they send (the contract this
+paragraph records), and since T-322 a published database is armed by the same call
+that published it (`start_database_session`), so no managed database
+exists without its watch service — or without the receiver's honest
+refusal when the watcher backend cannot start.
+
 Round-1 review addendum (D-137, same task; report
 `.opencode/reviews/t102-round1.md`, deepseek-v4.1-flash — verdict
 approve-with-fixes: 2×P1, 4×P2, 9×P3): findings processed here —
@@ -14382,6 +14401,12 @@ re-read on listener registration (recorded for that card). D-137's
 follow-ups (1) (logging.rs facade lines — frozen zone, untouched
 here), (3) (the mock bus's `stateFileChanged` emitter), (4) (the
 SYS-010 notice) and (6)/(7) remain open on their own cards.
+
+Addendum (2026-11-23, T-322/D-186): the recovery boundary above holds
+only for recovery mode BEFORE the command — a successful
+`db_recreate`/`db_restore_backup` now starts the watch service over
+the recovered database (the shared session tail), so the carrier reads
+recorded verdicts from its first pass on.
 
 Follow-ups for the board (the orchestrator cards them): extend the
 D-137 follow-up-(1) logging card (or its own) with the add-flow
@@ -21087,113 +21112,6 @@ message, exported with `opencode session export` and written verbatim
 under a provenance note. Its two questions repeat round 1's first two
 and go to the orchestrator in the report.
 
-Addendum (2026-11-23, T-129): T-129 — the card for scheme B's
-integration tests, spec §15.2's rows T-F4 (`docs/spec.md:936`) and
-T-F12 (`:944`) with §15.4's DoD 13, 14, 15 and 17
-(`docs/spec.md:969-970`, `:972`) — is closed as fully covered by this
-suite, with no code or test of its own. A read-only coverage check at
-`main` @ `2afbc0a` (report `.opencode/reviews/t129-coverage-check.md`
-— under the gitignored `.opencode/`, so not in the repo) mapped every
-claim of the two Expected cells and the four DoD items onto the suite
-and found zero gaps. This addendum is the card's only repo artifact: a
-dated addendum, no new D-number — D-125's posture in `760237e`.
-Closing a card on a gap analysis is D-158's precedent; that check
-found four gaps and filled them with tests, this one found none. Every
-line cited below was re-read in the tree at that base before writing
-(Rule 2); the suite file has one commit (`ae83a87`) and no diff since.
-Both primary tests drive the real `sync_run` command (`run_sync`,
-`src-tauri/src/sync_pipeline_tests.rs:700-708`):
-
-- _T-F4 — `skipped`, `E_MARKERS_INVALID`, the other projects are written._
-  `a_scheme_b_file_without_exactly_one_marker_pair_is_left_untouched_and_the_run_continues`
-  (`src-tauri/src/sync_pipeline_tests.rs:1149-1221`): a scheme-A
-  project, then five scheme-B files the parser refuses — no markers,
-  two pairs, reversed order, and each single missing half
-  (`:1159-1170`). The ordered statuses, `written` then five `skipped`
-  (`:1206-1211`); `E_MARKERS_INVALID` on every refused row
-  (`:1212-1218`); the other project written, its managed block equal
-  to the hand-spelled `BODY` (`:1219-1220`). Beyond the cell, the same
-  test pins §7.5's "nothing is written": each refused file stays byte
-  for byte (`:1183-1188`), makes no copy and gets no stamp
-  (`:1189-1197`), and the run is `partial` (`:1201-1204`). A written
-  project on both sides of a skip is the creation test's pin
-  (`a_first_sync_creates_the_missing_target_in_schemes_a_and_c_and_never_in_scheme_b`,
-  `:964-1064`; `:996`).
-- _T-F12 — The area outside the markers is kept byte for byte._
-  `a_scheme_b_file_with_bom_and_crlf_keeps_everything_outside_the_markers_byte_for_byte`
-  (`:1223-1275`): the head opens with the BOM and carries a blank
-  line, a line with trailing spaces and the begin marker, all on CRLF
-  (`:1232-1234`); the tail opens at the end marker (`:1235`). After a
-  `written` run (`:1246`) the file on disk must still begin with the
-  head and end with the tail (`:1249-1256`) — `assert_b_splice`'s
-  `strip_prefix` and `strip_suffix` over the raw bytes (`:323-328`;
-  `read` answers a `Vec<u8>`, `:728-730`), so the BOM is compared as
-  `EF BB BF` and every break as `0D 0A`. The second sync reads the file
-  back `unchanged` — the same bytes, no second copy (`:1266-1274`).
-- _DoD 13–15 and 17, by §15.4's short names._ "Full build with marker":
-  `the_creation_marker_matches_the_spec_template_and_closes_every_managed_block_with_one_run_timestamp`
-  (`:1336-1386`) and
-  `scheme_a_builds_the_full_file_with_the_extra_file_lines_in_their_positions`
-  (`:1388-1481`). The same §15.4 row's
-  "marker at the end of the block in scheme B": the first of the two —
-  the marker is the line right before the end marker (`:1361-1369`) and
-  names the run's instant (`:1380`). "External edits are overwritten":
-  `an_external_edit_is_overwritten_by_the_next_sync_and_backed_up_in_every_scheme`
-  (`:1485-1573`). "Last sync times":
-  `last_sync_times_follow_only_the_written_and_unchanged_statuses`
-  (`:2017-2180`). ALG-033, which the DoD 13 check names
-  (`docs/spec.md:969`), is what makes a status `unchanged`
-  (`docs/spec.md:668`); the suite asserts it throughout
-  (`sync_pipeline_tests.rs:1268`, `:1987`, `:2091`, `:2127`).
-- _Both tests bite, by this entry's own record._ The per-test table
-  above has a row for each. `refused marker pair`: red under B4
-  ("project 1: nothing is written into a refused scheme-B file") and
-  under I
-  ("§9.4 phase 4 step 3: five skipped projects beside a written one").
-  `BOM + CRLF`: red under D2
-  ("the T-F12 target after the sync: the bytes before the begin marker changed")
-  and under B1 (the statuses, `unchanged`). Nothing was re-run for the
-  closure.
-- _The check's one optional hardening: considered and declined._ A
-  written scheme-C project appended after the five refused ones would
-  kill no mutant the suite does not already kill — the report's
-  ground, which the tree bears out. Every broken-marker shape leaves
-  phase 1 through the one `skip_verdict(ErrorCode::MarkersInvalid, …)`
-  return (`src-tauri/src/sync_phase1.rs:580-585`) as one
-  `PreflightVerdict::Skipped` carrying that code (`:666-676`) — only
-  the message text differs — and a written project after a skip is
-  already asserted (`sync_pipeline_tests.rs:996`).
-
-What the closure does not claim. Nothing was executed for it: the
-green and the mutation evidence above are this entry's record, made on
-a suite file unchanged since. The three-OS proof rides the merge push,
-as the entry's own boundary says: at this writing `ae83a87` is not on
-`origin/main` (`git merge-base --is-ancestor` exits 1 against the
-local remote-tracking ref, `bc26146`); CI was not queried. The check
-judged what the repository can show, the two Expected cells and the
-four DoD items; the card's Description was elided in the brief the
-checker received (the report's caveat 4), so a clause outside those
-cells could not have been seen. The UI half is no automation claim at
-all: the `skipped` row with its code and the paste-the-block hint,
-like the byte-for-byte check itself, is in the manual smoke checklist
-(`docs/manual-smoke.md:574-576`, `:564-566`).
-
-Round-1 review addendum (same task; report
-`.opencode/reviews/t129-r1.md`, deepseek-v4.1-flash): APPROVE — 0×P0,
-0×P1, one P2, one P3; both taken in the amend, each re-verified in
-this session before acting. The reviewer opened every one of the
-thirty-nine distinct citations and found each true of this tree. P2-1:
-the four assertion messages quoted from the per-test table were tails
-of the real strings; they are the table's own now, character for
-character. P3-1: the D-158 parenthetical sat under "no new D-number",
-though D-158 is a full entry whose gap analysis found four gaps — the
-two precedents are separated above, with the difference stated. By
-P2-1's rule two more borrowings the reviewer did not list were put
-right unasked: §15.4's second short name and the T-F12 cell lead now
-carry the spec's own first letters. Checks: md-only diff — this
-addendum; no test suites run, the md-only regime; `pnpm run
-format:check` green.
-
 ### D-184 — T-228: the supply-chain gates land in CI — `cargo audit` beside cargo-deny, a full `pnpm audit`, and a dependency-free license allow-list check in place of the spec's `license-checker` (which sees 24 of 257 installed packages under pnpm) — 2026-11-23
 
 Problem: SEC-010 (docs/spec.md:897) has demanded `cargo audit`,
@@ -21628,3 +21546,418 @@ round. One boundary was the reviewer's own: the "Checks:" paragraph's
 exit codes were taken on the brief's word, not re-executed — so the
 four checks were run once more on the final amended tree after this
 addendum (a docs-only amend; all exit 0).
+
+### D-186 — T-322: the database session tail is one shared function (`start_database_session`) run by the `setup` hook and by the recovery commands, the two service buses parked in a managed `StateServices` slot until a database is published, and the start spent exactly once per session — 2026-11-23
+
+Problem: P1-1 of the 2026-11-23 project review
+(`.opencode/reviews/project-review-2026-11-23.md`, confirmed by its
+`-verification.md`): after a successful `db_restore_backup`/
+`db_recreate`, `run_recovery` reopened, swept, copied and published
+the database — and nothing else. The handle was not even `mut`, so no
+commit hook; no dirty service, no watcher, no availability listener,
+no availability startup pass, no retention task. Until a restart
+`state://dirty` and `state://file-changed` never emitted on their own,
+external edits went undetected and the daily retention did not run —
+the UI silently under-reported unsaved and external changes right
+after the user recovered data. D-121 had recorded the gap and promised
+that "the recovery commands' task re-arms both"; T-024 landed the
+commands without it, and T-258 (D-147's P3-5) mirrored only the sweep.
+
+Re-verification at the base (the card's line numbers were revision
+fd00673's; everything was located by content at `f8b545a`):
+
+- _By reading._ `run_recovery` (`commands.rs`) ended
+  `app.manage(database); Ok(())` after the sweep and the daily copy;
+  `database` was an immutable binding. By grep, the production call
+  sites of `set_commit_hook`, the two `spawn_service`s,
+  `listen_availability`, `spawn_daily_cleanup` and `spawn_recheck`
+  existed only in `lib.rs`'s `setup` hook.
+- _At runtime._ the four recovery batteries below, written first, were
+  red against the base code: the restore battery timed out on "the
+  startup availability recheck must report the gone folder", the other
+  three on "the dirty service ran only 0 passes, waiting for 1".
+
+Four questions were open before a line was written.
+
+- _Where do the two bus receiving halves live between the hook's
+  recovery-mode return and the recovery?_ Before: locals of the
+  `setup` closure, dropped by its early `return Ok(())`. They cannot
+  be rebuilt at recovery time — the halves belong to the buses the
+  managed `DirtyState`/`FileWatchState` own, and tauri keeps the FIRST
+  managed value of a type: verified in the installed 2.12.6,
+  `src/state.rs:118-127` (`StateManager::set` answers `!already_set`
+  and inserts nothing on a duplicate), `:142-146` (`get` panics with
+  "state not found for type" on a missing one) and `src/lib.rs`'s
+  `Manager::unmanage` — `unsafe`, deprecated since 2.3.0, its own doc
+  naming `Mutex<Option<_>>` + `Option::take` as the supported shape.
+  Decision: one managed slot, `StateServices`
+  (`Mutex<Option<(Receiver<Trigger>, Receiver<Command>)>>`, `lib.rs`),
+  managed beside the states that own the buses — before anything that
+  can fail — and taken by the shared tail. The same fact corrects
+  `RECOVERY_OPERATION`'s doc in `commands.rs`, which claimed `manage`
+  "panics on a duplicate state": it does not; it answers `false` and
+  keeps the first, which is what makes an ungated double recovery a
+  silent discard of the loser's reopen rather than a crash.
+- _How much of the tail is shared?_ All of it — the §9.4 sweep, the
+  DB-022 commit hook, the ERR-001 daily copy, the publication and the
+  four services:
+  `start_database_session(app: &AppHandle<R>, database: Db)`
+  (`lib.rs`). The recovery path had mirrored three of the five steps (T-258 added the sweep to the mirror — the second copy
+  D-161's rule is about); one function ends the mirroring. Order and
+  spellings are unchanged, so every `lib.rs` text pin stayed green
+  untouched: `db_tests.rs`'s open → daily copy → manage → retention
+  spawn (no `?`/`return` between copy and manage), `ipc_tests.rs`'s
+  open → sweep → hook → manage, and the raw "exactly once" counts of
+  the dirty and watch wiring. Those scans read `lib.rs` alone: they
+  see the tail's body, not its callers — the hook's call of the tail
+  and the recovery's lack of a mirror were unpinned until round 1
+  found it (below, M12 and the pin that kills it).
+- _Which thread runs the tail in recovery?_ Before, the sweep and the
+  daily copy ran on the async worker after the `spawn_blocking` join —
+  a `VACUUM INTO`, i.e. a file copy, on a worker (SYS-001; the module
+  doc's own claim was false for those two steps). Now the tail runs
+  inside the same blocking closure, after the reopen and the audit
+  lines, whose order is unchanged. The hook runs it on the main thread
+  before the event loop, as before.
+- _What does a second start do?_ Three layers, each with its own
+  evidence. (a) The command: a recovery in a session that already runs
+  a database is refused before any file moves (the existing
+  `db_recreate_is_rejected_once_the_database_is_running`) — and since
+  round 1 it is refused UNDER the operation gate, which is now taken
+  first. The guard used to run before the gate: a check-then-lock
+  window in which a restore that passed the check, waited, and took
+  the gate after a concurrent recovery had finished would preserve
+  that recovery's working database away, publish nothing and answer
+  success (pre-existing; round 1's P2-1, re-verified by reading
+  `StateManager::set` before it was taken). (b) The
+  tail: a call that finds a database already managed stops at
+  `manage`'s `false` — the handle it was handed is dropped unpublished
+  and nothing is armed. (c) The take: the parked halves are taken only
+  AFTER a successful publication, so a start is spent only by the call
+  that publishes a database and arms over it; every reachable failure
+  of a recovery precedes the tail, which leaves the start unspent for
+  the user's next attempt. A fourth branch — "published, but nothing
+  parked" — was written first and found unreachable by mutation
+  (M8 below survived: layer (b)'s return shields it); it is now a
+  reasoned `expect`, the house shape for a broken composition (the
+  module docs of `dirty_recalc.rs`), and removing layer (b) is killed
+  by it (M11).
+
+One ordering that was implicit in the hook is now stated at its step:
+the retention handle is cloned AFTER the hook is installed — the hook
+is a per-clone field of `Db` (`Db::set_commit_hook`; the test suites'
+`hooked_handle` documents it), so a clone taken earlier would run the
+retention task's prunes without the commit seam.
+
+Solution: `src-tauri/src/lib.rs` — `StateServices` and
+`start_database_session`; the hook parks the halves
+(`app.manage(StateServices::parked(..))`, :473) and its post-open tail
+is one call (:597); `commands.rs` — `run_recovery` runs the tail inside
+its blocking closure (:312); `db.rs` — the hook, daily-copy and sweep
+docs name their one caller (the tail, both open paths).
+
+Testing (BDD, red first). Five behavior batteries and — since round
+1 — two wiring pins in `ipc_tests.rs`; the harness
+`recovery_mode_app()` grew into the hook's real recovery-mode state —
+the three service states, the parked slot, and the three state events
+mounted (`tauri_specta` 2.0.0-rc.29 `src/event.rs:45-53`: without
+`mount_events` an emit or listen panics on the registry lookup, which
+is why the old harness, `DataRoot` only, could not have hosted them):
+
+- `db_restore_arms_the_state_services_over_the_restored_world` — the
+  card's definition of done plus the other two services' startup
+  runs. The copy carries a whole world: a synced project, a project
+  whose folder is gone, and a journal over its limit (`log.max_entries`
+  at the §6.5 floor, 1000, with 1050 rows). After the restore over
+  mock IPC: the availability startup pass reports the gone folder;
+  the retention task's startup run brings the journal to 1000; both
+  wires are silent over the clean world; then an external edit of the
+  target file emits `state://file-changed` (`external_changed`), and a
+  library commit through the store repository — the write path a
+  library command takes — emits `state://dirty` (`dirty: true`).
+- `db_recreate_arms_the_state_services_over_the_fresh_database` — the
+  recreate half: one transaction (the project and its first
+  assignment) drives the recalculation onto the wire; after the
+  after-sync seam brings the watch set up to date, an external edit
+  reaches it.
+- `a_second_recovery_in_one_session_arms_no_second_set_of_services` —
+  the retry is rejected (`E_VALIDATION`, "a database is already
+  running") and arms nothing: the pass counters hold across a settle
+  window (every spawned service starts with its own trigger, which
+  runs a pass at once), and one availability diff is exactly ONE full
+  watch pass — the listener registered once, and still registered.
+- `a_failed_recovery_arms_nothing_and_a_later_recovery_still_arms` — a
+  restore of a missing copy is rejected before anything is touched;
+  nothing is published or started; the recreate after it arms.
+- `the_shared_tail_publishes_a_database_and_arms_the_services_once_per_session`
+  — the tail driven the way the hook drives it (the hook itself cannot
+  run on the mock runtime), then a second call over another database:
+  the first database stays the session's (a probe marker read through
+  a handle fetched AFTER the second call), no counter moves, and a
+  commit still reaches the wire.
+- `the_setup_hook_runs_the_shared_tail_and_the_recovery_path_mirrors_none_of_it`
+  and `the_recovery_gate_is_taken_before_the_recovery_mode_guard` —
+  the two wiring pins round 1 showed were missing: the hook calls the
+  tail exactly once, after the open, with nothing after it; the
+  recovery path calls it exactly once and mirrors none of the tail's
+  steps; the operation gate precedes the recovery-mode guard.
+
+Mutations (each restored after its run; M8 is the one that survived):
+
+- M1, the hook not installed → 4 of 5 red (the one-shot battery does
+  not depend on it).
+- M2, the dirty service not spawned → 5 of 5 red.
+- M3, the watcher not spawned → 5 of 5 red.
+- M4, the availability listener not registered → the one-shot battery
+  red (no full pass arrives for the diff).
+- M5, the listener registered twice → the one-shot battery red,
+  `left: 3, right: 2`.
+- M6, no availability startup pass → the restore battery red.
+- M7, no retention task → the restore battery red,
+  `left: 1050, right: 1000`.
+- M8, a panic planted in the "published, nothing parked" branch →
+  survived: the branch is unreachable, so it was replaced by the
+  `expect` above.
+- M11, layer (b)'s guard removed → the shared-tail battery red through
+  the `expect`.
+- M12 (round 1), the hook's call of the tail replaced by a drop → the
+  new hook pin red (`left: 0, right: 1`); before that pin existed this
+  mutant left the whole suite green.
+- M13 (round 1), the guard moved back before the gate → the new order
+  pin red.
+- M14 (round 1), the tail made to publish the second database → the
+  shared-tail battery red (`left: "second", right: "first"`); the
+  assertion it kills read through a stale clone until round 1.
+
+Honest boundaries:
+
+- The watcher's own startup degrade (D-155) now applies to the
+  recovery path identically — a refused watcher backend leaves no
+  watching until restart. Not reachable through the real backend at
+  the app layer (D-148), so it is unpinned here too.
+- The new batteries follow the hardened cross-platform shapes — D-181's
+  draining convergence before the file act, deadline-based event
+  reads, the Windows teardown order — but only the Linux leg was run
+  locally; the macOS and Windows legs are CI's to confirm.
+- A second call of the tail is unreachable through the production
+  callers; its behavior is pinned at the function level only (the
+  callers' guards are pinned over IPC).
+- The hook's call of the tail is pinned by a text scan — added after
+  round 1 found that nothing pinned it (the older scans see only the
+  tail's body, so a hook that never called it stayed green) — and
+  still not by a run: no mock-runtime test executes the real `setup`
+  closure. The manual smoke checklist gains section 4 for that half
+  (`docs/manual-smoke.md`, pending the recovery screen).
+- "A failed recovery leaves the start unspent" is proven for the
+  failure before any file moves (the missing copy). The documented
+  window after the preserve — a copy damaged between validation and
+  the reopen — fails inside `Db::open`, before the tail, by the same
+  code path; no test stages it.
+- Four modules outside this card's zone still attribute the startup
+  wiring to the `setup` hook alone (verified by reading each line):
+  `dirty_recalc.rs` :10-13, :118-122 and :470 ("the `setup` hook's
+  one call"), `file_watch.rs` :36, :139-144 and :1100-1102,
+  `availability.rs` :11-13, `retention.rs` :17-20 and :97-99. Their
+  "recovery mode" sentences stay true by their own definition — no
+  database managed, no service — but the caller of every `spawn` is
+  now the shared tail, run by the hook AND the recovery command. The
+  brief's file-independence contract names this card's zone
+  (`commands.rs`, `lib.rs`, `ipc_tests.rs`, possibly `logging.rs` and
+  `db.rs`) and whether another window owns those four files is not
+  recorded in the repository, so they were not edited (Rule 10): a
+  doc-only follow-up for the next task allowed to touch them
+  (round 1's P2-4).
+- Unchanged and not this card's: a library edit flips the
+  external-change verdict only at the next refresh point (no
+  commit-hook piggyback in the watch service by design, its module
+  docs), and the dirty service's facade lines remain D-121's recorded
+  follow-up.
+
+Docs updated in the same change (Rule 11): `ARCHITECTURE.md` (the
+recovery-mode definition and the recovery paragraph), `commands.rs`
+(module docs, the `RECOVERY_OPERATION` doc), `db.rs` (three caller
+docs), `lib.rs` (the parked start, the tail), `ipc_tests.rs` (the
+module header, the sweep pin's comment), `docs/manual-smoke.md`
+(section 4). `src/bindings.ts` is untouched — no command signature
+changed — and `export_bindings_are_up_to_date` stays green.
+
+Verification, on the final tree after both review rounds:
+`CARGO_BUILD_JOBS=2 cargo fmt --all -- --check` exit 0;
+`CARGO_BUILD_JOBS=2 cargo clippy --workspace --all-targets --
+-D warnings` exit 0; `CARGO_BUILD_JOBS=2 cargo nextest run --workspace
+--no-fail-fast` exit 0 (1687 tests, 32 binaries); `pnpm run
+format:check` exit 0 (Markdown changed); `pnpm run lint` and `pnpm run
+typecheck` exit 0 — no `.ts` changed, and the pre-commit hook runs
+both at every commit.
+
+Follow-ups for the board (outside this card): CI's macOS and Windows
+legs should be watched for the five new batteries on the first run
+after the merge — a platform assumption they carry would show there
+first; D-121's dirty-service facade lines remain open on their card.
+
+Round-1 review addendum (D-186, same task; report
+`.opencode/reviews/t322-round1.md`, deepseek-v4.1-flash, exit 0):
+REQUEST_CHANGES, 0×P0, 0×P1, 4×P2, 4×P3 — "the defect the card
+describes is closed: after either recovery the session is armed exactly
+like a healthy launch. What is missing is contract, not behavior." All
+four P2 and three of the four P3 taken, each re-verified in the tree
+before it was acted on:
+
+- P2-1 (taken): `run_recovery` checked "is a `Db` managed" BEFORE
+  taking the operation gate — a check-then-lock window; the entry's
+  "unreachable through both callers" was false for it. The gate is now
+  taken first and the guard runs under it; the order is pinned as text
+  (the interleaving is a preemption between two adjacent statements
+  and cannot be staged on the mock runtime) and killed by M13.
+- P2-2 (taken): nothing pinned that the `setup` hook CALLS the tail —
+  the refactor had moved the wiring the older scans measured into a
+  function nobody proved was called — and two sentences of this entry
+  overclaimed (the hook's call site "stays pinned"; the `lib.rs` counts
+  pinning "no mirrored copy"). The hook pin and the no-mirror pin were
+  added (M12 kills the first); both sentences are corrected above.
+- P2-3 (taken): the shared-tail battery's "the second database was not
+  published" read the marker through a clone taken BEFORE the second
+  call — vacuous. It now reads through a handle fetched after it
+  (M14 kills it).
+- P2-4 (taken as a record, not an edit): four modules outside the
+  zone still attribute the startup wiring to the hook alone — recorded
+  under "Honest boundaries" as the Rule 10 deviation and a board
+  follow-up; D-137's session-history sentence ("the service is never
+  spawned in recovery mode by design") gained a dated addendum.
+- P3-1 (taken): the five "Windows teardown rule" comments in the new
+  batteries overstated what `drop(app)` achieves once the retention
+  task holds a handle forever; reworded.
+- P3-2 (taken): the retention-clone-after-hook comment was framed as
+  load-bearing; the prunes touch the journal and the runs, not the
+  build's inputs, so nothing observable rides on it — the comment says
+  so now and keeps the shape.
+- P3-3 (taken): the restore battery awaited the retention prune before
+  the dirty startup pass, so "the startup pass ran" could be read as
+  the prune's own pass; the startup passes are awaited first (the
+  service's startup permit is queued before the retention task exists)
+  and the silence is asserted after both.
+- P3-4 (noted, no action): the event deadline is 5 s and the journal
+  poll 20 s; the asymmetry is deliberate — a missing wire event fails
+  fast, the prune may legitimately take longer on a loaded runner.
+
+Round-2 review addendum (D-186, same task; report
+`.opencode/reviews/t322-round2.md`, hy4-flash-free, exit 0): APPROVE,
+0×P0, 0×P1, 0×P2, 2×P3 — both new, both comment accuracy, both taken.
+Round 1's eight changes were each confirmed fixed (the gate-first
+order, the two pins, the corrected assertion, the recorded deviation,
+the three comment fixes, the docs), and the reviewer re-verified the
+recorded line references of the four out-of-zone modules. P3-N1: the
+gate comment in `run_recovery` read as if the gate had left the
+window ("Taken first, it left a window", right after "the gate
+deliberately precedes …") — it now names the old order. P3-N2: the
+comment this change added to the older sweep pin credited that pin
+with "the recovery path has no mirrored copy", which its
+`lib.rs`-only markers cannot see — the credit now sits with the hook
+pin that holds it. Review phase complete after these two.
+
+Addendum (2026-11-23, T-129): T-129 — the card for scheme B's
+integration tests, spec §15.2's rows T-F4 (`docs/spec.md:936`) and
+T-F12 (`:944`) with §15.4's DoD 13, 14, 15 and 17
+(`docs/spec.md:969-970`, `:972`) — is closed as fully covered by this
+suite, with no code or test of its own. A read-only coverage check at
+`main` @ `2afbc0a` (report `.opencode/reviews/t129-coverage-check.md`
+— under the gitignored `.opencode/`, so not in the repo) mapped every
+claim of the two Expected cells and the four DoD items onto the suite
+and found zero gaps. This addendum is the card's only repo artifact: a
+dated addendum, no new D-number — D-125's posture in `760237e`.
+Closing a card on a gap analysis is D-158's precedent; that check
+found four gaps and filled them with tests, this one found none. Every
+line cited below was re-read in the tree at that base before writing
+(Rule 2); the suite file has one commit (`ae83a87`) and no diff since.
+Both primary tests drive the real `sync_run` command (`run_sync`,
+`src-tauri/src/sync_pipeline_tests.rs:700-708`):
+
+- _T-F4 — `skipped`, `E_MARKERS_INVALID`, the other projects are written._
+  `a_scheme_b_file_without_exactly_one_marker_pair_is_left_untouched_and_the_run_continues`
+  (`src-tauri/src/sync_pipeline_tests.rs:1149-1221`): a scheme-A
+  project, then five scheme-B files the parser refuses — no markers,
+  two pairs, reversed order, and each single missing half
+  (`:1159-1170`). The ordered statuses, `written` then five `skipped`
+  (`:1206-1211`); `E_MARKERS_INVALID` on every refused row
+  (`:1212-1218`); the other project written, its managed block equal
+  to the hand-spelled `BODY` (`:1219-1220`). Beyond the cell, the same
+  test pins §7.5's "nothing is written": each refused file stays byte
+  for byte (`:1183-1188`), makes no copy and gets no stamp
+  (`:1189-1197`), and the run is `partial` (`:1201-1204`). A written
+  project on both sides of a skip is the creation test's pin
+  (`a_first_sync_creates_the_missing_target_in_schemes_a_and_c_and_never_in_scheme_b`,
+  `:964-1064`; `:996`).
+- _T-F12 — The area outside the markers is kept byte for byte._
+  `a_scheme_b_file_with_bom_and_crlf_keeps_everything_outside_the_markers_byte_for_byte`
+  (`:1223-1275`): the head opens with the BOM and carries a blank
+  line, a line with trailing spaces and the begin marker, all on CRLF
+  (`:1232-1234`); the tail opens at the end marker (`:1235`). After a
+  `written` run (`:1246`) the file on disk must still begin with the
+  head and end with the tail (`:1249-1256`) — `assert_b_splice`'s
+  `strip_prefix` and `strip_suffix` over the raw bytes (`:323-328`;
+  `read` answers a `Vec<u8>`, `:728-730`), so the BOM is compared as
+  `EF BB BF` and every break as `0D 0A`. The second sync reads the file
+  back `unchanged` — the same bytes, no second copy (`:1266-1274`).
+- _DoD 13–15 and 17, by §15.4's short names._ "Full build with marker":
+  `the_creation_marker_matches_the_spec_template_and_closes_every_managed_block_with_one_run_timestamp`
+  (`:1336-1386`) and
+  `scheme_a_builds_the_full_file_with_the_extra_file_lines_in_their_positions`
+  (`:1388-1481`). The same §15.4 row's
+  "marker at the end of the block in scheme B": the first of the two —
+  the marker is the line right before the end marker (`:1361-1369`) and
+  names the run's instant (`:1380`). "External edits are overwritten":
+  `an_external_edit_is_overwritten_by_the_next_sync_and_backed_up_in_every_scheme`
+  (`:1485-1573`). "Last sync times":
+  `last_sync_times_follow_only_the_written_and_unchanged_statuses`
+  (`:2017-2180`). ALG-033, which the DoD 13 check names
+  (`docs/spec.md:969`), is what makes a status `unchanged`
+  (`docs/spec.md:668`); the suite asserts it throughout
+  (`sync_pipeline_tests.rs:1268`, `:1987`, `:2091`, `:2127`).
+- _Both tests bite, by this entry's own record._ The per-test table
+  above has a row for each. `refused marker pair`: red under B4
+  ("project 1: nothing is written into a refused scheme-B file") and
+  under I
+  ("§9.4 phase 4 step 3: five skipped projects beside a written one").
+  `BOM + CRLF`: red under D2
+  ("the T-F12 target after the sync: the bytes before the begin marker changed")
+  and under B1 (the statuses, `unchanged`). Nothing was re-run for the
+  closure.
+- _The check's one optional hardening: considered and declined._ A
+  written scheme-C project appended after the five refused ones would
+  kill no mutant the suite does not already kill — the report's
+  ground, which the tree bears out. Every broken-marker shape leaves
+  phase 1 through the one `skip_verdict(ErrorCode::MarkersInvalid, …)`
+  return (`src-tauri/src/sync_phase1.rs:580-585`) as one
+  `PreflightVerdict::Skipped` carrying that code (`:666-676`) — only
+  the message text differs — and a written project after a skip is
+  already asserted (`sync_pipeline_tests.rs:996`).
+
+What the closure does not claim. Nothing was executed for it: the
+green and the mutation evidence above are this entry's record, made on
+a suite file unchanged since. The three-OS proof rides the merge push,
+as the entry's own boundary says: at this writing `ae83a87` is not on
+`origin/main` (`git merge-base --is-ancestor` exits 1 against the
+local remote-tracking ref, `bc26146`); CI was not queried. The check
+judged what the repository can show, the two Expected cells and the
+four DoD items; the card's Description was elided in the brief the
+checker received (the report's caveat 4), so a clause outside those
+cells could not have been seen. The UI half is no automation claim at
+all: the `skipped` row with its code and the paste-the-block hint,
+like the byte-for-byte check itself, is in the manual smoke checklist
+(`docs/manual-smoke.md:574-576`, `:564-566`).
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t129-r1.md`, deepseek-v4.1-flash): APPROVE — 0×P0,
+0×P1, one P2, one P3; both taken in the amend, each re-verified in
+this session before acting. The reviewer opened every one of the
+thirty-nine distinct citations and found each true of this tree. P2-1:
+the four assertion messages quoted from the per-test table were tails
+of the real strings; they are the table's own now, character for
+character. P3-1: the D-158 parenthetical sat under "no new D-number",
+though D-158 is a full entry whose gap analysis found four gaps — the
+two precedents are separated above, with the difference stated. By
+P2-1's rule two more borrowings the reviewer did not list were put
+right unasked: §15.4's second short name and the T-F12 cell lead now
+carry the spec's own first letters. Checks: md-only diff — this
+addendum; no test suites run, the md-only regime; `pnpm run
+format:check` green.

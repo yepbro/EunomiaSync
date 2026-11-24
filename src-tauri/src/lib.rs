@@ -6,7 +6,7 @@
 //! without a Rust toolchain.
 
 use specta_typescript::Typescript;
-use tauri::Manager;
+use tauri::{AppHandle, Manager, Runtime};
 use tauri_specta::{Builder, collect_commands, collect_events};
 
 // The IPC error contract (spec §7.10, §10): AppError and the MVP
@@ -443,10 +443,11 @@ pub fn run() {
             // the availability cache — infallible, needed in every
             // mode (the commit hook reads it through the managed
             // state at fire time, and in recovery mode it exists
-            // unused: no service is spawned, no hook is ever set).
-            // The bus's receiving half waits in `dirty_triggers` for
-            // the service spawn below — the pair travels together
-            // because the channel is the state's own coalescing seam.
+            // unused until the recovery arms it). The bus's
+            // receiving half is parked in `StateServices` (below)
+            // for the shared tail — the pair travels together
+            // because the channel is the state's own coalescing
+            // seam.
             let (dirty_state, dirty_triggers) = dirty_recalc::DirtyState::new();
             app.manage(dirty_state);
 
@@ -456,11 +457,20 @@ pub fn run() {
             // the same reason as the dirty cache — infallible, needed
             // in every mode (the availability listener and the pump
             // thread clone the sending half through the managed
-            // state, and in recovery mode it exists unused: no
-            // listener, no service). The bus's receiving half waits
-            // in `file_watch_commands` for the service spawn below.
+            // state, and in recovery mode it exists unused until the
+            // recovery arms it). The bus's receiving half is parked
+            // with the dirty one.
             let (file_watch_state, file_watch_commands) = file_watch::FileWatchState::new();
             app.manage(file_watch_state);
+            // The parked start of the state services (T-322): both
+            // receiving halves wait here as managed state until a
+            // database is published — on the healthy path a few steps
+            // below, in recovery mode until `db_recreate`/
+            // `db_restore_backup` reopens one. Managed with the
+            // states that own the buses, before anything that can
+            // fail: the tail reads it, and a hook returning early must
+            // not drop it.
+            app.manage(StateServices::parked(dirty_triggers, file_watch_commands));
 
             // Machine-level config (spec §5.8, SYS-011…013): read or
             // create `config.toml` from the data directory — before
@@ -545,7 +555,7 @@ pub fn run() {
             // and reopens it"). The frontend screen itself is the
             // recovery-UI task's; this hook's contract is: corrupt →
             // logged, alive, database-less.
-            let mut database = match db::Db::open(&data_dir) {
+            let database = match db::Db::open(&data_dir) {
                 Ok(database) => database,
                 Err(error @ db::DbInitError::Corrupt { .. }) => {
                     // The typed verdict exists (the match arm owns
@@ -555,11 +565,13 @@ pub fn run() {
                     if let Some(app_error) = error.app_error() {
                         logging::db_corrupt(&app_error);
                     }
-                    // Recovery mode: no `Db` is managed, the daily
-                    // step below is skipped with it (there is no
-                    // database to copy), and the window opens into
-                    // the recovery UI. The command that recovers
-                    // performs this step's daily+manage tail itself.
+                    // Recovery mode: no `Db` is managed, the shared
+                    // tail below is skipped with it (there is no
+                    // database to sweep, copy, publish or arm), and
+                    // the window opens into the recovery UI. The
+                    // command that recovers runs that tail itself
+                    // over the reopened database — the parked service
+                    // start above is exactly what it arms (T-322).
                     return Ok(());
                 }
                 Err(error) => {
@@ -575,127 +587,262 @@ pub fn run() {
                     return Err(error.into());
                 }
             };
-            // The §9.4 crash-recovery pass ("Recovery after a crash",
-            // T-258): every `running` run row a dead process left is
-            // marked `interrupted` — synchronously, here, BEFORE the
-            // event loop can serve a command: at this moment every
-            // `running` row is a corpse by definition (no command of
-            // this process holds the flag yet), which a deferred pass
-            // could not promise (a spawned sweep could race this
-            // process's own first sync and mark a LIVE run). The
-            // per-project rows and the project stamps stay exactly as
-            // the crash left them (§9.4: "the project status already
-            // reflects what was written"; T-F3), and the hashes'
-            // recalculation is the DB-022 startup pass below (T-101,
-            // already wired). Deliberately BEFORE the commit hook:
-            // the marking's row change would otherwise drop a dirty
-            // trigger for a pass that reads projects, not runs. A
-            // refusal degrades like the housekeeping steps (logged
-            // through the facade, the launch continues — D-046/D-054):
-            // the corpse rows stay `running`, the next restart retries
-            // the idempotent sweep. Zero corpses (the normal startup)
-            // logs nothing.
-            match database.mark_interrupted_runs(&eunomia_store::values::now_utc()) {
-                Ok(0) => {}
-                Ok(count) => logging::sync_runs_interrupted(count),
-                Err(error) => logging::sync_runs_interrupt_failed(error.code.as_str()),
-            }
-            // The DB-022 commit seam (T-101): every transaction that
-            // commits with row changes drops one trigger permit onto
-            // the dirty-recalc bus, which debounces it 150 ms and
-            // recalculates. Installed on the `mut` handle before the
-            // database is managed and the first operation can run —
-            // `set_commit_hook`'s `&mut self` is the proof nothing is
-            // in flight while the hook appears.
-            database.set_commit_hook(dirty_recalc::commit_hook(app.handle().clone()));
-            // The ERR-001 daily backup (spec §10): after the database
-            // is open and migrated, one `VACUUM INTO` copy per UTC day
-            // (`db-backups/daily-YYYYMMDD.sqlite3`), the newest 7 kept
-            // — idempotent within a day, decided by the file name. A
-            // fresh first launch gets its copy too ("at every
-            // startup"): a cheap copy of the empty database is an
-            // honest baseline for the day. Degrade, never abort
-            // (DECISIONS.md D-046): the daily copy is extra
-            // reliability, not a precondition — a failure is logged
-            // through the facade and the launch continues (unlike a
-            // pre-migration copy failure, D-038). An existing same-day
-            // copy gets no line: it is the idempotent no-op, and a
-            // line per restart would only repeat itself.
-            match database.ensure_daily_backup(jiff::Timestamp::now()) {
-                Ok(eunomia_store::storage::DailyBackupOutcome::Written(path)) => {
-                    logging::db_backup_daily(&path);
-                }
-                Ok(eunomia_store::storage::DailyBackupOutcome::AlreadyPresent(_)) => {}
-                Err(error) => logging::db_backup_daily_failed(&error),
-            }
-            // The LOG-006 retention task (spec §7.7, §6.4): journal and
-            // sync-run cleanup by the settings limits — the startup run
-            // fires immediately inside the spawned task (the database is
-            // open and managed by now), then once a day. Deliberately
-            // *after* `app.manage` and after the ERR-001 daily copy
-            // above: the copy is the day's recovery point of the state
-            // as the app found it, housekeeping shrinks it afterwards,
-            // and commands keep answering through the whole pass — the
-            // executor serializes them on the one connection behind the
-            // prune's single transaction, a bounded queue rather than a
-            // hang. A failure degrades exactly like the daily copy's —
-            // logged through the facade, the launch unaffected (D-054).
-            let retention_db = database.clone();
-            app.manage(database);
-            // DB-022's startup recalculation point (T-101): the
-            // service task over the trigger bus, spawned — not
-            // awaited — so the set-L build pass cannot hold the
-            // launch (SYS-001; NFR-002's startup budget). The spawn
-            // sends the startup trigger itself, before the retention
-            // task's first cleanup can occupy the bus's one permit
-            // with a debounced Commit (either way exactly one pass
-            // runs — the coalescing). The pass emits `state://dirty`
-            // only for projects found dirty against the clean
-            // baseline (OUT-013's startup warning; `dirty_recalc.rs`
-            // module docs); a failure records nothing and waits for
-            // the next trigger (at-least-once).
-            dirty_recalc::spawn_service(app.handle().clone(), dirty_triggers);
-            // §5.7's watch service (T-102): subscribe to the
-            // availability event FIRST — the listener must exist
-            // before the startup recheck below can emit, or the
-            // session's first verdicts would miss it — then spawn the
-            // service with the SYS-007 debounce. A watcher backend
-            // that fails to start degrades: no watching this session,
-            // the launch unaffected (SYS-010's no-crash posture; the
-            // facade warning line is logged in the arm below, D-155).
-            file_watch::listen_availability(app.handle());
-            if let Err(init) = file_watch::spawn_service(
-                app.handle().clone(),
-                file_watch_commands,
-                file_watch::DEBOUNCE,
-            ) {
-                // The degrade is total but no longer silent: the bus's
-                // receiving half was dropped with the refusal, later
-                // `try_send`s fail harmlessly, and the app runs
-                // without external-change detection until restart —
-                // the one-line warn the logging follow-up owed
-                // (D-137's follow-up 1, D-155).
-                logging::file_watch_init_failed(&init);
-            }
-            retention::spawn_daily_cleanup(retention_db);
+            // Everything after a successful open is the shared tail —
+            // `start_database_session` (below): the §9.4 sweep, the
+            // DB-022 commit seam, the ERR-001 daily copy, the
+            // publication, and the state services over the published
+            // database. The recovery commands run the same function
+            // over the database they reopen (T-322), so the two open
+            // paths cannot drift apart again.
+            start_database_session(app.handle(), database);
 
-            // DB-032's startup check point (D-09, T-079): one
-            // availability recheck of every active project, spawned —
-            // not awaited — so four metadata probes per project over
-            // possibly dead drives cannot hold the launch (SYS-001;
-            // NFR-002's startup budget). Deliberately the LAST startup
-            // step: the event is mounted (the hook's first line), the
-            // database is managed (the recheck reads the project list
-            // through its executor), and the diff cache above exists.
-            // The pass emits `state://project-availability` only when
-            // some project is found unavailable (the baseline rule —
-            // `availability.rs` module docs); a failure is logged
-            // through the facade, never fatal to the launch.
-            availability::spawn_recheck(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// The session's state services — the dirty recalculation, the
+/// target-file watch, the availability recheck and the daily
+/// retention task — and their one-shot start.
+///
+/// The two bus-driven services (dirty, watch) are started from the
+/// RECEIVING halves of the buses their managed states own
+/// ([`dirty_recalc::DirtyState`], [`file_watch::FileWatchState`]).
+/// Those states are managed before anything that can fail, in every
+/// mode, so the halves must outlive the `setup` hook's recovery-mode
+/// return: they are parked here, as managed state, until a database
+/// is published for them — on the healthy path moments later, in
+/// recovery mode until `db_recreate`/`db_restore_backup` reopens one
+/// (T-322: before it, the halves died with the hook, and a recovered
+/// session ran without its services until a restart).
+///
+/// The take is the session's "armed exactly once" fact:
+/// [`start_database_session`] spends the pair in the call that
+/// publishes the session's database — and only in that call — and
+/// arms the services over it; a later call finds a database already
+/// managed (tauri keeps the first of a type) and stops before the
+/// take. The shape is tauri's own recommendation — a managed value
+/// cannot be safely replaced (`Manager::manage` keeps the first of a
+/// type and answers `false`; `unmanage` is unsafe, and its docs name
+/// `Mutex<Option<_>>` + `Option::take` as the supported way; tauri
+/// 2.12.6, `src/state.rs` `StateManager::set` and `src/lib.rs`
+/// `Manager::unmanage`).
+///
+/// The lock guards only the swap-out: a short synchronous critical
+/// section with no `.await` to cross (both callers run the tail
+/// synchronously — the hook before the event loop serves a command,
+/// the recovery command under its own `RECOVERY_OPERATION` gate).
+pub(crate) struct StateServices {
+    /// The parked receiving halves of the dirty-trigger bus and the
+    /// watch command bus — `None` once the session is armed.
+    parked: std::sync::Mutex<
+        Option<(
+            tauri::async_runtime::Receiver<dirty_recalc::Trigger>,
+            tauri::async_runtime::Receiver<file_watch::Command>,
+        )>,
+    >,
+}
+
+impl StateServices {
+    /// Parks the two receiving halves for the shared tail — called
+    /// where the buses are created, before anything that can fail.
+    pub(crate) fn parked(
+        dirty_triggers: tauri::async_runtime::Receiver<dirty_recalc::Trigger>,
+        file_watch_commands: tauri::async_runtime::Receiver<file_watch::Command>,
+    ) -> Self {
+        Self {
+            parked: std::sync::Mutex::new(Some((dirty_triggers, file_watch_commands))),
+        }
+    }
+
+    /// Takes the parked halves: `Some` on the session's first — and
+    /// only — start, `None` once the services are armed.
+    fn take_parked(
+        &self,
+    ) -> Option<(
+        tauri::async_runtime::Receiver<dirty_recalc::Trigger>,
+        tauri::async_runtime::Receiver<file_watch::Command>,
+    )> {
+        self.parked
+            .lock()
+            .expect("the parked service start is locked only inside this short synchronous section")
+            .take()
+    }
+}
+
+/// Brings a freshly opened database into the session — the one tail
+/// every open path runs after a successful [`db::Db::open`]: the
+/// `setup` hook for a healthy launch, and the recovery commands for
+/// the database `db_recreate`/`db_restore_backup` reopened (T-322;
+/// the same function, so neither path can lag the other again).
+///
+/// The order is load-bearing and pinned by the `lib.rs` source scans
+/// (`db_tests.rs`, `ipc_tests.rs`):
+///
+/// 1. **The §9.4 crash-recovery sweep** ("Recovery after a crash",
+///    T-258): every `running` run row a dead process left is marked
+///    `interrupted` — synchronously, before the event loop can serve
+///    a command. On the startup path this is the moment every
+///    `running` row is a corpse by definition (no command of this
+///    process holds the flag yet), which a deferred pass could not
+///    promise (a spawned sweep could race this process's own first
+///    sync and mark a LIVE run); on the recovery path no run can be
+///    live either — no database was managed until this command. The
+///    per-project rows and the project stamps stay exactly as the
+///    crash left them (§9.4: "the project status already reflects
+///    what was written"; T-F3), and the hashes' recalculation is the
+///    DB-022 startup pass below (T-101). Deliberately BEFORE the
+///    commit hook: the marking's row change would otherwise drop a
+///    dirty trigger for a pass that reads projects, not runs. A
+///    refusal degrades like the housekeeping steps (logged through
+///    the facade, the session continues — D-046/D-054): the corpse
+///    rows stay `running`, the next start retries the idempotent
+///    sweep. Zero corpses (the normal case) logs nothing.
+/// 2. **The DB-022 commit seam** (T-101): every transaction that
+///    commits with row changes drops one trigger permit onto the
+///    dirty-recalc bus, which debounces it 150 ms and recalculates.
+///    Installed on the `mut` handle before the database is managed
+///    and the first operation can run — `set_commit_hook`'s
+///    `&mut self` is the proof nothing is in flight while the hook
+///    appears.
+/// 3. **The ERR-001 daily backup** (spec §10): after the database is
+///    open and migrated, one `VACUUM INTO` copy per UTC day
+///    (`db-backups/daily-YYYYMMDD.sqlite3`), the newest 7 kept —
+///    idempotent within a day, decided by the file name. A fresh
+///    first launch gets its copy too ("at every startup"): a cheap
+///    copy of the empty database is an honest baseline for the day.
+///    Degrade, never abort (DECISIONS.md D-046): the daily copy is
+///    extra reliability, not a precondition — a failure is logged
+///    through the facade and the session continues (unlike a failed
+///    pre-migration copy, D-038). An existing same-day copy gets no
+///    line: it is the idempotent no-op, and a line per restart would
+///    only repeat itself.
+/// 4. **The publication** — `app.manage(database)`: from here every
+///    database command finds the handle.
+/// 5. **The state services** over the published database, in an order
+///    of their own (each step's reason is at the step).
+///
+/// Infallible by contract: nothing here can fail the open that
+/// succeeded — every refusal degrades through the facade. One-shot
+/// per session: the callers' own guards make a second call
+/// unreachable (the hook runs before any command; the recovery
+/// command takes its operation gate first and refuses under it while
+/// a database runs), and the tail holds that line on its own — a
+/// call that finds a database already managed stops there, dropping
+/// the handle it was handed unpublished and arming nothing, because
+/// the parked start is spent only by the call that publishes.
+///
+/// Blocking by content (SQL, `VACUUM INTO`, the watcher's start):
+/// the hook runs it on the main thread before the event loop, the
+/// recovery command inside its `spawn_blocking` closure (SYS-001).
+///
+/// # Panics
+///
+/// Panics if [`StateServices`], [`dirty_recalc::DirtyState`],
+/// [`file_watch::FileWatchState`] or
+/// [`availability::AvailabilityState`] is not managed — impossible
+/// in production: the `setup` hook manages all four before the open
+/// can fail into recovery mode, and a test harness that forgets one
+/// is a broken fixture, not a state to run on. Also panics if the
+/// parked start is already spent at a successful publication — only
+/// this function spends it, right after publishing, so that is a
+/// broken composition of the module, not a data condition.
+pub(crate) fn start_database_session<R: Runtime>(app: &AppHandle<R>, mut database: db::Db) {
+    match database.mark_interrupted_runs(&eunomia_store::values::now_utc()) {
+        Ok(0) => {}
+        Ok(count) => logging::sync_runs_interrupted(count),
+        Err(error) => logging::sync_runs_interrupt_failed(error.code.as_str()),
+    }
+    database.set_commit_hook(dirty_recalc::commit_hook(app.clone()));
+    match database.ensure_daily_backup(jiff::Timestamp::now()) {
+        Ok(eunomia_store::storage::DailyBackupOutcome::Written(path)) => {
+            logging::db_backup_daily(&path);
+        }
+        Ok(eunomia_store::storage::DailyBackupOutcome::AlreadyPresent(_)) => {}
+        Err(error) => logging::db_backup_daily_failed(&error),
+    }
+    // The retention task's handle is cloned AFTER the hook, the
+    // shape the hook always had: the hook is a per-clone field of `Db`
+    // (`Db::set_commit_hook`), so a clone taken earlier would run the
+    // task's writes outside the commit seam. Nothing observable rides
+    // on it today — the prunes touch the journal and the runs, not the
+    // build's inputs, so the pass they trigger diffs empty — but every
+    // writer of the session's database goes through the same seam.
+    let retention_db = database.clone();
+    let published = app.manage(database);
+    if !published {
+        // A database is already managed — unreachable through both
+        // callers: the hook runs once, and the recovery command
+        // refuses while a database runs, under the operation gate it
+        // takes first, so no recovery can slip between that refusal's
+        // check and this publication. tauri kept the FIRST handle of
+        // the type; this one is dropped here, unpublished, and the
+        // services the first call armed stay the session's.
+        return;
+    }
+    // A successful publication is the session's first, and only this
+    // function takes the parked start — right here — so the halves
+    // are there. (Taken AFTER the publication, never before: a start
+    // is spent only by the call that publishes a database and arms
+    // over it.)
+    let (dirty_triggers, file_watch_commands) = app.state::<StateServices>().take_parked().expect(
+        "the parked service start is spent only by the call that published the session's database",
+    );
+    // DB-022's startup recalculation point (T-101): the service task
+    // over the trigger bus, spawned — not awaited — so the set-L
+    // build pass cannot hold the launch (SYS-001; NFR-002's startup
+    // budget). The spawn sends the startup trigger itself, before
+    // the retention task's first cleanup can occupy the bus's one
+    // permit with a debounced Commit (either way exactly one pass
+    // runs — the coalescing). The pass emits `state://dirty` only
+    // for projects found dirty against the clean baseline (OUT-013's
+    // startup warning; `dirty_recalc.rs` module docs); a failure
+    // records nothing and waits for the next trigger (at-least-once).
+    dirty_recalc::spawn_service(app.clone(), dirty_triggers);
+    // §5.7's watch service (T-102): subscribe to the availability
+    // event FIRST — the listener must exist before the startup
+    // recheck below can emit, or the session's first verdicts would
+    // miss it — then spawn the service with the SYS-007 debounce. A
+    // watcher backend that fails to start degrades: no watching this
+    // session, the launch unaffected (SYS-010's no-crash posture; the
+    // facade warning line is logged in the arm below, D-155).
+    file_watch::listen_availability(app);
+    if let Err(init) =
+        file_watch::spawn_service(app.clone(), file_watch_commands, file_watch::DEBOUNCE)
+    {
+        // The degrade is total but no longer silent: the bus's
+        // receiving half was dropped with the refusal, later
+        // `try_send`s fail harmlessly, and the app runs without
+        // external-change detection until restart — the one-line warn
+        // the logging follow-up owed (D-137's follow-up 1, D-155).
+        logging::file_watch_init_failed(&init);
+    }
+    // The LOG-006 retention task (spec §7.7, §6.4): journal and
+    // sync-run cleanup by the settings limits — the startup run fires
+    // immediately inside the spawned task, then once a day.
+    // Deliberately *after* the publication and after the ERR-001
+    // daily copy above: the copy is the day's recovery point of the
+    // state as the app found it, housekeeping shrinks it afterwards,
+    // and commands keep answering through the whole pass — the
+    // executor serializes them on the one connection behind the
+    // prune's single transaction, a bounded queue rather than a
+    // hang. A failure degrades exactly like the daily copy's — logged
+    // through the facade, the launch unaffected (D-054).
+    retention::spawn_daily_cleanup(retention_db);
+
+    // DB-032's startup check point (D-09, T-079): one availability
+    // recheck of every active project, spawned — not awaited — so
+    // four metadata probes per project over possibly dead drives
+    // cannot hold the launch (SYS-001; NFR-002's startup budget).
+    // Deliberately the LAST step: the event is mounted (the hook's
+    // first line), the database is managed (the recheck reads the
+    // project list through its executor), the diff cache exists, and
+    // the watch listener above is registered. The pass emits
+    // `state://project-availability` only when some project is found
+    // unavailable (the baseline rule — `availability.rs` module
+    // docs); a failure is logged through the facade, never fatal.
+    availability::spawn_recheck(app.clone());
 }
 
 #[cfg(test)]

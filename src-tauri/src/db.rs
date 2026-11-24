@@ -240,9 +240,10 @@ pub(crate) struct Db {
     /// row change** — read-only transactions and no-op writes fire
     /// nothing, which is what keeps the dirty-recalc service's own
     /// snapshot read from re-triggering itself. `None` until
-    /// [`Db::set_commit_hook`] installs one (the setup hook does,
-    /// with `dirty_recalc::commit_hook`); a `Db` without a hook
-    /// behaves exactly as before the seam existed. The closure runs
+    /// [`Db::set_commit_hook`] installs one (the shared session tail
+    /// does, for the startup open and the recovery reopen alike, with
+    /// `dirty_recalc::commit_hook`); a `Db` without a hook behaves
+    /// exactly as before the seam existed. The closure runs
     /// on the blocking pool while the connection mutex is still held,
     /// so it must never block — the installed one only `try_send`s
     /// onto a capacity-1 channel.
@@ -375,11 +376,14 @@ impl Db {
 
     /// Installs the "a write committed" seam ([`Db::run`]'s hook,
     /// DB-022/T-101) — the one writer of the [`Db::commit_hook`]
-    /// field. Called once by the `setup` hook after a successful
-    /// open, before the database is managed and the first operation
-    /// can run; `&mut self` is the proof that no operation is in
-    /// flight while the hook appears (every `run` clones the field's
-    /// `Arc` under the same guarantee). The hook itself is built by
+    /// field. Called once per open path by the shared session tail
+    /// (`crate::start_database_session`: the `setup` hook's healthy
+    /// launch and the recovery commands' reopen both run it) after a
+    /// successful open, before the database is managed and the first
+    /// operation can run; `&mut self` is the proof that no operation
+    /// is in flight while the hook appears (every `run` clones the
+    /// field's `Arc` under the same guarantee — which is also why the
+    /// tail clones the retention handle only AFTER this call). The hook itself is built by
     /// [`crate::dirty_recalc::commit_hook`]; nothing in this module
     /// knows what it does — the seam is deliberately dumb.
     pub(crate) fn set_commit_hook(&mut self, hook: Arc<dyn Fn() + Send + Sync>) {
@@ -407,14 +411,16 @@ impl Db {
     ///
     /// `now` is the date seam — the injectable "today": only its UTC
     /// day names the copy, so the same-day and retention behavior is
-    /// deterministic under test. The `setup` hook passes the real
-    /// clock.
+    /// deterministic under test. The shared session tail passes the
+    /// real clock.
     ///
     /// Not callable from inside a [`Db::run`] closure: this method
     /// takes the connection lock itself, and the `std::sync::Mutex` is
     /// not reentrant — an operation already holding the guard would
-    /// deadlock. Startup (the only caller today) runs before any
-    /// operation exists.
+    /// deadlock. Its only caller today — that tail
+    /// (`crate::start_database_session`) — runs before any operation
+    /// exists (the `setup` hook before the event loop, the recovery
+    /// command before its publication).
     ///
     /// **Degrade, never abort** (the recorded ERR-001 policy,
     /// DECISIONS.md D-046): the daily copy is extra reliability, not a
@@ -456,8 +462,8 @@ impl Db {
     /// the flag is in memory and invisible to SQL — and mark a LIVE
     /// run `interrupted`; a synchronous call at either caller cannot.
     ///
-    /// The callers (the `setup` hook and `run_recovery`'s tail) own
-    /// the degrade posture: a refusal is logged, never fatal to the
+    /// The caller (the shared session tail the `setup` hook and
+    /// `run_recovery` both run) owns the degrade posture: a refusal is logged, never fatal to the
     /// launch or the recovery (the D-046/D-054 startup-housekeeping
     /// shape), and the next restart retries the idempotent sweep
     /// (the store scopes the UPDATE to `running` rows, so a re-run

@@ -587,7 +587,8 @@ retention spawn, and the `ipc_tests.rs` pin added with the sweep
 **Recovery mode** (spec §10 `E_DB_CORRUPT` row, §7.10 command notes;
 DECISIONS.md D-049): when the startup open fails the quick_check gate,
 the `setup` hook logs the verdict and continues **without** managing a
-`Db` — that state (layout up, `DataRoot` published, no database) is
+`Db` — that state (layout up, `DataRoot` and the session states
+published, the two service buses parked and unarmed, no database) is
 recovery mode, and the §10 screen that replaces the app is what it
 exists for; the too-new, rolled-back-migration and generic-open
 failures keep their abort. The recovery commands
@@ -602,12 +603,14 @@ symlinks are not copies) and `app_open_data_folder`
 (the opener plugin's Rust API; SEC-001 — the webview holds no
 `opener:` permission). The destructive pair — `db_recreate`,
 `db_restore_backup(backup_name)`
-— is guarded three times (a healthy `Db` already managed →
-`E_VALIDATION`; a concurrent recovery → `E_VALIDATION` over an
-async-mutex gate; and for `db_recreate` alone, a live file both
-startup gates accept → `E_VALIDATION` "a working database is already
-in place": the empty start never silently discards a working
-unmanaged database — the state a restore whose reopen failed leaves)
+— is guarded three times (a concurrent recovery → `E_VALIDATION` over
+an async-mutex gate, taken FIRST; a healthy `Db` already managed →
+`E_VALIDATION`, checked under that gate so no recovery can slip
+between the check and the publication; and for `db_recreate` alone,
+a live file both startup gates accept → `E_VALIDATION` "a working
+database is already in place": the empty start never silently
+discards a working unmanaged database — the state a restore whose
+reopen failed leaves)
 and then, inside one `spawn_blocking`: validate the selection (a
 plain `*.sqlite3` base name only — no separators, `.`/`..`, `.tmp`
 staging debris or `-wal`/`-shm`/`-journal` siblings, a 0-byte
@@ -628,11 +631,19 @@ damaged file already lets SQLite's own crash recovery remove bogus
 siblings, the preserve catches what those reads leave — the main
 rename as the commit point), publish the staged copy by one rename
 (§9.5's staging pattern, parent-directory fsync best-effort), reopen
-through the full `Db::open` chain, sweep any `running` rows a dead process
-left into `interrupted` (the §9.4 startup crash recovery, T-258 — recovery
-mode is the one state where no run can be live), write the day's ERR-001
-copy, and `app.manage` the reopened database — §7.10's "…and reopens it": the
-app continues without a restart. The window in which the database
+through the full `Db::open` chain, and run `start_database_session`
+(`lib.rs`) — the same tail a healthy startup runs, since T-322/D-186: sweep
+any `running` rows a dead process left into `interrupted` (the §9.4 startup
+crash recovery, T-258 — recovery mode is the one state where no run can be
+live), install the DB-022 commit hook, write the day's ERR-001 copy,
+`app.manage` the reopened database, and start the state services over it
+(dirty recalculation, target-file watch, availability startup pass, daily
+retention). §7.10's "…and reopens it": the app continues without a
+restart, armed like a launch. The two service buses' receiving halves are
+parked in the managed `StateServices` slot from the `setup` hook until
+that tail takes them — once per session; until T-322 the recovery
+published a database and nothing else, and the recovered session ran
+without its services until a restart. The window in which the database
 path is empty is the two renames; the preserve audit line rides the
 `on_preserved` callback into it. Every recovery step is audited
 through the facade (`recovery_preserved`/
