@@ -22066,3 +22066,16 @@ lines is leading and outputs nothing — pinned by both cases), and the
 mock's position sort gained its falsifiable guard (the store array
 reversed, the served ids still climb). The review phase is complete
 after this round.
+
+Addendum (2026-11-24, post-merge): the task's follow-ups are carded on
+the board — four INBOX cards, no T-numbers until the owner's triage:
+the variant-content carrier (no §7.10 command serves variant text yet;
+the editor family or a widened read), D-14's hidden-count (a
+`hidden_count` field or an explicit widened-read convention), the gap
+tooltip detail (the wire carries only the boolean `level_skipped`; a
+`from_level` field would name the skipped level), and the D-037
+fallback consolidation (the P3-5 decline above, for a calm window once
+the library commands land). The cards are the tracking unit; this line
+is the D-record duplicate the board rule asks for. Written as a service
+commit in main after the merge — md-only, no suites under the md-only
+regime; prettier and the pre-commit hook gate it.
