@@ -12,11 +12,13 @@
 #   glob      GHSA-3g3m-2fjr-6pw4  fixed in 14.0.2
 #   minimatch GHSA-g3hv-75wg-m249  fixed in 11.0.1
 #
-# Scoped to the parent on purpose: a bare `minimatch` override would also
-# rewrite eslint's own minimatch 3.x edges (@eslint/config-array and
-# @eslint/eslintrc, both ^3.1.5), which the advisory does not reach. No
-# `glob>minimatch` entry is needed: glob 14 depends on minimatch ^11 itself.
-# Removable once js-beautify and editorconfig declare the patched majors.
+# Scoped to the parent on purpose: the floor belongs to the editorconfig
+# chain, not to the tree at large. (Before T-340 the scoping also kept
+# eslint's own minimatch 3.x edges — @eslint/config-array and
+# @eslint/eslintrc — untouched; eslint 10 dropped both, and the tree now
+# carries minimatch 11.0.9 only.) No `glob>minimatch` entry is needed:
+# glob 14 depends on minimatch ^11 itself. Removable once js-beautify and
+# editorconfig declare the patched majors.
 overrides:
   'js-beautify>glob': '^14.0.2'
   'editorconfig>minimatch': '^11.0.1'

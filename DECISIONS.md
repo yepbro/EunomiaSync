@@ -20693,6 +20693,18 @@ needed: glob 14 declares the 11.x line itself (`^11.0.5` in the installed
 14.0.6; `^11.0.0` in the registry manifests of 14.0.0–14.0.2), and
 resolution takes the highest match.
 
+Addendum (2026-11-24, T-340): the eslint half of the scoping
+rationale above no longer holds of the tree — eslint 10.15.0 dropped
+`@eslint/eslintrc` and its `@eslint/config-array` 0.23.6 now takes
+`minimatch: ^11`, so no `minimatch@3.1.5` instance remains and the
+"eslint's own edges" reason for scoping the override has nothing left
+to protect (verified with `pnpm why minimatch` and
+`pnpm why @eslint/eslintrc`). The overrides themselves stay: their
+consumers are the `@vue/test-utils > js-beautify > glob` and
+`… > js-beautify > editorconfig > minimatch` chains, which did not
+move. `pnpm-workspace.yaml`'s comment is updated to say so, and the
+entry's text above stays as written (the dated-record posture).
+
 Rule 1 — the brief's mechanism assumption, resolved before coding. The
 spawn brief named `pnpm.overrides` in package.json as "the likely
 mechanism". That is the pre-12 location: the project pins

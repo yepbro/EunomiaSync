@@ -183,7 +183,14 @@ describe('the error contract (DateFormatError)', () => {
       fn()
     } catch (caught) {
       if (caught instanceof DateFormatError) return caught
-      throw new Error(`not a DateFormatError: ${String(caught)}`)
+      // The wrapper keeps the original as `cause`. `Error`'s options bag
+      // is ES2022 and the project's lib is ES2020, so the same fact is
+      // spelled as the property it is.
+      const wrapped: Error & { cause?: unknown } = new Error(
+        `not a DateFormatError: ${String(caught)}`,
+      )
+      wrapped.cause = caught
+      throw wrapped
     }
     throw new Error('expected a throw, got a return')
   }
