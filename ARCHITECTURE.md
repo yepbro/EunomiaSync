@@ -214,6 +214,21 @@ Rust commands are registered through `tauri-specta`:
    transaction through the new-project rules `commands.rs` shares
    with `project_add_manual` (typed outcomes for paths already
    registered or excluded; any error rolls back the whole batch) —
+   the Library module's instruction lifecycle
+   `instruction_create`/`instruction_update`/`instruction_hide`/
+   `instruction_restore` (T-328, DECISIONS.md D-188): the create
+   dialog's pair (one instruction, its `Main` variant, one `create`
+   version per entity and one `instruction.created` journal entry)
+   placed at the end of the picked section — `create_item` +
+   `move_item` in one transaction, §6.9/DB-016 validation first
+   (the marker line answers `E_CONTENT_RESERVED`, its own §10 row) —
+   the rename with its `update` version and the verified same-name
+   no-op, and the hide/restore pair that keeps variants and
+   assignments (D-11/DB-013) recording one version and one journal
+   entry per real transition, idempotent on re-runs; no SYS-005 gate
+   — §5.4's own sentence allows library edits during a sync, the
+   DB-022 commit hook recalculates the dirty set after every
+   committed transaction —
    and the System module's `dialog_pick_folder` (T-073): the native
    folder picker invoked from Rust, its canonical picked path
    remembered in the SEC-003 session allowlist (`None` on cancel,

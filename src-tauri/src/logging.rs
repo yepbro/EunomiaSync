@@ -2108,6 +2108,95 @@ fn log_rotation_failed(step: RotationStep, path: &Path, error: &io::Error) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The four Library instruction commands (T-328, §7.10 Library module;
+// the `eunomia::library` target, D-188)
+// ---------------------------------------------------------------------------
+
+/// The `instruction_create` command failed (T-328, §10's every-error
+/// rule): the `exclusion_remove_failed` shape — the reachable §10
+/// answers are the typed `E_VALIDATION` refusals of the §6.9 field
+/// validators (the DB-016 marker line answers `E_CONTENT_RESERVED`,
+/// its own row of the table), the `E_VALIDATION` refusal of a
+/// NOCASE-twin visible name (§6.9's cross-row clause, the store's
+/// own), and the shared base classifier's SQL classes
+/// (`LibraryError::Sql` through the writes and the section lookup,
+/// `StorageError::Sql` through the journal insert, the
+/// `RevisionError::Sql`/settings reads — busy exhaustion, a corrupt
+/// database, a constraint abort). A successful create is the journal
+/// entry itself (D-051's mirror policy — info+user+ok is not
+/// mirrored to the file log).
+pub(crate) fn instruction_create_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "creating an instruction failed"
+    );
+}
+
+/// The `instruction_update` command failed (T-328, §10's every-error
+/// rule): the `instruction_create_failed` shape — the reachable §10
+/// answers are the typed `E_VALIDATION` refusals of a stale id, a
+/// heading id, a NOCASE-twin name or a §6.9 field violation, and the
+/// shared base classifier's SQL classes through the write, the
+/// version recording and the journal insert. A successful rename is
+/// the journal entry itself; the verified no-op (a same-name rename,
+/// D-188) writes nothing and logs nothing.
+pub(crate) fn instruction_update_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "renaming an instruction failed"
+    );
+}
+
+/// The `instruction_hide` command failed (T-328, §10's every-error
+/// rule): the `instruction_create_failed` shape — the reachable §10
+/// answers are the typed `E_VALIDATION` refusals of a stale id or a
+/// heading id, and the shared base classifier's SQL classes. A
+/// successful hide is the journal entry itself; the verified no-op
+/// (a repeated hide, D-188) writes nothing and logs nothing.
+pub(crate) fn instruction_hide_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "hiding an instruction failed"
+    );
+}
+
+/// The `instruction_restore` command failed (T-328, §10's every-error
+/// rule): the `instruction_create_failed` shape — the reachable §10
+/// answers are the typed `E_VALIDATION` refusals of a stale id, a
+/// heading id, or a NOCASE-twin name a visible instruction took while
+/// the row was hidden (§6.9's clause surfacing at the restore, the
+/// store's own), and the shared base classifier's SQL classes. A
+/// successful restore is the journal entry itself; the verified no-op
+/// (a restore of an active row, D-188) writes nothing and logs
+/// nothing.
+pub(crate) fn instruction_restore_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "restoring an instruction failed"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     //! Behavior tests of the subscriber seam: a real subscriber is built

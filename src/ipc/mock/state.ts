@@ -81,7 +81,8 @@ export type MockState = {
    * The library tree rows (§6.2 `library_items` + the active variants
    * of `instruction_variants`), in `position` order — `libraryGet`
    * (T-083) maps them onto the wire the way `toColumnEntry` maps a
-   * project row. Dates are derived deterministically from the fixture
+   * project row, and the instruction lifecycle commands (T-328)
+   * write them. Dates are derived deterministically from the fixture
    * era's base instant (one second per position).
    */
   library: MockLibraryRow[]

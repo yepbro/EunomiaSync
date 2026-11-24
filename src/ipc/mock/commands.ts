@@ -55,6 +55,7 @@ import {
   mockState,
   toAddedProject,
   toColumnEntry,
+  type MockLibraryRow,
   type MockProjectRow,
   type MockState,
 } from './state'
@@ -279,6 +280,205 @@ function renderMarkdownPreview(text: string): MarkdownPreview {
     warnings.push({ kind: 'unclosed_code_fence' as const, line: fenceOpenLine })
   }
   return { html: html.join('\n'), warnings }
+}
+
+// ---------------------------------------------------------------------------
+// The four instruction commands (T-328, §7.10 Library module, D-188):
+// the mock twins of the Rust family — the same §6.9 validation order
+// (name, then text), the same typed envelopes (DB-016's marker line is
+// E_CONTENT_RESERVED, its own §10 row), the same D-188 rules (the
+// section placement, the same-name no-op, the hide/restore
+// idempotence, the class-only duplicate arm on restore). Known mock
+// limits, deliberate (D-108's posture): no `revisions` rows (the mock
+// store has no version table — the version DoDs are the Rust suite's),
+// no assignment data to keep (the assignments are not wired into the
+// mock store yet; the real commands do not touch them either, which
+// the mock mirrors by not touching what does not exist), and the
+// marker scan is a line `trim()` equality over the CRLF/BOM-aware
+// split — the `classify_line` mirror at the shapes tests send.
+// ---------------------------------------------------------------------------
+
+/** The D-19 marker literals (the Rust `markers` module's twins). */
+const BEGIN_MARKER = '<!-- EUNOMIASYNC:BEGIN -->'
+const END_MARKER = '<!-- EUNOMIASYNC:END -->'
+
+/** The D-115 bounded echo, the real `bounded_echo`'s twin: caller
+ * input echoed into a rejection envelope is capped at 64 code points,
+ * with the truncation named. */
+function boundedEcho(value: string): string {
+  const characters = Array.from(value)
+  if (characters.length <= 64) return value
+  return `${characters.slice(0, 64).join('')} (+${characters.length - 64} more code points)`
+}
+
+/** The §6.9 name verdict: the trimmed form, or the rejection reason —
+ * the real `validate_instruction_title`'s mirror (trim-then-count, one
+ * line, the D-126 name-wide NUL rule), with the same class-only
+ * reason texts. */
+function validateInstructionName(name: string): { trimmed: string } | { reason: string } {
+  const trimmed = name.trim()
+  const characters = Array.from(trimmed)
+  if (characters.length === 0) {
+    return { reason: 'instruction name is empty after trimming' }
+  }
+  if (characters.length > 200) {
+    return {
+      reason: `instruction name is ${characters.length} characters after trimming; the limit is 200`,
+    }
+  }
+  const offending = characters.findIndex((ch) => ch === '\n' || ch === '\r' || ch === '\0')
+  if (offending >= 0) {
+    const character = characters[offending]
+    return character === '\0'
+      ? { reason: `instruction name contains NUL at index ${offending}` }
+      : {
+          reason: `instruction name contains the line break ${JSON.stringify(character)} at index ${offending}`,
+        }
+  }
+  return { trimmed }
+}
+
+/** The §6.9 variant-text verdict (`null` when legal): DB-006's length
+ * ceiling, the NUL rejection, and DB-016's reserved marker line — a
+ * line equal to a D-19 literal modulo padding (the real check runs
+ * over the ALG-002-normalized form; the split here handles CRLF and a
+ * leading BOM is stripped, the shapes a test sends). The marker arm
+ * carries which literal and the 1-based line number, the real
+ * envelope's own facts. */
+function variantTextRejection(
+  text: string,
+):
+  | { kind: 'length' | 'nul'; reason: string }
+  | { kind: 'marker'; marker: string; line: number }
+  | null {
+  const characters = Array.from(text)
+  if (characters.length > 262_144) {
+    return {
+      kind: 'length',
+      reason: `variant text is ${characters.length} characters; the limit is 262144`,
+    }
+  }
+  const nul = characters.indexOf('\0')
+  if (nul >= 0) {
+    return { kind: 'nul', reason: `variant text contains NUL at index ${nul}` }
+  }
+  // The scan mirrors the real path's BUILT form as far as a
+  // line-based mock can: the CRLF/CR-aware split, the leading edge —
+  // the BOM run and empty lines dropped IN INTERLEAVED fixed-point
+  // passes, exactly `drop_leading_edge`'s loop (a BOM after a blank
+  // line is still leading; the LINE NUMBER the real envelope carries
+  // counts this form) — and each line equal to a D-19 literal modulo
+  // ASCII spaces and tabs (`classify_line`'s own padding — Unicode
+  // whitespace padding does NOT match here, exactly as it does not
+  // there).
+  const lines = splitBuiltForm(text)
+  for (let index = 0; index < lines.length; index++) {
+    const line = (lines[index] ?? '').replace(/^[ \t]+|[ \t]+$/g, '')
+    if (line === BEGIN_MARKER || line === END_MARKER) {
+      return { kind: 'marker', marker: line, line: index + 1 }
+    }
+  }
+  return null
+}
+
+/**
+ * The built form's line list, the `variant_text` + `classify_line`
+ * composition's mock twin: line breaks normalized (CRLF and a lone
+ * CR both become LF — the split accepts every spelling), then the
+ * leading edge dropped to its fixed point: the BOM run stripped and
+ * empty (ASCII whitespace only) lines removed, interleaved, until
+ * neither consumes anything (a BOM that becomes leading only after a
+ * blank line drops is still leading — `drop_leading_edge`'s own
+ * rule).
+ */
+function splitBuiltForm(text: string): string[] {
+  const lines = text.split(/\r\n|\r|\n/)
+  let start = 0
+  let changed = true
+  while (changed) {
+    changed = false
+    while ((lines[start] ?? '').startsWith('\uFEFF')) {
+      lines[start] = (lines[start] ?? '').replace(/^\uFEFF+/, '')
+      changed = true
+    }
+    while (start < lines.length && /^[ \t]*$/.test(lines[start] ?? '')) {
+      start++
+      changed = true
+    }
+  }
+  return lines.slice(start)
+}
+
+/** The D-188 section rule's target position (the real
+ * `section_target`'s twin, over the position-ordered rows): the end of
+ * the picked heading's ALG-060 range — the first heading of level
+ * `<=` its own that follows it, or the table end — or, for the root
+ * pick (`null`), the end of the prefix before the FIRST heading. A
+ * `section` that names no row or an instruction answers the refusal
+ * reason instead (the typed field rejection's input). */
+function sectionTarget(
+  ordered: readonly MockLibraryRow[],
+  section: string | null,
+): number | { refusal: string } {
+  if (section === null) {
+    const firstHeading = ordered.find((row) => row.kind === 'heading')
+    return firstHeading ? firstHeading.position : ordered.length + 1
+  }
+  const heading = ordered.find((row) => row.id === section)
+  if (!heading) {
+    return { refusal: 'no row with this id' }
+  }
+  if (heading.kind !== 'heading') {
+    return { refusal: 'a section must be a heading row (MAIN-015)' }
+  }
+  const level = heading.headingLevel
+  const next = ordered.find(
+    (row) => row.kind === 'heading' && row.position > heading.position && row.headingLevel <= level,
+  )
+  return next ? next.position : ordered.length + 1
+}
+
+/** §6.9's cross-row clause: whether a VISIBLE instruction already
+ * carries the name NOCASE-equal — the real store's
+ * `active_title_taken` mirror, including its fold: SQLite's COLLATE
+ * NOCASE folds ASCII A–Z only, so "Ä"/"ä" are NOT twins there and are
+ * not here either (the mock stays exactly as permissive as the real
+ * boundary, never inventing a rejection). `except` is the row the
+ * check excludes (the store's own by-id exclusion; a HIDDEN row never
+ * blocks). */
+function visibleNameTaken(
+  rows: readonly MockLibraryRow[],
+  name: string,
+  except?: MockLibraryRow,
+): boolean {
+  const wanted = asciiFold(name)
+  return rows.some(
+    (row) =>
+      row !== except &&
+      row.kind === 'instruction' &&
+      row.state === 'active' &&
+      asciiFold(row.title) === wanted,
+  )
+}
+
+/** SQLite's NOCASE fold: ASCII letters only. */
+const asciiFold = (value: string): string => value.replace(/[A-Z]/g, (c) => c.toLowerCase())
+
+/** The shared by-id refusal of the three id-addressed commands (the
+ * real `instruction_of`'s twin): an unknown id or a heading row is the
+ * typed `E_VALIDATION` refusal of the `id` field. */
+function instructionRowOf(state: MockState, id: string): MockLibraryRow | Promise<never> {
+  const row = state.library.find((item) => item.id === id)
+  if (!row || row.kind !== 'instruction') {
+    return rejectWith('E_VALIDATION', 'errors.validation', {
+      field: 'id',
+      value: boundedEcho(id),
+      reason: row
+        ? 'the row is a heading; headings have no instruction lifecycle (MAIN-015)'
+        : 'no instruction with this id',
+    })
+  }
+  return row
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +932,175 @@ export const mockCommands: IpcCommands = {
    */
   async dialogPickFolder() {
     return `/home/dev/repos/picked-project-${mockState().projects.length}`
+  },
+
+  /**
+   * `instruction_create` (§7.10 Library module, LIB-002, §8 S3,
+   * T-328/D-188): the create dialog's save — §6.9 name-then-text
+   * validation (the marker line answers `E_CONTENT_RESERVED`, its own
+   * §10 row), the NOCASE-twin refusal among VISIBLE instructions, the
+   * section placement (the end of the picked heading's range; `null`
+   * is the root prefix end), the `Main` pair, and the one
+   * `instruction.created` journal entry. No version rows exist in the
+   * mock store (the documented limit above).
+   */
+  async instructionCreate(name, text, section) {
+    const state = mockState()
+    // §6.9 first (D-076's split, mirrored): the name, then the text —
+    // the same fixed order the real command runs.
+    const validated = validateInstructionName(name)
+    if ('reason' in validated) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'name',
+        value: boundedEcho(name),
+        reason: validated.reason,
+      })
+    }
+    const textRejection = variantTextRejection(text)
+    if (textRejection) {
+      if (textRejection.kind === 'marker') {
+        return rejectWith('E_CONTENT_RESERVED', 'errors.content_reserved', {
+          field: 'text',
+          marker: textRejection.marker,
+          line: String(textRejection.line),
+        })
+      }
+      // No value echo: the instruction text is the one thing SEC-008
+      // keeps out of envelopes (the real command's rule, mirrored).
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'text',
+        reason: textRejection.reason,
+      })
+    }
+    const ordered = [...state.library].sort((a, b) => a.position - b.position)
+    // The section check precedes the duplicate check — the real
+    // command's own order (its `section_target` runs before
+    // `create_item` meets the store's twin): a request with both
+    // faults answers about the section.
+    const target = sectionTarget(ordered, section)
+    if (typeof target !== 'number') {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'section',
+        value: boundedEcho(section ?? ''),
+        reason: target.refusal,
+      })
+    }
+    if (visibleNameTaken(state.library, validated.trimmed)) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'name',
+        value: boundedEcho(validated.trimmed),
+        reason: 'a visible instruction already carries this name, case-insensitive (6.9)',
+      })
+    }
+    // The pair (LIB-002): the instruction with its `Main` variant —
+    // the text stored in the SAVE-FOLDED form (§6.9: CRLF becomes LF
+    // on save; a lone CR stays, the store's own `fold_crlf` rule).
+    // The dates follow the row-creating shape the seeding uses
+    // (DB-002 UTC; runtime rows stamp the wall clock — the seeded
+    // rows' one-second-per-position form is the generator's own).
+    const now = new Date().toISOString()
+    const row: MockLibraryRow = {
+      kind: 'instruction',
+      id: freshRowId(),
+      position: 0,
+      title: validated.trimmed,
+      state: 'active',
+      variants: [
+        { id: freshRowId(), name: 'Main', content: text.replace(/\r\n/g, '\n'), isMain: true },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    }
+    // The placement: the row takes the target position with the dense
+    // renumber (DB-011) — the store's own append-then-move, mirrored.
+    ordered.splice(target - 1, 0, row)
+    ordered.forEach((item, index) => {
+      item.position = index + 1
+    })
+    state.library = ordered
+    journal('instruction.created', { entityType: 'instruction', entityId: row.id })
+    return {
+      instruction_id: row.id,
+      variant_id: row.variants[0]?.id as string,
+      position: row.position,
+    }
+  },
+
+  /**
+   * `instruction_update` (§7.10 Library module, T-328/D-188): the
+   * rename — the same-name save is the verified no-op (nothing
+   * written, nothing journaled), a NOCASE twin among visible
+   * instructions and a heading or stale id are the typed refusals, and
+   * a real rename journals `instruction.changed`.
+   */
+  async instructionUpdate(id, name) {
+    const state = mockState()
+    const validated = validateInstructionName(name)
+    if ('reason' in validated) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'name',
+        value: boundedEcho(name),
+        reason: validated.reason,
+      })
+    }
+    const row = instructionRowOf(state, id)
+    if (row instanceof Promise) return row
+    // D-188's verified no-op: the same name writes and journals
+    // nothing (the D-115 precedent).
+    if (row.title === validated.trimmed) return null
+    if (visibleNameTaken(state.library, validated.trimmed, row)) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'name',
+        value: boundedEcho(validated.trimmed),
+        reason: 'a visible instruction already carries this name, case-insensitive (6.9)',
+      })
+    }
+    row.title = validated.trimmed
+    journal('instruction.changed', { entityType: 'instruction', entityId: row.id })
+    return null
+  },
+
+  /**
+   * `instruction_hide` (§7.10 Library module, LIB-005, D-11/DB-013,
+   * T-328/D-188): the hide — the row flips to `hidden` keeping its
+   * variants (and whatever assignment state a future task wires in;
+   * the real command touches none, DB-013), a repeated hide is the
+   * verified no-op, and the one real transition journals
+   * `instruction.hidden`.
+   */
+  async instructionHide(id) {
+    const state = mockState()
+    const row = instructionRowOf(state, id)
+    if (row instanceof Promise) return row
+    if (row.state === 'hidden') return null
+    row.state = 'hidden'
+    journal('instruction.hidden', { entityType: 'instruction', entityId: row.id })
+    return null
+  },
+
+  /**
+   * `instruction_restore` (§7.10 Library module, LIB-005…007/012,
+   * T-328/D-188): the restore — the row returns to `active`, a
+   * repeated restore is the verified no-op, and a visible NOCASE twin
+   * that took the name while the row was hidden refuses the restore
+   * with the class-only envelope (the stored title never travels,
+   * SEC-008). The one real transition journals
+   * `instruction.restored`.
+   */
+  async instructionRestore(id) {
+    const state = mockState()
+    const row = instructionRowOf(state, id)
+    if (row instanceof Promise) return row
+    if (row.state === 'active') return null
+    if (visibleNameTaken(state.library, row.title)) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'name',
+        reason: 'a visible instruction already carries this name, case-insensitive (6.9)',
+      })
+    }
+    row.state = 'active'
+    journal('instruction.restored', { entityType: 'instruction', entityId: row.id })
+    return null
   },
 
   /** `markdown_preview` (§7.10, SEC-005/D-15): sanitized HTML + warnings. */

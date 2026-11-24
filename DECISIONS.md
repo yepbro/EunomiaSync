@@ -22079,3 +22079,214 @@ the library commands land). The cards are the tracking unit; this line
 is the D-record duplicate the board rule asks for. Written as a service
 commit in main after the merge — md-only, no suites under the md-only
 regime; prettier and the pre-commit hook gate it.
+
+### D-188 — T-328: the `instruction_create` / `instruction_update` / `instruction_hide` / `instruction_restore` commands — the create dialog's "section" read as the end-of-section placement, the rename/hide/restore verified no-ops, and no SYS-005 gate for library edits — 2026-11-24
+
+Problem: the batch of the three absorbed cards (T-084 create,
+T-085 rename, T-086 hide/restore) lands the first four §7.10 Library
+commands over the already-landed repositories (T-081 `library`,
+T-082 `library_versions`) and validators (T-063). Five points were
+open: (1) what the T-084 card's "text at the specified position
+(section)" takes on the wire — the §7.3 LIB-002 create dialog and
+scenario S3 both say "pick a section", but no §7.10 signature spells
+the parameter; (2) whether the T-085 DoD's "renaming to the same
+name creates no version" is the version layer's ALG-070 hash gate
+alone or a command-level no-op; (3) whether hide/restore record and
+journal on an idempotent re-run (the store's `hide_item`/
+`restore_item` are idempotent by D-093's design and hand the caller
+no "changed" signal); (4) whether the commands run the SYS-005
+`E_SYNC_RUNNING` gate the project-changing commands run; (5) which
+§10 code rejects the DB-016 marker line.
+
+Readings chosen (Rule 1, recorded before implementation):
+
+- **(1) The section rule.** `instruction_create(name, text,
+section)` takes `section: Option<String>` — a heading row id.
+  `Some(id)`: the new instruction is placed at the END of that
+  heading's ALG-060 range (the item before the next heading of level
+  ≤ the heading's level, or the table end) — the same "end of the
+  section" target LIB-032 gives an instruction dropped on a heading,
+  so drag-drop and create-place agree. `None` (root, the dialog's
+  "no section"): the end of the prefix before the FIRST heading —
+  the only place an instruction has no heading above it (ALG-021);
+  with no headings in the table the whole table is the root, so
+  `None` is the table end. A `section` that names no row or names an
+  instruction is the `E_VALIDATION` field refusal of the `section`
+  field (headings are the only section identity, MAIN-015). The
+  placement composes the store's own two functions — `create_item`
+  (appends at `MAX(position)+1`) then `move_item` to the computed
+  target — inside the command's one transaction, so no new store
+  seam and no renumbering duplication (the D-179 "by construction,
+  not by copy" posture). The rejected alternative was a raw
+  `position: i64` parameter: it moves the ALG-060 range arithmetic
+  into every caller (the UI would have to compute section ends), and
+  an integer the webview sends is unvalidated structure — the
+  id-addressed form keeps the section semantics server-side.
+- **(2) Rename-to-same-name is a verified no-op.** The command
+  compares the VALIDATED name with the stored title before any
+  write; equal answers `Ok(())` with nothing written — no store
+  write (the store would restamp `updated_at` for a field-present
+  update), no `record_instruction` call, no journal entry (the
+  D-115/D-137 verified-no-op precedent). The ALG-070 hash gate would
+  absorb the version row anyway; the pre-check keeps the save
+  honest end to end: "saving without changes adds none" (LIB-026's
+  acceptance) covers the journal and the row too, not only the
+  `revisions` table. The comparison is on the validated (trimmed)
+  form against the stored form — the D-075 contract makes those the
+  same shape.
+- **(3) Hide/restore converge on re-runs.** A hide of an
+  already-hidden instruction and a restore of an active one are
+  verified no-ops in the same D-115 shape: the row read first, the
+  state compared, nothing written, recorded or journaled when the
+  requested state is already current. The store's own idempotence
+  stays the floor; the command does not re-journal a transition
+  that did not happen (a double-clicked eye button converges to one
+  journal entry and one `hide` version).
+- **(4) No SYS-005 gate.** §5.4 SYS-005's own sentence: "Library
+  edits during a sync are allowed; they do not go into the current
+  run and stay 'dirty'." The gate is for commands that change
+  PROJECTS (`project_update`, `project_remove`, `project_relink`,
+  P1 `backup_restore`); these four commands write library rows, and
+  the DB-022 commit hook recalculates the dirty set after every
+  committed transaction — the honest integration for a library edit
+  mid-sync is the dirty flag, not a refusal.
+- **(5) `E_CONTENT_RESERVED` for the DB-016 marker line.** DB-016
+  says "Saving is rejected with the `E_CONTENT_RESERVED` error", so
+  `validate_variant_text`'s `ReservedContent` arm maps to
+  `ErrorCode::ContentReserved` with the marker literal and the
+  built-form line number as params; every other validator arm
+  (empty/long/line-break/NUL name, too-long/NUL text) maps to
+  `E_VALIDATION` with the field/value/reason envelope.
+
+The journal shape (LOG-001, D-051): `instruction_create` writes ONE
+`instruction.created` entry — the main variant is part of the
+instruction's birth (LIB-002: the create dialog always produces the
+pair), not a separate user action — while the VERSION layer records
+both entities (one `create` version for the instruction, one for
+the variant, ALG-071's own per-entity `rev_no`); `instruction_update`
+writes `instruction.changed`, hide and restore their own members.
+Every command runs inside ONE `Db::run` transaction (§6.9 "an entity
+is never saved partly"; D-037/D-051), versions recorded with
+`history.max_revisions` read in the same transaction (ALG-072's
+caller contract), the journal entry inside the operation's own
+transaction.
+
+Verification. BDD red first: the whole battery was written before
+the implementation and run against deliberate stubs — every behavior
+test red (the stubs' refusals satisfied none of the expected
+outcomes) — then green on the real implementation. Nineteen
+mock-IPC tests in `ipc_tests.rs` (the `library_app` healthy shape,
+seeds through the T-081/T-082 repositories, the build asserted
+through the §9.1 snapshot + §9.2 builder the sync itself uses — the
+independent oracle for T-086's "a hidden instruction is not in the
+build"), six unit tests of the pure mapping seams in `commands.rs`'s
+own suite, and fifteen mock-layer tests in
+`src/ipc/mock/commands.spec.ts` (the wire twins: the same §6.9 order,
+the same envelopes, the same D-188 rules; the mock store gained the
+`library` rows the fixture generator already built — the known
+limits, no version table and no assignment rows, are stated in the
+file). Mutations: 39 scripted mutations in all (28 against the Rust
+command file — the duplicate envelope, the marker line's own code,
+both version recordings, the created variant's main-variant shape,
+the journal member of each command, the section placement, its root
+half and its `level <= own` half under both wrong readings, the
+same-name/hide/restore no-op guards, the by-id kind and existence
+guards, the §6.9 name and text validation and their fixed order,
+the §6.5 limit read, the actual writes of rename and hide — and 11
+against the mock twin — the duplicate check, the marker code, the
+placement, the root target, the no-op guard, the hide flip, the
+restore refusal, the ASCII-only twin fold, the
+section-before-duplicate order, the fixed-point leading edge, the
+save-folded storage); every one was KILLED by its oracle
+test, and the mutated file was restored byte-for-byte after each
+(`cmp` against a backup). Checks, all exit 0: `cargo fmt --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo nextest run --workspace --test-threads=4` (1713 tests),
+`pnpm test` (307 tests), `pnpm run format:check`, `pnpm run lint`,
+`pnpm run typecheck`; `src/bindings.ts` regenerated through the
+export pin test (the first run red as documented, the committed file
+regenerated, the pin green since). Docs brought to the landed truth
+(Rule 11): ARCHITECTURE.md's registered-commands enumeration,
+`docs/manual-smoke.md`'s pending-surfaces paragraph and the S3
+entry's Pending line (the create/rename/lifecycle backend is in
+place; the assignment step's backend and the UI surfaces are not),
+the `commands.rs` and `ipc_tests.rs` module docs, and
+`src/ipc/mode.spec.ts`'s pinned command set.
+
+Round-1 review (deepseek-v4.1-flash, report
+`.opencode/reviews/t328-round1.md`): APPROVE — 0×P0/P1/P2 in the
+production code, three test-audit P2s, two test-audit P3s, five
+production/mock P3s. All taken and fixed in the amend, each verified
+with a killing mutation: TA-P2-1 the created variant's
+`Main`/`is_main`/content now asserted on the Rust side (mutation
+M26); TA-P2-2 the section rule's `level <= own` half gained a
+discriminating case in both suites — a level-2 pick owning a
+level-3 subsection targets the next level-2 heading, killing both
+wrong readings (M24 first-following-heading, M25 strictly-lower);
+TA-P2-3 the "NUL in the text" case is now a short NUL string (the
+validator checks length first, the old compound input never reached
+the NUL arm); TA-P3-1 the fixed name-then-text validation order and
+the hidden-twin positive half of §6.9's "among visible" are pinned
+in both suites (M28, MM9, M27); P3-1 the mock's create now checks
+the section before the duplicate (the real command's order, MM9);
+P3-2 the mock's marker scan mirrors the built form — ASCII
+space/tab padding, leading empty lines dropped, the line number
+counted over that form; P3-3 the mock's twin fold is ASCII-only
+(SQLite's NOCASE; pinned by the Müller/MÜLLER pair, MM8); P3-4
+`instructionUpdate` reuses `instructionRowOf`; P3-5 was this
+addendum's own promise line, closed by the round dispositions
+themselves.
+
+Round-2 review (hy4-flash-free, report
+`.opencode/reviews/t328-round2.md`): APPROVE — 0×P0/P1/P2, five
+P3s; every round-1 fix independently re-verified against the tree.
+All five taken and fixed in the amend: P3-1 the battery counts in
+this entry were corrected (thirteen mock tests at the time of the
+finding; fifteen after this round's additions) and the promise line
+replaced by these dispositions; P3-2 the mock's leading-edge strip
+is now the interleaved fixed-point loop `drop_leading_edge` itself
+runs — a BOM that becomes leading only after a blank line drops is
+still leading, and the twin case pinning it kills the single-pass
+mutant (MM10); P3-3 the mock stores the create text in the
+save-folded form (§6.9's CRLF→LF on save, a lone CR staying — the
+store's own `fold_crlf` rule, MM11); TA-P3-1 and TA-P3-2 two stale
+test headers that described older worlds than the tests build (a
+`rev_no 2` create version that does not exist; "seven renames under
+a limit of 5" in a 12-rename/limit-10 test) — both now state the
+world the test actually builds. Checks after the round-2 fixes were
+re-run, all exit 0 (the final numbers above).
+
+Honest boundary: the reviews verified the code and the test oracles
+by reading (read-only, no cargo/pnpm runs); the green claims are
+the author's own runs, recorded above and re-run after the last
+fix.
+
+Landing addendum (the rebase onto T-083's `e1fde3b` + the D-187
+follow-up docs commit, 2026-11-24): the sibling's `library_get`
+landed the same seams this entry's commands use, and the merge kept
+both sides by construction, not by copy — the two `library_store_to_
+app_error` mappers the tasks wrote independently became ONE function
+(T-083's `pub(crate)` shape, this task's context-free
+`DuplicateInstructionTitle` arm folded into it; the duplicate
+definitions the auto-merge left were deleted, and
+`library_write_to_app_error`/`revision_store_to_app_error` stay this
+task's own). The mock store unified on T-083's richer
+`MockLibraryRow` union (dated rows, `assignments` wired; this task's
+four mock twins adapted to it — the `headingLevel ?? 7` fallbacks
+fell away under the union's narrowing, the created row stamps the
+wall clock the journal helper always used); `mode.spec.ts`'s pinned
+surface is the union (`libraryGet` + the four instruction names).
+`src/bindings.ts` regenerated on the rebased tree (the first
+export-pin run red as documented, the second green). The full suite
+re-run on the rebased branch, all exit 0: fmt / clippy -D warnings /
+nextest --workspace (1723 tests — T-083's `library_tests.rs` battery
+joined) / vitest (313 tests — their six mock tests joined) /
+format:check / lint / typecheck; one first-run watcher timeout
+(`a_recreated_directory_is_re_armed_by_the_next_set`, eunomia-fs,
+inotify under load) passed in isolation and in the full re-run — a
+recorded flake, not a merge casualty: this diff does not touch
+eunomia-fs. No new review round: the md-only exception does not
+apply (the rebase touched code), but the changes are the mechanical
+consequences of the union the two review rounds already audited
+(the mapper merge and the mock adaptation preserve every audited
+behavior; the suites that pin them are unchanged and green).

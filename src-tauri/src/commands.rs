@@ -8,13 +8,17 @@
 //! `project_add_manual` (T-074), the Projects module's
 //! `exclusions_list`/`exclusion_remove` (T-078), the Projects
 //! module's `projects_reorder` (T-080), the Sync module's
-//! `sync_run` (T-118, D-138) and the Library module's `library_get`
-//! (T-083, D-187): `app_open_data_folder`, `db_backups_list`,
-//! `db_restore_backup`, `db_recreate`, `activity_list`,
-//! `settings_get`, `settings_set`, `app_info`, `markdown_preview`,
-//! `projects_list`, `dialog_pick_folder`, `project_add_manual`,
-//! `exclusions_list`, `exclusion_remove`, `projects_reorder`,
-//! `sync_run`, `library_get`.
+//! `sync_run` (T-118, D-138), the Library module's `library_get`
+//! (T-083, D-187) and the Library module's instruction
+//! lifecycle `instruction_create`/`instruction_update`/
+//! `instruction_hide`/`instruction_restore` (T-328, D-188):
+//! `app_open_data_folder`, `db_backups_list`, `db_restore_backup`,
+//! `db_recreate`, `activity_list`, `settings_get`, `settings_set`,
+//! `app_info`, `markdown_preview`, `projects_list`,
+//! `dialog_pick_folder`, `project_add_manual`, `exclusions_list`,
+//! `exclusion_remove`, `projects_reorder`, `sync_run`,
+//! `library_get`, `instruction_create`, `instruction_update`,
+//! `instruction_hide`, `instruction_restore`.
 //!
 //! This module also owns the rules a NEW project row is built by —
 //! the derived §6.9 fields, the PRJ-012 copy of the `default.*`
@@ -116,7 +120,14 @@ use eunomia_core::library::{
     Heading as CoreHeading, HeadingLevel, Instruction as CoreInstruction, InstructionState, ItemId,
     LibraryItem as CoreLibraryItem,
 };
+use eunomia_core::library_validators::{
+    LibraryFieldError, validate_instruction_title, validate_variant_text,
+};
+use eunomia_core::markers::{BEGIN_MARKER, END_MARKER, MarkerLine};
 use eunomia_core::project::{Color, ProjectId};
+use eunomia_core::version_snapshot::{
+    instruction_snapshot, instruction_snapshot_hash, variant_snapshot, variant_snapshot_hash,
+};
 use eunomia_fs::atomic::{AtomicWriteError, WrittenFile};
 use eunomia_fs::backup::{BackupError, BackupOutcome, BackupTarget};
 use eunomia_fs::paths::NotARepoError;
@@ -124,6 +135,13 @@ use eunomia_fs::write_access::WriteAccessError;
 use eunomia_store::action_log::{
     Action, ActionLogError, ActivityQuery, Details, Entity, EntityType, Level, LogEntry, Outcome,
     Visibility, insert,
+};
+use eunomia_store::library::{
+    ItemKind, ItemScope, ItemState, ItemUpdate, LibraryError, LibraryItem, NewLibraryItem,
+    NewVariant, Variant,
+};
+use eunomia_store::library_versions::{
+    InstructionOp, Recorded, RevisionError, VariantOp, record_instruction, record_variant,
 };
 use eunomia_store::projects::{ListScope, ProjectState, ProjectsError};
 use eunomia_store::settings::{SettingKey, SettingValue, SettingsError};
@@ -4513,10 +4531,16 @@ fn assemble_library_tree(read: LibraryRead) -> Vec<LibraryTreeItem> {
 /// D-037 fallback with a class-only diagnostic naming the column —
 /// never the stored value (rule 8; a tampered cell is arbitrary
 /// database text, and `params`/`os_message` are exactly the surfaces
-/// the log line and the localized message read). The write-path
-/// variants (`NotFound`, `AlreadyAssigned`, …) are unreachable from
-/// the reads this mapper serves today and map to the family fallback
-/// — the same belt every store mapper here wears.
+/// the log line and the localized message read). The NOCASE-twin
+/// title rejection is the typed `E_VALIDATION` refusal of the `name`
+/// field WITHOUT a value — the context-free form (the title the
+/// store names can be the row's own STORED title on the restore
+/// path, and stored text never travels, SEC-008; the
+/// create/update paths add the caller's own echo through
+/// [`library_write_to_app_error`], T-328). The write-path variants
+/// (`NotFound`, `AlreadyAssigned`, …) are unreachable from the reads
+/// this mapper serves today and map to the family fallback — the
+/// same belt every store mapper here wears.
 pub(crate) fn library_store_to_app_error(error: eunomia_store::library::LibraryError) -> AppError {
     match error {
         eunomia_store::library::LibraryError::Sql(source) => db::sqlite_error_to_app_error(source),
@@ -4524,6 +4548,22 @@ pub(crate) fn library_store_to_app_error(error: eunomia_store::library::LibraryE
             "LibraryCorrupt",
             &format!("a stored {column} cell is outside its vocabulary"),
         ),
+        // The context-free duplicate-title arm (T-328): `field` +
+        // `reason` only — the stored title never travels (SEC-008);
+        // the create/update commands enrich it with the caller's own
+        // echo through [`library_write_to_app_error`].
+        eunomia_store::library::LibraryError::DuplicateInstructionTitle { .. } => {
+            let mut app_error = AppError::new(ErrorCode::Validation);
+            app_error
+                .params
+                .insert("field".to_owned(), "name".to_owned());
+            app_error.params.insert(
+                "reason".to_owned(),
+                "a visible instruction already carries this name, case-insensitive (6.9)"
+                    .to_owned(),
+            );
+            app_error
+        }
         write_outcome => library_fallback(
             "LibraryError",
             match &write_outcome {
@@ -4969,6 +5009,578 @@ fn picked_folder_vanished(picked: &Path, source: &std::io::Error) -> AppError {
         .params
         .insert("path".to_owned(), picked.display().to_string());
     app_error.with_os_error(source)
+}
+
+// ---------------------------------------------------------------------------
+// `instruction_create` / `instruction_update` / `instruction_hide` /
+// `instruction_restore` (T-328, §7.10 Library module, §7.3 LIB-002,
+// LIB-005…007/012, MAIN-012…014, §6.4, §6.9, DB-005/DB-010/DB-013/
+// DB-016, §8 S3, §9.8 ALG-070…072, spec decision D-11; the five
+// readings and the composition rules are recorded in DECISIONS.md
+// D-188)
+// ---------------------------------------------------------------------------
+
+/// The `instruction_create` answer: the identities the created pair
+/// carries plus the placement the row took — the ids are what every
+/// later library command (`instruction_update`, `instruction_hide`,
+/// the variant commands, `assignment_set`) addresses, and the
+/// position pins where in the §6.4 sequence the new row landed. The
+/// `library_get` read refreshes the tree; this DTO stays the minimal
+/// create receipt (the `ScanCommitEntry` minimal-payload rule).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct InstructionCreated {
+    /// The created instruction's row id (UUIDv7 TEXT, DB-002).
+    pub(crate) instruction_id: String,
+    /// The created main variant's row id — LIB-002's pair: the dialog
+    /// always creates the instruction WITH its `Main` variant.
+    pub(crate) variant_id: String,
+    /// The stored `position` of the new instruction (DB-011), the
+    /// placement the D-188 section rule chose — `i32` on the wire
+    /// (specta forbids 64-bit integers; the table's row count always
+    /// fits, the `AddedProject.sort_order` decision).
+    pub(crate) position: i32,
+}
+
+/// The `instruction_create` command (§7.10 Library module, LIB-002,
+/// §8 S3): the create dialog's save — one instruction, its main
+/// variant named `Main`, placed in the picked section — validated
+/// through the §6.9 field validators (DB-016's marker line included),
+/// written with its two `create` versions and its journal entry in
+/// ONE transaction.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn instruction_create<R: Runtime>(
+    app: AppHandle<R>,
+    name: String,
+    text: String,
+    section: Option<String>,
+) -> Result<InstructionCreated, AppError> {
+    instruction_create_impl(app, name, text, section)
+        .await
+        .inspect_err(logging::instruction_create_failed)
+}
+
+/// The body of [`instruction_create`], split so the one logging edge
+/// covers every failure path (the `activity_list` shape).
+async fn instruction_create_impl<R: Runtime>(
+    app: AppHandle<R>,
+    name: String,
+    text: String,
+    section: Option<String>,
+) -> Result<InstructionCreated, AppError> {
+    // §6.9 first, before any database is resolved (D-076's split: the
+    // field rules are core's, the wire envelope is the command's).
+    // The name validator returns the TRIMMED form — the stored form
+    // (the D-075 contract). The text is validated unchanged: the store
+    // owns the save-time CRLF fold, so the validator measures the
+    // caller's own spelling. DB-016's marker line is its own §10 row
+    // here (E_CONTENT_RESERVED), everything else the E_VALIDATION
+    // field envelope.
+    let sent_name = name;
+    let name = validate_instruction_title(&sent_name)
+        .map_err(|error| rejected_title_field(&sent_name, &error))?;
+    validate_variant_text(&text).map_err(rejected_text_field)?;
+    let database = managed_db(&app)?;
+    database
+        .run(move |transaction| {
+            // The D-188 section rule, computed over the ordered list
+            // the store's own read serves — BEFORE the row exists: the
+            // target is a position in `1..=M+1` (M = the current row
+            // count).
+            let target = section_target(transaction, section.as_deref())?;
+            // The create pair (LIB-002): the instruction and its main
+            // variant in this one transaction — DB-010's constructive
+            // half is the composition itself (the store module docs).
+            let item = eunomia_store::library::create_item(
+                transaction,
+                &NewLibraryItem::Instruction { title: &name },
+            )
+            .map_err(|error| library_write_to_app_error(error, &name))?;
+            let variant = eunomia_store::library::create_variant(
+                transaction,
+                &NewVariant {
+                    instruction_id: &item.id,
+                    name: "Main",
+                    content: &text,
+                    is_main: true,
+                },
+            )
+            .map_err(library_store_to_app_error)?;
+            // The placement: `create_item` appended at the table end
+            // (`M + 1`); a target short of that moves the row through
+            // the store's own renumbering (DB-011 stays dense).
+            let placed = if item.position != target {
+                eunomia_store::library::move_item(transaction, &item.id, target)
+                    .map_err(library_store_to_app_error)?
+            } else {
+                item
+            };
+            // The versions (ALG-070/071): one `create` row per entity —
+            // the T-084 DoD's pair — with the §6.5 limit read in this
+            // same transaction (ALG-072's caller contract, D-188).
+            let max_revisions = history_max_revisions(transaction)?;
+            record_instruction_version(transaction, &placed, InstructionOp::Create, max_revisions)?;
+            record_variant_version(transaction, &variant, VariantOp::Create, max_revisions)?;
+            // LOG-001…004 (D-051): the pair's birth is ONE user action
+            // — one entry naming the instruction.
+            journal_instruction(transaction, Action::InstructionCreated, &placed.id)?;
+            Ok(InstructionCreated {
+                instruction_id: placed.id,
+                variant_id: variant.id,
+                position: wire_position(placed.position),
+            })
+        })
+        .await
+}
+
+/// The `instruction_update` command (§7.10 Library module, §7.3,
+/// ALG-070/071): the rename — validated, written with its `update`
+/// version and journal entry in one transaction, and the verified
+/// no-op when the name did not change (D-188).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn instruction_update<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+    name: String,
+) -> Result<(), AppError> {
+    instruction_update_impl(app, id, name)
+        .await
+        .inspect_err(logging::instruction_update_failed)
+}
+
+/// The body of [`instruction_update`], split so the one logging edge
+/// covers every failure path (the `activity_list` shape).
+async fn instruction_update_impl<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+    name: String,
+) -> Result<(), AppError> {
+    // §6.9 first (D-076), the same envelope shape as the create's.
+    let sent_name = name;
+    let name = validate_instruction_title(&sent_name)
+        .map_err(|error| rejected_title_field(&sent_name, &error))?;
+    let database = managed_db(&app)?;
+    database
+        .run(move |transaction| {
+            // The rename's own by-id read: MAIN-015's identity split
+            // (a heading's rename is `heading_update`, §7.10) and the
+            // verified no-op's comparison input.
+            let item = instruction_of(transaction, &id)?;
+            // D-188's verified no-op: the validated name equals the
+            // stored title — nothing changed, so nothing is written,
+            // recorded or journaled (the D-115 precedent; the store
+            // would restamp `updated_at` for a present field, and the
+            // ALG-070 hash gate would only suppress the version row).
+            if item.title == name {
+                return Ok(());
+            }
+            let updated = eunomia_store::library::update_item(
+                transaction,
+                &id,
+                &ItemUpdate {
+                    title: Some(name.as_str()),
+                    heading_level: None,
+                },
+            )
+            .map_err(|error| library_write_to_app_error(error, &name))?;
+            // The `update` version (ALG-070/071): the pre-check above
+            // skipped the byte-equal title, and a different title is a
+            // different snapshot hash — a real rename always records.
+            let max_revisions = history_max_revisions(transaction)?;
+            record_instruction_version(
+                transaction,
+                &updated,
+                InstructionOp::Update,
+                max_revisions,
+            )?;
+            journal_instruction(transaction, Action::InstructionChanged, &updated.id)?;
+            Ok(())
+        })
+        .await
+}
+
+/// The `instruction_hide` command (§7.10 Library module, LIB-005,
+/// §6.4, D-11/DB-013): the hide — variants and assignments stay, the
+/// instruction leaves the build, the `hide` version and journal entry
+/// land in one transaction, and a repeated hide is the verified
+/// no-op (D-188).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn instruction_hide<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<(), AppError> {
+    instruction_hide_impl(app, id)
+        .await
+        .inspect_err(logging::instruction_hide_failed)
+}
+
+/// The body of [`instruction_hide`], split so the one logging edge
+/// covers every failure path (the `activity_list` shape).
+async fn instruction_hide_impl<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), AppError> {
+    let database = managed_db(&app)?;
+    database
+        .run(move |transaction| {
+            let item = instruction_of(transaction, &id)?;
+            // D-188's verified no-op: an already-hidden instruction
+            // hides nothing. The store's own idempotence would write
+            // nothing anyway; the version and the journal skip the
+            // re-run of a transition that did not happen (a
+            // double-clicked eye button converges to one entry).
+            if item.state == ItemState::Hidden {
+                return Ok(());
+            }
+            let hidden = eunomia_store::library::hide_item(transaction, &id)
+                .map_err(library_store_to_app_error)?;
+            let max_revisions = history_max_revisions(transaction)?;
+            record_instruction_version(transaction, &hidden, InstructionOp::Hide, max_revisions)?;
+            journal_instruction(transaction, Action::InstructionHidden, &hidden.id)?;
+            Ok(())
+        })
+        .await
+}
+
+/// The `instruction_restore` command (§7.10 Library module,
+/// LIB-005…007/012): the restore — the instruction returns WITH its
+/// assignments and its old position, the `restore` version and
+/// journal entry land in one transaction, and a repeated restore is
+/// the verified no-op (D-188).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn instruction_restore<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<(), AppError> {
+    instruction_restore_impl(app, id)
+        .await
+        .inspect_err(logging::instruction_restore_failed)
+}
+
+/// The body of [`instruction_restore`], split so the one logging edge
+/// covers every failure path (the `activity_list` shape).
+async fn instruction_restore_impl<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<(), AppError> {
+    let database = managed_db(&app)?;
+    database
+        .run(move |transaction| {
+            let item = instruction_of(transaction, &id)?;
+            // The verified no-op twin: an active instruction restores
+            // nothing (a heading is already refused above — it can
+            // never be hidden).
+            if item.state == ItemState::Active {
+                return Ok(());
+            }
+            // §6.9's clause surfaces here (D-076): a visible NOCASE
+            // twin may have taken the name while the row was hidden —
+            // the store refuses the restore; the envelope stays
+            // class-only (the stored title never travels, SEC-008's
+            // rule for arbitrary stored text).
+            let restored = eunomia_store::library::restore_item(transaction, &id)
+                .map_err(library_store_to_app_error)?;
+            let max_revisions = history_max_revisions(transaction)?;
+            record_instruction_version(
+                transaction,
+                &restored,
+                InstructionOp::Restore,
+                max_revisions,
+            )?;
+            journal_instruction(transaction, Action::InstructionRestored, &restored.id)?;
+            Ok(())
+        })
+        .await
+}
+
+// ---- The shared helpers of the four instruction commands (T-328) ----
+
+/// The D-115 bounded echo: caller input echoed into an error envelope
+/// is capped at 64 code points, with the truncation named — a §6.9
+/// VIOLATING value is unbounded by definition (a 300 000-character
+/// text, a gigabyte "name"), and it must ride neither the wire
+/// envelope nor the §10 log line. The mock layer mirrors the same cap.
+fn bounded_echo(value: &str) -> String {
+    const ECHO_CODE_POINTS: usize = 64;
+    let total = value.chars().count();
+    if total <= ECHO_CODE_POINTS {
+        value.to_owned()
+    } else {
+        let bounded: String = value.chars().take(ECHO_CODE_POINTS).collect();
+        format!("{bounded} (+{} more code points)", total - ECHO_CODE_POINTS)
+    }
+}
+
+/// Maps the §6.9 title validator's rejection onto the wire (D-076):
+/// the `rejected_field` shape — `E_VALIDATION`, the `name` field, the
+/// caller's own input (bounded) as the value, and the validator's own
+/// class-only reason (lengths and indices, never the content).
+fn rejected_title_field(sent: &str, error: &LibraryFieldError) -> AppError {
+    rejected_field("name", &bounded_echo(sent), &error.to_string())
+}
+
+/// Maps the §6.9 variant-text validator's rejection onto the wire.
+/// DB-016's marker line is its own §10 row (`E_CONTENT_RESERVED`,
+/// with the D-19 literal and the built form's 1-based line number);
+/// every other arm is the `E_VALIDATION` field envelope — with NO
+/// value echo: the instruction TEXT is the one thing SEC-008 keeps
+/// out of logs and envelopes alike, and the validator's reason
+/// already carries the length or the index.
+fn rejected_text_field(error: LibraryFieldError) -> AppError {
+    match error {
+        LibraryFieldError::ReservedContent { line, marker } => {
+            let mut app_error = AppError::new(ErrorCode::ContentReserved);
+            app_error
+                .params
+                .insert("field".to_owned(), "text".to_owned());
+            app_error.params.insert(
+                "marker".to_owned(),
+                match marker {
+                    MarkerLine::Begin => BEGIN_MARKER,
+                    MarkerLine::End => END_MARKER,
+                }
+                .to_owned(),
+            );
+            app_error.params.insert("line".to_owned(), line.to_string());
+            app_error
+        }
+        other => {
+            let mut app_error = AppError::new(ErrorCode::Validation);
+            app_error
+                .params
+                .insert("field".to_owned(), "text".to_owned());
+            app_error
+                .params
+                .insert("reason".to_owned(), other.to_string());
+            app_error
+        }
+    }
+}
+
+/// The D-188 section rule's target position: the end of the picked
+/// heading's ALG-060 range — the position of the first heading of
+/// level `<=` its own that follows it, or the table end — or, for the
+/// root pick (`None`), the end of the prefix before the FIRST heading
+/// (ALG-021: the only place an instruction has no heading above it;
+/// with no headings the whole table is root). The rejected
+/// alternative, a raw `position` integer, is recorded in D-188.
+///
+/// The lookup rides the store's own ordered list (the `list_items`
+/// read, position-ordered — the `exclusion_remove` by-id-through-
+/// the-list precedent); the list walk is one linear pass, the same
+/// cost class as the `move_item` renumbering the placement itself
+/// pays (rule 6).
+fn section_target(
+    transaction: &rusqlite::Transaction<'_>,
+    section: Option<&str>,
+) -> Result<i64, AppError> {
+    let items = eunomia_store::library::list_items(transaction, ItemScope::All)
+        .map_err(library_store_to_app_error)?;
+    // The position AFTER the current last row — where `create_item`
+    // appends, and the target when no boundary follows.
+    let table_end = items.len() as i64 + 1;
+    let target = match section {
+        Some(id) => {
+            let heading = items.iter().find(|item| item.id == id).ok_or_else(|| {
+                rejected_field("section", &bounded_echo(id), "no row with this id")
+            })?;
+            if heading.kind != ItemKind::Heading {
+                return Err(rejected_field(
+                    "section",
+                    &bounded_echo(id),
+                    "a section must be a heading row (MAIN-015)",
+                ));
+            }
+            // The store's decoder guarantees a heading's level (the
+            // §6.2 kind/level matrix); a `None` here is a decode
+            // drift, not a data state.
+            let level = heading
+                .heading_level
+                .expect("a heading row always carries its level");
+            items
+                .iter()
+                .find(|item| {
+                    item.kind == ItemKind::Heading
+                        && item.position > heading.position
+                        && item.heading_level.is_some_and(|next| next <= level)
+                })
+                .map(|next| next.position)
+                .unwrap_or(table_end)
+        }
+        None => items
+            .iter()
+            .find(|item| item.kind == ItemKind::Heading)
+            .map(|first| first.position)
+            .unwrap_or(table_end),
+    };
+    Ok(target)
+}
+
+/// The by-id read the three id-addressed commands share: the row must
+/// exist and be an instruction (MAIN-015's identity split — a heading
+/// row answers the typed `E_VALIDATION` refusal of the `id` field,
+/// never a store error or a silent rename/hide of the wrong kind).
+fn instruction_of(
+    transaction: &rusqlite::Transaction<'_>,
+    id: &str,
+) -> Result<LibraryItem, AppError> {
+    let item = eunomia_store::library::get_item(transaction, id)
+        .map_err(library_store_to_app_error)?
+        .ok_or_else(|| rejected_field("id", &bounded_echo(id), "no instruction with this id"))?;
+    if item.kind != ItemKind::Instruction {
+        return Err(rejected_field(
+            "id",
+            &bounded_echo(id),
+            "the row is a heading; headings have no instruction lifecycle (MAIN-015)",
+        ));
+    }
+    Ok(item)
+}
+
+/// `history.max_revisions` read in the operation's own transaction
+/// (ALG-072's caller contract, D-188): the §6.5-validated value the
+/// prune runs on — the settings store owns the range (10–1000), this
+/// seam only hands the number on. A corrupt stored cell surfaces
+/// through the settings read mapper (class-only diagnostic, never
+/// the stored value).
+fn history_max_revisions(transaction: &rusqlite::Transaction<'_>) -> Result<i64, AppError> {
+    match eunomia_store::settings::get(transaction, SettingKey::HistoryMaxRevisions)
+        .map_err(settings_cell_to_app_error)?
+    {
+        SettingValue::Int(limit) => Ok(limit),
+        // Unreachable: `get` answers the key's default or a §6.5-parsed
+        // value, and the key's value kind is Int (the store's own
+        // pairing rule) — the recorded fallback, never a guess.
+        _ => Err(settings_cell_to_app_error(StorageError::Settings {
+            key: SettingKey::HistoryMaxRevisions.as_str().to_owned(),
+            source: SettingsError::Type {
+                expected: "int",
+                found: "the value the key's own reader produced",
+            },
+        })),
+    }
+}
+
+/// Records the instruction's version (§9.8 ALG-070/071) for the row's
+/// current title and state: the T-055 snapshot pair built over the
+/// just-saved row, `op` naming the user action. The hash gate (a
+/// byte-equal snapshot records nothing) and the ALG-072 prune are the
+/// recording service's own.
+fn record_instruction_version(
+    transaction: &rusqlite::Transaction<'_>,
+    item: &LibraryItem,
+    op: InstructionOp,
+    max_revisions: i64,
+) -> Result<Recorded, AppError> {
+    let state = match item.state {
+        ItemState::Active => InstructionState::Active,
+        ItemState::Hidden => InstructionState::Hidden,
+    };
+    let snapshot = instruction_snapshot(&item.title, state);
+    let hash = instruction_snapshot_hash(&item.title, state);
+    record_instruction(transaction, &item.id, op, &snapshot, &hash, max_revisions)
+        .map_err(revision_store_to_app_error)
+}
+
+/// The variant twin of [`record_instruction_version`]: the snapshot
+/// pair over the variant's name and text (the store's own folded
+/// stored form — what DB-006 measures is what the snapshot carries).
+fn record_variant_version(
+    transaction: &rusqlite::Transaction<'_>,
+    variant: &Variant,
+    op: VariantOp,
+    max_revisions: i64,
+) -> Result<Recorded, AppError> {
+    let snapshot = variant_snapshot(&variant.name, &variant.content);
+    let hash = variant_snapshot_hash(&variant.name, &variant.content);
+    record_variant(
+        transaction,
+        &variant.id,
+        op,
+        &snapshot,
+        &hash,
+        max_revisions,
+    )
+    .map_err(revision_store_to_app_error)
+}
+
+/// Writes one library lifecycle journal entry (LOG-001…004, D-051)
+/// inside the operation's own transaction: the instruction action at
+/// info/user/ok, the instruction's id as the entity — the identity
+/// the Activity window's Library group filters on. A refusal is the
+/// command's `Err`, never a journal entry.
+fn journal_instruction(
+    transaction: &rusqlite::Transaction<'_>,
+    action: Action,
+    instruction_id: &str,
+) -> Result<(), AppError> {
+    let mut entry = LogEntry::new(action, Level::Info, Visibility::User, Outcome::Ok);
+    entry.entity = Some(Entity {
+        kind: EntityType::Instruction,
+        id: instruction_id,
+    });
+    insert(transaction, &entry).map_err(activity_log_to_app_error)?;
+    // The D-051 mirror contract: one call per written entry — a no-op
+    // for this info+user+ok shape (the journal already holds it;
+    // `mirror_level` decides), and the single place a future
+    // level/visibility change would pick up its mirroring.
+    logging::action_logged(&entry);
+    Ok(())
+}
+
+/// The `AddedProject.sort_order` decision's twin: the store's i64
+/// position on the i32 wire (specta forbids 64-bit integers; the
+/// library's row count always fits — set L is 1 000 items).
+fn wire_position(position: i64) -> i32 {
+    i32::try_from(position).expect("the library's row count fits the wire's i32")
+}
+
+/// Maps a library store failure of the four instruction commands'
+/// WRITES onto the §7.10 wire, enriching one arm with the caller's
+/// own name: the NOCASE-twin title rejection ([`LibraryError::DuplicateInstructionTitle`])
+/// carries the SENT name as the envelope's value — the caller's own
+/// input, bounded (D-115). Everything else is
+/// [`library_store_to_app_error`].
+fn library_write_to_app_error(error: LibraryError, sent_name: &str) -> AppError {
+    match error {
+        LibraryError::DuplicateInstructionTitle { .. } => rejected_field(
+            "name",
+            &bounded_echo(sent_name),
+            "a visible instruction already carries this name, case-insensitive (6.9)",
+        ),
+        other => library_store_to_app_error(other),
+    }
+}
+
+/// Maps a version-recording failure onto the wire (the
+/// `library_store_to_app_error` shape, the revisions family): SQLite
+/// failures through the shared base classifier, a corrupt vocabulary
+/// cell through the fallback with a class-only diagnostic, and the
+/// by-id outcomes — unreachable in these flows (the row was just
+/// written inside the same transaction on the one connection,
+/// D-037) — through the same fallback with the family label.
+fn revision_store_to_app_error(error: RevisionError) -> AppError {
+    match error {
+        RevisionError::Sql(source) => db::sqlite_error_to_app_error(source),
+        RevisionError::Member { column, .. } => library_fallback(
+            "RevisionCorrupt",
+            &format!("a stored {column} cell is outside its vocabulary"),
+        ),
+        other => library_fallback(
+            "RevisionError",
+            match &other {
+                RevisionError::NotFound { .. } => {
+                    "a by-id recording outcome reached a command that does not map it"
+                }
+                RevisionError::NotAnInstruction { .. } => {
+                    "a heading row reached a version recording"
+                }
+                RevisionError::Member { .. } | RevisionError::Sql(_) => {
+                    "an unexpected revision outcome"
+                }
+            },
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -5951,5 +6563,203 @@ mod tests {
             "NFR-023 assigns the root warning to Linux alone — even uid 0 \
              does not raise it elsewhere"
         );
+    }
+
+    // ---- The instruction commands' pure mapping seams (T-328) -------
+
+    #[test]
+    fn a_marker_line_rejection_is_its_own_section_10_code_with_the_line_facts() {
+        // Arrange: the DB-016 arm of `validate_variant_text`, both D-19
+        // literals — the only §10 row whose action text says "Remove
+        // the reserved marker line".
+        let cases = [
+            (MarkerLine::Begin, BEGIN_MARKER),
+            (MarkerLine::End, END_MARKER),
+        ];
+
+        for (marker, literal) in cases {
+            // Act
+            let app_error =
+                rejected_text_field(LibraryFieldError::ReservedContent { line: 3, marker });
+
+            // Assert: `E_CONTENT_RESERVED` with the field, the literal
+            // (a fixed app constant, not user content) and the 1-based
+            // line — no value echo (SEC-008 keeps the text out).
+            assert_eq!(app_error.code, ErrorCode::ContentReserved);
+            assert_eq!(app_error.message_key, "errors.content_reserved");
+            assert_eq!(
+                app_error.params.get("field").map(String::as_str),
+                Some("text")
+            );
+            assert_eq!(
+                app_error.params.get("marker").map(String::as_str),
+                Some(literal)
+            );
+            assert_eq!(app_error.params.get("line").map(String::as_str), Some("3"));
+            assert!(
+                !app_error.params.contains_key("value"),
+                "the instruction text never rides the envelope"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_text_rejection_is_the_validation_envelope_without_a_value() {
+        // Arrange & Act: a non-marker §6.9 text arm (the DB-006 length
+        // ceiling — the class of a 300 000-character save).
+        let app_error =
+            rejected_text_field(LibraryFieldError::VariantTextTooLong { length: 300_000 });
+
+        // Assert: the E_VALIDATION field envelope, field and reason
+        // only — the length is in the reason, the text itself never
+        // travels (SEC-008).
+        assert_eq!(app_error.code, ErrorCode::Validation);
+        assert_eq!(app_error.message_key, "errors.validation");
+        assert_eq!(
+            app_error.params.get("field").map(String::as_str),
+            Some("text")
+        );
+        assert!(
+            app_error.params.contains_key("reason"),
+            "the validator's own class-only reason travels"
+        );
+        assert!(
+            !app_error.params.contains_key("value"),
+            "the instruction text never rides the envelope"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_title_from_the_store_maps_context_free_its_caller_enriched() {
+        // Arrange: the store's NOCASE-twin rejection, which can carry
+        // the row's own STORED title on the restore path — the mapper
+        // must stay class-only, and only the caller's own input may be
+        // echoed by the enriched write twin.
+        let stored = LibraryError::DuplicateInstructionTitle {
+            title: "a stored user title".to_owned(),
+        };
+
+        // Act & Assert (context-free): field + reason, never the title.
+        let bare = library_store_to_app_error(stored);
+        assert_eq!(bare.code, ErrorCode::Validation);
+        assert_eq!(bare.params.get("field").map(String::as_str), Some("name"));
+        assert!(
+            !bare.params.contains_key("value"),
+            "a stored title never travels (SEC-008)"
+        );
+        let reason = bare
+            .params
+            .get("reason")
+            .map(|reason| reason.as_str().to_owned())
+            .unwrap_or_default();
+        assert!(
+            !reason.contains("a stored user title"),
+            "the reason is class-only, got: {reason}"
+        );
+
+        // Act & Assert (enriched): the caller's own sent name is the
+        // value — bounded by the D-115 cap.
+        let enriched = library_write_to_app_error(
+            LibraryError::DuplicateInstructionTitle {
+                title: "the sent name".to_owned(),
+            },
+            &"The Sent Name".repeat(80),
+        );
+        let value = enriched
+            .params
+            .get("value")
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert!(
+            value.ends_with("more code points)"),
+            "the echo is capped: {value}"
+        );
+        assert!(!value.contains("The Sent Name".repeat(80).as_str()));
+    }
+
+    #[test]
+    fn corrupt_library_and_revision_cells_map_to_the_fallback_class_only() {
+        // Arrange: the D-039 corrupt-cell arms of both store families —
+        // a vocabulary cell outside its closed set.
+        let library_member = LibraryError::Member {
+            column: "state",
+            found: "half-hidden".to_owned(),
+        };
+        let revision_member = RevisionError::Member {
+            column: "kind",
+            found: "subsection".to_owned(),
+        };
+
+        // Act
+        let library_error = library_store_to_app_error(library_member);
+        let revision_error = revision_store_to_app_error(revision_member);
+
+        // Assert: each family's own fallback label, the column named in
+        // the diagnostic, the stored value never present.
+        for (app_error, kind, column) in [
+            (library_error, "LibraryCorrupt", "state"),
+            (revision_error, "RevisionCorrupt", "kind"),
+        ] {
+            assert_eq!(app_error.code, ErrorCode::DbLocked);
+            assert!(app_error.params.is_empty());
+            let details = app_error.details.expect("the details carry the cause");
+            assert_eq!(details.os_kind.as_deref(), Some(kind));
+            let message = details.os_message.clone().unwrap_or_default();
+            assert!(
+                message.contains(column),
+                "the diagnostic names the column ({column}), got: {message}"
+            );
+            assert!(
+                !message.contains("half-hidden") && !message.contains("subsection"),
+                "the stored value never travels, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn unreachable_library_write_outcomes_map_to_the_family_fallback() {
+        // Arrange: the write-path outcomes an instruction command does
+        // not itself pre-empt, each carrying a stored identifier.
+        let outcomes = [
+            LibraryError::NotFound {
+                id: "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f".to_owned(),
+            },
+            LibraryError::NotAnInstruction {
+                id: "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f".to_owned(),
+            },
+            LibraryError::AlreadyAssigned {
+                project_id: "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f".to_owned(),
+                instruction_id: "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f".to_owned(),
+            },
+        ];
+
+        // Act
+        for outcome in outcomes {
+            let app_error = library_store_to_app_error(outcome);
+
+            // Assert: the family fallback, class-only text — the
+            // identifiers never reach `params` or `os_message`.
+            assert_eq!(app_error.code, ErrorCode::DbLocked);
+            assert!(app_error.params.is_empty());
+            let details = app_error.details.expect("the details carry the cause");
+            assert_eq!(details.os_kind.as_deref(), Some("LibraryError"));
+            let message = details.os_message.unwrap_or_default();
+            assert!(
+                !message.contains("0193a2bb"),
+                "no stored identifier travels in the diagnostic, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bounded_echo_caps_at_sixty_four_code_points_and_names_the_rest() {
+        // The D-115 cap, directly: a short value rides whole; a long
+        // one carries its first 64 code points and the count of the
+        // rest — never the whole unbounded input.
+        assert_eq!(bounded_echo("short"), "short");
+        let long = "x".repeat(300);
+        let echoed = bounded_echo(&long);
+        assert!(echoed.starts_with(&"x".repeat(64)));
+        assert!(echoed.ends_with("(+236 more code points)"), "got: {echoed}");
     }
 }

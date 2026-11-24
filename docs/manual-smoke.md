@@ -259,13 +259,17 @@ states, never new claims.
 
 **Pending surfaces.** The entries are written against the spec's
 surfaces (§7, §8, §11), because the main-window UI has not landed:
-as of 2026-11-23, `src/App.vue` renders the shell only — no toolbar
+as of 2026-11-24, `src/App.vue` renders the shell only — no toolbar
 buttons, library, matrix, scan modal or sync panel. The
 scenario-relevant backend commands (`project_add_manual`,
 `scan_start`/`scan_cancel`/`scan_commit`, `sync_run`,
-`settings_get`/`settings_set`, and the library read `library_get`)
-are registered (`src-tauri/src/lib.rs`); the library write commands
-and the assignment commands are not. No entry below is executable until its surfaces
+`settings_get`/`settings_set`, the library read `library_get` and
+the instruction lifecycle
+`instruction_create`/`instruction_update`/`instruction_hide`/
+`instruction_restore`)
+are registered (`src-tauri/src/lib.rs`); the remaining library write
+commands (variants, headings, `items_move`) and the assignment
+commands are not. No entry below is executable until its surfaces
 land; each entry's Pending line names them, with the spec §16
 milestone that owns them (the milestone table maps S1/S2 → M1,
 S3/S5 → M2, S4–S6 → M3, S9 → M4, S7/S10 → M5). An entry may name a
@@ -403,7 +407,14 @@ Source: spec §8 S3; §7.3 LIB-002…016; §6.9 validation; DB-016
 (`E_CONTENT_RESERVED`); OUT-010/011; DB-021/022.
 
 Pending: "+ New instruction", the instruction editor (UI-003) and the
-matrix cells — spec §16 M2/M3.
+matrix cells — spec §16 M2/M3. The create/rename/lifecycle backend is
+in place — the registered
+`instruction_create`/`instruction_update`/`instruction_hide`/
+`instruction_restore` (T-328) — so the dialog's rejections below
+(the case duplicate, the marker line, the §6.9 field rules) answer
+with the commands' own typed envelopes once the editor lands; the
+assignment step's backend (`assignment_set`) is still pending, and
+with it the dirty flip the entry ends on.
 
 **Prepare.** One project added, never synced. A project with no
 assignments that has never been synced is not dirty (DB-021) — note

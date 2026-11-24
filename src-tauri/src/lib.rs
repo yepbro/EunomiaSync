@@ -175,17 +175,19 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // `activity_list` (T-027), the Settings module's
         // `settings_get`/`settings_set` (T-030), the System
         // module's `app_info` (T-031), the Library module's
-        // `markdown_preview` (T-056), the Projects module's
-        // `projects_list` (T-072), the System module's
-        // `dialog_pick_folder` (T-073), the Projects module's
-        // `project_add_manual` (T-074), the Projects module's
-        // `exclusions_list`/`exclusion_remove` (T-078), the Projects
-        // module's `projects_reorder` (T-080), the Projects module's
-        // `scan_start`/`scan_cancel`/`scan_commit` (T-076/T-077),
-        // the Sync module's `sync_run` (T-118, D-138) and the
-        // Library module's `library_get` (T-083, D-187). Every later
-        // command task (assignments, headings, …) lists its own §7.10
-        // names here.
+        // `markdown_preview` (T-056), the Library module's
+        // `library_get` (T-083, D-187) and its instruction
+        // lifecycle `instruction_create`/`instruction_update`/
+        // `instruction_hide`/`instruction_restore` (T-328), the
+        // Projects module's `projects_list` (T-072), the System
+        // module's `dialog_pick_folder` (T-073), the Projects
+        // module's `project_add_manual` (T-074), the Projects
+        // module's `exclusions_list`/`exclusion_remove` (T-078), the
+        // Projects module's `projects_reorder` (T-080), the
+        // Projects module's `scan_start`/`scan_cancel`/`scan_commit`
+        // (T-076/T-077) and the Sync module's `sync_run` (T-118,
+        // D-138). Every later command task (assignments, headings, …)
+        // lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
         // commands that take an `AppHandle`), so the registration pins
         // the concrete runtime of the shipped app; `markdown_preview`
@@ -201,6 +203,10 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::exclusion_remove::<tauri::Wry>,
             commands::exclusions_list::<tauri::Wry>,
             commands::library_get::<tauri::Wry>,
+            commands::instruction_create::<tauri::Wry>,
+            commands::instruction_hide::<tauri::Wry>,
+            commands::instruction_restore::<tauri::Wry>,
+            commands::instruction_update::<tauri::Wry>,
             commands::markdown_preview,
             commands::project_add_manual::<tauri::Wry>,
             commands::projects_list::<tauri::Wry>,

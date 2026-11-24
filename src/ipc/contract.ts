@@ -40,6 +40,7 @@ export type {
   ErrorCode,
   ExclusionEntry,
   ExistingProject,
+  InstructionCreated,
   LibraryHeadingEntry,
   LibraryInstructionEntry,
   LibraryTreeItem,

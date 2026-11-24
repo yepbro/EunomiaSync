@@ -177,6 +177,26 @@
 //! SEC-003: during a sync even a validly-picked path meets
 //! `E_SYNC_RUNNING`). The take-once/RAII/panic/parallel-race halves
 //! of the seam itself live in `sync_running.rs`'s own suite.
+//!
+//! The instruction lifecycle tests (T-328, §7.10 Library module,
+//! §7.3 LIB-002/LIB-005…007/012, §6.4, §6.9, DB-013/DB-016, §8 S3,
+//! §9.8 ALG-070/071/072, spec decision D-11; DECISIONS.md D-188) use
+//! the `library_app` healthy shape with the library seeded through
+//! the T-081/T-082 repositories and the build asserted through the
+//! §9.1 snapshot plus §9.2 builder the sync itself uses (the
+//! independent oracle for "a hidden instruction is not in the
+//! build"): the three absorbed cards' DoDs — the duplicate-name and
+//! reserved-marker-line refusals with nothing written, the create
+//! pair's one instruction version and one variant version, the
+//! rename's `update` version with the same-name verified no-op, and
+//! the hide/restore pair keeping the assignments while the build
+//! excludes and regains the text — plus the D-188 section placement
+//! (the end of the picked section's range, the root prefix end), the
+//! ALG-072 caller contract (the §6.5 limit read in the operation's
+//! own transaction), the idempotence of every lifecycle command, the
+//! class-only duplicate arm of a refused restore (SEC-008: no stored
+//! title travels), the boundary lengths of §6.9, and the
+//! registration pins.
 #![allow(clippy::print_stderr)] // test skip-notices and benchmark timings print deliberately
 
 use tauri::Manager;
@@ -11606,4 +11626,1201 @@ fn the_sync_run_command_is_registered_with_the_specta_builder() {
         1,
         "lib.rs must register the `sync_run` command exactly once (§7.10, T-118)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `instruction_create` / `instruction_update` / `instruction_hide` /
+// `instruction_restore` (T-328, §7.10 Library module, §7.3 LIB-002,
+// LIB-005…007/012, MAIN-012…014, §6.4, §6.9, DB-013/DB-016, §8 S3,
+// §9.8 ALG-070/071, spec decision D-11, DECISIONS.md D-188)
+// ---------------------------------------------------------------------------
+
+/// A mock app in the healthy state the four instruction commands
+/// serve: all four registered and a real `Db` managed over a fresh
+/// temp root (the `settings_app` shape). Seeding goes through the
+/// store repositories — the same `Db::run` path a producing command
+/// takes (the `activity_app` rule).
+fn library_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let database = crate::db::Db::open(temp.path())
+        .expect("opening a fresh database in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::instruction_create,
+            crate::commands::instruction_hide,
+            crate::commands::instruction_restore,
+            crate::commands::instruction_update,
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(database);
+    (temp, app)
+}
+
+/// Invokes `instruction_create` over the app's `main` webview with the
+/// create dialog's three fields (LIB-002: name, main-variant text,
+/// the picked section — `None` is the root, D-188).
+fn invoke_instruction_create(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    name: &str,
+    text: &str,
+    section: Option<&str>,
+) -> Result<crate::commands::InstructionCreated, serde_json::Value> {
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request(
+            "instruction_create",
+            serde_json::json!({ "name": name, "text": text, "section": section }),
+        ),
+    );
+    match response {
+        Ok(payload) => Ok(payload
+            .deserialize::<crate::commands::InstructionCreated>()
+            .expect("the success payload must deserialize into the DTO")),
+        Err(error) => Err(error),
+    }
+}
+
+/// Invokes `instruction_update` (the rename, T-085) over the `main`
+/// webview.
+fn invoke_instruction_update(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    id: &str,
+    name: &str,
+) -> Result<(), serde_json::Value> {
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request(
+            "instruction_update",
+            serde_json::json!({ "id": id, "name": name }),
+        ),
+    );
+    match response {
+        Ok(payload) => {
+            payload
+                .deserialize::<()>()
+                .expect("the success payload is the unit value");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Invokes `instruction_hide` (T-086) over the `main` webview.
+fn invoke_instruction_hide(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    id: &str,
+) -> Result<(), serde_json::Value> {
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request("instruction_hide", serde_json::json!({ "id": id })),
+    );
+    match response {
+        Ok(payload) => {
+            payload
+                .deserialize::<()>()
+                .expect("the success payload is the unit value");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Invokes `instruction_restore` (T-086) over the `main` webview.
+fn invoke_instruction_restore(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    id: &str,
+) -> Result<(), serde_json::Value> {
+    let response = tauri::test::get_ipc_response(
+        webview,
+        invoke_request("instruction_restore", serde_json::json!({ "id": id })),
+    );
+    match response {
+        Ok(payload) => {
+            payload
+                .deserialize::<()>()
+                .expect("the success payload is the unit value");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Seeds one heading through the store (the writer the command layer
+/// itself goes through), returning its row id.
+fn seed_library_heading(database: &crate::db::Db, title: &'static str, level: u8) -> String {
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::library::create_item(
+            tx,
+            &eunomia_store::library::NewLibraryItem::Heading { title, level },
+        )
+        .map(|item| item.id)
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)
+    }))
+    .expect("seeding a heading through the repository must work")
+}
+
+/// Seeds one active instruction with its main variant through the
+/// store, returning `(instruction_id, variant_id)` (the
+/// `seed_instruction` shape of the dirty-recalc suite).
+fn seed_library_instruction(
+    database: &crate::db::Db,
+    title: &'static str,
+    content: &'static str,
+) -> (String, String) {
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        let item = eunomia_store::library::create_item(
+            tx,
+            &eunomia_store::library::NewLibraryItem::Instruction { title },
+        )
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)?;
+        let variant = eunomia_store::library::create_variant(
+            tx,
+            &eunomia_store::library::NewVariant {
+                instruction_id: &item.id,
+                name: "Main",
+                content,
+                is_main: true,
+            },
+        )
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)?;
+        Ok((item.id, variant.id))
+    }))
+    .expect("seeding an instruction with its main variant must work")
+}
+
+/// Seeds one scheme-A project with both extra files off, returning its
+/// row id — the `seed_project` shape of the dirty-recalc suite (with
+/// both extras off, the built `managed` text IS the §9.2 body, the
+/// build oracle's input).
+fn seed_build_project(database: &crate::db::Db) -> String {
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::projects::create(
+            tx,
+            &eunomia_store::projects::NewProject {
+                path: "/home/dev/src/demo",
+                path_key: "/home/dev/src/demo",
+                name: "Demo",
+                label: "DEM",
+                color: "red",
+                description: "",
+                added_via: eunomia_store::projects::AddedVia::Manual,
+                scheme: eunomia_store::settings::Scheme::A,
+                base_name: eunomia_store::settings::BaseName::AgentsMd,
+                extra_local: eunomia_store::settings::ExtraFile {
+                    enabled: false,
+                    position: eunomia_store::settings::Position::End,
+                },
+                extra_project: eunomia_store::settings::ExtraFile {
+                    enabled: false,
+                    position: eunomia_store::settings::Position::End,
+                },
+            },
+        )
+        .map(|project| project.id)
+        .map_err(crate::commands::projects_store_to_app_error)
+    }))
+    .expect("seeding a project through the repository must work")
+}
+
+/// Assigns `variant_id` of `instruction_id` to the project (DB-012)
+/// through the store — the `seed_assignment` shape of the
+/// dirty-recalc suite. Ids arrive owned (the executor's `'static`
+/// rule).
+fn seed_library_assignment(
+    database: &crate::db::Db,
+    project_id: String,
+    instruction_id: String,
+    variant_id: String,
+) {
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::library::assign(
+            tx,
+            &eunomia_store::library::NewAssignment {
+                project_id: &project_id,
+                instruction_id: &instruction_id,
+                variant_id: &variant_id,
+            },
+        )
+        .map(|_| ())
+        .map_err(crate::dirty_recalc::library_seed_error_for_tests)
+    }))
+    .expect("seeding an assignment through the repository must work");
+}
+
+/// One entity's recorded versions — `(rev_no, op)` pairs in `rev_no`
+/// order — read back from the `revisions` table through the `Db::run`
+/// executor (the raw-column window the history read command will one
+/// day own; today the table has no public reader, D-093).
+fn revisions_of(database: &crate::db::Db, entity_id: &str) -> Vec<(i64, String)> {
+    let entity_id = entity_id.to_owned();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        let mut statement = tx
+            .prepare("SELECT rev_no, op FROM revisions WHERE entity_id = ?1 ORDER BY rev_no")
+            .map_err(crate::db::sqlite_error_to_app_error)?;
+        let rows = statement
+            .query_map([&entity_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(crate::db::sqlite_error_to_app_error)?
+            .collect::<Result<Vec<(i64, String)>, _>>()
+            .map_err(crate::db::sqlite_error_to_app_error)?;
+        Ok(rows)
+    }))
+    .expect("reading the revisions through the executor must work")
+}
+
+/// The library table's `(id, title, position)` rows in `position`
+/// order — the placement assertions' window into the table-wide
+/// sequence (DB-011).
+fn library_positions(database: &crate::db::Db) -> Vec<(String, String, i64)> {
+    tauri::async_runtime::block_on(database.run(|tx| {
+        eunomia_store::library::list_items(tx, eunomia_store::library::ItemScope::All)
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|item| (item.id, item.title, item.position))
+                    .collect()
+            })
+            .map_err(crate::dirty_recalc::library_seed_error_for_tests)
+    }))
+    .expect("reading the library through the executor must work")
+}
+
+/// The built `managed` text of the single seeded project — the
+/// INDEPENDENT build oracle: the §9.1 snapshot plus the §9.2 body
+/// builder the sync pipeline itself uses, spelled through the public
+/// seams (never through the code under test). With both extra files
+/// off, scheme A's managed text is the body alone.
+fn built_body_of(database: &crate::db::Db) -> String {
+    tauri::async_runtime::block_on(database.run(|tx| {
+        let snapshot = eunomia_store::build_snapshot::read(tx)
+            .map_err(crate::dirty_recalc::build_snapshot_to_app_error)?;
+        let built = eunomia_core::content_build::build_projects(&snapshot);
+        built
+            .first()
+            .map(|project| project.managed.clone())
+            .ok_or_else(|| {
+                let mut error = crate::errors::AppError::new(crate::errors::ErrorCode::DbLocked);
+                error.details = Some(crate::errors::ErrorDetails {
+                    os_code: None,
+                    os_kind: Some("NoProject".to_owned()),
+                    os_message: Some("the build oracle needs one active project".to_owned()),
+                });
+                error
+            })
+    }))
+    .expect("building the single project's body must work")
+}
+
+/// The rows count of a table — the "nothing was written" proofs.
+fn table_rows(database: &crate::db::Db, table: &'static str) -> i64 {
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("counting the table's rows must work")
+}
+
+// ---- `instruction_create` (T-084) ----------------------------------------
+
+#[test]
+fn instruction_create_rejects_a_duplicate_visible_name_case_insensitively() {
+    // T-084's first acceptance arm (§6.9: "unique among visible
+    // instructions, case-insensitive"; S3's Alt: "duplicate name"):
+    // a NOCASE twin is refused with the typed E_VALIDATION envelope,
+    // and the whole operation is rejected — no item row, no variant,
+    // no version, no journal entry.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let (seeded, variant) = seed_library_instruction(&database, "Alpha", "Be concise.");
+
+    let error = invoke_instruction_create(&webview, "  ALPHA  ", "Twin text.", None)
+        .expect_err("a NOCASE-equal visible name must be refused");
+
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["message_key"], serde_json::json!("errors.validation"));
+    assert_eq!(
+        error["params"]["field"],
+        serde_json::json!("name"),
+        "the failed field is the instruction name"
+    );
+    assert_eq!(
+        error["params"]["value"],
+        serde_json::json!("ALPHA"),
+        "the value echoes the caller's own input, validated form (D-075)"
+    );
+    assert_eq!(
+        table_rows(&database, "library_items"),
+        1,
+        "no item was written"
+    );
+    assert_eq!(
+        table_rows(&database, "instruction_variants"),
+        1,
+        "no variant was written"
+    );
+    assert_eq!(
+        table_rows(&database, "revisions"),
+        0,
+        "no version was recorded"
+    );
+    assert!(
+        journal_entries(&database).is_empty(),
+        "nothing was journaled"
+    );
+    // The seeded row is untouched by the refusal.
+    assert_eq!(
+        library_positions(&database),
+        vec![(seeded.clone(), "Alpha".to_owned(), 1)],
+        "the seeded instruction is the only row"
+    );
+    assert_eq!(revisions_of(&database, &variant).len(), 0);
+    // §6.9's positive half: "unique among VISIBLE instructions" — a
+    // HIDDEN twin does not block the create (the store's own rule;
+    // the conflict resurfaces only when the twin is restored).
+    invoke_instruction_hide(&webview, &seeded).expect("hiding the twin must succeed");
+    let over_hidden = invoke_instruction_create(&webview, "alpha", "The visible twin.", None)
+        .expect("a name equal to a HIDDEN instruction's must be accepted");
+    assert_eq!(
+        library_positions(&database),
+        vec![
+            (seeded, "Alpha".to_owned(), 1),
+            (over_hidden.instruction_id.clone(), "alpha".to_owned(), 2),
+        ],
+        "the hidden row keeps its place (D-093), the create appends after it"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn instruction_create_rejects_a_reserved_marker_line_with_e_content_reserved() {
+    // T-084's second acceptance arm (DB-016: "Saving is rejected with
+    // the E_CONTENT_RESERVED error"; S3's Alt: "reserved marker in the
+    // text"): a scheme-B marker line on its own line in the main
+    // variant's text refuses the save; nothing is written.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+
+    let error = invoke_instruction_create(
+        &webview,
+        "Style",
+        "Before.\n\n<!-- EUNOMIASYNC:BEGIN -->\n\nAfter.",
+        None,
+    )
+    .expect_err("a reserved marker line must refuse the save");
+
+    assert_eq!(error["code"], serde_json::json!("E_CONTENT_RESERVED"));
+    assert_eq!(
+        error["message_key"],
+        serde_json::json!("errors.content_reserved")
+    );
+    assert_eq!(
+        error["params"]["field"],
+        serde_json::json!("text"),
+        "the failed field is the variant text"
+    );
+    assert_eq!(
+        error["params"]["marker"],
+        serde_json::json!("<!-- EUNOMIASYNC:BEGIN -->"),
+        "which D-19 literal the line equals"
+    );
+    assert_eq!(
+        error["params"]["line"],
+        serde_json::json!("3"),
+        "the 1-based line number, the built form's count"
+    );
+    assert_eq!(
+        table_rows(&database, "library_items"),
+        0,
+        "no item was written"
+    );
+    assert_eq!(
+        table_rows(&database, "instruction_variants"),
+        0,
+        "no variant was written"
+    );
+    assert_eq!(
+        table_rows(&database, "revisions"),
+        0,
+        "no version was recorded"
+    );
+    assert!(
+        journal_entries(&database).is_empty(),
+        "nothing was journaled"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn instruction_create_records_one_instruction_version_and_one_variant_version() {
+    // T-084's third acceptance arm: "one instruction version and one
+    // variant version are created" — the create pair (LIB-002: the
+    // dialog always produces the pair), each with ALG-071's own
+    // `create` op and `rev_no = 1`, plus the `instruction.created`
+    // journal entry (LOG-001) and DB-010's main-variant shape.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+
+    let created = invoke_instruction_create(&webview, "  Be concise  ", "Run the checks.", None)
+        .expect("a valid create must succeed");
+
+    // The row pair: one instruction, one variant — the main one.
+    assert_eq!(table_rows(&database, "library_items"), 1);
+    assert_eq!(table_rows(&database, "instruction_variants"), 1);
+    assert_eq!(
+        library_positions(&database),
+        vec![(created.instruction_id.clone(), "Be concise".to_owned(), 1)],
+        "the title is stored trimmed (D-075), the root placement is the empty table's end"
+    );
+    // The version pair, exactly one row per entity (the DoD's pair).
+    assert_eq!(
+        revisions_of(&database, &created.instruction_id),
+        vec![(1, "create".to_owned())],
+        "one instruction version, op create, rev_no 1 (ALG-071)"
+    );
+    assert_eq!(
+        revisions_of(&database, &created.variant_id),
+        vec![(1, "create".to_owned())],
+        "one variant version, op create, rev_no 1"
+    );
+    // The created pair's own shape (LIB-002): the variant is the MAIN
+    // one — named `Main`, flagged `is_main`, carrying the sent text
+    // verbatim (the store's folded form: no CRLF was sent).
+    let variant = created.variant_id.clone();
+    let (name, is_main, content) = tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.query_row(
+            "SELECT name, is_main, content FROM instruction_variants WHERE id = ?1",
+            [&variant],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("reading the created variant row must work");
+    assert_eq!(name, "Main", "LIB-002 names the main variant `Main`");
+    assert_eq!(is_main, 1, "DB-010: the first variant is the main one");
+    assert_eq!(content, "Run the checks.", "the sent text, stored verbatim");
+    // The journal entry (LOG-001…004, D-051): one entry, naming the
+    // instruction.
+    let journal = journal_entries(&database);
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].action.as_str(), "instruction.created");
+    assert_eq!(
+        journal[0]
+            .entity
+            .as_ref()
+            .map(|(kind, id)| (kind.as_str(), id.as_str())),
+        Some(("instruction", created.instruction_id.as_str())),
+        "the entry names the created instruction through its entity"
+    );
+    assert_eq!(journal[0].result.as_str(), "ok");
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn instruction_create_places_the_instruction_at_the_end_of_the_picked_section() {
+    // The D-188 section rule: `Some(heading)` places the new
+    // instruction at the END of that heading's ALG-060 range (the item
+    // before the next heading of level <= its own), `None` at the end
+    // of the root prefix (before the FIRST heading — the only place
+    // with no heading above, ALG-021), and the whole table's positions
+    // stay dense (DB-011).
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    // The tree: ## Style (1), A (2), ### Tests (3), B (4), ## Release
+    // (5), C (6) — the §9.2 example's shape.
+    let style = seed_library_heading(&database, "Style", 2);
+    let (alpha, _) = seed_library_instruction(&database, "Alpha", "Alpha text.");
+    let tests = seed_library_heading(&database, "Tests", 3);
+    let (beta, _) = seed_library_instruction(&database, "Beta", "Beta text.");
+    let release = seed_library_heading(&database, "Release", 2);
+    let (gamma, _) = seed_library_instruction(&database, "Gamma", "Gamma text.");
+
+    // The picked section is `### Tests` (level 3): its range ends at
+    // `## Release` (position 5), so the new instruction lands there.
+    let into_tests = invoke_instruction_create(&webview, "New in Tests", "Text.", Some(&tests))
+        .expect("creating into a section must succeed");
+    assert_eq!(into_tests.position, 5, "the end of the Tests range");
+    assert_eq!(
+        library_positions(&database),
+        vec![
+            (style, "Style".to_owned(), 1),
+            (alpha, "Alpha".to_owned(), 2),
+            (tests, "Tests".to_owned(), 3),
+            (beta, "Beta".to_owned(), 4),
+            (
+                into_tests.instruction_id.clone(),
+                "New in Tests".to_owned(),
+                5
+            ),
+            (release.clone(), "Release".to_owned(), 6),
+            (gamma, "Gamma".to_owned(), 7),
+        ],
+        "DB-011: the sequence stays dense through the insertion"
+    );
+
+    // The root pick: the first heading (`## Style`, position 1) bounds
+    // the root prefix, so a root instruction lands before it.
+    let into_root = invoke_instruction_create(&webview, "Root item", "Text.", None)
+        .expect("creating into the root must succeed");
+    assert_eq!(into_root.position, 1, "the end of the root prefix");
+    assert_eq!(
+        library_positions(&database)
+            .first()
+            .map(|(id, _, _)| id.clone()),
+        Some(into_root.instruction_id.clone()),
+        "the root instruction has no heading above it (ALG-021)"
+    );
+
+    // The LAST section pick (level 2, no following heading): the
+    // table end — the appended position needs no move.
+    let into_release =
+        invoke_instruction_create(&webview, "New in Release", "Text.", Some(&release))
+            .expect("creating into the last section must succeed");
+    assert_eq!(
+        into_release.position, 9,
+        "the end of the Release range is the table end"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn instruction_create_into_a_level_2_section_skips_the_nested_subsections() {
+    // The discriminating case of the D-188 section rule's `level <=
+    // own` half (the round-1 review's TA-P2-2): a level-2 pick whose
+    // range CONTAINS a level-3 subsection must target the next
+    // LEVEL-2 heading — not the first following heading of any level,
+    // and not the table end. Both wrong readings answer a different
+    // position here and only here.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    // The tree: `## Style` (1), `### Tests` (2), A (3), `## Release`
+    // (4) — the level-2 section Style OWNS the nested Tests.
+    let style = seed_library_heading(&database, "Style", 2);
+    let tests = seed_library_heading(&database, "Tests", 3);
+    let (alpha, _) = seed_library_instruction(&database, "Alpha", "Alpha text.");
+    let release = seed_library_heading(&database, "Release", 2);
+
+    let created = invoke_instruction_create(&webview, "New in Style", "Text.", Some(&style))
+        .expect("creating into the level-2 section must succeed");
+
+    // The end of Style's range is `## Release` (the next heading of
+    // level <= 2) — position 4, NOT `### Tests`'s 2 (the first
+    // following heading) and not the table end (5).
+    assert_eq!(created.position, 4, "the next level-2 heading's position");
+    assert_eq!(
+        library_positions(&database),
+        vec![
+            (style, "Style".to_owned(), 1),
+            (tests, "Tests".to_owned(), 2),
+            (alpha, "Alpha".to_owned(), 3),
+            (created.instruction_id.clone(), "New in Style".to_owned(), 4),
+            (release, "Release".to_owned(), 5),
+        ],
+        "the nested subsection and its items stay inside the picked \
+         section's range (ALG-060)"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn instruction_create_rejects_a_section_that_is_not_a_heading() {
+    // MAIN-015's identity rule (D-188): a `section` that names an
+    // instruction row or nothing at all is the typed field refusal —
+    // a stale tree's id, not a database problem.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let (alpha, _) = seed_library_instruction(&database, "Alpha", "Alpha text.");
+
+    let error = invoke_instruction_create(&webview, "Twin", "Text.", Some(&alpha))
+        .expect_err("an instruction id is not a section");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("section"));
+
+    let error = invoke_instruction_create(&webview, "Twin", "Text.", Some("no-such-row"))
+        .expect_err("an unknown id is not a section");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("section"));
+    assert_eq!(
+        table_rows(&database, "library_items"),
+        1,
+        "nothing was written"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn instruction_create_rejects_every_section_6_9_field_violation() {
+    // The §6.9 boundary pair for both fields: empty-after-trim and
+    // over-limit names, a multi-line name, a NUL in the name, an
+    // over-limit text, a NUL in the text — every refusal is the
+    // E_VALIDATION field envelope, and nothing is written.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+
+    for (name, field) in [
+        ("   ", "name"),
+        (&"a".repeat(201)[..], "name"),
+        ("two\nlines", "name"),
+        ("a\0b", "name"),
+    ] {
+        let error = invoke_instruction_create(&webview, name, "Text.", None)
+            .err()
+            .unwrap_or_else(|| panic!("the name {name:?} must be refused, not accepted"));
+        assert_eq!(
+            error["code"],
+            serde_json::json!("E_VALIDATION"),
+            "name {name:?}"
+        );
+        assert_eq!(error["params"]["field"], serde_json::json!(field));
+    }
+
+    // The text arms, each its OWN violation (the validator checks
+    // length first, so a NUL case must be short to reach the NUL arm):
+    // one over-limit text, one with a NUL inside.
+    for text in [&"x".repeat(262_145)[..], "Before.\0After"] {
+        let error = invoke_instruction_create(&webview, "Valid name", text, None)
+            .err()
+            .unwrap_or_else(|| panic!("the text {text:?} must be refused, not accepted"));
+        assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+        assert_eq!(error["params"]["field"], serde_json::json!("text"));
+    }
+    // The fixed validation order (name first, then text — the real
+    // command's own order, D-076): a request that violates BOTH
+    // fields answers about the NAME.
+    let error = invoke_instruction_create(&webview, "", "a\0b", None)
+        .expect_err("the double fault must be refused");
+    assert_eq!(error["params"]["field"], serde_json::json!("name"));
+
+    assert_eq!(
+        table_rows(&database, "library_items"),
+        0,
+        "no item was written"
+    );
+    assert_eq!(
+        table_rows(&database, "revisions"),
+        0,
+        "no version was recorded"
+    );
+    assert!(
+        journal_entries(&database).is_empty(),
+        "nothing was journaled"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn instruction_create_accepts_the_boundary_length_name_and_text() {
+    // The §6.9 range ENDS are legal (a 200-character name, a
+    // 262144-character text) — the off-by-one pair of the refusal
+    // test, and rule 6's large-input pin: a maximal text saves within
+    // the stated linear cost, no truncation, no panic.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+
+    let created = invoke_instruction_create(&webview, &"a".repeat(200), &"x".repeat(262_144), None)
+        .expect("the boundary values must save");
+
+    assert_eq!(created.position, 1);
+    assert_eq!(
+        revisions_of(&database, &created.instruction_id),
+        vec![(1, "create".to_owned())]
+    );
+    // The stored variant carries the full text (DB-006 measures what
+    // is stored — the whole point of the boundary pin).
+    let variant = created.variant_id.clone();
+    let stored_len = tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.query_row(
+            "SELECT length(content) FROM instruction_variants WHERE id = ?1",
+            [&variant],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("reading the stored text length must work");
+    assert_eq!(stored_len, 262_144);
+    drop(app);
+    drop(temp);
+}
+
+// ---- `instruction_update` (T-085) ----------------------------------------
+
+#[test]
+fn instruction_update_renames_and_records_an_update_version() {
+    // T-085's main flow (§7.3, ALG-070/071): a real rename writes the
+    // new title, records ONE `update` version (rev_no 1 — the raw
+    // seed writes no create version, D-093's split), and journals
+    // `instruction.changed`.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let (alpha, _) = seed_library_instruction(&database, "Alpha", "Alpha text.");
+
+    invoke_instruction_update(&webview, &alpha, "  Renamed  ")
+        .expect("a valid rename must succeed");
+
+    assert_eq!(
+        library_positions(&database),
+        vec![(alpha.clone(), "Renamed".to_owned(), 1)],
+        "the title is stored trimmed"
+    );
+    assert_eq!(
+        revisions_of(&database, &alpha),
+        vec![(1, "update".to_owned())],
+        "the seed writes no versions (the raw store has no version side effects, \
+         D-093's split); the real rename records the update version (ALG-071)"
+    );
+    let journal = journal_entries(&database);
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].action.as_str(), "instruction.changed");
+    assert_eq!(
+        journal[0]
+            .entity
+            .as_ref()
+            .map(|(kind, id)| (kind.as_str(), id.as_str())),
+        Some(("instruction", alpha.as_str()))
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn instruction_update_to_the_same_name_creates_no_version_and_journals_nothing() {
+    // T-085's acceptance criterion, verbatim: "renaming to the same
+    // name creates no version" — and by the D-188 reading the whole
+    // save is the verified no-op (the D-115 precedent): no version
+    // row, no journal entry, no `updated_at` restamp.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let (alpha, _) = seed_library_instruction(&database, "Alpha", "Alpha text.");
+    let row = alpha.clone();
+    let updated_at_before = tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.query_row(
+            "SELECT updated_at FROM library_items WHERE id = ?1",
+            [&row],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("reading the row's updated_at must work");
+
+    invoke_instruction_update(&webview, &alpha, "  Alpha  ")
+        .expect("a same-name rename is the verified no-op, not an error");
+
+    assert_eq!(
+        revisions_of(&database, &alpha),
+        Vec::<(i64, String)>::new(),
+        "the seed wrote no versions; the no-op added none (ALG-070, D-16)"
+    );
+    assert!(
+        journal_entries(&database).is_empty(),
+        "a transition that did not happen journals nothing (D-115)"
+    );
+    let row = alpha.clone();
+    let updated_at_after = tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.query_row(
+            "SELECT updated_at FROM library_items WHERE id = ?1",
+            [&row],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("reading the row's updated_at must work");
+    assert_eq!(
+        updated_at_before, updated_at_after,
+        "the no-op restamps nothing (a real change is what restamps)"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn instruction_update_rejects_stale_ids_headings_and_duplicate_names() {
+    // The rename's typed refusals: an id no row matches (a stale
+    // editor), a heading id (heading renames are `heading_update`,
+    // §7.10 — MAIN-015's identity split), and a NOCASE twin among
+    // visible instructions (§6.9) — each refused before anything is
+    // written.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let style = seed_library_heading(&database, "Style", 2);
+    let (alpha, _) = seed_library_instruction(&database, "Alpha", "Alpha text.");
+    seed_library_instruction(&database, "Beta", "Beta text.");
+
+    let error = invoke_instruction_update(&webview, "no-such-row", "New name")
+        .expect_err("an unknown id must be refused");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("id"));
+
+    let error = invoke_instruction_update(&webview, &style, "New name")
+        .expect_err("a heading id must be refused");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("id"));
+
+    let error = invoke_instruction_update(&webview, &alpha, "  BETA ")
+        .expect_err("a NOCASE twin must be refused");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("name"));
+    assert_eq!(error["params"]["value"], serde_json::json!("BETA"));
+
+    let error =
+        invoke_instruction_update(&webview, &alpha, "").expect_err("an empty name must be refused");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("name"));
+
+    assert_eq!(
+        table_rows(&database, "library_items"),
+        3,
+        "nothing was written"
+    );
+    assert_eq!(
+        table_rows(&database, "revisions"),
+        0,
+        "no version was recorded"
+    );
+    assert!(
+        journal_entries(&database).is_empty(),
+        "nothing was journaled"
+    );
+    drop(app);
+    drop(temp);
+}
+
+// ---- `instruction_hide` / `instruction_restore` (T-086) ------------------
+
+#[test]
+fn a_hidden_instruction_keeps_its_assignments_and_stays_out_of_the_build() {
+    // T-086's first acceptance arm (D-11/DB-013: "a hidden instruction
+    // can have assignments, but it is not included in the build";
+    // LIB-005…007/012, MAIN-012…014): hiding an ASSIGNED instruction
+    // keeps the assignment row (and the variant), removes its text
+    // from the built file (the independent §9.2 oracle), records the
+    // `hide` version and journals `instruction.hidden`.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let project = seed_build_project(&database);
+    let (alpha, main_variant) = seed_library_instruction(&database, "Alpha", "Alpha body text.");
+    seed_library_assignment(
+        &database,
+        project.clone(),
+        alpha.clone(),
+        main_variant.clone(),
+    );
+
+    // The visible baseline: the assignment builds the instruction's
+    // text into the project's body.
+    assert!(
+        built_body_of(&database).contains("Alpha body text."),
+        "an assigned visible instruction is in the build"
+    );
+
+    invoke_instruction_hide(&webview, &alpha).expect("hiding must succeed");
+
+    // DB-013/D-11: the assignment stays, the variant stays.
+    assert_eq!(
+        table_rows(&database, "project_instructions"),
+        1,
+        "the assignment is kept (D-11)"
+    );
+    assert_eq!(
+        table_rows(&database, "instruction_variants"),
+        1,
+        "the variant is kept"
+    );
+    // The build oracle: a hidden instruction is not in the file after
+    // the change — the assignment no longer builds its text.
+    assert!(
+        !built_body_of(&database).contains("Alpha body text."),
+        "a hidden instruction is excluded from the build (D-11)"
+    );
+    assert_eq!(
+        built_body_of(&database),
+        "",
+        "the only assigned instruction gone, the body is empty"
+    );
+    // The lifecycle trail: one `hide` version (ALG-071), one journal
+    // entry.
+    assert_eq!(
+        revisions_of(&database, &alpha),
+        vec![(1, "hide".to_owned())],
+        "the seed wrote no version; the hide records op hide"
+    );
+    let journal = journal_entries(&database);
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].action.as_str(), "instruction.hidden");
+    assert_eq!(
+        journal[0]
+            .entity
+            .as_ref()
+            .map(|(kind, id)| (kind.as_str(), id.as_str())),
+        Some(("instruction", alpha.as_str()))
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn restoring_returns_the_instruction_with_its_assignments_and_the_build() {
+    // T-086's second acceptance arm ("after the restoration the
+    // assignments are in place", LIB-005…007/012): restore brings the
+    // instruction back WITH its assignment (the matrix cell the hide
+    // never dropped), the build regains its text, and the trail gains
+    // the `restore` version and the journal entry.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let project = seed_build_project(&database);
+    let (alpha, main_variant) = seed_library_instruction(&database, "Alpha", "Alpha body text.");
+    seed_library_assignment(
+        &database,
+        project.clone(),
+        alpha.clone(),
+        main_variant.clone(),
+    );
+    invoke_instruction_hide(&webview, &alpha).expect("hiding must succeed");
+
+    invoke_instruction_restore(&webview, &alpha).expect("restoring must succeed");
+
+    assert_eq!(
+        table_rows(&database, "project_instructions"),
+        1,
+        "the assignment is back in place (kept through the hide, D-11)"
+    );
+    assert!(
+        built_body_of(&database).contains("Alpha body text."),
+        "the restored instruction builds its text again"
+    );
+    assert_eq!(
+        revisions_of(&database, &alpha),
+        vec![(1, "hide".to_owned()), (2, "restore".to_owned())],
+        "the hide and restore versions follow each other (ALG-071; the seed \
+         itself wrote none — the raw store has no version side effects)"
+    );
+    // `recent` serves newest first: the restore entry is journal[0].
+    let journal = journal_entries(&database);
+    assert_eq!(journal.len(), 2);
+    assert_eq!(journal[0].action.as_str(), "instruction.restored");
+    assert_eq!(
+        journal[0]
+            .entity
+            .as_ref()
+            .map(|(kind, id)| (kind.as_str(), id.as_str())),
+        Some(("instruction", alpha.as_str()))
+    );
+    assert_eq!(journal[1].action.as_str(), "instruction.hidden");
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn hide_and_restore_are_verified_no_ops_on_a_repeated_click() {
+    // The D-188 idempotence reading (the make-operations-idempotent
+    // rule): a second hide of an already-hidden instruction and a
+    // restore of an active one converge with nothing written — one
+    // version, one journal entry per real transition.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let (alpha, _) = seed_library_instruction(&database, "Alpha", "Alpha text.");
+
+    invoke_instruction_hide(&webview, &alpha).expect("the first hide must succeed");
+    invoke_instruction_hide(&webview, &alpha).expect("a repeated hide converges silently");
+
+    assert_eq!(
+        revisions_of(&database, &alpha),
+        vec![(1, "hide".to_owned())],
+        "one hide version for two clicks"
+    );
+    assert_eq!(journal_entries(&database).len(), 1, "one journal entry");
+
+    invoke_instruction_restore(&webview, &alpha).expect("the restore must succeed");
+    invoke_instruction_restore(&webview, &alpha)
+        .expect("a restore of an active instruction converges silently");
+
+    assert_eq!(
+        revisions_of(&database, &alpha),
+        vec![(1, "hide".to_owned()), (2, "restore".to_owned())],
+        "the repeated restore added no version"
+    );
+    assert_eq!(
+        journal_entries(&database).len(),
+        2,
+        "still one entry per transition"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn restore_refuses_a_name_a_visible_twin_took_while_hidden() {
+    // §6.9's clause surfacing where the store puts it (D-076): a
+    // hidden twin does not block a create or a rename, so the name
+    // can be taken while the instruction is hidden — restoring into
+    // the conflict is the typed refusal, nothing written.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let (alpha, _) = seed_library_instruction(&database, "Alpha", "Alpha text.");
+    invoke_instruction_hide(&webview, &alpha).expect("hiding must succeed");
+    // A visible twin of the hidden name appears while it is hidden.
+    seed_library_instruction(&database, "alpha", "Twin text.");
+
+    let error = invoke_instruction_restore(&webview, &alpha)
+        .expect_err("restoring into a NOCASE-twin name must be refused");
+
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("name"));
+    assert!(
+        !error["params"]
+            .as_object()
+            .is_none_or(|params| params.contains_key("value")),
+        "the stored title never travels in params (SEC-008's class-only rule)"
+    );
+    // The refusal left the row hidden and the twin alone.
+    let row = alpha.clone();
+    let state = tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.query_row(
+            "SELECT state FROM library_items WHERE id = ?1",
+            [&row],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("reading the row's state must work");
+    assert_eq!(state, "hidden", "the refused restore wrote nothing");
+    assert_eq!(table_rows(&database, "library_items"), 2);
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn hide_and_restore_reject_stale_ids_and_headings() {
+    // MAIN-015's identity rule at the lifecycle commands: headings
+    // cannot be hidden (§6.2's CHECK — the store's floor) and no row
+    // answers an unknown id — both the typed field refusal, nothing
+    // written.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    let style = seed_library_heading(&database, "Style", 2);
+
+    let error = invoke_instruction_hide(&webview, "no-such-row")
+        .expect_err("an unknown id must be refused");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("id"));
+
+    let error =
+        invoke_instruction_hide(&webview, &style).expect_err("a heading id must be refused");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("id"));
+
+    let error =
+        invoke_instruction_restore(&webview, &style).expect_err("a heading id must be refused");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("id"));
+
+    assert_eq!(
+        table_rows(&database, "library_items"),
+        1,
+        "nothing was written"
+    );
+    assert_eq!(
+        table_rows(&database, "revisions"),
+        0,
+        "no version was recorded"
+    );
+    assert!(
+        journal_entries(&database).is_empty(),
+        "nothing was journaled"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_instruction_commands_are_registered_with_the_specta_builder() {
+    // The §7.10 Library-module names, each registered exactly once —
+    // the D-034 wiring-pin rationale: without this pin, dropping a
+    // registration would leave `export_bindings_are_up_to_date` green
+    // while it silently rewrote the committed bindings without the
+    // command.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    for name in [
+        "instruction_create",
+        "instruction_hide",
+        "instruction_restore",
+        "instruction_update",
+    ] {
+        assert_eq!(
+            lib.matches(&format!("commands::{name}")).count(),
+            1,
+            "lib.rs must register the `{name}` command exactly once (§7.10, T-328)"
+        );
+    }
+}
+
+#[test]
+fn instruction_versions_follow_the_history_max_revisions_setting() {
+    // ALG-072's caller contract (D-188): the command reads
+    // `history.max_revisions` in its own transaction and hands the
+    // value on — a lowered setting prunes the entity's history at its
+    // next recorded change (the §6.5 value the user set, not a
+    // hardcoded default). The latest version is never deleted.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let webview = main_webview(&app);
+    // The §6.5 range floor is 10 (the store's own validation), so the
+    // test prunes from 12 versions to 10.
+    seed_setting(
+        &database,
+        eunomia_store::settings::SettingKey::HistoryMaxRevisions,
+        eunomia_store::settings::SettingValue::Int(10),
+    );
+    let (alpha, _) = seed_library_instruction(&database, "Alpha", "Alpha text.");
+
+    for revision in 0..12 {
+        invoke_instruction_update(&webview, &alpha, &format!("Name {revision}"))
+            .unwrap_or_else(|_| panic!("rename {revision} must succeed"));
+    }
+
+    let revisions = revisions_of(&database, &alpha);
+    assert_eq!(revisions.len(), 10, "the §6.5 limit prunes to 10 (ALG-072)");
+    assert_eq!(
+        revisions.first().map(|(rev_no, _)| *rev_no),
+        Some(3),
+        "the oldest two of the 12 versions were pruned (rev_no 1 and 2)"
+    );
+    assert_eq!(
+        revisions.last().map(|(rev_no, _)| *rev_no),
+        Some(12),
+        "the latest version is never deleted (ALG-072)"
+    );
+    drop(app);
+    drop(temp);
 }

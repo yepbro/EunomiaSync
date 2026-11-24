@@ -1282,3 +1282,419 @@ describe('scanCommit', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// The four instruction commands (T-328, §7.10 Library module, D-188)
+// ---------------------------------------------------------------------------
+
+describe('instructionCreate / instructionUpdate / instructionHide / instructionRestore (T-328)', () => {
+  /** The ids of the seeded two-level world below. */
+  const H_A = 'h-a'
+  const I_ROOT = 'i-root'
+  const H_B = 'h-b'
+  const I_X = 'i-x'
+  const H_C = 'h-c'
+
+  /**
+   * A small two-level library world (the fixture profile's single
+   * heading sits at the table tail, which cannot exercise the section
+   * rule — so the block seeds its own rows, the state-editing pattern
+   * the watch-flag tests use): `## A` (1), a root instruction (2),
+   * `### B` (3), X (4), `## C` (5).
+   */
+  function seedTwoLevelLibrary(): void {
+    // The rows follow the store's union shape (dates included — the
+    // seeded row's fields are the shape every reader maps).
+    const stamp = (position: number): string =>
+      new Date(Date.UTC(2026, 10, 24, 12, 0, 0) + position * 1000).toISOString()
+    mockState().library = [
+      {
+        kind: 'heading',
+        id: H_A,
+        position: 1,
+        headingLevel: 2,
+        title: 'A section',
+        state: 'active',
+        createdAt: stamp(1),
+        updatedAt: stamp(1),
+      },
+      {
+        kind: 'instruction',
+        id: I_ROOT,
+        position: 2,
+        title: 'Root rule',
+        state: 'active',
+        variants: [{ id: 'v-root', name: 'Main', content: 'Root text.', isMain: true }],
+        createdAt: stamp(2),
+        updatedAt: stamp(2),
+      },
+      {
+        kind: 'heading',
+        id: H_B,
+        position: 3,
+        headingLevel: 3,
+        title: 'B subsection',
+        state: 'active',
+        createdAt: stamp(3),
+        updatedAt: stamp(3),
+      },
+      {
+        kind: 'instruction',
+        id: I_X,
+        position: 4,
+        title: 'X rule',
+        state: 'active',
+        variants: [{ id: 'v-x', name: 'Main', content: 'X text.', isMain: true }],
+        createdAt: stamp(4),
+        updatedAt: stamp(4),
+      },
+      {
+        kind: 'heading',
+        id: H_C,
+        position: 5,
+        headingLevel: 2,
+        title: 'C section',
+        state: 'active',
+        createdAt: stamp(5),
+        updatedAt: stamp(5),
+      },
+    ]
+  }
+
+  /** The journal's current length. */
+  const journalSize = (): number => mockState().activity.length
+
+  it('creates the pair with the Main variant, places it, and journals once', async () => {
+    // T-084's main flow (LIB-002): one instruction row with its Main
+    // variant, the name stored trimmed, the placement at the end of
+    // the picked section, and ONE `instruction.created` entry.
+    seedTwoLevelLibrary()
+    const state = mockState()
+    const before = journalSize()
+
+    const created = await commands.instructionCreate('  New rule  ', 'Be concise.', H_B)
+
+    const row = state.library.find((item) => item.id === created.instruction_id)
+    expect(row).toMatchObject({
+      kind: 'instruction',
+      title: 'New rule',
+      state: 'active',
+      position: 5,
+    })
+    // The end of `### B`'s range is `## C` (position 5): the new row
+    // takes position 5 and C shifts down — the dense renumber; X (the
+    // range's last item) keeps its position 4.
+    expect(state.library.find((item) => item.id === I_X)?.position).toBe(4)
+    expect(state.library.find((item) => item.id === H_C)?.position).toBe(6)
+    // The union narrows by kind: the created row is the instruction.
+    expect(row?.kind === 'instruction' ? row.variants : undefined).toEqual([
+      { id: created.variant_id, name: 'Main', content: 'Be concise.', isMain: true },
+    ])
+    expect(created.position).toBe(5)
+    expect(journalSize()).toBe(before + 1)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'instruction.created',
+      entity_type: 'instruction',
+      entity_id: created.instruction_id,
+    })
+  })
+
+  it('places a root create before the first heading (ALG-021, D-188)', async () => {
+    seedTwoLevelLibrary()
+
+    const created = await commands.instructionCreate('Root twin', 'Text.', null)
+
+    // The root prefix ends at the FIRST heading (position 1), so a
+    // root create lands at position 1 — the only place with no
+    // heading above it.
+    expect(created.position).toBe(1)
+    expect(mockState().library[0]?.id).toBe(created.instruction_id)
+    expect(mockState().library.find((item) => item.id === H_A)?.position).toBe(2)
+  })
+
+  it('creates into a level-2 section past its nested subsection (the discriminating case)', async () => {
+    // The round-1 review's TA-P2-2, mock side: the end of `## A`'s
+    // range is `## C` (the next heading of level <= 2) — NOT `### B`
+    // (the first following heading of ANY level) and not the table
+    // end. Both wrong readings answer a different position here.
+    seedTwoLevelLibrary()
+
+    const created = await commands.instructionCreate('New in A', 'Text.', H_A)
+
+    expect(created.position).toBe(5)
+    expect(mockState().library.find((item) => item.id === H_B)?.position).toBe(3)
+    expect(mockState().library.find((item) => item.id === I_X)?.position).toBe(4)
+    expect(mockState().library.find((item) => item.id === H_C)?.position).toBe(6)
+  })
+
+  it('rejects a NOCASE-twin visible name with the typed envelope, writing nothing', async () => {
+    // §6.9's cross-row clause: unique among VISIBLE instructions,
+    // case-insensitive — the refusal names the field and echoes the
+    // caller's own (validated) name, and nothing is written or
+    // journaled. The positive half rides along: a HIDDEN twin does
+    // not block the create, and SQLite's NOCASE fold is ASCII-only,
+    // so a non-ASCII "twin" never blocked in the first place.
+    seedTwoLevelLibrary()
+    const state = mockState()
+    const before = journalSize()
+    const rows = state.library.length
+
+    await expect(
+      commands.instructionCreate('  ROOT RULE  ', 'Twin text.', null),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'name', value: 'ROOT RULE' },
+    })
+
+    expect(state.library).toHaveLength(rows)
+    expect(journalSize()).toBe(before)
+
+    // A hidden twin does not block (§6.9: "among visible"). The root
+    // placement applies: the create lands before the first heading
+    // (position 1).
+    await commands.instructionHide(I_ROOT)
+    await expect(
+      commands.instructionCreate('root rule', 'The visible twin.', null),
+    ).resolves.toMatchObject({ position: 1 })
+    // The ASCII-only fold's own pin (SQLite's NOCASE folds A–Z only):
+    // "MÜLLER" is NOT a NOCASE twin of an existing "Müller" — the Ü
+    // does not fold, so the create succeeds (a Unicode-fold mutant
+    // would refuse it).
+    await commands.instructionCreate('Müller', 'Text.', null)
+    await expect(commands.instructionCreate('MÜLLER', 'Text.', null)).resolves.toMatchObject({
+      position: 3,
+    })
+  })
+
+  it('answers a double fault about the name (the fixed validation order)', async () => {
+    // The real command's order, pinned: name first, then text — a
+    // request violating both fields answers about the NAME.
+    seedTwoLevelLibrary()
+
+    await expect(commands.instructionCreate('', 'a\0b', null)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'name' },
+    })
+    // And the section precedes the duplicate at the store boundary
+    // (the real command computes `section_target` before `create_item`
+    // meets the twin): a twin name AND a non-heading section answer
+    // about the section.
+    await expect(commands.instructionCreate('Root rule', 'Text.', I_X)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'section' },
+    })
+  })
+
+  it('rejects a reserved marker line with E_CONTENT_RESERVED (DB-016)', async () => {
+    seedTwoLevelLibrary()
+    const state = mockState()
+    const before = journalSize()
+
+    await expect(
+      commands.instructionCreate('Valid name', 'Before.\n<!-- EUNOMIASYNC:END -->\nAfter.', null),
+    ).rejects.toMatchObject({
+      code: 'E_CONTENT_RESERVED',
+      params: { field: 'text', marker: '<!-- EUNOMIASYNC:END -->', line: '2' },
+    })
+
+    expect(state.library).toHaveLength(5)
+    expect(journalSize()).toBe(before)
+  })
+
+  it('numbers the marker line over the built form (ALG-002 leading edge)', async () => {
+    // The real validator scans the ALG-002-normalized text — the
+    // leading empty lines drop, so a marker under them is line 1 of
+    // the built form, and space/tab padding matches (Unicode
+    // whitespace padding does not — `classify_line`'s own rule).
+    seedTwoLevelLibrary()
+
+    await expect(
+      commands.instructionCreate(
+        'Valid name',
+        '\n\n \t<!-- EUNOMIASYNC:BEGIN -->\t \nAfter.',
+        null,
+      ),
+    ).rejects.toMatchObject({
+      code: 'E_CONTENT_RESERVED',
+      params: { line: '1' },
+    })
+  })
+
+  it('rejects a marker a leading BOM-after-blank-line was hiding (the fixed-point edge)', async () => {
+    // `drop_leading_edge`'s own rule, pinned: a BOM that becomes
+    // LEADING only after a blank line drops is still leading — the
+    // round-2 review's P3-2, the one shape where a single-pass strip
+    // misses the marker the app rejects. The BOM here sits after a
+    // blank line, so the built form's line 1 is the bare marker.
+    seedTwoLevelLibrary()
+
+    await expect(
+      commands.instructionCreate('Valid name', '\n\uFEFF<!-- EUNOMIASYNC:END -->\nAfter.', null),
+    ).rejects.toMatchObject({
+      code: 'E_CONTENT_RESERVED',
+      params: { line: '1' },
+    })
+  })
+
+  it('stores the create text in the save-folded form (CRLF becomes LF)', async () => {
+    // §6.9's save-time fold, the store's `fold_crlf` twin: CRLF
+    // becomes LF on save (a lone CR stays). The stored row a later
+    // read serves carries the folded form.
+    seedTwoLevelLibrary()
+
+    const created = await commands.instructionCreate('Folded rule', 'Line one.\r\nLine two.', null)
+
+    const created_row = mockState().library.find((item) => item.id === created.instruction_id)
+    expect(created_row?.kind === 'instruction' ? created_row.variants[0] : undefined).toMatchObject(
+      { content: 'Line one.\nLine two.' },
+    )
+  })
+
+  it('rejects the §6.9 name and text violations, and a section that is not a heading', async () => {
+    seedTwoLevelLibrary()
+    const state = mockState()
+    const before = journalSize()
+
+    await expect(commands.instructionCreate('   ', 'Text.', null)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'name' },
+    })
+    await expect(commands.instructionCreate('a\nb', 'Text.', null)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'name' },
+    })
+    await expect(
+      commands.instructionCreate('Name', `x${'y'.repeat(262_144)}`, null),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'text' },
+    })
+    // MAIN-015's identity rule: an instruction id is not a section.
+    await expect(commands.instructionCreate('Name', 'Text.', I_X)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'section' },
+    })
+    await expect(commands.instructionCreate('Name', 'Text.', 'no-such-row')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'section' },
+    })
+
+    expect(state.library).toHaveLength(5)
+    expect(journalSize()).toBe(before)
+  })
+
+  it('renames and journals, and answers a same-name rename as the verified no-op', async () => {
+    // T-085's DoD (D-188): the same-name save writes and journals
+    // nothing; a real rename journals `instruction.changed`.
+    seedTwoLevelLibrary()
+    const state = mockState()
+    const before = journalSize()
+
+    await commands.instructionUpdate(I_X, '  X rule  ')
+
+    // The no-op: the trimmed name equals the stored title.
+    expect(state.library.find((item) => item.id === I_X)?.title).toBe('X rule')
+    expect(journalSize()).toBe(before)
+
+    await commands.instructionUpdate(I_X, 'Renamed rule')
+    expect(state.library.find((item) => item.id === I_X)?.title).toBe('Renamed rule')
+    expect(journalSize()).toBe(before + 1)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'instruction.changed',
+      entity_id: I_X,
+    })
+  })
+
+  it('refuses a rename onto a visible twin, a heading id, and a stale id', async () => {
+    seedTwoLevelLibrary()
+    const state = mockState()
+    const before = journalSize()
+
+    await expect(commands.instructionUpdate(I_X, 'root rule')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'name', value: 'root rule' },
+    })
+    await expect(commands.instructionUpdate(H_A, 'New title')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'id' },
+    })
+    await expect(commands.instructionUpdate('no-such-row', 'New title')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'id' },
+    })
+
+    expect(state.library.find((item) => item.id === I_X)?.title).toBe('X rule')
+    expect(journalSize()).toBe(before)
+  })
+
+  it('hides keeping the variants, and restores — one journal entry per real transition', async () => {
+    // T-086's lifecycle (D-11/DB-013: the variants stay; the mock has
+    // no assignment rows to keep — the documented limit), with the
+    // D-188 idempotence: a repeated hide or restore writes and
+    // journals nothing.
+    seedTwoLevelLibrary()
+    const state = mockState()
+    const before = journalSize()
+
+    await commands.instructionHide(I_X)
+    expect(state.library.find((item) => item.id === I_X)).toMatchObject({
+      state: 'hidden',
+      variants: [{ id: 'v-x', name: 'Main', content: 'X text.', isMain: true }],
+    })
+    expect(journalSize()).toBe(before + 1)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'instruction.hidden',
+      entity_id: I_X,
+    })
+
+    await commands.instructionHide(I_X)
+    expect(journalSize()).toBe(before + 1)
+
+    await commands.instructionRestore(I_X)
+    expect(state.library.find((item) => item.id === I_X)?.state).toBe('active')
+    expect(journalSize()).toBe(before + 2)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'instruction.restored',
+      entity_id: I_X,
+    })
+
+    await commands.instructionRestore(I_X)
+    expect(journalSize()).toBe(before + 2)
+  })
+
+  it('refuses a restore into a visible NOCASE twin, class-only', async () => {
+    // §6.9's clause surfacing at the restore (D-076): the envelope
+    // carries the field and the reason, never the stored title
+    // (SEC-008).
+    seedTwoLevelLibrary()
+    const state = mockState()
+
+    await commands.instructionHide(I_ROOT)
+    // A visible twin of the hidden name appears while it is hidden.
+    await commands.instructionCreate('ROOT RULE', 'Twin text.', null)
+
+    await expect(commands.instructionRestore(I_ROOT)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'name' },
+    })
+    expect(state.library.find((item) => item.id === I_ROOT)?.state).toBe('hidden')
+  })
+
+  it('refuses a hide and a restore on a heading id and a stale id', async () => {
+    seedTwoLevelLibrary()
+    const state = mockState()
+    const before = journalSize()
+
+    await expect(commands.instructionHide(H_B)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'id' },
+    })
+    await expect(commands.instructionRestore('no-such-row')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'id' },
+    })
+
+    expect(state.library.find((item) => item.id === H_B)?.state).toBe('active')
+    expect(journalSize()).toBe(before)
+  })
+})

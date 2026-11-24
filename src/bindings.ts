@@ -205,6 +205,38 @@ export const commands = {
 	 */
 	libraryGet: (includeHidden: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<LibraryTreeItem[]>("library_get", { includeHidden }, options),
 	/**
+	 *  The `instruction_create` command (§7.10 Library module, LIB-002,
+	 *  §8 S3): the create dialog's save — one instruction, its main
+	 *  variant named `Main`, placed in the picked section — validated
+	 *  through the §6.9 field validators (DB-016's marker line included),
+	 *  written with its two `create` versions and its journal entry in
+	 *  ONE transaction.
+	 */
+	instructionCreate: (name: string, text: string, section: string | null, options?: InvokeOptions) => __TAURI_INVOKE<InstructionCreated>("instruction_create", { name, text, section }, options),
+	/**
+	 *  The `instruction_hide` command (§7.10 Library module, LIB-005,
+	 *  §6.4, D-11/DB-013): the hide — variants and assignments stay, the
+	 *  instruction leaves the build, the `hide` version and journal entry
+	 *  land in one transaction, and a repeated hide is the verified
+	 *  no-op (D-188).
+	 */
+	instructionHide: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instruction_hide", { id }, options),
+	/**
+	 *  The `instruction_restore` command (§7.10 Library module,
+	 *  LIB-005…007/012): the restore — the instruction returns WITH its
+	 *  assignments and its old position, the `restore` version and
+	 *  journal entry land in one transaction, and a repeated restore is
+	 *  the verified no-op (D-188).
+	 */
+	instructionRestore: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instruction_restore", { id }, options),
+	/**
+	 *  The `instruction_update` command (§7.10 Library module, §7.3,
+	 *  ALG-070/071): the rename — validated, written with its `update`
+	 *  version and journal entry in one transaction, and the verified
+	 *  no-op when the name did not change (D-188).
+	 */
+	instructionUpdate: (id: string, name: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instruction_update", { id, name }, options),
+	/**
 	 *  Renders the editor's Markdown into sanitized preview HTML with the
 	 *  Markdown warnings alongside (§7.10 Library module `markdown_preview`,
 	 *  the D-009 name registry; SEC-005, D-15, §7.3 LIB-002/009…016).
@@ -1491,6 +1523,32 @@ export type FileChangedEvent = {
 	 *  module docs' diff contract).
 	 */
 	changes: ProjectFileChange[],
+};
+
+/**
+ *  The `instruction_create` answer: the identities the created pair
+ *  carries plus the placement the row took — the ids are what every
+ *  later library command (`instruction_update`, `instruction_hide`,
+ *  the variant commands, `assignment_set`) addresses, and the
+ *  position pins where in the §6.4 sequence the new row landed. The
+ *  `library_get` read refreshes the tree; this DTO stays the minimal
+ *  create receipt (the `ScanCommitEntry` minimal-payload rule).
+ */
+export type InstructionCreated = {
+	/**  The created instruction's row id (UUIDv7 TEXT, DB-002). */
+	instruction_id: string,
+	/**
+	 *  The created main variant's row id — LIB-002's pair: the dialog
+	 *  always creates the instruction WITH its `Main` variant.
+	 */
+	variant_id: string,
+	/**
+	 *  The stored `position` of the new instruction (DB-011), the
+	 *  placement the D-188 section rule chose — `i32` on the wire
+	 *  (specta forbids 64-bit integers; the table's row count always
+	 *  fits, the `AddedProject.sort_order` decision).
+	 */
+	position: number,
 };
 
 /**  A heading's tree row (§2 "Section heading", LIB-030). */
