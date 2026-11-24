@@ -25,6 +25,11 @@ export default tseslint.config(
       'coverage',
       'playwright-report',
       'test-results',
+      // Owner-local tooling (gitignored): commands/, scripts/ and the
+      // agent's own scratch files are not project source, and a `*.cjs`
+      // smoke script under it once failed the commit gate (T-323's
+      // first attempt; T-339).
+      '.opencode',
       'src-tauri',
       'src/bindings.ts',
       // Cargo workspace target directory (root-level, holds build scripts output)
