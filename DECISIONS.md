@@ -19283,7 +19283,17 @@ Solution:
   "only two cases" sentence is now contradicted outright — archiving,
   hiding and the other UI-010 items are non-destructive by the
   definition yet confirmed — and stays v1.0 text owned by the D-170
-  follow-up card, not this one.
+  follow-up card, not this one. **2026-11-24 addendum (T-335):** that
+  follow-up landed — docs/spec.md:732 now narrows the sentence to the
+  sync pipeline (the only step that asks for confirmation is the
+  empty result, D-25, with no target file written until it is
+  answered; closing the window
+  during a sync keeps its own §9.4 confirmation) and points at
+  NFR-021 + UI-010 for destructive actions instead of restating a
+  two-case rule that applied app-wide; UI-010 is named as the home of
+  the main UI's list, which is wider than the destructive class, and
+  the case list is deliberately not duplicated here or there (the
+  owner's ruling of 2026-11-24, option 1).
 - _UI-010 untouched; the enumeration caveat is gone with the tail it
   lived in._ UI-010 already cites NFR-021 in its leading clause
   (D-170's P2-1 placement), and its own text carries no completeness
