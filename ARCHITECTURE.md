@@ -85,6 +85,7 @@ src-tauri/
   src/db.rs                # DB state + one-transaction executor   (working)
   src/dirty_recalc.rs      # Background dirty recalc, state://dirty events (working)
   src/errors.rs            # AppError + MVP error-code registry  (working)
+  src/backup_orphans.rs    # Orphaned .bak report at Db::open (read-only, T-332) (working)
   src/file_watch.rs        # Target-file watch service, state://file-changed (working)
   src/logging.rs           # File log: daily + 10 MB rotation, 5-file cap (working)
   src/markdown.rs          # Markdown preview renderer (pulldown-cmark; preview only) (working)
@@ -727,6 +728,30 @@ newest copy of each kind is protected even past the window, the
 `daily-*` scheme stays under ERR-001's own count rule beside them, and
 a copy deleted by the pass takes its `-journal`/`-wal`/`-shm` sidecar
 siblings with it.
+
+Orphaned project-backup copies — `.bak` files under `backups/` that no
+`backup_records` row claims (the crash window D-091 records: the copy
+is written straight to its final name, the record follows) — are
+reported by a read-only pass at the same end-of-open point, never
+deleted (the owner ruling of 2026-11-24, T-332, D-190):
+`src-tauri/src/backup_orphans.rs` reads every claimed `backup_path`
+(through `eunomia_store::backup_records::all_paths`, all statuses),
+lists each `backups/<project folder>/` one level deep, and logs one
+`logging::backup_orphans` `warn` line with numeric fields only —
+`orphan_files`, `orphan_folders`, `unreadable_folders`; no paths and
+no folder names, because a folder name carries the project-name slug
+(SEC-008). The line is emitted when an orphan was counted or a
+project folder could not be listed; when nothing was counted but a
+folder could not be listed, it carries a distinct message (the two
+counts are a lower bound then), while a mixed pass keeps the orphan
+message with `unreadable_folders` beside it. A tree with no orphans
+and every folder readable logs nothing. The rule the line
+belongs to: the user inspects the folder and deletes a file by hand
+when its content is not needed; the app never reclaims the space (a
+copy with no row may be the only surviving evidence of a file). A
+failed records read or an unlistable root degrades to its own `warn`
+line and never fails the open; a project folder that cannot be listed
+is counted and the readable ones are still judged.
 
 The `settings` table has a typed repository, `eunomia_store::settings`
 (spec §6.5, DECISIONS.md D-039): the thirteen §6.5 keys as a

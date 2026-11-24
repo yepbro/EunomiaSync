@@ -9279,14 +9279,14 @@ fn project_add_manual_answers_within_the_refresh_budget_when_the_watch_pass_hang
 /// worker-thread boundary; the service task, spawned or not, cannot
 /// pollute the capture).
 #[derive(Clone)]
-struct WarnCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+pub(crate) struct WarnCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl WarnCapture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
     }
 
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         String::from_utf8_lossy(&self.0.lock().expect("the capture lock")).into_owned()
     }
 }
@@ -9318,7 +9318,7 @@ impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for WarnCapture {
 /// capture), `log_internal_errors(false)` as every subscriber of this
 /// crate builds with (the fmt layer's own writer-error fallback must
 /// stay off, the `logging.rs` module docs' Windows reasoning).
-fn warn_capture_subscriber(capture: &WarnCapture) -> impl tracing::Subscriber {
+pub(crate) fn warn_capture_subscriber(capture: &WarnCapture) -> impl tracing::Subscriber {
     tracing_subscriber::fmt()
         .with_writer(capture.clone())
         .with_max_level(tracing::Level::WARN)

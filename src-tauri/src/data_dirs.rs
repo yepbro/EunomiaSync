@@ -136,6 +136,18 @@ pub(crate) fn db_backups_dir(root: &Path) -> PathBuf {
     root.join(DB_BACKUPS_SUBDIRECTORY)
 }
 
+/// Returns the project-backup directory inside the layout:
+/// `<data dir>/backups` (spec §5.5) — the tree the sync pipeline's
+/// phase 2 writes one folder per project into
+/// (`backups/<project_id>__<slug>/<file>.<UTC>.<hash8>.bak`, see
+/// `eunomia_core::backup_name::backup_relative_path`), and the tree
+/// the orphan report scans at every successful open (T-332). Like
+/// [`db_backups_dir`] it only derives the path; the layout step
+/// creates the folder.
+pub(crate) fn backups_dir(root: &Path) -> PathBuf {
+    root.join(BACKUPS_SUBDIRECTORY)
+}
+
 /// The resolved data-directory root, published as managed state by the
 /// `setup` hook right after [`ensure_data_layout`] (T-024).
 ///

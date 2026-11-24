@@ -2,8 +2,10 @@
 //! §9.4 phase 2; task T-115): the store's writer for one run's backup
 //! copies and the dedup lookup the phase consults before making one.
 //!
-//! Two entry points, both joining **the caller's** transaction
-//! (D-037/D-051, the `sync_runs` shape):
+//! Three entry points. [`insert`] and [`last_checked`] join **the
+//! caller's** transaction (D-037/D-051, the `sync_runs` shape);
+//! [`all_paths`] runs on the caller's connection and joins nothing —
+//! it is the read-only claim set of the orphan report (T-332/D-190):
 //!
 //! * [`insert`] — one row per copy a run produced. §9.4 phase 2 step 1
 //!   inserts a record only after the BKP-010 size + SHA-256 check
@@ -24,6 +26,10 @@
 //!   compares the source against, and the layout path a dedup
 //!   decision's own record must point at ("the record points to the
 //!   existing one", BKP-010).
+//! * [`all_paths`] — every `backup_path` the table claims, across all
+//!   statuses: the set the orphan report subtracts from the files it
+//!   lists under `backups/`, so a copy no row mentions is the only
+//!   thing that report can name (D-190).
 //!
 //! # The writer contracts D-122 fixed (T-114's reader is the oracle)
 //!
@@ -342,6 +348,35 @@ pub fn last_checked(
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(err) => Err(BackupRecordsError::Sql(err)),
     }
+}
+
+/// Every `backup_path` the table claims, across **all** statuses —
+/// the orphan report's known set (T-332, the owner ruling of
+/// 2026-11-24).
+///
+/// All statuses on purpose: a `pruned` row's file is gone, so
+/// including it can only keep a path out of the orphan set that no
+/// file carries any more, while a `discarded` row is the abort
+/// sweep's history of a copy this run itself removed. Excluding
+/// either would widen the report, never narrow it wrongly — but
+/// including them costs nothing and states the contract the report
+/// relies on: a file is orphaned only when **no** row mentions it.
+/// The order is the stored cell order (`backup_path`, then the
+/// engine's tiebreak) so the read is deterministic under test.
+///
+/// # Errors
+///
+/// Returns [`BackupRecordsError::Sql`] when the query fails; the
+/// caller's report degrades with a log line (it is housekeeping, not
+/// a command).
+pub fn all_paths(conn: &Connection) -> Result<Vec<String>, BackupRecordsError> {
+    let mut statement = conn.prepare(
+        "SELECT backup_path FROM backup_records
+          ORDER BY backup_path, id",
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(BackupRecordsError::Sql)
 }
 
 #[cfg(test)]

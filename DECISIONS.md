@@ -22805,3 +22805,124 @@ mutant survived because a downstream closed-type check still returned
 `E_VALIDATION`; it was replaced by a behavior-changing clamp. A server
 interruption left one mutant applied; the exact pre-mutant block was
 restored and all four were rerun cleanly.
+
+### D-190 — T-332: orphaned `.bak` copies get a read-only startup report and a manual rule instead of a silent cleanup — 2026-11-24
+
+Problem: a `.bak` copy under `backups/` that no `backup_records` row
+mentions has no owner. The backup retention (T-114) walks rows, the
+phase-2 abort sweep (BKP-005) knows only its own run's copies, and
+D-091 records how such a file appears: the copy is written straight
+to its final §5.5 name, so a process death between the copy and its
+record — or a record transaction that failed after the file was
+verified — leaves verified bytes nothing points at. D-132's review
+handed the debris over ("an owner for pre-existing orphan `.bak`
+debris"), and the owner's triage of 2026-11-24 (option 2) ruled:
+do not delete them silently — make them visible and fix the manual
+rule of handling. No automatic cleanup at startup, no deferral.
+
+Solution: a read-only report, `src-tauri/src/backup_orphans.rs`, run
+once at the end of every successful `Db::open` — the same trigger as
+the T-253 protective-copy pass, so every launch and every recovery
+reopen reports, and both facts it needs (the data root and the open
+connection) are already there. The pass reads **every**
+`backup_records.backup_path` through the new
+`eunomia_store::backup_records::all_paths` (all statuses: a `pruned`
+or `discarded` row still claims the name it refers to) and lists
+`backups/<project folder>/` one level deep; a `*.bak` file whose
+relative layout string (`backups/<folder>/<file>`) is in no row's
+cell is an orphan. Nothing is deleted, moved or rewritten. The cost
+is one SELECT over the rows (the claim set is a `HashSet`, so its
+construction and every lookup are expected-constant) plus two
+directory levels of names — linear in rows plus entries, no file
+opened, sized or hashed.
+
+The ruling's three questions, answered in the line and in this
+record:
+
+- **What is shown.** One `warn` line
+  (`logging::backup_orphans`) per run with numeric fields only —
+  `orphan_files`, `orphan_folders` (folders holding at least one),
+  `unreadable_folders` (folders the pass could not list, which makes
+  the two counts a lower bound). No paths and no folder names: a
+  folder name carries the project-name slug, i.e. stored user text
+  (SEC-008). Two messages, never both: the orphan one when files
+  were counted, and a distinct "the count is a lower bound" one when
+  nothing was counted but a folder could not be listed (round-1
+  review's P3-1: a zero from a partial pass must not read as a clean
+  tree). A tree with no orphans and every folder readable logs
+  nothing — the retention passes' no-op policy.
+- **Who decides.** The user. The app never reclaims the space on its
+  own: a copy with no row may be the only surviving evidence of a
+  file (that is exactly the abort window D-091 records), so a silent
+  sweep would destroy data the run was trying to protect.
+- **What to do.** Inspect `<data dir>/backups/` and delete a file by
+  hand when its content is not needed. There is no UI command for
+  this in v1 (the backups screen and `backups_list` are T-125's);
+  the log line is the whole report surface, and it repeats at every
+  open while the files stay.
+
+Degrade, never abort (the D-046/D-054 startup-housekeeping posture,
+the T-253 pass's own contract): a failed records read
+(`logging::backup_orphans_failed`) or an unlistable `backups/` root
+(`logging::backup_orphans_unreadable`) logs and returns — the open
+succeeds, and the next open retries the whole report. A project
+folder that cannot be listed is not an error: it is counted in
+`unreadable_folders` and the readable folders are still judged (the
+protective copy pass's partially-unreadable posture). A missing
+`backups/` root is the quiet answer, not an error. A non-UTF-8 entry
+name fails the pass: a layout path is TEXT on the wire, so such a
+name could never be claimed by a row and the counts could not be
+trusted.
+
+Tests: `backup_orphans.rs`'s inline module (twelve) — the
+claimed/unclaimed pair (the only difference is the row's claim), a
+root-level `.bak` and a non-`.bak` file, foreign files and a
+directory squatting on a `.bak` name ignored, a non-UTF-8 entry name
+failing the pass closed (Unix arm, skipping when the filesystem
+refuses the bytes), folders counted once each, a missing root as the
+quiet answer, the unreadable folder counted beside the readable ones
+still judged (root-gated Unix arm, the availability suite's gate),
+and five facade tests — four over a real migrated database with the
+store's own writers, the root-unlistable one over an in-memory table
+built for that arm alone: the orphan line with its counts and no
+fragment of the fixture's user data (folder slug, project name and
+label, source path, layout prefix), the claimed-only tree silent, the
+unreadable-only pass on the lower-bound message (root-gated), a
+dropped `backup_records` table on the records-read degrade line, and
+a file squatting on `backups/` on the root-unlistable line. The store
+side, `all_paths_returns_every_claimed_path_across_statuses` in
+`tests/backup_records.rs`, pins the status-blind known set and the
+empty-table answer. The wiring has its text pin in `db_tests.rs`
+(`the_open_reports_orphaned_backup_copies_after_the_retention_pass`):
+the call sits inside `Db::open`'s body, after the retention marker
+and before the `Ok(Db { … })` tail, and a repo-wide census over the
+crate's `src/*.rs` finds exactly one caller module (`db.rs`; the
+needle is assembled at run time so the pin's own text cannot count).
+Mutations run on the final tree, each restored byte-for-byte: the
+`Db::open` call removed → the wiring pin red; a comment naming the
+call dropped into another module → the census red; the claim test
+inverted (`!known.contains` → true) → the counted-orphans tests red;
+the missing-root arm removed → the quiet-answer test red; the
+facade's branch flipped (`> 0` → `== 0`) → the orphan-line and
+lower-bound tests red; `text_name` made lossy → the non-UTF-8 test
+red.
+
+Round-1 review (hy4-flash-free, report `.opencode/reviews/t332-r1.md`):
+REQUEST CHANGES — 2×P2, 3×P3, all five taken in the amend. P2-1: the
+architecture paragraph named `project_folders`; the emitted field is
+`orphan_folders` (fixed there). P2-2: three documented branches had
+no test — the non-UTF-8 fail-closed, a root-level `.bak` and the two
+degrade lines — each gained its test (above). P3-1: "no orphans logs
+nothing" was false for the unreadable-only pass, and "per session
+start" contradicted the per-open trigger; the message split and the
+wording are fixed. P3-2: the wiring pin now names the enclosing
+function and the repo-wide census. P3-3: the SEC-008 assertion now
+covers the fixture's real name, label and paths instead of a slug
+that appears nowhere. The reviewer's note on complexity is answered
+by the `HashSet` above.
+
+Docs: ARCHITECTURE.md's open-path section gains the report's
+paragraph beside the T-253 pass, and its module table the new file.
+No spec change: §5.5/§7.6 pin the layout and the copies, not a
+housekeeping report, and the requirement set has no row for it —
+this is the owner's ruling, recorded here.

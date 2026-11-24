@@ -40,7 +40,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use eunomia_core::backup_name::{BackupTime, backup_relative_path};
 use eunomia_core::project::{BaseName as CoreBaseName, ProjectId, Scheme as CoreScheme};
 use eunomia_store::backup_records::{
-    BackupRecordStatus, BackupRecordsError, CheckedCopy, NewBackupRecord, insert, last_checked,
+    BackupRecordStatus, BackupRecordsError, CheckedCopy, NewBackupRecord, all_paths, insert,
+    last_checked,
 };
 use eunomia_store::backup_retention;
 use eunomia_store::projects::{AddedVia, NewProject};
@@ -673,8 +674,49 @@ fn last_checked_answers_none_where_no_checked_copy_exists() {
     );
 }
 
-// ---- the T-114 handshake ----------------------------------------------
+/// The orphan report's known-set read (T-332): every claimed path comes
+/// back, **whatever** its status — the terminal rows still claim the
+/// names they refer to, which is what keeps a `pruned` copy's absent
+/// file out of the report and a `discarded` one from ever being called
+/// an orphan.
+#[test]
+fn all_paths_returns_every_claimed_path_across_statuses() {
+    let (conn, _guard, _data) = records_db("all-paths");
+    let project = seed_project(&conn, 1);
+    let run = seed_run(&conn, &project);
+    let source = "/repos/repo-1/AGENTS.md";
+    let mut expected: Vec<String> = Vec::new();
+    for (n, status) in [
+        (1, BackupRecordStatus::Ok),
+        (2, BackupRecordStatus::Pruned),
+        (3, BackupRecordStatus::Missing),
+        (4, BackupRecordStatus::Discarded),
+    ] {
+        let backup_path = agents_path(&project, "Project 1", n, stamp_time(n));
+        insert(
+            &conn,
+            &sample_record(&project, &run, source, &backup_path, &digest(n), status),
+        )
+        .expect("the fixture record should insert");
+        expected.push(backup_path);
+    }
+    expected.sort();
 
+    assert_eq!(
+        all_paths(&conn).expect("the read should work"),
+        expected,
+        "every status's path is a claim, in stored-path order"
+    );
+
+    // The empty table is the honest empty answer, not an error.
+    let (empty, _guard, _data) = records_db("all-paths-empty");
+    assert_eq!(
+        all_paths(&empty).expect("the read should work"),
+        Vec::<String>::new()
+    );
+}
+
+// ---- the T-114 handshake ----------------------------------------------
 #[test]
 fn the_retention_service_prunes_rows_written_by_this_repository() {
     // The D-122 compatibility criterion, end to end: three checked

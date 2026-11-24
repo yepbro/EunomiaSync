@@ -32,6 +32,13 @@ pub(crate) mod db;
 // the same transaction (DECISIONS.md D-054).
 pub(crate) mod retention;
 
+// The orphaned project-backup report (T-332, the owner ruling of
+// 2026-11-24): the read-only listing of `backups/` against the
+// `backup_records` rows, run at the end of every successful
+// `Db::open`. Never deletes — the debris is reported and the user
+// decides (D-190).
+pub(crate) mod backup_orphans;
+
 // The recovery-screen backend (spec §7.10 command notes, §10
 // E_DB_CORRUPT row; T-024): the file mechanics behind
 // `db_recreate`/`db_restore_backup` and the `db-backups/` listing.

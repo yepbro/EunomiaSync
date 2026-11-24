@@ -1027,6 +1027,70 @@ pub(crate) fn db_backup_retention_failed(path: &Path, error: &std::io::Error) {
     );
 }
 
+/// Orphaned project-backup copies were found (T-332, the owner ruling
+/// of 2026-11-24): `.bak` files under `backups/` that no
+/// `backup_records` row claims. `warn`: the app deliberately does
+/// **not** delete them (a copy with no row may be the only surviving
+/// evidence of a file — D-091's crash window), so the line asks the
+/// user to look, and nothing retries on its own: the next open
+/// reports again while the files stay.
+///
+/// The payload is numeric only — orphaned files, the project folders
+/// holding at least one, and the folders the pass could not list.
+/// Two messages, never both: the orphan one when files were counted,
+/// and a distinct "count is a lower bound" one when nothing was
+/// counted but a folder could not be listed (a zero from a partial
+/// pass must not read as a clean tree). No paths and no folder
+/// names: a folder name carries the project-name slug, which is
+/// stored user text (SEC-008). The manual rule the line belongs to
+/// is recorded in DECISIONS.md (D-190).
+pub(crate) fn backup_orphans(report: &crate::backup_orphans::OrphanReport) {
+    if report.orphan_files > 0 {
+        tracing::warn!(
+            target: "eunomia::db",
+            orphan_files = report.orphan_files,
+            orphan_folders = report.orphan_folders,
+            unreadable_folders = report.unreadable_folders,
+            "backup copies with no backup_records row found; they are left in place for manual review"
+        );
+    } else {
+        // Nothing counted, but a folder could not be listed: the zero
+        // above is a lower bound, so the line must not read as "no
+        // orphans" — the distinct message says which fact it carries.
+        tracing::warn!(
+            target: "eunomia::db",
+            orphan_files = report.orphan_files,
+            orphan_folders = report.orphan_folders,
+            unreadable_folders = report.unreadable_folders,
+            "the orphan backup report could not list every project folder; the orphan count is a lower bound"
+        );
+    }
+}
+
+/// The orphan report's read of `backup_records` failed: the pass
+/// degrades with a line and never fails the open (the D-046/D-054
+/// startup-housekeeping posture); the next open retries.
+pub(crate) fn backup_orphans_failed(error: &eunomia_store::backup_records::BackupRecordsError) {
+    tracing::warn!(
+        target: "eunomia::db",
+        error = %error,
+        "orphan backup report could not read the backup records; continuing without it"
+    );
+}
+
+/// The orphan report could not list `backups/` itself: the same
+/// degrade posture as [`backup_orphans_failed`], with the path and
+/// the OS cause (SEC-008: paths are allowed; the io error carries no
+/// stored text).
+pub(crate) fn backup_orphans_unreadable(path: &Path, error: &std::io::Error) {
+    tracing::warn!(
+        target: "eunomia::db",
+        path = %path.display(),
+        error = %error,
+        "orphan backup report could not list backups/; continuing without it"
+    );
+}
+
 /// A database operation hit SQLite's busy/locked state, its
 /// `busy_timeout` expired, and the `Db::run` executor is replaying
 /// the whole operation in a fresh transaction (spec §10 `E_DB_LOCKED`

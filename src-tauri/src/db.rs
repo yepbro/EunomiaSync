@@ -366,6 +366,14 @@ impl Db {
         // `retention::cleanup_db_backups` is best-effort (it logs its
         // own failures through the facade) and can never fail this open.
         crate::retention::cleanup_db_backups(&backups_dir, Timestamp::now());
+        // The orphaned-copy report (T-332, the owner ruling of
+        // 2026-11-24): a read-only listing of `backups/` against the
+        // `backup_records` rows, the same open-time trigger as the
+        // pass above and the same best-effort contract — it logs its
+        // own failures through the facade and can never fail this
+        // open. Nothing is deleted here: the debris is made visible
+        // and the decision stays with the user (D-190).
+        crate::backup_orphans::report(data_dir, &connection);
         Ok(Db {
             connection: Arc::new(Mutex::new(connection)),
             backups_dir,

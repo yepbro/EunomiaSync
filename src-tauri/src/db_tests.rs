@@ -2661,8 +2661,72 @@ fn busy_retries_are_logged_through_the_facade() {
     );
 }
 
-// ---- SEC-007 modes after the real first run (Unix only) -------------------
-//
+#[test]
+fn the_open_reports_orphaned_backup_copies_after_the_retention_pass() {
+    // Wiring pin (the `busy_retries_are_logged_through_the_facade`
+    // style): the orphan report's only caller is `Db::open`'s tail,
+    // and the trigger order is its contract — the protective-copy
+    // pass first (it may retire db-backups/ files that same open),
+    // then the read-only listing of `backups/`, then the handle.
+    // `config_tests::strip_comments` keeps prose about the mechanism
+    // from satisfying the pin, and the needle is assembled at run
+    // time so this file's own text cannot count as a caller below.
+    let needle = ["backup_orphans", "::", "report", "("].concat();
+    let db_module = crate::config_tests::strip_comments(include_str!("db.rs"));
+    let open = db_module
+        .find("pub(crate) fn open(")
+        .expect("db.rs must keep `Db::open`");
+    let retention = db_module
+        .find("retention::cleanup_db_backups(")
+        .expect("db.rs must keep the protective-copy retention pass");
+    let report = db_module
+        .find(&format!("{needle}data_dir, &connection)"))
+        .expect(
+            "db.rs must run the orphan report with the data root and the \
+             open connection (T-332)",
+        );
+    let tail = db_module
+        .find("Ok(Db {")
+        .expect("db.rs must keep the open's Ok(Db { … }) tail");
+    assert!(
+        open < retention && retention < report && report < tail,
+        "the order is open → retention pass → orphan report → handle \
+         (positions: open {open}, retention {retention}, report {report}, \
+         tail {tail})"
+    );
+
+    // Repo-wide: exactly one module's text mentions the call, and it is
+    // `db.rs`. The census is deliberately comment-blind (raw sources,
+    // not stripped): a comment that names the call in another module is
+    // still a drift signal, and this pin's own needle is assembled at
+    // run time so it cannot count itself.
+    let mut callers: Vec<String> = Vec::new();
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for entry in std::fs::read_dir(&src).expect("the crate's src/ must be listable") {
+        let entry = entry.expect("a readable src/ entry");
+        if entry
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("rs")
+        {
+            continue;
+        }
+        let text = std::fs::read_to_string(entry.path())
+            .unwrap_or_else(|err| panic!("{} must read: {err}", entry.path().display()));
+        if text.contains(&needle) {
+            callers.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    callers.sort();
+    assert_eq!(
+        callers,
+        vec!["db.rs".to_owned()],
+        "the orphan report has exactly one caller module (T-332, D-190)"
+    );
+}
+
+// ---- SEC-007 modes after the real first run (Unix only) -------------------//
 // The T-022 acceptance criterion: a Linux/macOS test checks the modes
 // after the first run. The "first run" here is the real startup seam —
 // `ensure_data_layout` + `Db::open` + the ERR-001 daily copy, the same
