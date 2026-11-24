@@ -1741,6 +1741,93 @@ pub(crate) fn scan_progress_emit_failed(error: &tauri::Error) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The variant commands (T-329, §7.10 Library module): the one failure
+// edge per command, the `projects_reorder_failed` shape over the
+// Library target. The reachable answers are the honest `NoDatabase`
+// fallback (recovery mode), the typed `E_VALIDATION` field refusals
+// (§6.9 rules, the LIB/DB-010/DB-012 outcomes — nothing was written),
+// `E_CONTENT_RESERVED` for a reserved marker line (DB-016), and the
+// classified store errors inside the transaction. The verified no-ops
+// (a re-sent delete, a re-promoted main, a no-change save) are
+// success-shaped answers and deliberately log nothing (nothing
+// happened; the journal records events, and a refusal or a no-op
+// wrote none), and a *successful* write is the journal's own
+// `variant.*` entry, written inside the operation's transaction
+// (D-051) — never duplicated into the file log (the info+user+ok
+// unmirrored shape).
+// ---------------------------------------------------------------------------
+
+/// The `variant_create` command failed (T-329, §10's every-error
+/// rule).
+pub(crate) fn variant_create_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "adding a variant failed"
+    );
+}
+
+/// The `variant_update` command failed (T-329, §10's every-error
+/// rule).
+pub(crate) fn variant_update_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "saving a variant failed"
+    );
+}
+
+/// The `variant_set_main` command failed (T-329, §10's every-error
+/// rule).
+pub(crate) fn variant_set_main_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "changing the main variant failed"
+    );
+}
+
+/// The `variant_delete` command failed (T-329, §10's every-error
+/// rule).
+pub(crate) fn variant_delete_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "deleting a variant failed"
+    );
+}
+
+/// The `variant_restore` command failed (T-329, §10's every-error
+/// rule).
+pub(crate) fn variant_restore_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "restoring a variant failed"
+    );
+}
+
 /// The availability recheck failed (T-079, D-09/DB-032, §10's
 /// every-error rule): the payload is the error's own §7.10 vocabulary,
 /// in the `activity_list_failed` shape. Logged by the fire-and-forget

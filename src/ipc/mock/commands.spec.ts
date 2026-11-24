@@ -186,7 +186,16 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
       position,
       title,
       state,
-      variants,
+      // The variant-command columns (T-329's union extension) filled
+      // with the hand-built world's fixed date: a fixture-shaped
+      // literal list becomes a complete `MockVariantRow` list.
+      variants: variants.map((variant) => ({
+        ...variant,
+        state: 'active' as const,
+        createdAt: '2026-11-20T09:00:01.000Z',
+        updatedAt: '2026-11-20T09:00:01.000Z',
+        deletedAt: null,
+      })),
       createdAt: '2026-11-20T09:00:01.000Z',
       updatedAt: '2026-11-20T09:00:01.000Z',
     }
@@ -1324,7 +1333,18 @@ describe('instructionCreate / instructionUpdate / instructionHide / instructionR
         position: 2,
         title: 'Root rule',
         state: 'active',
-        variants: [{ id: 'v-root', name: 'Main', content: 'Root text.', isMain: true }],
+        variants: [
+          {
+            id: 'v-root',
+            name: 'Main',
+            content: 'Root text.',
+            isMain: true,
+            state: 'active',
+            createdAt: stamp(2),
+            updatedAt: stamp(2),
+            deletedAt: null,
+          },
+        ],
         createdAt: stamp(2),
         updatedAt: stamp(2),
       },
@@ -1344,7 +1364,18 @@ describe('instructionCreate / instructionUpdate / instructionHide / instructionR
         position: 4,
         title: 'X rule',
         state: 'active',
-        variants: [{ id: 'v-x', name: 'Main', content: 'X text.', isMain: true }],
+        variants: [
+          {
+            id: 'v-x',
+            name: 'Main',
+            content: 'X text.',
+            isMain: true,
+            state: 'active',
+            createdAt: stamp(4),
+            updatedAt: stamp(4),
+            deletedAt: null,
+          },
+        ],
         createdAt: stamp(4),
         updatedAt: stamp(4),
       },
@@ -1387,7 +1418,11 @@ describe('instructionCreate / instructionUpdate / instructionHide / instructionR
     expect(state.library.find((item) => item.id === I_X)?.position).toBe(4)
     expect(state.library.find((item) => item.id === H_C)?.position).toBe(6)
     // The union narrows by kind: the created row is the instruction.
-    expect(row?.kind === 'instruction' ? row.variants : undefined).toEqual([
+    // `toMatchObject` (the landing's mechanical consequence of
+    // MockVariantRow's T-329 extension): the row now also carries the
+    // variant-command columns with wall-clock dates, so exhaustive
+    // equality cannot name them — the four pinned facts are unchanged.
+    expect(row?.kind === 'instruction' ? row.variants : undefined).toMatchObject([
       { id: created.variant_id, name: 'Main', content: 'Be concise.', isMain: true },
     ])
     expect(created.position).toBe(5)
@@ -1698,3 +1733,458 @@ describe('instructionCreate / instructionUpdate / instructionHide / instructionR
     expect(journalSize()).toBe(before)
   })
 })
+
+// ---------------------------------------------------------------------------
+// The five variant commands (§7.10 Library module, T-329): the mock twins
+// of the Rust battery — every absorbed card's definition of done over the
+// in-memory library rows, with the journal census read back through
+// `state.activity`.
+// ---------------------------------------------------------------------------
+
+describe('variantCreate', () => {
+  it('copies the main variant’s text in copy_main mode and never takes the flag', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+
+    const created = await commands.variantCreate(instruction.id, 'Copy', 'copy_main')
+
+    expect(created).toMatchObject({
+      instruction_id: instruction.id,
+      name: 'Copy',
+      content: main.content,
+      is_main: false,
+      state: 'active',
+    })
+    // The copy is a NEW row; the main keeps its flag (DB-010).
+    expect(instruction.variants.filter((row) => row.isMain)).toHaveLength(1)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'variant.created',
+      entity_type: 'variant',
+      entity_id: created.id,
+    })
+  })
+
+  it('copies the CURRENT main’s text after the flag has moved', async () => {
+    // The P2-4 twin: the copy source is the main AS IT STANDS, not any
+    // variant — the flag moves, the text changes, and the copy must
+    // carry the new main's text.
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const second = await commands.variantCreate(instruction.id, 'Second', 'empty')
+    await commands.variantSetMain(second.id)
+    await commands.variantUpdate(second.id, null, 'the new main text')
+
+    const copy = await commands.variantCreate(instruction.id, 'Copy', 'copy_main')
+
+    expect(copy.content).toBe('the new main text')
+  })
+
+  it('refuses any create when the instruction has no active main (DB-010)', async () => {
+    // The store rejects EVERY non-main insert without an active main —
+    // both sources alike (the Rust command's `MainRequired` arm). The
+    // broken state is reached by tampering the row (the tests' own
+    // reachability rule).
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    main.isMain = false
+
+    await expect(commands.variantCreate(instruction.id, 'Empty', 'empty')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'instruction_id',
+        reason: 'the instruction has no active main variant (DB-010)',
+      },
+    })
+    await expect(commands.variantCreate(instruction.id, 'Copy', 'copy_main')).rejects.toMatchObject(
+      {
+        code: 'E_VALIDATION',
+        params: { field: 'instruction_id' },
+      },
+    )
+    // The trim is persisted (§6.9): a padded-but-legal name is stored
+    // trimmed, exactly like the validator's own returned value.
+    main.isMain = true
+    const padded = await commands.variantCreate(instruction.id, '  Padded  ', 'empty')
+    expect(padded.name).toBe('Padded')
+  })
+
+  it('answers the empty text in empty mode (LIB-014/015)', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+
+    const created = await commands.variantCreate(instruction.id, 'Empty', 'empty')
+
+    expect(created.content).toBe('')
+    expect(created.state).toBe('active')
+  })
+
+  it('refuses the NOCASE twin of an active name, writing nothing', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const before = instruction.variants.length
+    const journalBefore = state.activity.length
+
+    await expect(commands.variantCreate(instruction.id, 'MAIN', 'empty')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'variant_name' },
+    })
+
+    expect(instruction.variants).toHaveLength(before)
+    expect(state.activity).toHaveLength(journalBefore)
+  })
+
+  it('applies the §6.9 name rules with the measured facts', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+
+    await expect(commands.variantCreate(instruction.id, '   ', 'empty')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'variant_name' },
+    })
+    await expect(
+      commands.variantCreate(instruction.id, 'a'.repeat(101), 'empty'),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'variant_name', length: '101' },
+    })
+    await expect(commands.variantCreate(instruction.id, 'a\0b', 'empty')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'variant_name', index: '1' },
+    })
+    // The legal edge passes.
+    await expect(
+      commands.variantCreate(instruction.id, 'a'.repeat(100), 'empty'),
+    ).resolves.toMatchObject({ name: 'a'.repeat(100) })
+  })
+})
+
+describe('variantUpdate', () => {
+  it('folds CRLF to LF and journals one changed entry', async () => {
+    const state = mockState()
+    const main = mainVariantOf(firstInstructionOf(state))
+
+    const updated = await commands.variantUpdate(main.id, null, 'Be brief.\r\nSecond\r\n')
+
+    expect(updated.content).toBe('Be brief.\nSecond\n')
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'variant.changed',
+      entity_type: 'variant',
+      entity_id: main.id,
+    })
+  })
+
+  it('refuses the reserved marker line with E_CONTENT_RESERVED', async () => {
+    const state = mockState()
+    const main = mainVariantOf(firstInstructionOf(state))
+    const stored = main.content
+
+    await expect(
+      commands.variantUpdate(main.id, null, 'x\n<!-- EUNOMIASYNC:END -->'),
+    ).rejects.toMatchObject({
+      code: 'E_CONTENT_RESERVED',
+      params: { field: 'variant_text', line: '2', marker: '<!-- EUNOMIASYNC:END -->' },
+    })
+    expect(main.content).toBe(stored)
+  })
+
+  it('catches a marker hidden behind a leading BOM at the build form’s own line', async () => {
+    // P2-3's twin: `normalize::variant_text` strips the leading BOM and
+    // blank lines before the DB-016 scan, so the marker IS caught (and
+    // its line number counts from the stripped form).
+    const state = mockState()
+    const main = mainVariantOf(firstInstructionOf(state))
+
+    await expect(
+      commands.variantUpdate(main.id, null, '\uFEFF<!-- EUNOMIASYNC:BEGIN -->'),
+    ).rejects.toMatchObject({
+      code: 'E_CONTENT_RESERVED',
+      params: { line: '1', marker: '<!-- EUNOMIASYNC:BEGIN -->' },
+    })
+    await expect(
+      commands.variantUpdate(main.id, null, '\n\n<!-- EUNOMIASYNC:END -->'),
+    ).rejects.toMatchObject({
+      code: 'E_CONTENT_RESERVED',
+      params: { line: '1' },
+    })
+    // The whitespace classes are ASCII exactly like the backend's
+    // (`char::is_ascii_whitespace`): a trailing form-feed trims (the
+    // marker line is caught), and a leading NBSP line is NOT empty (the
+    // marker stays on line 2 — Unicode trim would drop it to 1).
+    await expect(
+      commands.variantUpdate(main.id, null, '<!-- EUNOMIASYNC:END -->\f'),
+    ).rejects.toMatchObject({
+      code: 'E_CONTENT_RESERVED',
+      params: { line: '1' },
+    })
+    await expect(
+      commands.variantUpdate(main.id, null, '\u00A0\n<!-- EUNOMIASYNC:END -->'),
+    ).rejects.toMatchObject({
+      code: 'E_CONTENT_RESERVED',
+      params: { line: '2' },
+    })
+  })
+
+  it('enforces the 262144-character limit at both edges', async () => {
+    const state = mockState()
+    const main = mainVariantOf(firstInstructionOf(state))
+
+    await expect(commands.variantUpdate(main.id, null, 'a'.repeat(262_144))).resolves.toMatchObject(
+      { content: 'a'.repeat(262_144) },
+    )
+    await expect(commands.variantUpdate(main.id, null, 'a'.repeat(262_145))).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'variant_text', length: '262145' },
+    })
+  })
+
+  it('applies the §6.9 name rules with the measured facts', async () => {
+    const state = mockState()
+    const main = mainVariantOf(firstInstructionOf(state))
+
+    await expect(commands.variantUpdate(main.id, '   ', null)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'variant_name' },
+    })
+    await expect(commands.variantUpdate(main.id, 'a'.repeat(101), null)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'variant_name', length: '101' },
+    })
+    // The positional-scan order (the validator's own): NUL before the
+    // later break, both reported at the first offender's index, with
+    // the character's stable name like the Rust mapper's.
+    await expect(commands.variantUpdate(main.id, 'a\0b\nc', null)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'variant_name',
+        reason: 'a variant name must not contain NUL',
+        index: '1',
+        character: 'NUL',
+      },
+    })
+    await expect(commands.variantUpdate(main.id, 'a\nb', null)).rejects.toMatchObject({
+      params: { reason: 'a variant name is one line', index: '1', character: 'LF' },
+    })
+    await expect(commands.variantUpdate(main.id, 'a\rb', null)).rejects.toMatchObject({
+      params: { reason: 'a variant name is one line', index: '1', character: 'CR' },
+    })
+    // The trim is persisted on the rename path (§6.9).
+    const renamed = await commands.variantUpdate(main.id, '  Renamed  ', null)
+    expect(renamed.name).toBe('Renamed')
+    const liveMain = liveVariantOf(state, main.id)
+    if (!liveMain) throw new Error('the renamed row must still be in the store')
+    expect(liveMain.name).toBe('Renamed')
+  })
+
+  it('answers a save without changes with nothing journaled (ALG-070)', async () => {
+    const state = mockState()
+    const main = mainVariantOf(firstInstructionOf(state))
+    const journalBefore = state.activity.length
+
+    const fieldless = await commands.variantUpdate(main.id, null, null)
+    expect(fieldless.content).toBe(main.content)
+
+    const sameValues = await commands.variantUpdate(main.id, main.name, main.content)
+    expect(sameValues.content).toBe(main.content)
+
+    expect(state.activity).toHaveLength(journalBefore)
+  })
+})
+
+describe('variantSetMain', () => {
+  it('leaves exactly one active main and demotes the previous one', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const main = activeVariantOf(instruction)
+    const created = await commands.variantCreate(instruction.id, 'Second', 'empty')
+
+    const promoted = await commands.variantSetMain(created.id)
+
+    expect(promoted.is_main).toBe(true)
+    if (main) expect(main.isMain).toBe(false)
+    expect(instruction.variants.filter((row) => row.isMain)).toHaveLength(1)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'variant.changed',
+      entity_id: created.id,
+    })
+  })
+
+  it('answers re-promoting the current main as the journaled-nothing no-op', async () => {
+    const state = mockState()
+    const main = mainVariantOf(firstInstructionOf(state))
+    const journalBefore = state.activity.length
+
+    const answer = await commands.variantSetMain(main.id)
+
+    expect(answer.is_main).toBe(true)
+    expect(state.activity).toHaveLength(journalBefore)
+  })
+})
+
+describe('variantDelete', () => {
+  it('moves every assignment to the default main — none disappears', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const main = activeVariantOf(instruction)
+    const created = await commands.variantCreate(instruction.id, 'Second', 'empty')
+    // The assignment rows the delete moves: two projects pointed at the
+    // doomed variant (the store-level world the real command pins).
+    const projects = state.projects.filter((row) => row.state === 'active').slice(0, 2)
+    for (const project of projects) {
+      state.assignments.push({
+        projectId: project.id,
+        instructionId: instruction.id,
+        variantId: created.id,
+      })
+    }
+    const before = state.assignments.filter((row) => row.instructionId === instruction.id).length
+
+    const deleted = await commands.variantDelete(created.id, null)
+
+    expect(deleted.state).toBe('deleted')
+    expect(deleted.is_main).toBe(false)
+    const after = state.assignments.filter((row) => row.instructionId === instruction.id)
+    expect(after).toHaveLength(before)
+    if (main) expect(after.every((row) => row.variantId === main.id)).toBe(true)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'variant.deleted',
+      entity_id: created.id,
+      details: JSON.stringify({ changed: 2 }),
+    })
+  })
+
+  it('refuses the last active variant whatever the replacement names', async () => {
+    const state = mockState()
+    const main = mainVariantOf(firstInstructionOf(state))
+    const journalBefore = state.activity.length
+
+    await expect(commands.variantDelete(main.id, null)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'id',
+        reason: 'the last active variant of an instruction cannot be deleted',
+      },
+    })
+    // The named arm is the LIB-025 guard's own refusal (field `id`), not
+    // the replacement-shape one — the guard runs first, exactly like the
+    // store's check order.
+    await expect(commands.variantDelete(main.id, main.id)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'id',
+        reason: 'the last active variant of an instruction cannot be deleted',
+      },
+    })
+    expect(main.state).toBe('active')
+    expect(state.activity).toHaveLength(journalBefore)
+  })
+
+  it('requires a successor for the main and promotes it (DB-010 keeps one)', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const main = activeVariantOf(instruction)
+    if (!main) throw new Error('the fixture instruction must have its Main')
+    const created = await commands.variantCreate(instruction.id, 'Second', 'empty')
+
+    await expect(commands.variantDelete(main.id, null)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'replacement' },
+    })
+
+    const deleted = await commands.variantDelete(main.id, created.id)
+    expect(deleted.state).toBe('deleted')
+    // `created` is the create-time wire snapshot; the live row is the
+    // store's — the successor's promotion lives there.
+    const liveCreated = liveVariantOf(state, created.id)
+    if (!liveCreated) throw new Error('the created variant must still be in the store')
+    expect(liveCreated.isMain).toBe(true)
+    expect(instruction.variants.filter((row) => row.isMain)).toHaveLength(1)
+  })
+})
+
+describe('variantRestore', () => {
+  it('returns a soft-deleted variant to active without the main flag', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const created = await commands.variantCreate(instruction.id, 'Second', 'empty')
+    await commands.variantDelete(created.id, null)
+
+    const restored = await commands.variantRestore(created.id)
+
+    expect(restored.state).toBe('active')
+    expect(restored.deleted_at).toBeNull()
+    expect(restored.is_main).toBe(false)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'variant.restored',
+      entity_id: created.id,
+    })
+  })
+
+  it('refuses a name reused by an active twin (E_VALIDATION)', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const created = await commands.variantCreate(instruction.id, 'Second', 'empty')
+    await commands.variantDelete(created.id, null)
+    const twin = await commands.variantCreate(instruction.id, 'SECOND', 'empty')
+
+    await expect(commands.variantRestore(created.id)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'variant_name' },
+    })
+
+    // `created` is the create-time wire snapshot; the live rows are the
+    // store's — the delete's effect lives there.
+    const liveCreated = liveVariantOf(state, created.id)
+    const liveTwin = liveVariantOf(state, twin.id)
+    if (!liveCreated || !liveTwin) throw new Error('both rows must still be in the store')
+    expect(liveCreated.state).toBe('deleted')
+    expect(liveTwin.state).toBe('active')
+  })
+
+  it('answers restoring an active variant as the journaled-nothing no-op', async () => {
+    const state = mockState()
+    const main = mainVariantOf(firstInstructionOf(state))
+    const journalBefore = state.activity.length
+
+    const answer = await commands.variantRestore(main.id)
+
+    expect(answer.state).toBe('active')
+    expect(state.activity).toHaveLength(journalBefore)
+  })
+})
+
+/** The first kind-narrowed instruction row of the fixture world — the
+ * union model's parent row the variant tests operate on. */
+function firstInstructionOf(state: ReturnType<typeof mockState>) {
+  const row = state.library.find((item) => item.kind === 'instruction')
+  if (!row || row.kind !== 'instruction') {
+    throw new Error('the fixture world must hold an instruction')
+  }
+  return row
+}
+
+/** The instruction row's ACTIVE main variant — the fixture world's
+ * `Main` (DB-010). */
+function mainVariantOf(instruction: ReturnType<typeof firstInstructionOf>) {
+  const main = instruction.variants.find((row) => row.isMain && row.state === 'active')
+  if (!main) throw new Error('the fixture instruction must have its Main')
+  return main
+}
+
+/** The live variant row behind a wire snapshot's id (the union's nested
+ * lookup — a wire answer is a snapshot; the store's row is live). */
+function liveVariantOf(state: ReturnType<typeof mockState>, variantId: string) {
+  for (const row of state.library) {
+    if (row.kind !== 'instruction') continue
+    const variant = row.variants.find((candidate) => candidate.id === variantId)
+    if (variant) return variant
+  }
+  return null
+}
+
+/** The first ACTIVE variant of the instruction — the fixture world's
+ * `Main` (the union-narrowed `activeVariantOf`). */
+function activeVariantOf(instruction: ReturnType<typeof firstInstructionOf>) {
+  return instruction.variants.find((row) => row.state === 'active') ?? null
+}

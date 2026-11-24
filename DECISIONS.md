@@ -22303,3 +22303,321 @@ are the tracking unit; this line is the D-record duplicate the board
 rule asks for. Written as a service commit in main after the merge —
 md-only, no suites under the md-only regime; prettier and the
 pre-commit hook gate it.
+
+### D-189 — The five variant commands (T-329): the command contract, the version/journal gating, and the layering against D-125's UI rulings — 2026-11-24
+
+Problem: the batch card T-329 (absorbing T-087…T-091) lands the §7.10
+Library-module variant commands (`variant_create`, `variant_update`,
+`variant_set_main`, `variant_delete`, `variant_restore`) over the
+already-landed store repository, §6.9 validators, version recorder and
+journal — and the sources left five readings open.
+
+Solution — the chosen readings, in the order the card lists its parts:
+
+1. **Placement: a new module, not `commands.rs`.** The commands live in
+   `src-tauri/src/variants.rs` (tests in `variants_tests.rs`), the
+   `scan.rs` precedent for a §7.10 command group: the parallel siblings
+   T-083/T-328 (same base commit) edit `commands.rs` from their own
+   cards, and a separate module is the minimal conflict surface the
+   batch brief demands.
+2. `variant_create(instruction_id, name, source)` with
+   `source ∈ {copy_main, empty}` (LIB-017…022's "a copy of the main
+   one or empty"). The name is the CALLER's — the "first free name
+   Variant N" prefill is the dialog's affordance (a UI task; the
+   command validates §6.9 and the store enforces NOCASE uniqueness);
+   `copy_main` reads the main's CURRENT stored content INSIDE the same
+   transaction (no TOCTOU with a concurrent edit on the one
+   connection, D-037); a created variant is never main (DB-010's
+   constructive half — the store's `MainRequired` surfaces a tampered
+   no-main instruction, DB-017's surfaced-not-repaired posture).
+3. `variant_update(id, name, content)`: both fields optional, `None`
+   leaves the field unchanged (the store's `VariantUpdate` shape).
+   §10's own rows split the card's "запрет NUL и строк-маркеров
+   (E_CONTENT_RESERVED)": NUL and the 262,144-character limit are field
+   validation (`E_VALIDATION`, §10's "a field failed validation
+   (table 6.9)"); a reserved marker line is `E_CONTENT_RESERVED`
+   (§10's literal situation row "the text contains a scheme B marker
+   line"). The CRLF→LF fold stays the store's own §6.9 clause (D-076)
+   and needs no command-side twin.
+4. `variant_delete(id, replacement)`: `None` is LIB-023's
+   default-to-main (D-125's C3), `Some` the named successor. Deleting
+   the main without a named successor is the typed `E_VALIDATION`
+   refusal (the store's `ReplacementRequired` — the card's own words:
+   "при удалении основного обязателен новый основной", the successor
+   flow D-12's original dialog wording already described: "the user
+   picks a new main variant in a dialog"). D-125's C2 ("the main
+   variant cannot be deleted at all", §6.4) stays the UI-level rule —
+   the disabled Delete button — and the spec's LIB-023/024/025 row
+   shows the ANALOGOUS layering for LIB-025 (the last variant: the
+   disabled button in the UI, the defensive refusal kept on the
+   command and the store behind it); this batch extends that
+   layering to the main-variant delete: the command and the store
+   keep the store's full contract, the UI simply never sends the
+   main-delete without a successor.
+5. **Versions and the journal are keyed to the real change.**
+   `variant_update` journals `variant.changed` IFF ALG-070 inserted a
+   version — the hash gate is §9.8's own definition of "a real change"
+   (D-16), so a save without changes writes no version AND no journal
+   (the D-051 no-false-claim rule; the store's same-value restamp of
+   `updated_at` is its own landed field-write semantics, not fought
+   here). create/delete/restore journal unconditionally after a
+   genuine transition; `variant_set_main` writes NO version (D-16: the
+   main flag is not snapshot-visible) and journals `variant.changed`
+   (the action's own "main choice" member). Idempotent re-sends
+   (delete on already-deleted, restore on active, set_main on the
+   current main) are verified no-ops — nothing written, journaled, or
+   versioned (the `projects_reorder` replayed-drag shape).
+   `variant.deleted` carries `Details::Bulk { changed }` with the
+   moved-assignment count — the number the LIB-023 confirmation names.
+6. **SYS-005 does not apply:** §5.4's own sentence — "Library edits
+   during a sync are allowed; they do not go into the current run and
+   stay dirty" — so the variant commands take no `reject_during_sync`
+   gate (unlike the project-changing commands); the DB-022 dirty
+   recalculation rides `Db::run`'s commit hook with no extra wiring.
+7. **The `LibraryError` mapping (the D-093 normalization this module
+   owns):** the typed LIB/DB-010/DB-012 outcomes → `E_VALIDATION` field
+   refusals (`id`, `instruction_id`, `variant_name`, `replacement`); a
+   corrupt vocabulary cell (`Member`) → the D-037 fallback with a
+   class-only `LibraryCorrupt` diagnostic (the T-027 round-2 rule —
+   never the stored value); `Sql` → the shared base classifier. Rule-8
+   posture: `params` carry fields, reasons, counts and indexes — never
+   the variant name or text (`LibraryFieldError`'s members become
+   `length`/`index`/`line`/`marker` numbers; no `value` param —
+   deliberately stricter than the project-name `rejected_field`
+   precedent, because the UI already holds the draft it sent).
+8. **The mock layer** wires the generator's held library/assignment
+   fixtures into the mock state (its own comment reserved them "for
+   the Library/Assignments command tasks") and models the five
+   contracts over them — NOCASE uniqueness, the exactly-one-main
+   invariant, the delete/restore flow, the `E_*` envelopes.
+
+**Addendum — the landing (same task, 2026-11-24).** The five commands
+landed per the readings above: `src-tauri/src/variants.rs` (the
+commands, the `VariantRecord` wire DTO, the `VariantSource` enum, the
+`LibraryError`/`LibraryFieldError`→`AppError` mappers, the
+`record_version`/`journal_variant`/`max_revisions` internals),
+`variants_tests.rs` (32 mock-IPC tests over a real `Db`), the `lib.rs`
+module + registration (five lines after `sync_run`, sorted), five
+`logging::variant_*_failed` edges over the `eunomia::library` target,
+`src/bindings.ts` regenerated through the export pin test, the mock
+layer wired (the generator's held library/assignment fixtures into
+`MockState` as `instructions`/`variants`/`assignments`, five mock
+implementations, 19 mock tests, the surface list), and
+`ARCHITECTURE.md`'s registered-set claim corrected to twenty-four
+(the base's "eighteen" was already one short of the nineteen it
+registered — the count now matches the `mode.spec` surface list).
+
+Checks: `cargo fmt --check`, `cargo clippy --workspace --all-targets
+-D warnings`, `cargo nextest run --workspace --test-threads=4`
+(1721/1721), `pnpm run format:check`, `pnpm run lint`, `pnpm run
+typecheck`, `pnpm test` (312/312) — all exit 0.
+
+Mutation battery (project rule 4): eighteen mutants over
+`variants.rs`, each restored byte-for-byte (md5-verified against the
+pristine copy) after its target tests went red — M1 the copy-mode
+content replaced with the empty text (the copy test); M2 the create
+claiming the main flag (both create-mode tests, via the store's
+`MainVariantExists`); M3 the duplicate-name arm falling back instead
+of the field refusal (the create-duplicate and restore-conflict
+tests); M4 the text validator skipped (the NUL, marker and limit
+tests); M5 the marker line answering `E_VALIDATION` instead of
+`E_CONTENT_RESERVED`; M6 the update's journal made unconditional (the
+no-op save test); M7 the set-main no-op dropped (the re-promotion
+test); M8 the set-main journal skipped; M9 the delete ignoring the
+caller's replacement (the named-successor test); M10 the delete's
+`Details::Bulk` count zeroed (the moved-count assert); M11 the delete
+version skipped (the delete-version and restore ladders); M12 the
+restore version skipped; M13 a `reject_during_sync` gate added to
+`variant_create` (the §5.4 library-edits-allowed pin); M14 the
+instruction pre-read dropped (the unknown-instruction field refusal —
+the store's `NotFound` arm alone would misname the field `id`);
+M15–M18 (added with round 1's strengthened tests) the copy source
+degraded to "any variant" (the copy test now seeds a moved flag and
+new text), the update's journal call removed (the table
+staged-trigger test), the create's gate order swapped (the §6.9
+refusal answering before the database resolution), and the
+`LastVariant` field mislabeled (the refusal-ordering pin). One
+layer-agreement noted by design and left as is: the version recorder's
+op+hash gate independently suppresses the re-record of an idempotent
+re-send — but the delete/restore no-op short-circuits remain
+LOAD-BEARING for the journal (without them a re-sent delete writes a
+second `variant.deleted` entry the recorder does not gate), pinned by
+the no-op tests' journal censuses.
+
+**Round-1 review addendum (same task; report
+`.opencode/reviews/t329-round1.md`, deepseek-v4.1-flash): APPROVE
+WITH NOTES — 0×P0, 0×P1, 3×P2, 14×P3 (two of the P2s and three of
+the P3s are test-audit findings).** Every finding was re-verified in
+the tree before acting; all were taken in the amend:
+
+- P2-1/P3-11: the `ARCHITECTURE.md` module tree had lost a line (the
+  `sync_phase2`/`sync_phase3` entries merged by this commit's own
+  insertion) and `variants.rs` sat out of the list's order — both
+  restored.
+- P2-2: the registered-set count is twenty-FOUR (the base's
+  "eighteen" was already one short of its nineteen registered — the
+  claim is now the pin the `mode.spec` surface list matches).
+- P2-3/P3-8/P3-9: the mock's DB-016 scan now mirrors
+  `normalize::variant_text` (the leading BOM run and empty lines
+  drop, so a hidden marker is caught at the build form's own line
+  number); `nameTaken` folds ASCII-only (the store's `COLLATE
+NOCASE` is ASCII); the name rules run one positional scan (NUL or
+  break, whichever comes first) like the validator's `name_problem`.
+- P2-4: the copy-mode test now seeds a second variant, MOVES the
+  main flag to it and edits its text — the copy must carry the
+  CURRENT main's text, not "any variant's" (the mock twin landed
+  too).
+- P2-5: the last-variant refusal asserts `params.field = "id"` —
+  LIB-025's check ordering against the replacement-shape refusal.
+- P3-1: the test counts corrected (31→32 Rust with the new table
+  test, 19 mock).
+- P3-2: the no-op short-circuits are load-bearing for the JOURNAL
+  (the recorder's gate suppresses only the version) — the addendum's
+  "belt-and-suspenders" wording above is rewritten.
+- P3-3: a table staged-trigger test pins the one-transaction claim
+  for create/update/set_main/restore (the delete kept its own).
+- P3-4: the §5.5 SYS-005 pin now drives all five commands under the
+  held flag.
+- P3-5: the no-database battery gains the invalid-name arm — the §6.9
+  refusal answers before the database resolution (the module docs'
+  gate order, now pinned).
+- P3-6: `E_CONTENT_RESERVED` carries `field = "variant_text"` (§7.3's
+  aria-invalid rule names the field), on both the Rust and mock arms.
+- P3-7: the mock's same-value save restamps `updatedAt` (the store's
+  own field-present-write semantics) while journaling nothing.
+- P3-10: D-189 reading 4's support reworded — the quoted spec
+  sentence is LIB-025's, cited now as the ANALOGY it is, with the
+  card's and D-12's own words as the direct support.
+- P3-12/P3-13/P3-14: the trim-and-persist pins (a padded create and
+  a padded rename, both sides), the two assertions that could not
+  fail (an `is_some` after a refusal; a `.find` standing in for a
+  "ONE entry" claim — now filtered-count asserts), and the mock's
+  `variantUpdate` name-rule tests.
+
+The reviewer's "checked and dropped" list (six candidate findings
+dismissed with reasons) was read and accepted as is. M15–M18 above
+are the mutation evidence for the strengthened tests.
+
+**Round-2 review addendum (same task; report
+`.opencode/reviews/t329-round2.md`, hy4-flash-free): APPROVE WITH
+NOTES — 0×P0, 0×P1, 5×P2, 7×P3 (one P2 and two P3s are test-audit
+findings).** Every finding was re-verified in the tree before acting;
+all were taken in the amend except one declined with its reason:
+
+- P2-1: the set-main and restore tests' "ONE journal entry" claims
+  are now filtered-count asserts like the create and update ones
+  (round 1 had fixed only those two).
+- P2-2: the table staged-trigger test censuses the version rows too —
+  the create arm against the whole `revisions` count (a failed create
+  has no id to look up; its would-be version row would be an orphan),
+  the restore arm against `third`'s ladder stopping at the delete —
+  and both staged tests assert `details.os_kind =
+"ConstraintViolation"`, so the error is provably the staged
+  trigger's abort, not an unrelated failure. One honest boundary: the
+  "version row committed outside the transaction" refactor the census
+  guards against is either caught by the row-count census already
+  (the row would survive too) or unreachable on this single-connection
+  executor (the error short-circuits before any post-commit write; a
+  nested `Db::run` would deadlock, not orphan) — the census is
+  defense-in-depth, and its arm's bite is proven by M19.
+- P2-3: the mock's `variantCreate` checks the active-main presence
+  UNCONDITIONALLY (the store's `MainRequired` arm fires for every
+  non-main insert, both sources alike), not only in `copy_main`.
+- P2-4: the mock's DB-016 mirror uses `char::is_ascii_whitespace`'s
+  exact set for the trailing trim and the leading empty-line test
+  (not JS `\s`/`trim()`) — a trailing form-feed now trims, a leading
+  NBSP line no longer counts as empty, both pinned by new mock tests.
+- P2-5: the landing addendum's counts corrected (rule 11).
+- P3-1: the command-level marker test gained the hidden-marker case —
+  `\u{feff}<!-- EUNOMIASYNC:BEGIN -->` answers `E_CONTENT_RESERVED`
+  with `field`, `line: 1` (the built form dropped the BOM) and the
+  literal.
+- P3-2: the last vacuous `is_some` after a refusal now asserts the
+  tampered row's `is_main == 0` (the refusal repaired nothing,
+  DB-017's posture).
+- P3-3: the no-op test gained the SEMANTIC no-op — a text whose folded
+  form equals the stored one (its CRLF twin) writes no version and
+  no journal (ALG-070's hash gate over the stored form).
+- P3-4: the mock's LIB-025 test asserts the guard's own refusal shape
+  (`field: 'id'`, the last-variant reason) on both arms — the guard,
+  not the replacement-shape refusal, answers whatever the replacement
+  names.
+- P3-5: the mock's line-break name refusal carries the `character`
+  param (`LF`/`CR`) like the Rust mapper's, pinned for both breaks.
+- P3-6: the mock's §6.9 name trim is `str::trim()`'s exact class
+  (Unicode `White_Space` — with U+0085, without the BOM), not JS
+  `trim()`'s.
+- P3-7: (a) DECLINED — the `source` enum's "anything else is empty"
+  arm is unreachable through the typed `IpcCommands` surface the mock
+  serves, and the real command's answer to a bad enum member is a
+  serde deserialization error, not a typed refusal; modeling that
+  shape in the mock would add noise without a reachable caller.
+  (b) Taken — the mock's duplicate-name probe runs only when a name
+  was sent, like the store's `Some(name)` check.
+- The audit's falsifiability gaps closed with the findings above; the
+  reviewer's "considered, not raised" items (the 262,145-raw-CRLF
+  conservative trade-off D-076 already accepts, the sibling zone) were
+  read and stand.
+
+Mutation follow-ups for the strengthened tests: M19 (the restore's
+journal entry skipped — the table test's restore arm and the restore
+test's entry count both die) and M6-revisited (the update's journal
+unconditional — the CRLF-twin pin dies with the no-op test). The
+battery's total stands at twenty kills, each restored byte-for-byte.
+
+**Landing addendum (same task; the 2026-11-24 rebase onto `70d9801`
+— main gained T-083's `library_get` (D-187) and T-328's four
+instruction lifecycle commands (D-188) since this branch's base).**
+No new review round: every change below is the mechanical consequence
+of the union the two completed rounds already audited (the same
+posture as T-328's landing).
+
+The conflict set and its resolution:
+
+- `lib.rs`: the registration union (the doc comment names both
+  groups; `library_tests` and `variants_tests` both registered; the
+  `collect_commands!` block auto-merged — thirty commands). The
+  registered-set count everywhere is **twenty-nine** (main's
+  "twenty" was itself four short of the twenty-four it registered;
+  the count is now the pin the `mode.spec` surface list matches).
+- `logging.rs`: auto-merged — every group's failure helpers kept.
+- `src/bindings.ts`: auto-merged, then proven byte-exact by the
+  export pin test (the first run green — the regenerated file is
+  identical to the merged one).
+- `DECISIONS.md`: main's D-187/D-188 tails kept; D-189 is the new
+  tail.
+- `ARCHITECTURE.md`/`docs/manual-smoke.md`: the merged truth — the
+  variant commands moved from "not registered" to the registered
+  list, the remaining library writes are headings/`items_move`.
+- **The mock store (the semantic part)**: `MockVariantRow` — T-083's
+  union shape — extended with the variant commands' own columns (the
+  §6.4 soft-delete state, the DB-002 dates), the price paid in dated
+  row literals exactly as the landing prescribed: the seeding line
+  derives per-variant dates inside the same deterministic era, T-328's
+  `instructionRow` test helper and two hand-built literals fill the
+  columns, and its create twin's main-variant literal carries them
+  (one assertion's exhaustive `toEqual` became `toMatchObject` — the
+  wall-clock dates the runtime rows stamp make exhaustive equality
+  unnameable; the pinned facts are unchanged). `assignments` is typed
+  mutable (`MockAssignmentRow`, the fixture shape un-readonly'd) so
+  the delete flow's moves write rows the store's own move would. The
+  five twins are kind-narrowed over `state.library`
+  (`variantInstructionOf`/`findVariantRow`), and their helpers are
+  deduped onto the shared ones T-328's landing left: the D-19 marker
+  literals, `splitBuiltForm` (the built-form splitter now under my
+  marker scan), and `asciiFold` (SQLite's ASCII NOCASE). One
+  mechanical touch to T-083's twin: `libraryGet` filters the row's
+  ACTIVE variants (DB-012's read side) — the variant commands are the
+  only source of deleted rows in the mock, and the real `library_get`
+  never serves one. The 20 variant mock tests adapted to the union
+  (`firstInstructionOf`/`mainVariantOf`/`liveVariantOf` narrowing
+  helpers); T-083's 6 and T-328's 15 tests' bodies are untouched.
+
+Checks on the rebased branch: `cargo fmt --check`,
+`cargo clippy --workspace --all-targets -D warnings`,
+`cargo nextest run --workspace --test-threads=4` (1755/1755 —
+T-083's and T-328's suites now run beside this batch's 32), `pnpm
+run format:check`, `pnpm run lint`, `pnpm run typecheck`, `pnpm test`
+(333/333) — all exit 0. The Rust commands, their 32 tests and the
+twenty-kill mutation battery are unchanged by the rebase: only the
+mock layer and the docs adapted.

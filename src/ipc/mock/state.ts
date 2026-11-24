@@ -15,8 +15,9 @@ import type {
   ProjectAvailabilityEventWire,
   ProjectColumnEntryWire,
   SettingItem,
+  VariantRecordWire,
 } from '../contract'
-import type { AssignmentFixture, ExclusionFixture, ProjectFixture } from '../fixtures/domain'
+import type { ExclusionFixture, ProjectFixture } from '../fixtures/domain'
 import {
   BASE_TS_MS,
   generateActivityEntries,
@@ -88,10 +89,12 @@ export type MockState = {
   library: MockLibraryRow[]
   /**
    * The assignment rows (§6.2 `project_instructions`), the fixture
-   * generator's referentially-honest set — `libraryGet`'s label join
-   * and the future assignment commands read them.
+   * generator's referentially-honest set — `libraryGet`'s label join,
+   * the variant commands' delete-flow moves (T-329) and the future
+   * assignment commands read and write them. The mutable twin of the
+   * readonly fixture shape: the seeding spreads the fixtures in.
    */
-  assignments: AssignmentFixture[]
+  assignments: MockAssignmentRow[]
   /** The journal's next autoincrement id (§6.2 `action_log.id`). */
   nextActivityId: number
   /**
@@ -130,21 +133,42 @@ export type MockLibraryRow =
       position: number
       title: string
       state: 'active' | 'hidden'
-      /** The instruction's ACTIVE variants (the fixture set has no
-       * soft-deleted ones — a known mock limit). */
+      /** The instruction's variants (§6.2 `instruction_variants`): the
+       * seeded fixture set is all-active, the variant commands' own
+       * soft deletes are the one source of `deleted` rows —
+       * `libraryGet` serves the active subset (DB-012). */
       variants: MockVariantRow[]
       createdAt: string
       updatedAt: string
     }
 
-/** One active variant of a mock instruction row (the `VariantFixture`
- * shape, mutable — a UI test edits the row, exactly like the project
- * rows). */
+/** One variant of a mock instruction row (the `VariantFixture` shape,
+ * mutable — a UI test edits the row, exactly like the project rows).
+ * The variant commands (T-329) extend the fixture shape with the
+ * `instruction_variants` columns their wire DTO reaches: the §6.4
+ * soft-delete state (the fixture set seeds none — the commands'
+ * own deletes are the only source of `deleted` rows), and the DB-002
+ * dates (one second per position, plus the variant's own index —
+ * deterministic within a reset, distinct per row). */
 export type MockVariantRow = {
   id: string
   name: string
   content: string
   isMain: boolean
+  state: 'active' | 'deleted'
+  createdAt: string
+  updatedAt: string
+  deletedAt: string | null
+}
+
+/** One `project_instructions` row in the mock store (§6.2, D-02: one
+ * variant of one instruction per project) — the fixture shape made
+ * mutable, so the variant commands' delete flow can move rows the way
+ * the store's own move does. */
+export type MockAssignmentRow = {
+  projectId: string
+  instructionId: string
+  variantId: string
 }
 
 /** Maps a store row to the `projects_list` wire shape (MAIN-028 fields). */
@@ -185,6 +209,27 @@ export function toAddedProject(row: MockProjectRow): AddedProjectWire {
     // "writable" (`null`); the warning arms stay reachable in tests by
     // editing the row directly.
     write_access_warning: null,
+  }
+}
+
+/** Maps an instruction row's variant to the `VariantRecord` wire shape
+ * (the §7.10 variant commands' answer; snake_case fields like the other
+ * DTOs — the instruction id comes from the owning row, the union
+ * model's parent link). */
+export function toVariantRecord(
+  instruction: MockLibraryRow & { kind: 'instruction' },
+  variant: MockVariantRow,
+): VariantRecordWire {
+  return {
+    id: variant.id,
+    instruction_id: instruction.id,
+    name: variant.name,
+    content: variant.content,
+    is_main: variant.isMain,
+    state: variant.state,
+    created_at: variant.createdAt,
+    updated_at: variant.updatedAt,
+    deleted_at: variant.deletedAt,
   }
 }
 
@@ -426,7 +471,16 @@ export function resetMockState(profile: FixtureProfile): MockState {
             position: item.position,
             title: item.title,
             state: item.state,
-            variants: item.variants.map((variant) => ({ ...variant })),
+            variants: item.variants.map((variant, index) => ({
+              ...variant,
+              state: 'active' as const,
+              deletedAt: null,
+              // The variant's own dates: one second per position plus
+              // its index — distinct per row, inside the same
+              // deterministic era.
+              createdAt: isoUtc(BASE_TS_MS + (item.position + 1) * 1000 + index),
+              updatedAt: isoUtc(BASE_TS_MS + (item.position + 1) * 1000 + index),
+            })),
             createdAt: isoUtc(BASE_TS_MS + item.position * 1000),
             updatedAt: isoUtc(BASE_TS_MS + item.position * 1000),
           },

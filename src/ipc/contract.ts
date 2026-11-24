@@ -60,4 +60,6 @@ export type {
   ScannedRepository,
   SettingChange,
   SettingItem,
+  VariantRecord_Serialize as VariantRecordWire,
+  VariantSource,
 } from '../bindings'

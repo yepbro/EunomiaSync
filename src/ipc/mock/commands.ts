@@ -55,15 +55,23 @@ import {
   mockState,
   toAddedProject,
   toColumnEntry,
+  toVariantRecord,
   type MockLibraryRow,
   type MockProjectRow,
   type MockState,
+  type MockVariantRow,
 } from './state'
 
 /** The page size when the caller sends none (the real command's value). */
 const DEFAULT_PAGE_LIMIT = 50
 /** The largest page served (the real command's MAX_PAGE_LIMIT). */
 const MAX_PAGE_LIMIT = 500
+
+/**
+ * The DB-006 text ceiling (§6.9), the mock's copy of the real limit —
+ * the boundary test's other edge.
+ */
+const VARIANT_TEXT_LIMIT = 262_144
 
 /**
  * The DB-002 UTC shape, character-level like `values::is_db002_shape`:
@@ -166,6 +174,162 @@ function pickColor(projects: readonly MockProjectRow[]): string {
   // Tie-break: first palette member (the real command hashes the new id —
   // an approximation, documented in DECISIONS.md D-108's limits).
   return best
+}
+
+// ---------------------------------------------------------------------------
+// The variant commands' shared helpers (§7.10 Library module, T-329): the
+// mock twins of the store's own queries and the Rust command's §6.9 rules,
+// over the union-shaped library rows (T-083's MockLibraryRow). The D-19
+// marker literals, the built-form splitter and the ASCII NOCASE fold are
+// the shared helpers below (T-328's landing); the name verdict, the trim
+// class and the save-time fold are this group's own.
+// ---------------------------------------------------------------------------
+
+/** The `E_VALIDATION` `variant_name` field refusal (the Rust command's
+ * `field_refusal` shape: field + reason, never the name itself). */
+function rejectVariantName(reason: string): Promise<never> {
+  return rejectWith('E_VALIDATION', 'errors.validation', {
+    field: 'variant_name',
+    reason,
+  })
+}
+
+/** The name's first rule offense by POSITION (the validator's own
+ * `name_problem` order): one scan reporting whichever of NUL or a line
+ * break comes first, with its code-point index and the offending
+ * character's stable name — the mock twin of
+ `LibraryFieldError::VariantNameLineBreak`/`VariantNameNul`'s shared
+ * scan, so `"a\0b\nc"` answers NUL at index 1 like the backend, not the
+ * break at index 3. */
+function firstNameOffense(trimmed: string): {
+  index: number
+  kind: 'break' | 'nul'
+  character: string
+} | null {
+  const characters = Array.from(trimmed)
+  for (let index = 0; index < characters.length; index++) {
+    const character = characters[index] as string
+    if (character === '\0') return { index, kind: 'nul', character: 'NUL' }
+    if (character === '\n' || character === '\r') {
+      return { index, kind: 'break', character: character === '\n' ? 'LF' : 'CR' }
+    }
+  }
+  return null
+}
+
+/** Rust `str::trim()`'s character class, not JavaScript's: the Unicode
+ * `White_Space` set — which includes U+0085 (JS `trim` keeps it) and
+ * excludes the BOM U+FEFF (JS `trim` removes it). The mock's names must
+ * trim exactly like the validator's, or padded-legal inputs persist
+ * differently on the two sides. */
+const RUST_TRIM =
+  '[\\t\\n\\u000B\\u000C\\r \\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]'
+const RUST_TRIM_RE = new RegExp(`^${RUST_TRIM}+|${RUST_TRIM}+$`, 'g')
+
+/** `str::trim()`'s exact behavior, for the mock's §6.9 name rules. */
+function rustTrim(value: string): string {
+  return value.replace(RUST_TRIM_RE, '')
+}
+
+/** The §6.9 name rules over a TRIMMED name (the validator's own
+ * order: the length bounds first, then the one positional scan) —
+ * answers the rejection, or null when the name is legal. */
+function nameRejection(name: string): Promise<never> | null {
+  const trimmed = rustTrim(name)
+  if (trimmed === '') {
+    return rejectVariantName('a variant name needs 1-100 characters after trimming')
+  }
+  const codePoints = Array.from(trimmed).length
+  if (codePoints > 100) {
+    return rejectWith('E_VALIDATION', 'errors.validation', {
+      field: 'variant_name',
+      reason: 'a variant name is at most 100 characters',
+      length: String(codePoints),
+    })
+  }
+  const offense = firstNameOffense(trimmed)
+  if (offense) {
+    return rejectWith('E_VALIDATION', 'errors.validation', {
+      field: 'variant_name',
+      reason:
+        offense.kind === 'nul'
+          ? 'a variant name must not contain NUL'
+          : 'a variant name is one line',
+      index: String(offense.index),
+      character: offense.character,
+    })
+  }
+  return null
+}
+
+/** The instruction row the variant commands address (the union's
+ * kind-narrowed lookup — the `instructionRowOf` twin for the variant
+ * group's own refusal shape), or null when no such row exists. */
+function variantInstructionOf(
+  state: MockState,
+  id: string,
+): (MockLibraryRow & { kind: 'instruction' }) | null {
+  const row = state.library.find((item) => item.id === id)
+  return row && row.kind === 'instruction' ? row : null
+}
+
+/** The variant row with its owning instruction (the by-id lookup the
+ * four id-addressed twins share), or null when no instruction holds a
+ * variant with this id. */
+function findVariantRow(
+  state: MockState,
+  id: string,
+): { instruction: MockLibraryRow & { kind: 'instruction' }; variant: MockVariantRow } | null {
+  for (const row of state.library) {
+    if (row.kind !== 'instruction') continue
+    const variant = row.variants.find((candidate) => candidate.id === id)
+    if (variant) return { instruction: row, variant }
+  }
+  return null
+}
+
+/** The instruction's ACTIVE main variant (DB-010's exactly-one). */
+function activeMainOf(variants: readonly MockVariantRow[]) {
+  return variants.find((row) => row.isMain && row.state === 'active') ?? null
+}
+
+/** Whether an ACTIVE variant of the instruction already carries the
+ * name NOCASE-equal (`exceptId` exempts the row being renamed) — the
+ * shared `asciiFold`, SQLite's own ASCII-only fold. */
+function nameTaken(
+  variants: readonly MockVariantRow[],
+  name: string,
+  exceptId: string | null,
+): boolean {
+  const wanted = asciiFold(name)
+  return variants.some(
+    (row) => row.state === 'active' && row.id !== exceptId && asciiFold(row.name) === wanted,
+  )
+}
+
+/** §6.9's save-time CRLF→LF fold (the store's own clause, D-076). */
+function foldCrlf(text: string): string {
+  return text.replace(/\r\n/g, '\n')
+}
+
+/** The first reserved marker line (DB-016) in the text as the build
+ * writes it — over the shared `splitBuiltForm` (the CRLF/lone-CR fold
+ * and the leading-edge drop), with the real scan's own trailing
+ * ASCII-whitespace trim first (`char::is_ascii_whitespace`, not JS
+ * `\s`), each line then equal to a D-19 literal modulo ASCII space/tab
+ * padding, at the built form's own 1-based line number. */
+function findReservedLine(text: string): { line: number; marker: string } | null {
+  // The ASCII-whitespace trailing trim, the short-escape spelling the
+  // shared `OUTPUTS_NO_TEXT` regex below uses (the `no-control-regex`
+  // rule tolerates `\v`/`\f`, not their `\u`-escape spellings).
+  const trailingTrimmed = text.replace(/[\t\n\v\f\r ]+$/, '')
+  const lines = splitBuiltForm(trailingTrimmed)
+  for (let index = 0; index < lines.length; index++) {
+    const line = (lines[index] ?? '').replace(/^[ \t]+|[ \t]+$/g, '')
+    if (line === BEGIN_MARKER) return { line: index + 1, marker: BEGIN_MARKER }
+    if (line === END_MARKER) return { line: index + 1, marker: END_MARKER }
+  }
+  return null
 }
 
 /**
@@ -585,15 +749,21 @@ export const mockCommands: IpcCommands = {
         id: row.id,
         title: row.title,
         state: row.state,
-        variant_count: row.variants.length,
+        // DB-012's read side: only the ACTIVE variants count and serve —
+        // the variant commands (T-329) put soft-deleted rows into the
+        // same list, and the real `library_get` never shows one (the
+        // landing's one mechanical touch to this twin).
+        variant_count: row.variants.filter((variant) => variant.state === 'active').length,
         created_at: row.createdAt,
         updated_at: row.updatedAt,
-        variants: row.variants.map((variant) => ({
-          id: variant.id,
-          name: variant.name,
-          is_main: variant.isMain,
-          is_empty: outputsNoText(variant.content),
-        })),
+        variants: row.variants
+          .filter((variant) => variant.state === 'active')
+          .map((variant) => ({
+            id: variant.id,
+            name: variant.name,
+            is_main: variant.isMain,
+            is_empty: outputsNoText(variant.content),
+          })),
         project_labels: labelsByInstruction.get(row.id) ?? [],
       }
     })
@@ -1006,7 +1176,18 @@ export const mockCommands: IpcCommands = {
       title: validated.trimmed,
       state: 'active',
       variants: [
-        { id: freshRowId(), name: 'Main', content: text.replace(/\r\n/g, '\n'), isMain: true },
+        {
+          id: freshRowId(),
+          name: 'Main',
+          content: text.replace(/\r\n/g, '\n'),
+          isMain: true,
+          // The variant-command columns (T-329's union extension): a
+          // created row is active with its own dates.
+          state: 'active',
+          createdAt: now,
+          updatedAt: now,
+          deletedAt: null,
+        },
       ],
       createdAt: now,
       updatedAt: now,
@@ -1324,6 +1505,287 @@ export const mockCommands: IpcCommands = {
         projects,
       },
     }
+  },
+
+  // -------------------------------------------------------------------------
+  // The five variant commands (§7.10 Library module, T-329): mock twins of
+  // the Rust commands over the wired library rows (D-189 reading 8) — the
+  // same contracts (NOCASE uniqueness, the exactly-one-main invariant, the
+  // delete/restore flow, the E_* envelopes), all synchronous over the
+  // in-memory store. The version table is NOT modelled: the real commands'
+  // answer is the row, and the history panel is the future revisions_list
+  // task's surface; the no-op detection compares the stored outcome, the
+  // ALG-070 hash gate's mock twin.
+  // -------------------------------------------------------------------------
+
+  /**
+   * `variant_create` (§7.10, T-087): the two content sources (a copy of
+   * the instruction's current main, or empty) with the caller's §6.9
+   * name; the NOCASE duplicate refusal.
+   */
+  async variantCreate(instructionId, name, source) {
+    const nameRejectionResult = nameRejection(name)
+    if (nameRejectionResult) return nameRejectionResult
+    const trimmed = rustTrim(name)
+    const state = mockState()
+    const instruction = variantInstructionOf(state, instructionId)
+    if (!instruction) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'instruction_id',
+        value: instructionId,
+        reason: 'no instruction with this id',
+      })
+    }
+    // DB-010's constructive half, BOTH sources alike (the store rejects
+    // every non-main insert when the instruction has no active main —
+    // the Rust command's `MainRequired` arm):
+    const main = activeMainOf(instruction.variants)
+    if (!main) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'instruction_id',
+        reason: 'the instruction has no active main variant (DB-010)',
+      })
+    }
+    const content = source === 'copy_main' ? main.content : ''
+    if (nameTaken(instruction.variants, trimmed, null)) {
+      return rejectVariantName(
+        'an active variant of this instruction already carries this name (case-insensitive)',
+      )
+    }
+    const now = new Date().toISOString()
+    const row: MockVariantRow = {
+      id: freshRowId(),
+      name: trimmed,
+      content,
+      isMain: false,
+      state: 'active',
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    }
+    instruction.variants.push(row)
+    journal('variant.created', { entityType: 'variant', entityId: row.id })
+    return toVariantRecord(instruction, row)
+  },
+
+  /**
+   * `variant_update` (§7.10, T-088): the §6.9 rules (CRLF fold, NUL, the
+   * reserved marker lines, the 262,144-character limit), a save without
+   * changes journaling nothing (ALG-070's mock twin over the stored
+   * outcome), one `variant.changed` entry per real change.
+   */
+  async variantUpdate(id, name, content) {
+    if (name !== null) {
+      const nameRejectionResult = nameRejection(name)
+      if (nameRejectionResult) return nameRejectionResult
+    }
+    if (content !== null) {
+      const codePoints = Array.from(content).length
+      if (codePoints > VARIANT_TEXT_LIMIT) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'variant_text',
+          reason: `variant text is at most ${VARIANT_TEXT_LIMIT} characters`,
+          length: String(codePoints),
+        })
+      }
+      const nulAt = content.indexOf('\0')
+      if (nulAt >= 0) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'variant_text',
+          reason: 'variant text must not contain NUL',
+          index: String(Array.from(content.slice(0, nulAt)).length),
+        })
+      }
+      const reserved = findReservedLine(content)
+      if (reserved) {
+        return rejectWith('E_CONTENT_RESERVED', 'errors.content_reserved', {
+          field: 'variant_text',
+          line: String(reserved.line),
+          marker: reserved.marker,
+        })
+      }
+    }
+    const state = mockState()
+    const found = findVariantRow(state, id)
+    if (!found) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        value: id,
+        reason: 'no variant with this id',
+      })
+    }
+    const { instruction, variant: row } = found
+    if (row.state !== 'active') {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        value: id,
+        reason: 'the variant is soft-deleted; restore it first',
+      })
+    }
+    const newName = name === null ? row.name : rustTrim(name)
+    const newContent = content === null ? row.content : foldCrlf(content)
+    // The duplicate-name probe runs only when a name was sent (the
+    // store checks `Some(name)` only — a fieldless or text-only save
+    // never probes).
+    if (name !== null && nameTaken(instruction.variants, newName, id)) {
+      return rejectVariantName(
+        'an active variant of this instruction already carries this name (case-insensitive)',
+      )
+    }
+    if (newName === row.name && newContent === row.content) {
+      // The verified no-op: nothing journaled (ALG-070, D-16) — but the
+      // STORE still restamps `updated_at` for a field-present write
+      // (`update_variant`'s own landed semantics, `library.rs`), so the
+      // mock restamps too: a same-value save is a written row without a
+      // real change, mock and real alike.
+      if (name !== null || content !== null) {
+        row.updatedAt = new Date().toISOString()
+      }
+      return toVariantRecord(instruction, row)
+    }
+    row.name = newName
+    row.content = newContent
+    row.updatedAt = new Date().toISOString()
+    journal('variant.changed', { entityType: 'variant', entityId: row.id })
+    return toVariantRecord(instruction, row)
+  },
+
+  /**
+   * `variant_set_main` (§7.10, T-089): demote-and-promote keeps exactly
+   * one active main (DB-010); re-promoting the current main is the
+   * journaled-nothing no-op.
+   */
+  async variantSetMain(id) {
+    const state = mockState()
+    const found = findVariantRow(state, id)
+    if (!found) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        value: id,
+        reason: 'no variant with this id',
+      })
+    }
+    const { instruction, variant: row } = found
+    if (row.state !== 'active') {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        value: id,
+        reason: 'the variant is soft-deleted; restore it first',
+      })
+    }
+    if (row.isMain) return toVariantRecord(instruction, row)
+    for (const other of instruction.variants) {
+      if (other.id !== row.id) other.isMain = false
+    }
+    row.isMain = true
+    journal('variant.changed', { entityType: 'variant', entityId: row.id })
+    return toVariantRecord(instruction, row)
+  },
+
+  /**
+   * `variant_delete` (§7.10, T-090): the default replacement is the
+   * instruction's main (LIB-023/D-125 C3), the named successor must be
+   * an active sibling, the last active variant is refused whatever the
+   * replacement names (LIB-025), and every assignment moves — none
+   * disappears.
+   */
+  async variantDelete(id, replacement) {
+    const state = mockState()
+    const found = findVariantRow(state, id)
+    if (!found) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        value: id,
+        reason: 'no variant with this id',
+      })
+    }
+    const { instruction, variant: row } = found
+    if (row.state === 'deleted') return toVariantRecord(instruction, row)
+    // LIB-025 first: the absolute refusal, whatever the replacement
+    // names.
+    const activeSiblings = instruction.variants.filter(
+      (candidate) => candidate.id !== row.id && candidate.state === 'active',
+    )
+    if (activeSiblings.length === 0) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        value: id,
+        reason: 'the last active variant of an instruction cannot be deleted',
+      })
+    }
+    let successor: MockVariantRow
+    if (replacement === null || replacement === undefined) {
+      if (row.isMain) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'replacement',
+          reason: 'deleting the main variant requires naming its successor',
+        })
+      }
+      const main = activeMainOf(instruction.variants)
+      if (!main) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'instruction_id',
+          reason: 'the instruction has no active main variant (DB-010)',
+        })
+      }
+      successor = main
+    } else {
+      const candidate = instruction.variants.find((row2) => row2.id === replacement)
+      if (!candidate || candidate.id === row.id || candidate.state !== 'active') {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'replacement',
+          value: replacement,
+          reason: 'the replacement is not an active variant of the same instruction',
+        })
+      }
+      successor = candidate
+    }
+    const moved = state.assignments.filter((assignment) => assignment.variantId === row.id).length
+    for (const assignment of state.assignments) {
+      if (assignment.variantId === row.id) assignment.variantId = successor.id
+    }
+    const now = new Date().toISOString()
+    const wasMain = row.isMain
+    row.state = 'deleted'
+    row.isMain = false
+    row.deletedAt = now
+    row.updatedAt = now
+    if (wasMain) successor.isMain = true
+    journal('variant.deleted', {
+      entityType: 'variant',
+      entityId: row.id,
+      details: JSON.stringify({ changed: moved }),
+    })
+    return toVariantRecord(instruction, row)
+  },
+
+  /**
+   * `variant_restore` (§7.10, T-091): the soft-deleted row returns to
+   * `active` without its old main flag; a name reused by an active twin
+   * is the `E_VALIDATION` refusal.
+   */
+  async variantRestore(id) {
+    const state = mockState()
+    const found = findVariantRow(state, id)
+    if (!found) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        value: id,
+        reason: 'no variant with this id',
+      })
+    }
+    const { instruction, variant: row } = found
+    if (row.state === 'active') return toVariantRecord(instruction, row)
+    if (nameTaken(instruction.variants, row.name, id)) {
+      return rejectVariantName(
+        'an active variant of this instruction already carries this name (case-insensitive)',
+      )
+    }
+    row.state = 'active'
+    row.deletedAt = null
+    row.updatedAt = new Date().toISOString()
+    journal('variant.restored', { entityType: 'variant', entityId: row.id })
+    return toVariantRecord(instruction, row)
   },
 }
 

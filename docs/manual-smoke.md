@@ -263,12 +263,14 @@ as of 2026-11-24, `src/App.vue` renders the shell only — no toolbar
 buttons, library, matrix, scan modal or sync panel. The
 scenario-relevant backend commands (`project_add_manual`,
 `scan_start`/`scan_cancel`/`scan_commit`, `sync_run`,
-`settings_get`/`settings_set`, the library read `library_get` and
-the instruction lifecycle
+`settings_get`/`settings_set`, the library read `library_get`, the
+instruction lifecycle
 `instruction_create`/`instruction_update`/`instruction_hide`/
-`instruction_restore`)
+`instruction_restore` and the variant commands
+`variant_create`/`variant_update`/`variant_set_main`/
+`variant_delete`/`variant_restore`)
 are registered (`src-tauri/src/lib.rs`); the remaining library write
-commands (variants, headings, `items_move`) and the assignment
+commands (headings, `items_move`) and the assignment
 commands are not. No entry below is executable until its surfaces
 land; each entry's Pending line names them, with the spec §16
 milestone that owns them (the milestone table maps S1/S2 → M1,

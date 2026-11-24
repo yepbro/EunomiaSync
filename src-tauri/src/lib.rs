@@ -157,6 +157,18 @@ pub(crate) mod file_watch;
 // rule D-100 reserved, fixed in D-179).
 pub(crate) mod scan;
 
+// The five Library-module variant commands (spec §7.10, T-329; the
+// batch absorbing T-087…T-091, D-189): `variant_create`,
+// `variant_update`, `variant_set_main`, `variant_delete`,
+// `variant_restore` — the command layer over the `eunomia-store`
+// library repository, the §6.9 library validators, the §9.8 version
+// recorder and the `variant.*` journal members. One `Db::run`
+// transaction per command (the write, the version row and the
+// journal entry commit or roll back together); no SYS-005 gate (§5.4
+// allows library edits during a sync). Its own module beside
+// `scan.rs` — the §7.10 command-group shape.
+pub(crate) mod variants;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -176,9 +188,12 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // `settings_get`/`settings_set` (T-030), the System
         // module's `app_info` (T-031), the Library module's
         // `markdown_preview` (T-056), the Library module's
-        // `library_get` (T-083, D-187) and its instruction
+        // `library_get` (T-083, D-187), its instruction
         // lifecycle `instruction_create`/`instruction_update`/
-        // `instruction_hide`/`instruction_restore` (T-328), the
+        // `instruction_hide`/`instruction_restore` (T-328) and its
+        // variant commands `variant_create`/`variant_update`/
+        // `variant_set_main`/`variant_delete`/`variant_restore`
+        // (T-329, the batch absorbing T-087…T-091, D-189), the
         // Projects module's `projects_list` (T-072), the System
         // module's `dialog_pick_folder` (T-073), the Projects
         // module's `project_add_manual` (T-074), the Projects
@@ -217,6 +232,11 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::settings_get::<tauri::Wry>,
             commands::settings_set::<tauri::Wry>,
             commands::sync_run::<tauri::Wry>,
+            variants::variant_create::<tauri::Wry>,
+            variants::variant_delete::<tauri::Wry>,
+            variants::variant_restore::<tauri::Wry>,
+            variants::variant_set_main::<tauri::Wry>,
+            variants::variant_update::<tauri::Wry>,
         ])
         // The registered §7.10 events: `state://project-availability`
         // (T-079, D-09/DB-032), `state://dirty` (T-101,
@@ -891,6 +911,9 @@ mod scan_tests;
 
 #[cfg(test)]
 mod library_tests;
+
+#[cfg(test)]
+mod variants_tests;
 
 #[cfg(test)]
 mod tests {

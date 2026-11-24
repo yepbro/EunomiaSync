@@ -652,6 +652,161 @@ export const commands = {
 	 *  [`logging::sync_run_failed`] edge.
 	 */
 	syncRun: (confirmEmpty: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<SyncRunOutcome_Serialize>("sync_run", { confirmEmpty }, options),
+	/**
+	 *  Adds one variant to an instruction (§7.3 LIB-017…022's "Add
+	 *  variant"): a copy of the main one or an empty one, with the
+	 *  CALLER's name.
+	 * 
+	 *  The name is §6.9-validated before anything runs (1–100 characters
+	 *  after trimming, one line, no NUL) and the store enforces the
+	 *  NOCASE uniqueness among the instruction's ACTIVE variants
+	 *  (§6.9, the `ux_variant_name` scope — a soft-deleted twin does not
+	 *  block). The "first free name `Variant N`" prefill is the dialog's
+	 *  own affordance (a UI task): the command takes the name the caller
+	 *  chose and answers the typed refusal when a retry converges on a
+	 *  taken one.
+	 * 
+	 *  [`VariantSource::CopyMain`] reads the main variant's CURRENT
+	 *  stored text inside the SAME transaction — the copy cannot drift
+	 *  from a concurrent edit (the one connection serializes the read
+	 *  and the write, D-037). An instruction with no active main (DB-010
+	 *  already broken out-of-band) is surfaced, never guessed at (the
+	 *  DB-017 posture). A created variant is never main: the first
+	 *  active variant of an instruction is its main by construction,
+	 *  and `variant_set_main` owns every later flag move.
+	 * 
+	 *  One transaction: the insert, the `create` version (ALG-071: the
+	 *  entity's first, `rev_no = 1`) and the `variant.created` journal
+	 *  entry (LOG-001…004, the variant's entity columns) commit or roll
+	 *  back together. Recovery mode (no database) answers the honest
+	 *  [`managed_db`] fallback.
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::variant_create_failed`]); a successful create is the
+	 *  journal entry itself (the D-051 mirror policy).
+	 */
+	variantCreate: (instructionId: string, name: string, source: VariantSource, options?: InvokeOptions) => __TAURI_INVOKE<VariantRecord_Serialize>("variant_create", { instructionId, name, source }, options),
+	/**
+	 *  Soft-deletes a variant (§6.4) after moving its assignments to one
+	 *  replacement — LIB-023's flow, one replacement for ALL of the
+	 *  variant's assignments.
+	 * 
+	 *  `replacement: None` (LIB-023's default, D-125's C3) moves every
+	 *  assignment to the instruction's main variant; `Some(id)` names
+	 *  the successor instead — an ACTIVE variant of the SAME
+	 *  instruction. Deleting the MAIN variant requires the named
+	 *  successor (the typed refusal otherwise — the card's "when
+	 *  deleting the main a new main is mandatory"); the successor then
+	 *  takes over the main flag with the assignments (DB-010 stays at
+	 *  exactly one). D-125's C2 ruling — "the main variant cannot be
+	 *  deleted at all" — is the UI-level rule (the disabled Delete
+	 *  button): the command keeps the store's full contract, the layering
+	 *  the spec's own LIB-023/024/025 row records for the defensive
+	 *  surfaces behind that button.
+	 * 
+	 *  The last active variant of an instruction cannot be deleted
+	 *  (LIB-025, DB-010's "at least one") — the absolute refusal,
+	 *  whatever the replacement names. Deleting an already-deleted
+	 *  variant is the verified no-op (a stale screen's double click):
+	 *  the row comes back unchanged, nothing journaled or versioned.
+	 * 
+	 *  One transaction (D-12's "everything in one transaction", §6.9's
+	 *  "an entity is never saved partly"): the assignment moves, the
+	 *  soft delete, the `delete` version (ALG-071) and the
+	 *  `variant.deleted` journal entry — whose `Details::Bulk` carries
+	 *  the moved-assignment count, the number the LIB-023 confirmation
+	 *  names. A failure between the writes rolls back everything (a
+	 *  staged-trigger test pins it). Recovery mode answers the honest
+	 *  [`managed_db`] fallback.
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::variant_delete_failed`]); a successful delete is the
+	 *  journal entry itself (the D-051 mirror policy).
+	 */
+	variantDelete: (id: string, replacement: string | null, options?: InvokeOptions) => __TAURI_INVOKE<VariantRecord_Serialize>("variant_delete", { id, replacement }, options),
+	/**
+	 *  Brings a soft-deleted variant back (§7.3 LIB-026/027, the command
+	 *  name fixed by D-009 and §7.10): `state` returns to `active`,
+	 *  `deleted_at` clears, a `restore` version is recorded and a
+	 *  `variant.restored` journal entry written.
+	 * 
+	 *  The variant returns WITHOUT its old main flag (the delete cleared
+	 *  it; DB-010 keeps exactly one active main — `variant_set_main` is
+	 *  the way back) and without its old assignments (they moved to a
+	 *  sibling by the delete; assigning is the assignment commands'
+	 *  business). The name may have been REUSED while the variant was
+	 *  deleted (the NOCASE index covers active rows only): a collision
+	 *  is the `E_VALIDATION` field refusal naming `variant_name`, and
+	 *  nothing changes — THE card criterion. Restoring an active variant
+	 *  is the verified no-op; an unknown id is the typed by-id refusal.
+	 * 
+	 *  One transaction: the restore, the `restore` version and the
+	 *  journal entry. Recovery mode answers the honest [`managed_db`]
+	 *  fallback.
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::variant_restore_failed`]); a successful restore is
+	 *  the journal entry itself (the D-051 mirror policy).
+	 */
+	variantRestore: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<VariantRecord_Serialize>("variant_restore", { id }, options),
+	/**
+	 *  Makes the variant its instruction's main one (§7.3 LIB-021 "Make
+	 *  main"), demoting the previous main — after the change the
+	 *  instruction has exactly one active main variant (DB-010, THE
+	 *  card criterion).
+	 * 
+	 *  The flag change is metadata, not a snapshot change (D-16): no
+	 *  version is written — `set_main` owns neither the name nor the
+	 *  text of the §9.8 snapshot. The journal entry is the `variant.
+	 *  changed` action's own "main choice" member. Promoting the current
+	 *  main (the UI's disabled button, defensively re-sent) is the
+	 *  verified no-op: nothing is written, journaled or versioned. A
+	 *  soft-deleted variant cannot take the flag; an unknown id is the
+	 *  typed by-id refusal.
+	 * 
+	 *  One transaction: the demote/promote pair and the journal entry
+	 *  (the store's two-statement swap stays atomic inside it — the
+	 *  `ux_variant_main` partial index would reject any other order).
+	 *  Recovery mode answers the honest [`managed_db`] fallback.
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::variant_set_main_failed`]); a successful promotion is
+	 *  the journal entry itself (the D-051 mirror policy).
+	 */
+	variantSetMain: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<VariantRecord_Serialize>("variant_set_main", { id }, options),
+	/**
+	 *  Saves a variant's name and text (§7.3 LIB-009…016): each field is
+	 *  optional — `None` (a JSON `null`) leaves that field unchanged,
+	 *  the store's own update shape.
+	 * 
+	 *  The rules, in §6.9's order: the name is 1–100 characters after
+	 *  trimming, one line, NUL-free; the text is at most 262,144
+	 *  characters, NUL-free, and free of the DB-016 reserved marker
+	 *  lines. §10's own rows split the refusals: the field rules answer
+	 *  `E_VALIDATION` naming the field (`variant_name`/`variant_text`)
+	 *  with the measured `length`/`index` riding `params`; a reserved
+	 *  marker line answers `E_CONTENT_RESERVED` with the built form's
+	 *  1-based `line` and the D-19 `marker` literal. The CRLF→LF fold is
+	 *  the store's own save-time clause (D-076): the stored form — and
+	 *  this answer's `content` — is the folded form.
+	 * 
+	 *  A version is created only on a real change (ALG-070: the
+	 *  snapshot hash against the entity's last version; D-16) — a save
+	 *  without changes writes no version, and the journal stays silent
+	 *  with it (the D-051 no-false-claim rule). A genuine change is ONE
+	 *  version and ONE `variant.changed` entry, whatever the field
+	 *  combination. A soft-deleted variant cannot be edited (restore it
+	 *  first); the NOCASE twin of an active sibling refuses the rename.
+	 * 
+	 *  One transaction: the row write, the version row and the journal
+	 *  entry. Recovery mode answers the honest [`managed_db`] fallback.
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::variant_update_failed`]); a successful save is the
+	 *  journal entry itself (the D-051 mirror policy) — a no-op save
+	 *  writes neither.
+	 */
+	variantUpdate: (id: string, name: string | null, content: string | null, options?: InvokeOptions) => __TAURI_INVOKE<VariantRecord_Serialize>("variant_update", { id, name, content }, options),
 };
 
 /** Events */
@@ -2845,6 +3000,100 @@ export type SyncRunSummary_Serialize = {
 	 */
 	projects: SyncRunProjectEntry_Serialize[],
 };
+
+/**
+ *  One `instruction_variants` row on the wire (§6.2 columns the UI
+ *  reaches): every variant command's answer — the row as it stands
+ *  after the operation, in the `ExistingProject` house shape (the
+ *  closed vocabularies in their stored spellings, the DB-002 UTC
+ *  timestamps as text).
+ */
+export type VariantRecord = VariantRecord_Serialize | VariantRecord_Deserialize;
+
+/**
+ *  One `instruction_variants` row on the wire (§6.2 columns the UI
+ *  reaches): every variant command's answer — the row as it stands
+ *  after the operation, in the `ExistingProject` house shape (the
+ *  closed vocabularies in their stored spellings, the DB-002 UTC
+ *  timestamps as text).
+ */
+export type VariantRecord_Deserialize = {
+	/**  Row id, UUIDv7 TEXT (DB-002). */
+	id: string,
+	/**  The owning instruction's id. */
+	instruction_id: string,
+	/**
+	 *  The variant name (§6.9: 1–100 characters, unique within the
+	 *  instruction among ACTIVE rows, NOCASE).
+	 */
+	name: string,
+	/**  The variant text (DB-006, stored in the §6.9 folded form). */
+	content: string,
+	/**
+	 *  The main-variant flag (DB-010: exactly one active main per
+	 *  instruction; metadata, not snapshot-visible — D-16).
+	 */
+	is_main: boolean,
+	/**  `active` or `deleted` (§6.4's soft delete). */
+	state: string,
+	/**  Creation time, DB-002 UTC ISO-8601. */
+	created_at: string,
+	/**  Last snapshot-visible write of the row. */
+	updated_at: string,
+	/**  When the variant was soft-deleted; `None` while active. */
+	deleted_at?: string | null,
+};
+
+/**
+ *  One `instruction_variants` row on the wire (§6.2 columns the UI
+ *  reaches): every variant command's answer — the row as it stands
+ *  after the operation, in the `ExistingProject` house shape (the
+ *  closed vocabularies in their stored spellings, the DB-002 UTC
+ *  timestamps as text).
+ */
+export type VariantRecord_Serialize = {
+	/**  Row id, UUIDv7 TEXT (DB-002). */
+	id: string,
+	/**  The owning instruction's id. */
+	instruction_id: string,
+	/**
+	 *  The variant name (§6.9: 1–100 characters, unique within the
+	 *  instruction among ACTIVE rows, NOCASE).
+	 */
+	name: string,
+	/**  The variant text (DB-006, stored in the §6.9 folded form). */
+	content: string,
+	/**
+	 *  The main-variant flag (DB-010: exactly one active main per
+	 *  instruction; metadata, not snapshot-visible — D-16).
+	 */
+	is_main: boolean,
+	/**  `active` or `deleted` (§6.4's soft delete). */
+	state: string,
+	/**  Creation time, DB-002 UTC ISO-8601. */
+	created_at: string,
+	/**  Last snapshot-visible write of the row. */
+	updated_at: string,
+	/**  When the variant was soft-deleted; `None` while active. */
+	deleted_at: string | null,
+};
+
+/**
+ *  Where a new variant's text comes from (§7.3 LIB-017…022's "a copy
+ *  of the main one or empty"), serialized as the spec's own words.
+ */
+export type VariantSource = 
+/**
+ *  The main variant's CURRENT stored text, read inside the same
+ *  transaction (D-189 reading 2 — no TOCTOU with a concurrent
+ *  edit on the one connection).
+ */
+"copy_main" | 
+/**
+ *  The empty text — an empty variant is legal and assignable
+ *  (LIB-014/015, D-13).
+ */
+"empty";
 
 /* Tauri Specta runtime */
 type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;
