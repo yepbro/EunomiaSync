@@ -22290,3 +22290,16 @@ apply (the rebase touched code), but the changes are the mechanical
 consequences of the union the two review rounds already audited
 (the mapper merge and the mock adaptation preserve every audited
 behavior; the suites that pin them are unchanged and green).
+
+Addendum (2026-11-24, post-merge): the task's follow-ups are carded on
+the board — two INBOX cards, no T-numbers until the owner's triage:
+the id-addressed commands' unit-value answers (whether the Library UI
+later wants the refreshed row on the wire instead of a re-read) and
+the MockState's missing `revisions`/`assignments` rows (the History
+panel's UI tests will need them; the variants batch grew the same
+store). The manual-smoke S3 assignment half named in the report is no
+card — it is `assignment_set`'s own scope (the T-331 batch). The cards
+are the tracking unit; this line is the D-record duplicate the board
+rule asks for. Written as a service commit in main after the merge —
+md-only, no suites under the md-only regime; prettier and the
+pre-commit hook gate it.
