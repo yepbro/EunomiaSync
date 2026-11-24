@@ -35,6 +35,7 @@ import type {
   IpcCommands,
   MarkdownPreview,
   ProjectAddResultWire,
+  ProjectLabelEntry,
   ScanCommitEntryWire,
   ScanRunOutcomeWire,
   ScannedRepository,
@@ -284,6 +285,22 @@ function renderMarkdownPreview(text: string): MarkdownPreview {
 // The command surface
 // ---------------------------------------------------------------------------
 
+/** Whether a variant's stored text outputs no text after ALG-002's
+ * normalization (D-13's empty variant) — the mock twin of the Rust
+ * `variant_text(content) === ""`. The normalizer's edge rules are
+ * POSITIONAL: from the left it strips BOM runs and blank lines (each
+ * a run of ASCII whitespace ended by a line break, the two
+ * interleaved), from the right a run of ASCII whitespace — so the
+ * twin is that same consumption as a regex, not a flat
+ * "every character is BOM-or-whitespace" test (round-2 P3-1: a
+ * TRAILING BOM blocks the right-hand strip — `" \u{FEFF}"` outputs
+ * text, a leading one behind blank lines does not). The character
+ * set is Rust's `char::is_ascii_whitespace` (five members) plus the
+ * BOM; `\r` is consumed as whitespace because the normalizer's
+ * line-break conversion turns it into `\n` first. */
+const OUTPUTS_NO_TEXT = /^(\u{FEFF}|[ \t\f\r ]*\n)*[ \t\f\r ]*$/u
+const outputsNoText = (content: string): boolean => OUTPUTS_NO_TEXT.test(content)
+
 export const mockCommands: IpcCommands = {
   /** `projects_list` (§7.10): column order is `sort_order` (ALG-001). */
   async projectsList(includeArchived) {
@@ -292,6 +309,95 @@ export const mockCommands: IpcCommands = {
     return visible.map(toColumnEntry)
   },
 
+  /**
+   * `library_get` (§7.10, T-083/D-187): the tree in `position` order —
+   * instructions (name, variant count, dates, state, the variants
+   * inline with LIB-014's emptiness flag and the main flag) and
+   * headings (level, the LIB-032 skip flag) — with each instruction's
+   * labels exactly the ACTIVE projects holding an assignment on it,
+   * in the projects' `sort_order`, each naming the assigned variant.
+   * The skip walk is the mock twin of the backend's gaps module (the
+   * adjacent-heading rule, instructions transparent); the variant
+   * half's known limit — the fixture set carries no soft-deleted
+   * variants, so the count is always the whole list — lives in
+   * `state.ts`'s `MockLibraryRow` note.
+   */
+  async libraryGet(includeHidden) {
+    const state = mockState()
+    // Sorted by the row's `position` — the wire contract's order —
+    // not the array order the fixture builder happens to leave: a
+    // test that reorders `mockState().library` (as the LIB-032 spec
+    // below does) keeps the answer in position order.
+    const rows = [...state.library]
+      .sort((a, b) => a.position - b.position)
+      .filter((row) => includeHidden === true || row.state === 'active')
+    // LIB-032 over the SERVED rows: the heading that arrives more than
+    // one level deeper than the heading before it is flagged — one
+    // skip per offending edge, instructions of either state
+    // transparent (the gaps module's own rule).
+    const skipped = new Set<number>()
+    let previous: { level: number } | null = null
+    rows.forEach((row, index) => {
+      if (row.kind !== 'heading') return
+      if (previous !== null && row.headingLevel > previous.level + 1) skipped.add(index)
+      previous = { level: row.headingLevel }
+    })
+    // The label join (D-187): the active projects in `sort_order` are
+    // walked in that order, so every instruction's labels come out in
+    // column order; an assignment whose project is not in the active
+    // set labels nothing (DB-014: archived rows are kept, never
+    // shown).
+    const activeProjects = [...state.projects]
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .filter((row) => row.state === 'active')
+    const assignmentsByProject = new Map<string, typeof state.assignments>()
+    for (const assignment of state.assignments) {
+      const list = assignmentsByProject.get(assignment.projectId) ?? []
+      list.push(assignment)
+      assignmentsByProject.set(assignment.projectId, list)
+    }
+    const labelsByInstruction = new Map<string, ProjectLabelEntry[]>()
+    for (const project of activeProjects) {
+      for (const assignment of assignmentsByProject.get(project.id) ?? []) {
+        const labels = labelsByInstruction.get(assignment.instructionId) ?? []
+        labels.push({
+          project_id: project.id,
+          name: project.name,
+          label: project.label,
+          color: project.color,
+          variant_id: assignment.variantId,
+        })
+        labelsByInstruction.set(assignment.instructionId, labels)
+      }
+    }
+    return rows.map((row, index) => {
+      if (row.kind === 'heading') {
+        return {
+          kind: 'heading' as const,
+          id: row.id,
+          title: row.title,
+          level: row.headingLevel,
+          level_skipped: skipped.has(index),
+        }
+      }
+      return {
+        kind: 'instruction' as const,
+        id: row.id,
+        title: row.title,
+        state: row.state,
+        variant_count: row.variants.length,
+        created_at: row.createdAt,
+        updated_at: row.updatedAt,
+        variants: row.variants.map((variant) => ({
+          id: variant.id,
+          name: variant.name,
+          is_main: variant.isMain,
+          is_empty: outputsNoText(variant.content),
+        })),
+        project_labels: labelsByInstruction.get(row.id) ?? [],
+      }
+    })
+  },
   /**
    * `projects_reorder` (§7.10, T-080): validates exactly like the real
    * command — the list must name every active project exactly once each

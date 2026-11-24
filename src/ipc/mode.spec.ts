@@ -31,6 +31,7 @@ describe('the mock command surface', () => {
       'dialogPickFolder',
       'exclusionRemove',
       'exclusionsList',
+      'libraryGet',
       'markdownPreview',
       'projectAddManual',
       'projectsList',

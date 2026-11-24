@@ -160,7 +160,7 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is eighteen commands — the §7.10 names that
+   The registered set is twenty commands — the §7.10 names that
    are implemented so far. It comprises the recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
    `db_backups_list`, `db_restore_backup`, `db_recreate` — plus the
@@ -233,7 +233,15 @@ Rust commands are registered through `tauri-specta`:
    read back from the committed rows. A post-phase-0 `Err` whose run
    row is still `running` gets that row a terminal `aborted` status
    with the error's own §10 code, decided by the row's state inside
-   one transaction (D-138's wrapper). Every further command name is
+   one transaction (D-138's wrapper) — and the Library
+   module's `library_get` (T-083, DECISIONS.md D-187): the §7.3
+   instruction library's tree — instructions (name, variant count,
+   dates, state, the variants inline with LIB-014's emptiness flag
+   and DB-010's main flag, the assignment labels of the ACTIVE
+   projects) and headings (level, the LIB-032 skip flag from the
+   `eunomia_core::gaps` walk) — one flat `position`-ordered vector
+   read in ONE `Db::run` transaction, the `include_hidden` flag
+   widening it the `projects_list` way. Every further command name is
    fixed by §7.10 and belongs to its own task.
 3. On debug builds the specta `Builder` exports `src/bindings.ts`
    (`specta_typescript::Typescript`). The file is **committed** so the

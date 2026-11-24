@@ -3,6 +3,7 @@ import { mockCommands } from './commands'
 import { mockState, resetMockState } from './state'
 import { mockEvents } from './events'
 import { PALETTE, type FixtureProfile } from '../fixtures/generator'
+import type { LibraryTreeItem } from '../contract'
 
 /** A small pinned world: 4 projects (last one archived), 3 instructions. */
 const PROFILE: FixtureProfile = {
@@ -143,6 +144,274 @@ describe('projectsList', () => {
     expect(archived?.external_changed).toBe(false)
     expect(archived?.file_deleted).toBe(false)
     expect(archived?.unwatched_reason, 'an archived row is outside the watch set').toBeNull()
+  })
+})
+
+describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
+  /** Narrows the wire union to its instruction arm. */
+  const isInstruction = (
+    entry: LibraryTreeItem,
+  ): entry is Extract<LibraryTreeItem, { kind: 'instruction' }> => entry.kind === 'instruction'
+
+  /** Narrows the wire union to its heading arm. */
+  const isHeading = (
+    entry: LibraryTreeItem,
+  ): entry is Extract<LibraryTreeItem, { kind: 'heading' }> => entry.kind === 'heading'
+
+  /** One hand-built heading row (positions and ids chosen by the test). */
+  function headingRow(id: string, position: number, level: 2 | 3 | 4 | 5 | 6, title: string) {
+    return {
+      kind: 'heading' as const,
+      id,
+      position,
+      headingLevel: level,
+      title,
+      state: 'active' as const,
+      createdAt: '2026-11-20T09:00:00.000Z',
+      updatedAt: '2026-11-20T09:00:00.000Z',
+    }
+  }
+
+  /** One hand-built instruction row with its variants. */
+  function instructionRow(
+    id: string,
+    position: number,
+    title: string,
+    state: 'active' | 'hidden',
+    variants: { id: string; name: string; content: string; isMain: boolean }[],
+  ) {
+    return {
+      kind: 'instruction' as const,
+      id,
+      position,
+      title,
+      state,
+      variants,
+      createdAt: '2026-11-20T09:00:01.000Z',
+      updatedAt: '2026-11-20T09:00:01.000Z',
+    }
+  }
+
+  it('serves the tree in position order with both kinds tagged and the full field set', async () => {
+    const rows = mockState().library
+    const tree = await commands.libraryGet(null)
+    // The served order is the rows' position order; the default read
+    // serves the visible library (the generator hides every 13th
+    // instruction — with PROFILE's 4 items, none is hidden, so the
+    // default read serves every row here).
+    expect(tree.map((entry) => entry.id)).toEqual(
+      [...rows].sort((a, b) => a.position - b.position).map((row) => row.id),
+    )
+    // Both kinds are present and tagged (§6.2's `kind` literals).
+    expect(tree.some(isHeading)).toBe(true)
+    expect(tree.some(isInstruction)).toBe(true)
+    // The instruction half carries the full wire field set, the DB-002
+    // date shape, and the store's variant order.
+    const first = tree.find(isInstruction)
+    expect(first).toBeDefined()
+    expect(Object.keys(first ?? {}).sort()).toEqual([
+      'created_at',
+      'id',
+      'kind',
+      'project_labels',
+      'state',
+      'title',
+      'updated_at',
+      'variant_count',
+      'variants',
+    ])
+    expect(first?.created_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+    expect(first?.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+    const row = rows.find((r) => r.kind === 'instruction' && r.id === first?.id)
+    expect(first?.variant_count).toBe(row?.kind === 'instruction' ? row.variants.length : 0)
+    expect(first?.variants.map((v) => [v.id, v.name])).toEqual(
+      row?.kind === 'instruction' ? row.variants.map((v) => [v.id, v.name]) : [],
+    )
+    // The heading half carries its own field set.
+    const heading = tree.find(isHeading)
+    expect(Object.keys(heading ?? {}).sort()).toEqual([
+      'id',
+      'kind',
+      'level',
+      'level_skipped',
+      'title',
+    ])
+    expect(heading?.level).toBeGreaterThanOrEqual(2)
+    expect(heading?.level).toBeLessThanOrEqual(6)
+  })
+
+  it('labels are exactly the active projects with an assignment, naming the assigned variant', async () => {
+    // The independent oracle: the test joins the store's own rows
+    // (projects in sort_order × their assignment rows) — the wire must
+    // agree with that join, per instruction.
+    const state = mockState()
+    const expected = new Map<string, { project_id: string; variant_id: string }[]>()
+    for (const project of [...state.projects]
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .filter((p) => p.state === 'active')) {
+      for (const assignment of state.assignments.filter((a) => a.projectId === project.id)) {
+        const list = expected.get(assignment.instructionId) ?? []
+        list.push({ project_id: project.id, variant_id: assignment.variantId })
+        expected.set(assignment.instructionId, list)
+      }
+    }
+    const tree = await commands.libraryGet(null)
+    const labeled = tree.filter(isInstruction)
+    expect(labeled.length).toBeGreaterThan(0)
+    for (const instruction of labeled) {
+      expect(
+        instruction.project_labels.map((l) => [l.project_id, l.variant_id]),
+        `labels of ${instruction.title}`,
+      ).toEqual((expected.get(instruction.id) ?? []).map((l) => [l.project_id, l.variant_id]))
+    }
+    // The chip's own fields come from the project row.
+    const withLabel = labeled.find((instruction) => instruction.project_labels.length > 0)
+    expect(withLabel).toBeDefined()
+    const label = withLabel?.project_labels[0]
+    const project = mockState().projects.find((p) => p.id === label?.project_id)
+    expect(label?.name).toBe(project?.name)
+    expect(label?.label).toBe(project?.label)
+    expect(label?.color).toBe(project?.color)
+
+    // The archive flip (DB-014): archiving a labeled project removes
+    // its chip everywhere while the assignment rows stay in the store.
+    const victim = mockState().projects.find(
+      (p) => p.state === 'active' && state.assignments.some((a) => a.projectId === p.id),
+    )
+    expect(victim).toBeDefined()
+    if (victim) {
+      victim.state = 'archived'
+      const relisted = await commands.libraryGet(null)
+      const stillLabeled = relisted
+        .filter(isInstruction)
+        .some((instruction) => instruction.project_labels.some((l) => l.project_id === victim.id))
+      expect(stillLabeled, 'an archived project never labels').toBe(false)
+      expect(
+        mockState().assignments.some((a) => a.projectId === victim.id),
+        'the archived project keeps its assignment rows (DB-014)',
+      ).toBe(true)
+    }
+  })
+
+  it('marks an empty variant with the LIB-014 flag and the main flag', async () => {
+    const rows = mockState().library
+    const target = rows.find((r) => r.kind === 'instruction')
+    expect(target).toBeDefined()
+    if (target?.kind === 'instruction') {
+      target.variants[0]!.content = ''
+      const tree = await commands.libraryGet(null)
+      const served = tree.filter(isInstruction).find((instruction) => instruction.id === target.id)
+      expect(served?.variants[0]?.is_empty, 'the empty variant is marked (LIB-014)').toBe(true)
+      expect(served?.variants[0]?.is_main, 'the main flag rides the same list (DB-010)').toBe(true)
+      // D-13's reading: whitespace-only text outputs no text, so it is
+      // as empty as "" — the mock mirrors the backend's ALG-002-based
+      // flag. The BOM rule is positional (round-2 P3-1): a trailing
+      // BOM blocks the right-hand strip, a leading one behind blank
+      // lines does not.
+      target.variants[0]!.content = ' \n\t '
+      const whitespace = await commands.libraryGet(null)
+      const servedBlank = whitespace
+        .filter(isInstruction)
+        .find((instruction) => instruction.id === target.id)
+      expect(servedBlank?.variants[0]?.is_empty, 'whitespace-only outputs no text (D-13)').toBe(
+        true,
+      )
+      target.variants[0]!.content = ' \u{FEFF}'
+      const trailingBom = await commands.libraryGet(null)
+      const servedTrailing = trailingBom
+        .filter(isInstruction)
+        .find((instruction) => instruction.id === target.id)
+      expect(
+        servedTrailing?.variants[0]?.is_empty,
+        'a TRAILING BOM blocks the strip: the variant outputs text',
+      ).toBe(false)
+      target.variants[0]!.content = '\n\u{FEFF}'
+      const leadingBom = await commands.libraryGet(null)
+      const servedLeading = leadingBom
+        .filter(isInstruction)
+        .find((instruction) => instruction.id === target.id)
+      expect(
+        servedLeading?.variants[0]?.is_empty,
+        'a BOM directly behind a dropped blank line is leading: nothing outputs',
+      ).toBe(true)
+      // The flag is false for a filled variant.
+      const filled = leadingBom
+        .filter(isInstruction)
+        .find((instruction) => instruction.variants.some((v) => !v.is_empty))
+      expect(filled?.variants.some((v) => !v.is_empty)).toBe(true)
+    }
+  })
+
+  it('serves the tree in position order even when the store array is not', async () => {
+    // The P3-7 pin (round-2 P3-2): the wire contract's order is the
+    // row's `position`, never the array order the store happens to
+    // hold — reverse the array, keep the positions, and the served
+    // ids must still climb.
+    const rows = mockState().library
+    const byPosition = [...rows].sort((a, b) => a.position - b.position).map((row) => row.id)
+    mockState().library.reverse()
+    const tree = await commands.libraryGet(null)
+    expect(tree.map((entry) => entry.id)).toEqual(byPosition)
+  })
+
+  it('flags only the headings that arrive too deep (LIB-032)', async () => {
+    // The spec's own example set: `##` then `####` is a skip; one step
+    // deeper, a close and a sibling are not; the first heading has no
+    // pair. Hand-built world, so the expected flags are literals.
+    mockState().library = [
+      headingRow('h-style', 1, 2, 'Style'),
+      instructionRow('i-shy', 2, 'Shy', 'hidden', [
+        { id: 'v-shy', name: 'Main', content: 'Be brief.', isMain: true },
+      ]),
+      headingRow('h-tone', 3, 4, 'Tone'),
+      headingRow('h-deep', 4, 5, 'Deep'),
+      headingRow('h-release', 5, 2, 'Release'),
+      headingRow('h-max', 6, 6, 'Max'),
+      headingRow('h-back', 7, 3, 'Back'),
+    ]
+    const flags = async (flag: boolean | null) => {
+      const tree = await commands.libraryGet(flag)
+      return tree
+        .filter(isHeading)
+        .map((heading) => [heading.title, heading.level_skipped] as const)
+    }
+    // The flag set is the same under either scope (hidden instructions
+    // are transparent to the pair walk).
+    const expected = [
+      ['Style', false],
+      ['Tone', true],
+      ['Deep', false],
+      ['Release', false],
+      ['Max', true],
+      ['Back', false],
+    ] as const
+    expect(await flags(null)).toEqual(expected)
+    expect(await flags(true)).toEqual(expected)
+  })
+
+  it('hidden instructions appear behind the flag with their labels kept (DB-013)', async () => {
+    const state = mockState()
+    const active = state.projects.find((p) => p.state === 'active')
+    expect(active).toBeDefined()
+    mockState().library = [
+      instructionRow('i-keeper', 1, 'Keeper', 'hidden', [
+        { id: 'v-keeper', name: 'Main', content: 'Keep.', isMain: true },
+      ]),
+      instructionRow('i-dropper', 2, 'Dropper', 'active', [
+        { id: 'v-dropper', name: 'Main', content: 'Drop.', isMain: true },
+      ]),
+    ]
+    mockState().assignments = [
+      { projectId: active!.id, instructionId: 'i-keeper', variantId: 'v-keeper' },
+    ]
+    const visible = await commands.libraryGet(null)
+    expect(visible.map((entry) => entry.title)).toEqual(['Dropper'])
+    const widened = await commands.libraryGet(true)
+    const keeper = widened
+      .filter(isInstruction)
+      .find((instruction) => instruction.title === 'Keeper')
+    expect(keeper?.state).toBe('hidden')
+    expect(keeper?.project_labels.map((l) => l.project_id)).toEqual([active!.id])
   })
 })
 

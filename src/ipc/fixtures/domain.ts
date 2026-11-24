@@ -1,14 +1,15 @@
 // Domain shapes the fixture generator produces (T-141).
 //
-// Projects reuse the generated wire type: `projects_list` (T-072/D-096) is
-// the only library/assignment-adjacent command that exists in
-// `src/bindings.ts` today, so its DTO is the contract fixtures must match.
-// Library items and assignments have NO generated wire types yet (the
-// Library and Assignments command groups of spec §7.10 are future tasks),
-// so their fixture shapes below mirror the §6.2 DDL columns they come from.
-// When those commands are generated, the mock maps these fixtures onto the
-// real DTOs — the shapes deliberately stay close to the schema to make that
-// mapping mechanical.
+// Projects reuse the generated wire type: `projects_list` (T-072/D-096)
+// is a library/assignment-adjacent command that existed in
+// `src/bindings.ts` when this file was written, so its DTO is the
+// contract fixtures must match. Library items and assignments kept
+// their own fixture shapes (mirroring the §6.2 DDL columns they come
+// from): `library_get` (T-083/D-187) has since generated its wire
+// types, and the mock maps these fixtures onto them in
+// `mock/state.ts`/`mock/commands.ts` — the assignment fixtures stay
+// schema-shaped for the Assignments command group that is still
+// future work.
 
 import type { ProjectColumnEntryWire } from '../contract'
 

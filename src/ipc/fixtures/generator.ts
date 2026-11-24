@@ -213,7 +213,11 @@ const EXCLUSION_WORDS: readonly string[] = [
 ]
 
 /** All fixture timestamps are offsets from this fixed instant. */
-const BASE_TS_MS = Date.UTC(2026, 10, 20)
+/** The fixture era's base instant (2026-11-20T00:00:00Z): every generated
+ * timestamp and UUIDv7 id derives from it, keeping worlds
+ * date-deterministic. Shared with `state.ts`, whose library rows derive
+ * their DB-002 dates from the same base. */
+export const BASE_TS_MS = Date.UTC(2026, 10, 20)
 const DAY_MS = 24 * 60 * 60 * 1000
 
 function projectName(rng: Rng, index: number): string {

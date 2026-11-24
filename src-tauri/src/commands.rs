@@ -7,13 +7,14 @@
 //! `dialog_pick_folder` (T-073), the Projects module's
 //! `project_add_manual` (T-074), the Projects module's
 //! `exclusions_list`/`exclusion_remove` (T-078), the Projects
-//! module's `projects_reorder` (T-080) and the Sync module's
-//! `sync_run` (T-118): `app_open_data_folder`, `db_backups_list`,
+//! module's `projects_reorder` (T-080), the Sync module's
+//! `sync_run` (T-118, D-138) and the Library module's `library_get`
+//! (T-083, D-187): `app_open_data_folder`, `db_backups_list`,
 //! `db_restore_backup`, `db_recreate`, `activity_list`,
 //! `settings_get`, `settings_set`, `app_info`, `markdown_preview`,
 //! `projects_list`, `dialog_pick_folder`, `project_add_manual`,
 //! `exclusions_list`, `exclusion_remove`, `projects_reorder`,
-//! `sync_run`.
+//! `sync_run`, `library_get`.
 //!
 //! This module also owns the rules a NEW project row is built by —
 //! the derived §6.9 fields, the PRJ-012 copy of the `default.*`
@@ -110,6 +111,11 @@ use crate::sync_phase3;
 use crate::sync_phase4;
 use crate::sync_running;
 
+use eunomia_core::gaps::heading_level_gaps;
+use eunomia_core::library::{
+    Heading as CoreHeading, HeadingLevel, Instruction as CoreInstruction, InstructionState, ItemId,
+    LibraryItem as CoreLibraryItem,
+};
 use eunomia_core::project::{Color, ProjectId};
 use eunomia_fs::atomic::{AtomicWriteError, WrittenFile};
 use eunomia_fs::backup::{BackupError, BackupOutcome, BackupTarget};
@@ -4124,6 +4130,455 @@ pub(crate) struct MarkdownPreview {
     /// [`markdown::preview`] the detection, in the same single parse
     /// pass as the HTML).
     pub(crate) warnings: Vec<markdown::MarkdownWarning>,
+}
+
+// ---------------------------------------------------------------------------
+// `library_get` (T-083, §7.10 Library module, §7.3 LIB-001/008/014,
+// spec-table D-14, LIB-032; D-187)
+// ---------------------------------------------------------------------------
+
+/// One row of the `library_get` tree: an instruction or a section
+/// heading, tagged `kind` with the §6.2 literals (`"instruction"`,
+/// `"heading"` — the spellings the core domain type serializes to).
+///
+/// The tree is ONE flat vector in `position` order (§7.3: one
+/// structure for all projects; OUT-001: the file order equals the
+/// library order). The order is expressed as collection order and the
+/// position NUMBER is deliberately not repeated on the wire — the
+/// core `library` precedent: one fact, one place, nothing to drift.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum LibraryTreeItem {
+    /// An instruction row (§2 "Instruction").
+    Instruction(LibraryInstructionEntry),
+    /// A section heading row (§2 "Section heading").
+    Heading(LibraryHeadingEntry),
+}
+
+/// An instruction's tree row — the LIB-001/008 field set plus the
+/// inline variant list and the assignment labels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct LibraryInstructionEntry {
+    /// The row id (UUIDv7 TEXT, DB-002).
+    pub(crate) id: String,
+    /// The instruction's main name (§6.9, 1–200 after trimming).
+    pub(crate) title: String,
+    /// `"active"` or `"hidden"` — the §6.4 state the "Show hidden"
+    /// filter (D-14) and the dashed chip (MAIN-013) read.
+    pub(crate) state: String,
+    /// The number of ACTIVE variants (DB-010's own scope; a
+    /// soft-deleted variant is not counted) — the card's LIB-001
+    /// field, derived in the same pass that builds
+    /// [`Self::variants`].
+    pub(crate) variant_count: u32,
+    /// Creation time, DB-002 UTC — the row's own value.
+    pub(crate) created_at: String,
+    /// Last snapshot-visible write of the INSTRUCTION row, DB-002 UTC
+    /// — a title rename or a hide/restore restamps it. A variant's
+    /// own edits restamp the variant's row, not this one; a pure
+    /// position move and a main-flag promotion restamp nothing (the
+    /// store's §9.8/D-16 rule, `library.rs`'s module docs).
+    pub(crate) updated_at: String,
+    /// The instruction's ACTIVE variants, in the store's creation
+    /// order (`created_at, id`). The main variant is identified by
+    /// its `is_main` flag, not by its place: a `variant_set_main`
+    /// promotion moves the flag without reordering the list (LIB-002's
+    /// "main first" is the editor's own display rule).
+    pub(crate) variants: Vec<LibraryVariantEntry>,
+    /// The colored labels (LIB-001): exactly the ACTIVE projects with
+    /// an assignment on this instruction, in the projects' own
+    /// `sort_order`, each naming the assigned variant. An archived
+    /// project's kept assignment rows (DB-014) never label — the
+    /// labels sit on rows of a matrix whose columns are the active
+    /// projects (MAIN-001, D-187).
+    pub(crate) project_labels: Vec<ProjectLabelEntry>,
+}
+
+/// One variant of the served instruction — the tree's own view, not
+/// the editor's: identity and the two flags the row UI reads, no
+/// content (the variant-editor command family owns the text; D-187).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct LibraryVariantEntry {
+    /// The variant's id (DB-002) — the identity `assignment_set` and
+    /// the variant commands address.
+    pub(crate) id: String,
+    /// The variant's name (§6.9, unique among the instruction's
+    /// active variants, NOCASE).
+    pub(crate) name: String,
+    /// The main-variant flag (DB-010): exactly one active variant of
+    /// an instruction carries it — the click-assign default
+    /// (MAIN-001) and the LIB-024 delete disable read it.
+    pub(crate) is_main: bool,
+    /// LIB-014: this variant is EMPTY in D-13's sense — "outputs no
+    /// text" — decided by the build's own oracle
+    /// (`normalize::variant_text`, ALG-002), so a whitespace-only
+    /// stored body counts exactly as it counts in a built file. The
+    /// empty-variant icon and the dimmed style read it; an empty
+    /// variant is assignable (LIB-015, D-13) and the emptiness never
+    /// blocks anything.
+    pub(crate) is_empty: bool,
+}
+
+/// One project label of an instruction row (LIB-001): the chip's own
+/// facts plus which variant the assignment names — the acceptance
+/// criterion's pair (labels match assignments).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct ProjectLabelEntry {
+    /// The project's id — the identity the matrix column and the
+    /// assignment commands share.
+    pub(crate) project_id: String,
+    /// The project's display name (the chip's tooltip text, the
+    /// MAIN-28 pattern).
+    pub(crate) name: String,
+    /// The color-badge label, 1–6 characters (DB-042).
+    pub(crate) label: String,
+    /// The palette member (DB-040) the chip renders.
+    pub(crate) color: String,
+    /// The assigned variant's id (D-02: one variant of one
+    /// instruction per project) — the matrix cell's own value.
+    pub(crate) variant_id: String,
+}
+
+/// A heading's tree row (§2 "Section heading", LIB-030).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct LibraryHeadingEntry {
+    /// The row id (DB-002).
+    pub(crate) id: String,
+    /// The heading's title (§6.9, 1–200 after trimming).
+    pub(crate) title: String,
+    /// The heading level, 2–6 (`##`…`######`).
+    pub(crate) level: u8,
+    /// The LIB-032 skip flag: this heading ARRIVES more than one
+    /// level deeper than the heading before it (`##` then `####`).
+    /// Legal input marked with the warning icon — never a validation
+    /// (D-072); computed by [`eunomia_core::gaps::heading_level_gaps`]
+    /// over the served collection.
+    pub(crate) level_skipped: bool,
+}
+
+/// The `library_get` command's read, gathered by the one transaction
+/// (D-037) and assembled outside it — the four lists the tree is
+/// built from, all read inside the same snapshot.
+struct LibraryRead {
+    /// The items in `position` order (the served scope).
+    items: Vec<eunomia_store::library::LibraryItem>,
+    /// Every active variant of every instruction (the snapshot's own
+    /// read, grouped per instruction by construction).
+    variants: Vec<eunomia_store::library::Variant>,
+    /// The active projects in `sort_order` — the label carriers.
+    projects: Vec<eunomia_store::projects::Project>,
+    /// The active projects' assignment rows, in the same order.
+    assignments: Vec<eunomia_store::library::Assignment>,
+}
+
+/// Serves the instruction library's tree (§7.10 Library module
+/// `library_get`, §7.3): every row LIB-001/008 names — instructions
+/// (name, number of variants, creation and change dates, state) and
+/// headings (level, the LIB-032 skip flag) — in `position` order,
+/// with the variants inline (LIB-014's emptiness flag, DB-010's main
+/// flag) and the project labels of the assignments (D-187 for the
+/// three readings this command fixed).
+///
+/// A pure read: one `Db::run` transaction gathers the four lists (the
+/// items, the active variants, the active projects and their
+/// assignments — one snapshot, D-037), and the assembly is linear
+/// Rust over data already in memory (rule 6): the label join walks
+/// the projects once, the variant grouping walks the variants once,
+/// and the skip walk is `eunomia_core::gaps::heading_level_gaps` over
+/// the served items. No SYS-005 gate (SYS-005 names the
+/// project-*changing* commands), no journal (D-051: reads journal
+/// nothing), no file I/O (nothing is probed — the availability flags
+/// are `projects_list`'s own).
+///
+/// `include_hidden` follows the `projects_list` precedent: `null`
+/// (omitted) and `false` serve the visible library, `true` widens to
+/// the whole table (D-14's "Show hidden"). Headings are always active
+/// (§6.2), so the flag only ever adds instruction rows.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn library_get<R: Runtime>(
+    app: AppHandle<R>,
+    include_hidden: Option<bool>,
+) -> Result<Vec<LibraryTreeItem>, AppError> {
+    library_get_impl(app, include_hidden)
+        .await
+        .inspect_err(logging::library_get_failed)
+}
+
+/// The body of [`library_get`], split the `projects_list` way so the
+/// one logging edge covers every failure path: the missing database
+/// and the ordered read.
+async fn library_get_impl<R: Runtime>(
+    app: AppHandle<R>,
+    include_hidden: Option<bool>,
+) -> Result<Vec<LibraryTreeItem>, AppError> {
+    let database = managed_db(&app)?;
+    let scope = if include_hidden == Some(true) {
+        eunomia_store::library::ItemScope::All
+    } else {
+        eunomia_store::library::ItemScope::Active
+    };
+    let read = database
+        .run(move |transaction| {
+            let items = eunomia_store::library::list_items(transaction, scope)
+                .map_err(library_store_to_app_error)?;
+            let variants = eunomia_store::library::list_active_variants(transaction)
+                .map_err(library_store_to_app_error)?;
+            let projects = eunomia_store::projects::list(
+                transaction,
+                eunomia_store::projects::ListScope::Active,
+            )
+            .map_err(projects_store_to_app_error)?;
+            let assignments =
+                eunomia_store::library::list_assignments_for_active_projects(transaction)
+                    .map_err(library_store_to_app_error)?;
+            Ok(LibraryRead {
+                items,
+                variants,
+                projects,
+                assignments,
+            })
+        })
+        .await?;
+    Ok(assemble_library_tree(read))
+}
+
+/// Builds the wire tree from the one-transaction read — pure, linear
+/// in the rows read (rule 6): one pass groups the variants per
+/// instruction, one pass indexes the assignments per instruction (the
+/// projects are already in `sort_order`, so the labels come out in
+/// column order), and the skip flags come from one
+/// [`eunomia_core::gaps::heading_level_gaps`] walk over the served
+/// items (instructions are transparent to the pair walk, so the flag
+/// set is identical under either scope; the indices address the
+/// served collection — the list the UI renders).
+fn assemble_library_tree(read: LibraryRead) -> Vec<LibraryTreeItem> {
+    // The active variants grouped per instruction — the read's own
+    // order (`instruction_id, created_at, id`) already groups them,
+    // and within one instruction it is the creation order.
+    let mut variants_by_instruction: std::collections::HashMap<
+        &str,
+        Vec<&eunomia_store::library::Variant>,
+    > = std::collections::HashMap::with_capacity(read.variants.len());
+    for variant in &read.variants {
+        variants_by_instruction
+            .entry(variant.instruction_id.as_str())
+            .or_default()
+            .push(variant);
+    }
+    // The label carrier: the active projects by id, then the
+    // assignments walked in the store's own order
+    // (`p.sort_order, i.position`) — walking them in that order
+    // leaves every instruction's labels in the projects' column
+    // order.
+    let projects_by_id: std::collections::HashMap<&str, &eunomia_store::projects::Project> = read
+        .projects
+        .iter()
+        .map(|project| (project.id.as_str(), project))
+        .collect();
+    let mut labels_by_instruction: std::collections::HashMap<&str, Vec<ProjectLabelEntry>> =
+        std::collections::HashMap::with_capacity(read.assignments.len());
+    for assignment in &read.assignments {
+        // Unreachable by construction: both reads — the projects list
+        // and the assignments query — apply the same
+        // `p.state = 'active'` predicate inside the one `Db::run`
+        // snapshot, so every assignment's project is in the map (the
+        // round-1 review verified this reachability before accepting
+        // the panic; a reasoned panic, never a silent skip, if the
+        // invariant ever breaks).
+        let project = projects_by_id
+            .get(assignment.project_id.as_str())
+            .unwrap_or_else(|| {
+                panic!("an assignment's project is missing from the same snapshot's active list")
+            });
+        labels_by_instruction
+            .entry(assignment.instruction_id.as_str())
+            .or_default()
+            .push(ProjectLabelEntry {
+                project_id: project.id.clone(),
+                name: project.name.clone(),
+                label: project.label.clone(),
+                color: project.color.clone(),
+                variant_id: assignment.variant_id.clone(),
+            });
+    }
+    // The LIB-032 skip walk over the SERVED items: the store rows
+    // become the core domain values the gaps module reads
+    // (instructions with an empty variant vector — the walk reads
+    // headings only), and the reports' `to_index` addresses this very
+    // collection. Levels arrive decoded (`2..=6`, the §6.2 CHECK
+    // matrix mirrored on the read), so the try_from cannot refuse a
+    // real row — a reasoned panic instead of a lie (the house
+    // precedent for broken invariants; round-1 P3-3's deeper
+    // suggestion — returning `Result` from this pure assembly — is
+    // declined: the branch is unreachable by construction, and an
+    // untestable error arm is exactly the dead defense the project
+    // does not add. The one decode this pass performs is reused by
+    // the tree pass below through the zip).
+    let core_items = read
+        .items
+        .iter()
+        .map(|item| match item.kind {
+            eunomia_store::library::ItemKind::Instruction => {
+                CoreLibraryItem::Instruction(CoreInstruction {
+                    id: ItemId::new(item.id.clone()),
+                    title: item.title.clone(),
+                    state: match item.state {
+                        eunomia_store::library::ItemState::Active => InstructionState::Active,
+                        eunomia_store::library::ItemState::Hidden => InstructionState::Hidden,
+                    },
+                    variants: Vec::new(),
+                })
+            }
+            eunomia_store::library::ItemKind::Heading => CoreLibraryItem::Heading(CoreHeading {
+                id: ItemId::new(item.id.clone()),
+                level: HeadingLevel::try_from(item.heading_level.unwrap_or_else(|| {
+                    panic!("a heading row carries its level (the §6.2 CHECK matrix, decoded on the read)")
+                }))
+                .unwrap_or_else(|error| {
+                    panic!("a decoded heading level must be a core level: {error}")
+                }),
+                title: item.title.clone(),
+            }),
+        })
+        .collect::<Vec<_>>();
+    let skipped: std::collections::HashSet<usize> = heading_level_gaps(&core_items)
+        .into_iter()
+        .map(|gap| gap.to_index)
+        .collect();
+
+    let mut tree = Vec::with_capacity(read.items.len());
+    // The tree pass walks the store rows ZIPPED with the core vector:
+    // the core half already carries the validated heading levels (the
+    // single decode lives in the pass above), so the wire entry reads
+    // its level from there instead of re-unwrapping the store cell —
+    // one decode per row, not two (round-1 P3-3).
+    for ((index, item), core) in read.items.iter().enumerate().zip(&core_items) {
+        match core {
+            CoreLibraryItem::Heading(heading) => {
+                tree.push(LibraryTreeItem::Heading(LibraryHeadingEntry {
+                    id: item.id.clone(),
+                    title: item.title.clone(),
+                    level: u8::from(heading.level),
+                    level_skipped: skipped.contains(&index),
+                }));
+            }
+            CoreLibraryItem::Instruction(_) => {
+                let variants = variants_by_instruction
+                    .remove(item.id.as_str())
+                    .unwrap_or_default();
+                let variant_count = variants.len();
+                tree.push(LibraryTreeItem::Instruction(LibraryInstructionEntry {
+                    id: item.id.clone(),
+                    title: item.title.clone(),
+                    state: item.state.as_str().to_owned(),
+                    variant_count: u32::try_from(variant_count).unwrap_or(u32::MAX),
+                    created_at: item.created_at.clone(),
+                    updated_at: item.updated_at.clone(),
+                    variants: variants
+                        .into_iter()
+                        .map(|variant| LibraryVariantEntry {
+                            id: variant.id.clone(),
+                            name: variant.name.clone(),
+                            is_main: variant.is_main,
+                            // D-13's empty variant: "Outputs no text".
+                            // The build's own oracle decides it —
+                            // `normalize::variant_text` (ALG-002) is
+                            // what a project file receives, so a
+                            // whitespace-only stored body is empty
+                            // here exactly as it is empty in the
+                            // build (round-1 P2-2: the raw
+                            // `content.is_empty()` was narrower than
+                            // the canon). Linear, one pass per
+                            // variant.
+                            is_empty: eunomia_core::normalize::variant_text(&variant.content)
+                                .is_empty(),
+                        })
+                        .collect(),
+                    project_labels: labels_by_instruction
+                        .remove(item.id.as_str())
+                        .unwrap_or_default(),
+                }));
+            }
+        }
+    }
+    tree
+}
+
+/// Normalizes a [`eunomia_store::library::LibraryError`] into the
+/// §7.10 envelope — the D-093 boundary's planned seam (the repository
+/// returns its typed error directly until a task allowed to edit
+/// `src-tauri` normalizes the shapes): `Sql` goes through the shared
+/// SQLite base classifier, a corrupt vocabulary cell through the
+/// D-037 fallback with a class-only diagnostic naming the column —
+/// never the stored value (rule 8; a tampered cell is arbitrary
+/// database text, and `params`/`os_message` are exactly the surfaces
+/// the log line and the localized message read). The write-path
+/// variants (`NotFound`, `AlreadyAssigned`, …) are unreachable from
+/// the reads this mapper serves today and map to the family fallback
+/// — the same belt every store mapper here wears.
+pub(crate) fn library_store_to_app_error(error: eunomia_store::library::LibraryError) -> AppError {
+    match error {
+        eunomia_store::library::LibraryError::Sql(source) => db::sqlite_error_to_app_error(source),
+        eunomia_store::library::LibraryError::Member { column, .. } => library_fallback(
+            "LibraryCorrupt",
+            &format!("a stored {column} cell is outside its vocabulary"),
+        ),
+        write_outcome => library_fallback(
+            "LibraryError",
+            match &write_outcome {
+                eunomia_store::library::LibraryError::NotFound { .. } => {
+                    "a by-id write outcome reached a command that does not map it"
+                }
+                eunomia_store::library::LibraryError::NotAnInstruction { .. } => {
+                    "a heading-only outcome reached a command that does not map it"
+                }
+                eunomia_store::library::LibraryError::NotAHeading { .. } => {
+                    "an instruction-only outcome reached a command that does not map it"
+                }
+                eunomia_store::library::LibraryError::DuplicateInstructionTitle { .. }
+                | eunomia_store::library::LibraryError::DuplicateVariantName { .. } => {
+                    "a name-conflict outcome reached a command that does not map it"
+                }
+                eunomia_store::library::LibraryError::MainVariantExists { .. }
+                | eunomia_store::library::LibraryError::MainRequired { .. }
+                | eunomia_store::library::LibraryError::NoActiveMain { .. } => {
+                    "a main-variant outcome reached a command that does not map it"
+                }
+                eunomia_store::library::LibraryError::LastVariant { .. }
+                | eunomia_store::library::LibraryError::ReplacementRequired { .. }
+                | eunomia_store::library::LibraryError::ReplacementInvalid { .. } => {
+                    "a delete-replacement outcome reached a command that does not map it"
+                }
+                eunomia_store::library::LibraryError::PositionOutOfRange { .. } => {
+                    "a position-range outcome reached a command that does not map it"
+                }
+                eunomia_store::library::LibraryError::AlreadyAssigned { .. }
+                | eunomia_store::library::LibraryError::VariantNotAssignable { .. }
+                | eunomia_store::library::LibraryError::VariantNotActive { .. } => {
+                    "an assignment outcome reached a command that does not map it"
+                }
+                eunomia_store::library::LibraryError::Member { .. }
+                | eunomia_store::library::LibraryError::Sql(_) => {
+                    "an unexpected library store outcome"
+                }
+            },
+        ),
+    }
+}
+
+/// Builds the D-037 fallback with a family label and a fixed,
+/// class-only diagnostic — the shared shape of the two
+/// [`library_store_to_app_error`] fallback arms (the
+/// `projects_fallback` builder).
+fn library_fallback(kind: &str, message: &str) -> AppError {
+    let mut app_error = AppError::new(ErrorCode::DbLocked);
+    app_error.details = Some(ErrorDetails {
+        os_code: None,
+        os_kind: Some(kind.to_owned()),
+        os_message: Some(message.to_owned()),
+    });
+    app_error
 }
 
 /// Renders the editor's Markdown into sanitized preview HTML with the

@@ -16,14 +16,16 @@ import type {
   ProjectColumnEntryWire,
   SettingItem,
 } from '../contract'
-import type { ExclusionFixture, ProjectFixture } from '../fixtures/domain'
+import type { AssignmentFixture, ExclusionFixture, ProjectFixture } from '../fixtures/domain'
 import {
+  BASE_TS_MS,
   generateActivityEntries,
   generateDbBackups,
   generateFixtures,
   parseFixtureProfile,
   type FixtureProfile,
 } from '../fixtures/generator'
+import { isoUtc } from '../fixtures/rng'
 import { DEFAULT_SETTINGS } from '../fixtures/settings'
 import { mockEventBus } from './events'
 
@@ -75,6 +77,20 @@ export type MockState = {
   backups: DbBackupInfo[]
   /** The D-10 screen's rows (§6.2 `project_exclusions`), in wire shape. */
   exclusions: ExclusionEntry[]
+  /**
+   * The library tree rows (§6.2 `library_items` + the active variants
+   * of `instruction_variants`), in `position` order — `libraryGet`
+   * (T-083) maps them onto the wire the way `toColumnEntry` maps a
+   * project row. Dates are derived deterministically from the fixture
+   * era's base instant (one second per position).
+   */
+  library: MockLibraryRow[]
+  /**
+   * The assignment rows (§6.2 `project_instructions`), the fixture
+   * generator's referentially-honest set — `libraryGet`'s label join
+   * and the future assignment commands read them.
+   */
+  assignments: AssignmentFixture[]
   /** The journal's next autoincrement id (§6.2 `action_log.id`). */
   nextActivityId: number
   /**
@@ -92,6 +108,42 @@ export type MockState = {
    * cancelled walk leaves it untouched (ERR-002).
    */
   scanFindings: string[]
+}
+
+/** One `library_items` row in the mock store (§6.2 columns the UI can
+ * reach): a heading or an instruction with its active variants. */
+export type MockLibraryRow =
+  | {
+      kind: 'heading'
+      id: string
+      position: number
+      headingLevel: 2 | 3 | 4 | 5 | 6
+      title: string
+      state: 'active'
+      createdAt: string
+      updatedAt: string
+    }
+  | {
+      kind: 'instruction'
+      id: string
+      position: number
+      title: string
+      state: 'active' | 'hidden'
+      /** The instruction's ACTIVE variants (the fixture set has no
+       * soft-deleted ones — a known mock limit). */
+      variants: MockVariantRow[]
+      createdAt: string
+      updatedAt: string
+    }
+
+/** One active variant of a mock instruction row (the `VariantFixture`
+ * shape, mutable — a UI test edits the row, exactly like the project
+ * rows). */
+export type MockVariantRow = {
+  id: string
+  name: string
+  content: string
+  isMain: boolean
 }
 
 /** Maps a store row to the `projects_list` wire shape (MAIN-028 fields). */
@@ -343,13 +395,6 @@ export function mockState(): MockState {
 /**
  * Replaces the store with fresh data for a profile. Tests call this in
  * `beforeEach` to pin their own small worlds.
- *
- * Note: the store currently serves only what the existing commands read
- * (projects, settings, activity, backups); the generated library and
- * assignment fixtures are built and held for the Library/Assignments
- * command tasks to wire in (set L's 100 000 assignments cost ~100 ms to
- * build — acceptable inside the §12.2 startup budget, and skipped entirely
- * by every profile that does not ask for them).
  */
 export function resetMockState(profile: FixtureProfile): MockState {
   const bundle = generateFixtures(profile)
@@ -360,6 +405,32 @@ export function resetMockState(profile: FixtureProfile): MockState {
     activity: generateActivityEntries(bundle.projects, profile),
     backups: generateDbBackups(profile),
     exclusions: bundle.exclusions.map(toExclusionEntry),
+    library: bundle.library.map((item) =>
+      item.kind === 'heading'
+        ? {
+            kind: 'heading' as const,
+            id: item.id,
+            position: item.position,
+            headingLevel: item.headingLevel,
+            title: item.title,
+            state: 'active' as const,
+            // DB-002 dates, one second per position: deterministic
+            // within a reset, distinct per row.
+            createdAt: isoUtc(BASE_TS_MS + item.position * 1000),
+            updatedAt: isoUtc(BASE_TS_MS + item.position * 1000),
+          }
+        : {
+            kind: 'instruction' as const,
+            id: item.id,
+            position: item.position,
+            title: item.title,
+            state: item.state,
+            variants: item.variants.map((variant) => ({ ...variant })),
+            createdAt: isoUtc(BASE_TS_MS + item.position * 1000),
+            updatedAt: isoUtc(BASE_TS_MS + item.position * 1000),
+          },
+    ),
+    assignments: bundle.assignments.map((assignment) => ({ ...assignment })),
     nextActivityId: 1_000_000,
     scanning: false,
     scanCancelled: false,

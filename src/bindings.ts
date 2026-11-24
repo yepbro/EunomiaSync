@@ -179,6 +179,32 @@ export const commands = {
 	 */
 	exclusionsList: (options?: InvokeOptions) => __TAURI_INVOKE<ExclusionEntry[]>("exclusions_list", undefined, options),
 	/**
+	 *  Serves the instruction library's tree (§7.10 Library module
+	 *  `library_get`, §7.3): every row LIB-001/008 names — instructions
+	 *  (name, number of variants, creation and change dates, state) and
+	 *  headings (level, the LIB-032 skip flag) — in `position` order,
+	 *  with the variants inline (LIB-014's emptiness flag, DB-010's main
+	 *  flag) and the project labels of the assignments (D-187 for the
+	 *  three readings this command fixed).
+	 * 
+	 *  A pure read: one `Db::run` transaction gathers the four lists (the
+	 *  items, the active variants, the active projects and their
+	 *  assignments — one snapshot, D-037), and the assembly is linear
+	 *  Rust over data already in memory (rule 6): the label join walks
+	 *  the projects once, the variant grouping walks the variants once,
+	 *  and the skip walk is `eunomia_core::gaps::heading_level_gaps` over
+	 *  the served items. No SYS-005 gate (SYS-005 names the
+	 *  project-*changing* commands), no journal (D-051: reads journal
+	 *  nothing), no file I/O (nothing is probed — the availability flags
+	 *  are `projects_list`'s own).
+	 * 
+	 *  `include_hidden` follows the `projects_list` precedent: `null`
+	 *  (omitted) and `false` serve the visible library, `true` widens to
+	 *  the whole table (D-14's "Show hidden"). Headings are always active
+	 *  (§6.2), so the flag only ever adds instruction rows.
+	 */
+	libraryGet: (includeHidden: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<LibraryTreeItem[]>("library_get", { includeHidden }, options),
+	/**
 	 *  Renders the editor's Markdown into sanitized preview HTML with the
 	 *  Markdown warnings alongside (§7.10 Library module `markdown_preview`,
 	 *  the D-009 name registry; SEC-005, D-15, §7.3 LIB-002/009…016).
@@ -1467,6 +1493,129 @@ export type FileChangedEvent = {
 	changes: ProjectFileChange[],
 };
 
+/**  A heading's tree row (§2 "Section heading", LIB-030). */
+export type LibraryHeadingEntry = {
+	/**  The row id (DB-002). */
+	id: string,
+	/**  The heading's title (§6.9, 1–200 after trimming). */
+	title: string,
+	/**  The heading level, 2–6 (`##`…`######`). */
+	level: number,
+	/**
+	 *  The LIB-032 skip flag: this heading ARRIVES more than one
+	 *  level deeper than the heading before it (`##` then `####`).
+	 *  Legal input marked with the warning icon — never a validation
+	 *  (D-072); computed by [`eunomia_core::gaps::heading_level_gaps`]
+	 *  over the served collection.
+	 */
+	level_skipped: boolean,
+};
+
+/**
+ *  An instruction's tree row — the LIB-001/008 field set plus the
+ *  inline variant list and the assignment labels.
+ */
+export type LibraryInstructionEntry = {
+	/**  The row id (UUIDv7 TEXT, DB-002). */
+	id: string,
+	/**  The instruction's main name (§6.9, 1–200 after trimming). */
+	title: string,
+	/**
+	 *  `"active"` or `"hidden"` — the §6.4 state the "Show hidden"
+	 *  filter (D-14) and the dashed chip (MAIN-013) read.
+	 */
+	state: string,
+	/**
+	 *  The number of ACTIVE variants (DB-010's own scope; a
+	 *  soft-deleted variant is not counted) — the card's LIB-001
+	 *  field, derived in the same pass that builds
+	 *  [`Self::variants`].
+	 */
+	variant_count: number,
+	/**  Creation time, DB-002 UTC — the row's own value. */
+	created_at: string,
+	/**
+	 *  Last snapshot-visible write of the INSTRUCTION row, DB-002 UTC
+	 *  — a title rename or a hide/restore restamps it. A variant's
+	 *  own edits restamp the variant's row, not this one; a pure
+	 *  position move and a main-flag promotion restamp nothing (the
+	 *  store's §9.8/D-16 rule, `library.rs`'s module docs).
+	 */
+	updated_at: string,
+	/**
+	 *  The instruction's ACTIVE variants, in the store's creation
+	 *  order (`created_at, id`). The main variant is identified by
+	 *  its `is_main` flag, not by its place: a `variant_set_main`
+	 *  promotion moves the flag without reordering the list (LIB-002's
+	 *  "main first" is the editor's own display rule).
+	 */
+	variants: LibraryVariantEntry[],
+	/**
+	 *  The colored labels (LIB-001): exactly the ACTIVE projects with
+	 *  an assignment on this instruction, in the projects' own
+	 *  `sort_order`, each naming the assigned variant. An archived
+	 *  project's kept assignment rows (DB-014) never label — the
+	 *  labels sit on rows of a matrix whose columns are the active
+	 *  projects (MAIN-001, D-187).
+	 */
+	project_labels: ProjectLabelEntry[],
+};
+
+/**
+ *  One row of the `library_get` tree: an instruction or a section
+ *  heading, tagged `kind` with the §6.2 literals (`"instruction"`,
+ *  `"heading"` — the spellings the core domain type serializes to).
+ * 
+ *  The tree is ONE flat vector in `position` order (§7.3: one
+ *  structure for all projects; OUT-001: the file order equals the
+ *  library order). The order is expressed as collection order and the
+ *  position NUMBER is deliberately not repeated on the wire — the
+ *  core `library` precedent: one fact, one place, nothing to drift.
+ */
+export type LibraryTreeItem = 
+/**  An instruction row (§2 "Instruction"). */
+{
+	kind: "instruction",
+} & LibraryInstructionEntry | 
+/**  A section heading row (§2 "Section heading"). */
+{
+	kind: "heading",
+} & LibraryHeadingEntry;
+
+/**
+ *  One variant of the served instruction — the tree's own view, not
+ *  the editor's: identity and the two flags the row UI reads, no
+ *  content (the variant-editor command family owns the text; D-187).
+ */
+export type LibraryVariantEntry = {
+	/**
+	 *  The variant's id (DB-002) — the identity `assignment_set` and
+	 *  the variant commands address.
+	 */
+	id: string,
+	/**
+	 *  The variant's name (§6.9, unique among the instruction's
+	 *  active variants, NOCASE).
+	 */
+	name: string,
+	/**
+	 *  The main-variant flag (DB-010): exactly one active variant of
+	 *  an instruction carries it — the click-assign default
+	 *  (MAIN-001) and the LIB-024 delete disable read it.
+	 */
+	is_main: boolean,
+	/**
+	 *  LIB-014: this variant is EMPTY in D-13's sense — "outputs no
+	 *  text" — decided by the build's own oracle
+	 *  (`normalize::variant_text`, ALG-002), so a whitespace-only
+	 *  stored body counts exactly as it counts in a built file. The
+	 *  empty-variant icon and the dimmed style read it; an empty
+	 *  variant is assignable (LIB-015, D-13) and the emptiness never
+	 *  blocks anything.
+	 */
+	is_empty: boolean,
+};
+
 /**
  *  The `markdown_preview` response (§7.10 Library module): the
  *  sanitized preview HTML plus D-15's non-blocking Markdown warnings.
@@ -1963,6 +2112,33 @@ export type ProjectFileChange = {
 	external_changed: boolean,
 	/**  SYS-009: the target file is gone after a recorded sync. */
 	file_deleted: boolean,
+};
+
+/**
+ *  One project label of an instruction row (LIB-001): the chip's own
+ *  facts plus which variant the assignment names — the acceptance
+ *  criterion's pair (labels match assignments).
+ */
+export type ProjectLabelEntry = {
+	/**
+	 *  The project's id — the identity the matrix column and the
+	 *  assignment commands share.
+	 */
+	project_id: string,
+	/**
+	 *  The project's display name (the chip's tooltip text, the
+	 *  MAIN-28 pattern).
+	 */
+	name: string,
+	/**  The color-badge label, 1–6 characters (DB-042). */
+	label: string,
+	/**  The palette member (DB-040) the chip renders. */
+	color: string,
+	/**
+	 *  The assigned variant's id (D-02: one variant of one
+	 *  instruction per project) — the matrix cell's own value.
+	 */
+	variant_id: string,
 };
 
 /**

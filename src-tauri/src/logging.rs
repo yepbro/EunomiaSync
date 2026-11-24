@@ -1470,6 +1470,26 @@ pub(crate) fn projects_list_failed(error: &AppError) {
     );
 }
 
+/// The `library_get` command failed (T-083, §7.10 Library module):
+/// the `projects_list_failed` shape over the Library target. The
+/// reachable §10 answers are the honest `NoDatabase` fallback
+/// (recovery mode) and the classified store errors of the one
+/// transaction — the shared SQLite base classifier for `Sql`, the
+/// D-037 fallback for a corrupt vocabulary cell (class-only text,
+/// SEC-008's rule: an instruction title or variant name never reaches
+/// the log line).
+pub(crate) fn library_get_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "reading the library tree failed"
+    );
+}
+
 /// The `sync_run` command failed (T-118, §9.4, §10's every-error rule):
 /// the `projects_list_failed` shape over the Sync target. The reachable
 /// §10 answers are the `E_SYNC_RUNNING` SYS-004 refusal of a second

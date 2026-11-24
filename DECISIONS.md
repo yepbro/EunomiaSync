@@ -21961,3 +21961,108 @@ right unasked: §15.4's second short name and the T-F12 cell lead now
 carry the spec's own first letters. Checks: md-only diff — this
 addendum; no test suites run, the md-only regime; `pnpm run
 format:check` green.
+
+### D-187 — T-083: the `library_get` command — labels are active-project chips, the tree is one flat position-ordered vector, variants ride inline with the emptiness flag — 2026-11-23
+
+Problem: the §7.10 Library module's read command (`library_get`, spec
+§7.3 LIB-001/008/014, spec-table D-14, LIB-032, §7.10) had three
+readings the card leaves open, each recorded here before the code
+(rule 1):
+
+- _Which projects do LIB-001's "colored labels of the projects where
+  at least one variant is assigned" cover?_ **Active projects only.**
+  The library list is the row header of the §7.4 matrix, whose columns
+  are the ACTIVE projects in `sort_order` (MAIN-001); an archived
+  project keeps its assignment rows (DB-014) but is no column, so a
+  label for it would name a cell the screen does not render. The
+  card's acceptance criterion — labels match assignments — is read as:
+  the labels on an instruction row are exactly the ACTIVE projects
+  with a `project_instructions` row on that instruction, each label
+  naming the assigned variant.
+- _What exactly is "variants with an emptiness flag" (LIB-014)?_ The
+  instruction entry carries its ACTIVE variants inline — id, name,
+  `is_main` (DB-010; the click-assign default and the LIB-024 disable
+  both read it), `is_empty` (content empty after the store's fold; the
+  LIB-014 icon). The card's "number of variants" is `variant_count`,
+  the length of that same list, so the two facts cannot drift. Variant
+  CONTENT is deliberately not served: the card's field list is the
+  tree's, and no §7.10 command carries the editor's text yet — the
+  carrier for MAIN-006's tooltip text and the editor body is the
+  variant-editor command family's concern (follow-up in the task
+  report).
+- _Item order and identity on the wire._ One flat vector in `position`
+  order, the order expressed as collection order and the position
+  NUMBER not repeated (the core `library` precedent — one fact, one
+  place). A tagged enum serves the two kinds; `include_hidden`
+  (`Option<bool>`, default active-only, `true` widens — the
+  `projects_list` precedent) backs D-14's "Show hidden" toggle, and
+  hidden instructions keep their labels (DB-013: assignments are
+  kept).
+
+The LIB-032 skip flag reuses `eunomia_core::gaps::heading_level_gaps`
+(D-073) — the command builds core `LibraryItem`s from the served
+rows (instructions with an empty variant vector: the walk reads
+headings only) and marks the heading at each report's `to_index`
+`level_skipped`. Hidden instructions are transparent to the pair walk
+(the gaps module's own rule), so the flag set is identical under
+either `include_hidden` value; the indices are taken over the SERVED
+collection, which is the list the UI renders.
+
+Everything runs in one `Db::run` transaction (D-037): the items read,
+the active-variants read, the active-projects read and the
+active-projects' assignments read — one snapshot, no per-row queries;
+the label join, the variant grouping and the gap walk are linear Rust
+passes over data already in memory (rule 6). A read: no SYS-005 gate,
+no journal (D-051), no file I/O — nothing to probe, so no extra
+`spawn_blocking` pass beyond the executor's own. `LibraryError`
+normalizes through `library_store_to_app_error` (the D-093 boundary's
+planned seam: `Sql` → the shared SQLite classifier, `Member` → the
+D-037 fallback with a class-only diagnostic naming the column —
+never the stored value, rule 8; write-path variants arrive only if a
+future command reuses the mapper and map to the family fallback).
+
+Addendum 2026-11-24 (round-1 review, deepseek-v4.1-flash): the
+`is_empty` reading above was narrower than the canon it implements —
+"content empty after the store's fold" marked a whitespace-only
+variant non-empty, while D-13 defines the empty variant as one that
+"outputs no text" and ALG-002's normalization (leading empty lines,
+trailing whitespace) makes the same variant output nothing in a
+build. Corrected in the amend: the flag now follows D-13 through the
+build's own oracle, `eunomia_core::normalize::variant_text(...).is_empty()`
+(linear, one pass per variant), and a whitespace-only variant is
+pinned as empty by the shape test. The same review's ARCHITECTURE.md
+finding (P2-1) is the inventory rule's own: the registered-command
+list now carries `library_get` and the true count (twenty; the count
+had already drifted to eighteen-against-nineteen at the base). The
+P3-3 half taken: the tree pass reuses the core pass's single
+heading-level decode through a zip (one decode per row, not two); the
+deeper suggestion — a `Result`-returning assembly — is declined on the
+recorded ground that the invariant arms are unreachable by
+construction and an untestable error arm is dead defense, while the
+`updated_at`/variant-order/`variant_count` doc comments were reworded
+to the store's actual restamping and ordering rules (P3-1/P3-2/P3-6)
+and the tests now use the store's public `values::is_db002_shape`
+instead of a hand-rolled weaker twin (P3-4). Declined without code:
+P3-5 (a shared `store_fallback` builder) — the per-module fallback is
+the established pattern (settings' `storage_fallback`, projects'
+`projects_fallback`, this one), and consolidating the three touches
+two other surfaces mid-flight; P3-8's oracle concern is answered by
+the Rust battery's literal pin plus the archive-flip assertion the
+review itself called the valuable half. The mock's own halves taken:
+`libraryGet` sorts by the row's `position` before mapping (P3-7 — the
+array order was only accidentally the position order) and its comment
+now points at the state module where the known limit actually lives.
+P3-9 (D-14's hidden-count carrier) stays a recorded follow-up for the
+UI task, not a defect: the flag's widened read serves the hidden rows
+themselves, the `projects_list` precedent.
+
+Round-2 review (hy4-flash-free, report `.opencode/reviews/t083-round2.md`):
+APPROVE with findings — 0×P0/P1/P2, 2×P3, all round-1 dispositions
+independently verified against the amended tree. Both P3s taken in the
+second amend: the mock's emptiness twin is now the normalizer's
+POSITIONAL edge consumption as a regex (a trailing BOM blocks the
+right-hand strip — `" \u{FEFF}"` outputs text; a BOM behind blank
+lines is leading and outputs nothing — pinned by both cases), and the
+mock's position sort gained its falsifiable guard (the store array
+reversed, the served ids still climb). The review phase is complete
+after this round.
