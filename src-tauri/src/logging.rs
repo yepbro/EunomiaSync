@@ -2284,6 +2284,66 @@ pub(crate) fn instruction_restore_failed(error: &AppError) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The four Library structure commands (T-330, §7.10 Library module)
+// ---------------------------------------------------------------------------
+
+/// The `heading_create` command failed (T-330, §10's every-error rule).
+/// The envelope carries no heading title; successful creates are the
+/// journal's own `heading.created` entries (D-051).
+pub(crate) fn heading_create_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "creating a heading failed"
+    );
+}
+
+/// The `heading_update` command failed (T-330, §10's every-error rule).
+/// Level/range refusals carry only measured numbers and field names.
+pub(crate) fn heading_update_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "updating a heading failed"
+    );
+}
+
+/// The `heading_delete` command failed (T-330, §10's every-error rule).
+pub(crate) fn heading_delete_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "deleting a heading failed"
+    );
+}
+
+/// The `items_move` command failed (T-330, §10's every-error rule).
+/// Self-move and level-boundary refusals carry indexes, never titles.
+pub(crate) fn items_move_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "moving a library item failed"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     //! Behavior tests of the subscriber seam: a real subscriber is built

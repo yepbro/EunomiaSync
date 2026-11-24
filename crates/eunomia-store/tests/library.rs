@@ -47,8 +47,8 @@ use eunomia_store::library::{
     NewLibraryItem, NewVariant, Variant, VariantState, VariantUpdate, assign, create_item,
     create_variant, delete_heading, delete_variant, get_assignment, get_item, get_variant,
     hide_item, list_assignments_for_project, list_assignments_for_variant, list_items,
-    list_variants, move_item, reassign, restore_item, restore_variant, set_main_variant, unassign,
-    update_item, update_variant,
+    list_variants, move_item, reassign, restore_item, restore_variant, set_item_order,
+    set_main_variant, unassign, update_item, update_variant,
 };
 use eunomia_store::projects as project_repo;
 use eunomia_store::projects::{AddedVia, NewProject, Project};
@@ -1704,6 +1704,96 @@ fn a_move_inside_a_transaction_rolls_back_as_a_set() {
         all_item_ids(&conn),
         vec![a.id, b.id, c.id],
         "the rollback erased the whole renumbering"
+    );
+    assert_eq!(all_positions(&conn), vec![1, 2, 3]);
+}
+
+#[test]
+fn replacing_the_whole_order_writes_a_dense_permutation_without_restamping() {
+    let (conn, _dir) = library_db("set-order");
+    let a = seed_heading(&conn, 1, 2);
+    let (b, _) = seed_instruction(&conn, 1);
+    let (c, _) = seed_instruction(&conn, 2);
+    let d = seed_heading(&conn, 2, 3);
+    let before: Vec<_> = [&a, &b, &c, &d]
+        .into_iter()
+        .map(|item| (item.id.clone(), item.updated_at.clone()))
+        .collect();
+
+    set_item_order(&conn, &[&c.id, &a.id, &d.id, &b.id])
+        .expect("an exact permutation must replace the order");
+
+    assert_eq!(
+        all_item_ids(&conn),
+        vec![c.id.clone(), a.id.clone(), d.id.clone(), b.id.clone()]
+    );
+    assert_eq!(all_positions(&conn), vec![1, 2, 3, 4]);
+    let after: Vec<_> = list_items(&conn, ItemScope::All)
+        .expect("the reordered rows must read back")
+        .into_iter()
+        .map(|item| (item.id, item.updated_at))
+        .collect();
+    let mut expected = before;
+    expected.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut actual = after;
+    actual.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(actual, expected, "position-only writes do not restamp rows");
+}
+
+#[test]
+fn replacing_the_whole_order_refuses_a_non_permutation_before_writing() {
+    let (conn, _dir) = library_db("set-order-invalid");
+    let a = seed_heading(&conn, 1, 2);
+    let (b, _) = seed_instruction(&conn, 1);
+    let c = seed_heading(&conn, 2, 3);
+    let original = all_item_ids(&conn);
+
+    let short = set_item_order(&conn, &[&a.id, &b.id]).expect_err("a missing row must be refused");
+    assert!(matches!(
+        short,
+        LibraryError::InvalidItemOrder {
+            expected: 3,
+            actual: 2
+        }
+    ));
+    let duplicate =
+        set_item_order(&conn, &[&a.id, &a.id, &c.id]).expect_err("a repeated id must be refused");
+    assert!(matches!(
+        duplicate,
+        LibraryError::DuplicateOrderId { ref id } if id == &a.id
+    ));
+    let unknown = set_item_order(&conn, &[&a.id, &b.id, "missing"])
+        .expect_err("an unknown id must be refused");
+    assert!(matches!(
+        unknown,
+        LibraryError::UnknownOrderId { ref id } if id == "missing"
+    ));
+    assert_eq!(
+        all_item_ids(&conn),
+        original,
+        "every refusal leaves the table untouched"
+    );
+}
+
+#[test]
+fn replacing_the_whole_order_joins_the_callers_transaction() {
+    let (conn, _dir) = library_db("set-order-rollback");
+    let a = seed_heading(&conn, 1, 2);
+    let (b, _) = seed_instruction(&conn, 1);
+    let c = seed_heading(&conn, 2, 3);
+    let original = all_item_ids(&conn);
+    {
+        let tx = conn.unchecked_transaction().expect("BEGIN should succeed");
+        set_item_order(&tx, &[&c.id, &b.id, &a.id]).expect("the permutation must be written");
+        assert_eq!(
+            all_item_ids(&tx),
+            vec![c.id.as_str(), b.id.as_str(), a.id.as_str()]
+        );
+    }
+    assert_eq!(
+        all_item_ids(&conn),
+        original,
+        "rollback restores the whole order"
     );
     assert_eq!(all_positions(&conn), vec![1, 2, 3]);
 }

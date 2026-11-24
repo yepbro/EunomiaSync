@@ -22633,3 +22633,175 @@ is the tracking unit; this line is the D-record duplicate the board
 rule asks for. Written as a service commit in main after the merge —
 md-only, no suites under the md-only regime; prettier and the
 pre-commit hook gate it.
+
+### D-191 — T-330: one typed heading-update operation, semantic move targets, and atomic library-order persistence — 2026-11-24
+
+Problem: the batch lands `heading_create`, `heading_update`,
+`heading_delete` and `items_move` (T-092…T-095). The card explicitly
+leaves the T-094 transport open: §7.10 fixes the command name
+`heading_update` but not how "Change level" and "Shift branch level ±1"
+reach it. The move prose also names UI drop outcomes rather than wire
+arguments, while the landed store's `move_item` accepts only one final
+1-based position (`crates/eunomia-store/src/library.rs:1211-1281`) and
+the core move accepts an insertion gap in the ORIGINAL list, including
+the end gap `len` (`crates/eunomia-core/src/reorder.rs:15-54`). Persisting
+a whole core permutation through repeated single-row moves would be a
+command-layer reimplementation of repository ordering and could become
+quadratic in the branch size.
+
+Solution — readings chosen before implementation:
+
+1. **One command, one mutually exclusive operation.**
+   `heading_update(id, update)` takes a tagged enum:
+   `{"mode":"rename","value":"…"}`,
+   `{"mode":"change_level","value":2..=6}`, or
+   `{"mode":"shift_branch","value":-1|+1}`. An enum, rather than three
+   optional fields, makes "rename and shift" and "two level modes at
+   once" unrepresentable; no fifth §7.10 command is invented. The Rust
+   core remains the rule owner: `change_heading_level` and
+   `shift_branch_level` (`crates/eunomia-core/src/levels.rs:272-483`)
+   perform the boundary checks, and their `LevelError` outcomes map to
+   `E_VALIDATION` at the IPC boundary. Wire level/delta values are
+   `i32`, not `u8`/`i8`: every JSON integer must reach the command's
+   validation boundary rather than fail serde before an `AppError`
+   exists. The command converts to core's closed types only after the
+   heading operand is resolved (round-2 P2). A same-value rename/level
+   change is a verified no-op: no row restamp and no journal entry.
+2. **Automatic drop alignment extends the same core rule.**
+   `shift_branch_to_level(items, index, new_root_level)` joins the
+   existing `levels` module and shares its all-or-nothing validation
+   pass with the ±1 operation. ALG-062's automatic case needs an
+   arbitrary difference within 2–6, not only ±1; adding the general
+   helper avoids reimplementing branch resolution or partial validation
+   in `src-tauri`. The existing ±1 API and its closed delta rule stay
+   unchanged (`crates/eunomia-core/src/levels.rs:444-498`).
+3. **`items_move(id, target)` names semantics, not stale positions.**
+   The target is a tagged enum: `after_item { id }` (the original-list
+   gap immediately after that row), `into_heading { id }` (the end of
+   that heading's ALG-060 section), or `root` (the first root position).
+   An instruction moved onto a heading lands at the section end; a
+   heading branch moved onto a heading becomes its last child and calls
+   the core helper with `target level + 1`; a branch moved to `root`
+   calls it with level 2. A heading whose target heading lies inside its
+   own ALG-060 branch is rejected before the move, including the
+   otherwise boundary-shaped "drop a branch onto itself" case. Other
+   interior gaps are rejected by the existing `move_branch`/`move_range`
+   guard (`crates/eunomia-core/src/reorder.rs:277-320`). The dragged
+   range is resolved ONCE on the pre-move list; automatic alignment is
+   applied to that exact range before insertion, and the aligned range
+   is then moved with `move_range`. Re-resolving the branch after
+   insertion is incorrect: the old root level may close on an adjacent
+   heading that the new, deeper root level would absorb (round-1 P1,
+   pinned by the H4-target/H3-closer regression).
+4. **The repository persists the core permutation.**
+   `eunomia_store::library::set_item_order` validates that the supplied
+   ids are exactly the current table-wide set, then writes every
+   `position = index + 1` through one caller-owned transaction. The
+   schema has no UNIQUE position index (`docs/spec.md:258-269`), so
+   intermediate duplicates inside the transaction cannot violate a
+   constraint; the final state is the DB-005/DB-011 dense sequence.
+   The command never translates hierarchy into ad-hoc repeated
+   `move_item` calls. Name validation is one linear core pass; each
+   structure operation makes a linear number of linear store/core
+   passes, with no text-processing loop nested inside another.
+5. **Creation placement and history.** `heading_create(name, level,
+parent)` appends at the table end when `parent` is absent (the
+   header "+" root case), or at the end of the named heading's ALG-060
+   branch when present (the row "+" child case). The caller supplies the
+   level; the UI's level-6 disable remains UI policy. Heading create,
+   rename, level change, branch shift, move and physical delete each
+   write their existing `heading.*` journal action in the same
+   transaction and write NO `revisions` row (§6.2's explicit heading
+   exception, `docs/spec.md:346`). A moved heading branch is one
+   `heading.changed` entry naming its root; a moved instruction is one
+   `instruction.changed` entry. No-op moves journal nothing.
+6. **Command count baseline verified, not guessed.** At this branch's
+   base, `src-tauri/src/lib.rs:210-240` contains 29 registrations and
+   `src/ipc/mode.spec.ts:24-54` pins the same 29 names. The brief's
+   reported 30-vs-29 discrepancy is not present in this checkout; the
+   existing machine-checked-count follow-up remains out of scope. This
+   batch adds exactly four names, so the truthful registered count is 33.
+
+Tests lead: all four absorbed DoDs get mock-IPC behavior tests over a
+real migrated `Db`, with direct store/SQL read-back. The move suite
+pins restart persistence, nested order (hidden items included), all
+three target forms, automatic level alignment and its 2–6 refusal,
+self/descendant rejection, and journal-failure rollback of BOTH order
+and levels. The heading suite pins name/level boundaries (including a
+large invalid name), physical deletion with instruction order intact,
+journal presence and the absence of heading revisions. Each new test is
+mutation-checked; evidence is added to this entry after implementation.
+
+**Landing addendum (same task, 2026-11-24).** The four commands landed
+in `src-tauri/src/headings.rs` with `HeadingRecord`, `HeadingUpdate` and
+`MoveTarget` as the generated wire contracts; `lib.rs` registers the
+module and exactly four commands; `logging.rs` adds one failure edge
+per command. `eunomia-core::levels::shift_branch_to_level` shares the
+existing all-or-nothing validation pass with manual ±1 shifts, and
+`eunomia_store::library::set_item_order` persists the exact core
+permutation in the caller's transaction. The TypeScript mock mirrors
+the contracts over `MockLibraryRow`, and `bindings.ts` is regenerated.
+
+Tests: 4 new core alignment tests, 3 new store order tests, 25 new
+mock-IPC Rust tests and 12 new mock tests. The DoDs are pinned directly:
+name/level validation and journal-without-revisions; physical heading
+delete with instruction order intact; `E_VALIDATION` plus unchanged
+rows on an invalid branch shift; restart-persistent moves and
+self/descendant rejection. Cross-cutting tests cover semantic targets,
+automatic level alignment and overflow, hidden instructions, no-op
+silence, journal-failure rollback of order AND levels, a 512-row move,
+a 160000-character invalid name without content echo, sync-time library
+edits, recovery mode and registration.
+
+Mutation battery: 46 mutants, 46 killed. Core mutants cover relative
+alignment, the target-level boundary, descendant overflow and the
+same-level no-op; store mutants cover dense persistence, transaction
+rollback and exact-permutation validation; command mutants cover every
+Rust test's load-bearing behavior (including no revisions and all four
+journal-failure rollbacks); mock mutants cover all twelve mock tests.
+R7/R9 initially hit a downstream mapper made unreachable by the
+`heading_of` guard and were correctly rerun against the actual guard;
+both failed. Every source file was restored and SHA-256 verified after
+each mutant. Full logs are owner-local under
+`.opencode/reviews/t330-mutations*`.
+
+Checks after the round-1 fixes: `cargo fmt --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, `cargo nextest run
+--workspace --test-threads=4` (1787/1787), `pnpm test` (345/345),
+`pnpm run format:check`, `pnpm run lint` and `pnpm run typecheck` —
+all exit 0. The generated bindings' whitespace is specta's own output;
+the file is not hand-formatted.
+
+**Round-1 review addendum (same task; report
+`.opencode/reviews/t330-round1.md`, deepseek-v4.1-flash, exit 0):
+REQUEST CHANGES — one P1, one P2 and four P3s.** Every finding was
+re-verified in the tree and taken; none was declined. The P1 fix
+resolves the dragged ALG-060 range once on the pre-move list, aligns
+exactly that range, then moves that exact range. The discriminating
+H4-target/H3-closer regression fails on the old implementation (the
+adjacent H3 became H6) and passes now; the existing overflow and
+self/descendant tests remain. The P2 test gap is closed by that scope
+regression. The P3s are all closed: the mock restamps only headings
+whose level actually changes and carries the change-level `index`;
+Rust and mock rename validation have empty/break/NUL/201-character
+negative tests; level-only shifts skip the whole-order write; and
+`Action::HeadingChanged` now documents re-levelling. Six follow-up
+mutants kill the new/fixed behaviors, bringing the battery to 42/42.
+
+**Round-2 review addendum (same task; report
+`.opencode/reviews/t330-round2.md`, hy4-flash-free, exit 0): REQUEST
+CHANGES — one P2, no P0/P1.** The finding was re-verified and taken;
+none was declined. `heading_create.level`, `HeadingUpdate::
+ChangeLevel` and `HeadingUpdate::ShiftBranch` now accept `i32` on the
+wire. Creation validates before database resolution; update resolves
+the heading operand first, then converts to `u8`/`i8` and delegates the
+2–6/±1 rule to core. Extreme integers (`-1`, `256`, `300` as levels;
+`128`, `-129`, `300` as deltas) therefore answer `E_VALIDATION` with
+the existing field/reason/numeric params instead of a serde
+`InvokeError`. Rust and mock boundary tests cover those values. Four
+follow-up mutants clamp or remap the invalid values and all four are
+killed, bringing the final battery to 46/46. The initial plain-cast
+mutant survived because a downstream closed-type check still returned
+`E_VALIDATION`; it was replaced by a behavior-changing clamp. A server
+interruption left one mutant applied; the exact pre-mutant block was
+restored and all four were rerun cleanly.

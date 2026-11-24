@@ -169,6 +169,13 @@ pub(crate) mod scan;
 // `scan.rs` — the §7.10 command-group shape.
 pub(crate) mod variants;
 
+// The four Library-structure commands (spec §7.10, T-330; the batch
+// absorbing T-092…T-095): `heading_create`, `heading_update`,
+// `heading_delete`, `items_move` — core-driven hierarchy changes over
+// the library repository, one transaction and one journal entry per
+// real operation, with no heading revisions and no SYS-005 gate.
+pub(crate) mod headings;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -194,6 +201,9 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // variant commands `variant_create`/`variant_update`/
         // `variant_set_main`/`variant_delete`/`variant_restore`
         // (T-329, the batch absorbing T-087…T-091, D-189), the
+        // Library-structure commands `heading_create`/
+        // `heading_update`/`heading_delete`/`items_move` (T-330,
+        // the batch absorbing T-092…T-095, D-191), the
         // Projects module's `projects_list` (T-072), the System
         // module's `dialog_pick_folder` (T-073), the Projects
         // module's `project_add_manual` (T-074), the Projects
@@ -237,6 +247,10 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             variants::variant_restore::<tauri::Wry>,
             variants::variant_set_main::<tauri::Wry>,
             variants::variant_update::<tauri::Wry>,
+            headings::heading_create::<tauri::Wry>,
+            headings::heading_delete::<tauri::Wry>,
+            headings::heading_update::<tauri::Wry>,
+            headings::items_move::<tauri::Wry>,
         ])
         // The registered §7.10 events: `state://project-availability`
         // (T-079, D-09/DB-032), `state://dirty` (T-101,
@@ -914,6 +928,9 @@ mod library_tests;
 
 #[cfg(test)]
 mod variants_tests;
+
+#[cfg(test)]
+mod headings_tests;
 
 #[cfg(test)]
 mod tests {

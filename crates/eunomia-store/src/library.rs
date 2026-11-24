@@ -24,6 +24,8 @@
 //! * [`move_item`] renumbers the affected range (DB-005's own
 //!   wording) and rejects a target outside `1..=N` with
 //!   [`LibraryError::PositionOutOfRange`];
+//! * [`set_item_order`] persists an exact whole-table permutation in
+//!   one caller-owned transaction, the ALG-061 branch-move endpoint;
 //! * [`delete_heading`] physically removes the row and closes the gap
 //!   by shifting the tail down (§6.4: the section's instructions stay
 //!   in place — positionally they shift up; structurally they join
@@ -117,11 +119,12 @@
 //!   precedent) and does not write revisions (§9.8 is the history
 //!   task's; LIB-026/027's "version on a real change" composes over
 //!   these functions later).
-//! * It does not own cross-entity compositions: moving a heading's
-//!   whole branch (LIB-032), bulk matrix operations (§7.4), and the
-//!   LIB-023 *per-project* replacement choices are command-layer
-//!   compositions over [`move_item`]/[`assign`]/
-//!   [`delete_variant`]+[`reassign`], each in one transaction.
+//! * It does not own cross-entity compositions: resolving and moving a
+//!   heading's whole branch (LIB-032/ALG-060…062) is a command-layer
+//!   composition over the core algorithms and [`set_item_order`]; bulk
+//!   matrix operations (§7.4) and the LIB-023 *per-project* replacement
+//!   choices compose [`assign`]/[`delete_variant`]+[`reassign`], each
+//!   in one transaction.
 //!
 //! # `updated_at` follows the snapshot notion of a real change
 //!
@@ -153,6 +156,7 @@
 //! [`LibraryError::Member`] — corruption or a newer app version
 //! (D-039), never a value to guess at.
 
+use std::collections::HashSet;
 use std::fmt;
 
 use rusqlite::Connection;
@@ -678,6 +682,24 @@ pub enum LibraryError {
         /// The table's row count — the highest legal position.
         max: i64,
     },
+    /// A whole-table order replacement did not name exactly the current
+    /// number of rows.
+    InvalidItemOrder {
+        /// The table's row count.
+        expected: usize,
+        /// The number of ids supplied.
+        actual: usize,
+    },
+    /// A whole-table order replacement named one row more than once.
+    DuplicateOrderId {
+        /// The repeated row id.
+        id: String,
+    },
+    /// A whole-table order replacement named an id outside the table.
+    UnknownOrderId {
+        /// The unknown row id.
+        id: String,
+    },
     /// The project already has an assignment for this instruction
     /// (D-02, the composite PRIMARY KEY). Changing the variant is
     /// [`reassign`], removing it [`unassign`].
@@ -777,6 +799,15 @@ impl fmt::Display for LibraryError {
             ),
             LibraryError::PositionOutOfRange { requested, max } => {
                 write!(f, "position {requested} is outside 1..={max}")
+            }
+            LibraryError::InvalidItemOrder { expected, actual } => {
+                write!(f, "a whole-table order needs {expected} ids, got {actual}")
+            }
+            LibraryError::DuplicateOrderId { id } => {
+                write!(f, "whole-table order repeats id {id:?}")
+            }
+            LibraryError::UnknownOrderId { id } => {
+                write!(f, "whole-table order names unknown id {id:?}")
             }
             LibraryError::AlreadyAssigned {
                 project_id,
@@ -1278,6 +1309,67 @@ pub fn move_item(
         )?;
     }
     Ok(get_item(conn, id)?.expect("the row just moved must be readable"))
+}
+
+/// Replaces the complete table-wide item order with `ordered_ids` and
+/// writes the DB-005/DB-011 positions `1..=N` in one caller-owned
+/// transaction.
+///
+/// The input must be an exact permutation of the current `library_items`
+/// ids. Length, duplicate and unknown-id refusals happen before the
+/// first write. The schema has no UNIQUE index on `position`
+/// (`docs/spec.md:258-269`), so each row may be updated independently;
+/// intermediate duplicate positions inside the transaction are invisible
+/// to other connections and the final sequence is dense. Position-only
+/// writes never restamp `updated_at` (D-16).
+///
+/// Complexity: one ordered table read, one hash-set membership pass and
+/// one prepared update per row — O(N) expected time and O(N) memory.
+///
+/// Atomicity: like [`move_item`], this multi-statement writer is atomic
+/// only inside the caller's transaction (D-037).
+///
+/// # Errors
+///
+/// [`LibraryError::InvalidItemOrder`] for a length mismatch,
+/// [`LibraryError::DuplicateOrderId`] for a repeated id,
+/// [`LibraryError::UnknownOrderId`] for an id outside the table, and
+/// [`LibraryError::Sql`] when a read or update fails.
+pub fn set_item_order(conn: &Connection, ordered_ids: &[&str]) -> Result<(), LibraryError> {
+    let existing = list_items(conn, ItemScope::All)?;
+    if ordered_ids.len() != existing.len() {
+        return Err(LibraryError::InvalidItemOrder {
+            expected: existing.len(),
+            actual: ordered_ids.len(),
+        });
+    }
+    let existing_ids: HashSet<&str> = existing.iter().map(|item| item.id.as_str()).collect();
+    let mut remaining = existing_ids.clone();
+    for &id in ordered_ids {
+        if !remaining.remove(id) {
+            return Err(if existing_ids.contains(id) {
+                LibraryError::DuplicateOrderId { id: id.to_owned() }
+            } else {
+                LibraryError::UnknownOrderId { id: id.to_owned() }
+            });
+        }
+    }
+    // Equal lengths plus every supplied id removed from the set imply an
+    // empty remainder; keep the invariant explicit without a panic.
+    if !remaining.is_empty() {
+        return Err(LibraryError::InvalidItemOrder {
+            expected: existing.len(),
+            actual: ordered_ids.len(),
+        });
+    }
+
+    let mut statement = conn.prepare("UPDATE library_items SET position = ?1 WHERE id = ?2")?;
+    for (index, &id) in ordered_ids.iter().enumerate() {
+        let position = i64::try_from(index + 1)
+            .expect("a table row count read from SQLite fits a positive i64 position");
+        statement.execute(rusqlite::params![position, id])?;
+    }
+    Ok(())
 }
 
 /// Physically deletes the heading with this id (§6.4: headings are

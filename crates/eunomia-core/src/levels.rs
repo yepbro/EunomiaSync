@@ -165,7 +165,7 @@
 //! ));
 //! ```
 
-use crate::heading_range::{HeadingBranchError, heading_branch};
+use crate::heading_range::{HeadingBranch, HeadingBranchError, heading_branch};
 use crate::library::{HeadingLevel, LibraryItem};
 
 /// The error [`change_heading_level`] and [`shift_branch_level`]
@@ -450,7 +450,51 @@ pub fn shift_branch_level(
     if delta != -1 && delta != 1 {
         return Err(LevelError::InvalidDelta { delta });
     }
+    shift_branch_validated(items, index, delta, &branch)
+}
 
+/// Aligns a whole heading branch so its root has `new_root_level`,
+/// preserving every heading's relative depth (ALG-062's automatic
+/// drop-on-heading/header case).
+///
+/// The branch is resolved by the same ALG-060 function as
+/// [`shift_branch_level`]. The requested root level must be within 2–6,
+/// and every descendant's aligned level must remain within 2–6. The
+/// validation pass completes before any item is rebuilt, so a refusal
+/// returns the original input untouched. Instructions and neighboring
+/// branches keep their values and order.
+///
+/// # Errors
+///
+/// [`LevelError::Branch`] when the root cannot be resolved;
+/// [`LevelError::LevelOutOfRange`] when `new_root_level` is outside 2–6;
+/// [`LevelError::BranchLevelOutOfRange`] when a descendant would leave
+/// 2–6. The reported offender is the first in collection order.
+pub fn shift_branch_to_level(
+    items: &[LibraryItem],
+    index: usize,
+    new_root_level: u8,
+) -> Result<Vec<LibraryItem>, LevelError> {
+    let branch = heading_branch(items, index)?;
+    let new_root =
+        HeadingLevel::try_from(new_root_level).map_err(|_| LevelError::LevelOutOfRange {
+            index,
+            value: new_root_level,
+        })?;
+    let difference = i16::from(new_root.as_u8()) - i16::from(branch.level.as_u8());
+    let delta = i8::try_from(difference).expect("heading levels 2 to 6 differ by at most 4");
+    shift_branch_validated(items, index, delta, &branch)
+}
+
+/// The shared all-or-nothing implementation for manual ±1 shifts and
+/// automatic drop alignment. The caller has resolved the branch and
+/// validated the operation's closed input set.
+fn shift_branch_validated(
+    items: &[LibraryItem],
+    index: usize,
+    delta: i8,
+    branch: &HeadingBranch,
+) -> Result<Vec<LibraryItem>, LevelError> {
     // All-or-nothing (ALG-062): validate EVERY heading of the branch
     // before writing any level, so a rejection leaves nothing behind.
     // The scan runs in collection order, which makes the reported
@@ -472,7 +516,7 @@ pub fn shift_branch_level(
 
     let mut shifted_items = items.to_vec();
     let mut new_levels = new_levels.into_iter();
-    for item_index in branch.range {
+    for item_index in branch.range.clone() {
         if let LibraryItem::Heading(heading) = &mut shifted_items[item_index] {
             heading.level = new_levels
                 .next()
@@ -485,9 +529,9 @@ pub fn shift_branch_level(
 /// The level one ±1 shift lands on: `None` when the result would
 /// leave 2–6 (ALG-062's rejection cases — an H2 shifting past the
 /// floor, an H6 shifting past the ceiling). Computed in `i16` so the
-/// closed-set check reads as arithmetic; `delta` is already
-/// validated to ±1 by the caller, so the value is always 1..=7
-/// here.
+/// closed-set check reads as arithmetic; `delta` is already validated
+/// by the caller (±1 for the manual command, at most ±4 for automatic
+/// alignment), so the value is always -2..=10 here.
 fn shifted(level: HeadingLevel, delta: i8) -> Option<HeadingLevel> {
     let value = i16::from(level.as_u8()) + i16::from(delta);
     if (2..=6).contains(&value) {
@@ -739,6 +783,60 @@ mod tests {
             change_heading_level(&items, 1, 1),
             Err(LevelError::NotAHeading { index: 1 })
         );
+    }
+
+    // ---- automatic drop alignment: a whole branch to a chosen root level -
+
+    #[test]
+    fn aligning_a_branch_preserves_relative_depth_and_every_other_item() {
+        let items = tree();
+        let aligned = shift_branch_to_level(&items, 0, 4)
+            .expect("aligning the H2/H3 branch to H4/H5 stays within 2 to 6");
+        assert_eq!(shape(&aligned), "4.5.2.2.");
+        for index in [1, 3, 4, 5, 6, 7] {
+            assert_eq!(aligned[index], items[index], "item {index} must not change");
+        }
+    }
+
+    #[test]
+    fn aligning_a_branch_rejects_an_out_of_range_target_before_writing() {
+        let items = tree();
+        for target in [1, 7] {
+            assert_eq!(
+                shift_branch_to_level(&items, 0, target),
+                Err(LevelError::LevelOutOfRange {
+                    index: 0,
+                    value: target
+                })
+            );
+        }
+        assert_eq!(shape(&items), "2.3.2.2.");
+    }
+
+    #[test]
+    fn aligning_a_branch_rejects_a_descendant_that_would_pass_h6() {
+        let items = vec![
+            heading("root", 5, "Root"),
+            heading("leaf", 6, "Leaf"),
+            instruction("one"),
+            heading("next", 2, "Next"),
+        ];
+        assert_eq!(
+            shift_branch_to_level(&items, 0, 6),
+            Err(LevelError::BranchLevelOutOfRange {
+                index: 0,
+                delta: 1,
+                offender: 1,
+                offender_level: 6,
+            })
+        );
+        assert_eq!(shape(&items), "56.2");
+    }
+
+    #[test]
+    fn aligning_a_branch_to_its_current_level_is_a_no_op() {
+        let items = tree();
+        assert_eq!(shift_branch_to_level(&items, 0, 2).unwrap(), items);
     }
 
     // ---- shift: the successful ±1 moves ----------------------------------

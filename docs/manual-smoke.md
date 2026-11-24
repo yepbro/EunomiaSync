@@ -266,12 +266,12 @@ scenario-relevant backend commands (`project_add_manual`,
 `settings_get`/`settings_set`, the library read `library_get`, the
 instruction lifecycle
 `instruction_create`/`instruction_update`/`instruction_hide`/
-`instruction_restore` and the variant commands
+`instruction_restore`, the variant commands
 `variant_create`/`variant_update`/`variant_set_main`/
-`variant_delete`/`variant_restore`)
-are registered (`src-tauri/src/lib.rs`); the remaining library write
-commands (headings, `items_move`) and the assignment
-commands are not. No entry below is executable until its surfaces
+`variant_delete`/`variant_restore`, and the structure commands
+`heading_create`/`heading_update`/`heading_delete`/`items_move`)
+are registered (`src-tauri/src/lib.rs`); the assignment commands are
+not. No entry below is executable until its surfaces
 land; each entry's Pending line names them, with the spec §16
 milestone that owns them (the milestone table maps S1/S2 → M1,
 S3/S5 → M2, S4–S6 → M3, S9 → M4, S7/S10 → M5). An entry may name a
@@ -455,6 +455,52 @@ instruction already in the library — the duplicate probe's target
   the `Main` select (§11.2).
 - S3's success line, verbatim in effect: the assignment is in the DB
   right away, files are not changed, the project became dirty.
+
+### S3a. Heading hierarchy, deletion and library moves
+
+Source: spec §7.3 LIB-030…034; §7.4 MAIN-015…023; §6.2/6.4;
+ALG-060…062; DB-005/DB-011; §7.10 `heading_create`,
+`heading_update`, `heading_delete`, `items_move`.
+
+Pending: the library heading tools, drag-and-drop interactions and
+confirmation dialog — spec §16 M2/M3. Their backend commands are
+registered (T-330); the checks below become executable when those UI
+surfaces land.
+
+**Prepare.** One project added, never synced. Build this library order:
+`## A`, instruction A1, `### B`, instruction B1, `## C`, instruction
+C1. Note the target file's state (under scheme A, `<repo>/AGENTS.md`
+should not exist yet).
+
+**Do.**
+
+1. Use the header "+" to add a root `##` and B's "+" to add a child.
+   Rename a heading. Try an empty/201-character name and levels 1/7.
+2. Change B's level, then use "Shift branch level +1" and "-1" to
+   restore it. Try shifting an H2 down or an H6-containing branch up.
+3. Delete B and confirm the dialog. Its instructions must remain.
+4. Drag A1 onto C1 (right after it), then onto heading A (the end of
+   A's section). Drag A's whole branch onto C (its last child), then
+   onto the library header (the first root at level 2).
+5. Try dropping A's branch onto A or B itself. Try a drop whose
+   automatic alignment would move a heading past H6.
+6. Restart the app and reread the library.
+
+**Pass when.**
+
+- Create/rename/level changes appear immediately; invalid names and
+  levels are refused with `E_VALIDATION` and nothing is half-saved.
+- A branch shift moves every heading in the branch by one and no
+  instruction; a refused shift changes neither levels nor order.
+- B is physically gone, B1 keeps its relative order among the
+  instructions, and all positions are dense from 1 with no gaps.
+- Instruction drops implement "after the row" and "at the section
+  end"; branch drops keep nested order and align levels to target + 1
+  or root level 2. Self/descendant drops and a level past H6 are
+  `E_VALIDATION` with the library unchanged.
+- The moved order and levels survive restart. Activity contains the
+  heading/instruction journal entries; heading history contains no
+  revisions. No project file changed before "Run sync".
 
 ### S4. Choosing a variant
 

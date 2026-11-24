@@ -807,6 +807,47 @@ export const commands = {
 	 *  writes neither.
 	 */
 	variantUpdate: (id: string, name: string | null, content: string | null, options?: InvokeOptions) => __TAURI_INVOKE<VariantRecord_Serialize>("variant_update", { id, name, content }, options),
+	/**
+	 *  Creates a heading of level 2–6 (§7.3 LIB-030/031, §6.9). `parent =
+	 *  None` appends a root at the table end; `Some(heading_id)` appends a
+	 *  child at the end of that heading's ALG-060 branch.
+	 * 
+	 *  Name validation is one linear pass and runs before the database is
+	 *  resolved. The insert, optional placement move and `heading.created`
+	 *  journal entry share one transaction. No revision row is written.
+	 */
+	headingCreate: (name: string, level: number, parent: string | null, options?: InvokeOptions) => __TAURI_INVOKE<HeadingRecord>("heading_create", { name, level, parent }, options),
+	/**
+	 *  Physically deletes one heading (§6.4 LIB-033). The store closes the
+	 *  position gap; every instruction and nested heading stays in its
+	 *  previous relative order and therefore belongs to the preceding
+	 *  section. The delete and `heading.deleted` journal entry share one
+	 *  transaction; no revision is written.
+	 */
+	headingDelete: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("heading_delete", { id }, options),
+	/**
+	 *  Applies exactly one heading operation: rename, point-wise level
+	 *  change, or whole-branch ±1 shift. The core owns the level rules; a
+	 *  same-value operation writes and journals nothing. Every real change
+	 *  journals `heading.changed` in the same transaction and writes no
+	 *  revision.
+	 */
+	headingUpdate: (id: string, update: HeadingUpdate, options?: InvokeOptions) => __TAURI_INVOKE<HeadingRecord>("heading_update", { id, update }, options),
+	/**
+	 *  Moves one instruction or a whole heading branch in one transaction
+	 *  (ALG-060/061). The target names a semantic drop outcome; the core
+	 *  computes the original-list insertion gap and rejects a branch's own
+	 *  interior. Dropping a branch on a heading/header also aligns every
+	 *  heading level through ALG-062 before any write.
+	 * 
+	 *  Complexity over database input: the ordered read, core conversion,
+	 *  branch resolution, move, optional alignment and order persistence are
+	 *  each O(N); level updates touch only changed headings. No text scan is
+	 *  nested inside another. A real move journals one `heading.changed` or
+	 *  `instruction.changed` entry with the moved-row count; an identity
+	 *  move writes and journals nothing.
+	 */
+	itemsMove: (id: string, target: MoveTarget, options?: InvokeOptions) => __TAURI_INVOKE<null>("items_move", { id, target }, options),
 };
 
 /** Events */
@@ -1681,6 +1722,48 @@ export type FileChangedEvent = {
 };
 
 /**
+ *  One heading row on the wire: the created or updated heading as it
+ *  stands after the command's transaction.
+ */
+export type HeadingRecord = {
+	/**  The heading's UUIDv7 TEXT id (DB-002). */
+	id: string,
+	/**  The stored, trimmed title (§6.9). */
+	title: string,
+	/**  The heading level, 2–6. */
+	level: number,
+	/**  The table-wide dense position (DB-005/DB-011). */
+	position: number,
+	/**  Creation time, DB-002 UTC ISO-8601. */
+	created_at: string,
+	/**  Last title/level write, DB-002 UTC ISO-8601. */
+	updated_at: string,
+};
+
+/**
+ *  The one mutually exclusive operation `heading_update` performs.
+ *  Adjacent tagging keeps primitive values (`String`, `i32`) in a
+ *  `value` field while `mode` makes the variants impossible to mix.
+ *  Numeric wire values are widened deliberately so malformed integers
+ *  reach the command's `E_VALIDATION` boundary instead of failing serde.
+ */
+export type HeadingUpdate = 
+/**  Rename this heading (LIB-030/031). */
+{ mode: "rename"; value: string } | 
+/**
+ *  Change only this heading's level (LIB-032). The wire uses i32
+ *  so every JSON integer reaches the command's `E_VALIDATION`
+ *  boundary; core still receives its closed `u8` level.
+ */
+{ mode: "change_level"; value: number } | 
+/**
+ *  Shift every heading in this heading's ALG-060 branch by ±1
+ *  (ALG-062). The wire uses i32 for the same boundary reason;
+ *  core still receives its closed `i8` delta.
+ */
+{ mode: "shift_branch"; value: number };
+
+/**
  *  The `instruction_create` answer: the identities the created pair
  *  carries plus the placement the row took — the ids are what every
  *  later library command (`instruction_update`, `instruction_hide`,
@@ -1900,6 +1983,30 @@ export type MarkdownWarningKind =
  *  LIB-002's named example).
  */
 "unclosed_code_fence";
+
+/**
+ *  A semantic drop destination for `items_move`. The frontend names
+ *  the row/heading it dropped onto; Rust resolves the current insertion
+ *  gap inside the transaction, so a stale numeric position cannot move
+ *  the wrong item.
+ */
+export type MoveTarget = 
+/**  The original-list gap immediately after this row. */
+{ mode: "after_item"; 
+/**  The row the item was dropped on. */
+id: string } | 
+/**
+ *  The end of this heading's section. A moved heading branch also
+ *  aligns its root to the target heading's level + 1 (ALG-062).
+ */
+{ mode: "into_heading"; 
+/**  The heading the item/branch was dropped on. */
+id: string } | 
+/**
+ *  The first root position. A moved heading branch aligns to level
+ *  2 (LIB-032/ALG-062).
+ */
+{ mode: "root" };
 
 /**
  *  The `project_add_manual` response: a typed outcome string plus the

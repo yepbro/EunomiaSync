@@ -579,6 +579,9 @@ pub(crate) fn build_snapshot_to_app_error(error: BuildSnapshotError) -> AppError
                     | eunomia_store::library::LibraryError::ReplacementInvalid { .. }
                     | eunomia_store::library::LibraryError::NoActiveMain { .. }
                     | eunomia_store::library::LibraryError::PositionOutOfRange { .. }
+                    | eunomia_store::library::LibraryError::InvalidItemOrder { .. }
+                    | eunomia_store::library::LibraryError::DuplicateOrderId { .. }
+                    | eunomia_store::library::LibraryError::UnknownOrderId { .. }
                     | eunomia_store::library::LibraryError::AlreadyAssigned { .. }
                     | eunomia_store::library::LibraryError::VariantNotAssignable { .. }
                     | eunomia_store::library::LibraryError::VariantNotActive { .. } => {
@@ -678,6 +681,9 @@ pub(crate) fn library_seed_error_for_tests(
         | eunomia_store::library::LibraryError::ReplacementInvalid { .. }
         | eunomia_store::library::LibraryError::NoActiveMain { .. }
         | eunomia_store::library::LibraryError::PositionOutOfRange { .. }
+        | eunomia_store::library::LibraryError::InvalidItemOrder { .. }
+        | eunomia_store::library::LibraryError::DuplicateOrderId { .. }
+        | eunomia_store::library::LibraryError::UnknownOrderId { .. }
         | eunomia_store::library::LibraryError::AlreadyAssigned { .. }
         | eunomia_store::library::LibraryError::VariantNotAssignable { .. }
         | eunomia_store::library::LibraryError::VariantNotActive { .. }) => panic!(

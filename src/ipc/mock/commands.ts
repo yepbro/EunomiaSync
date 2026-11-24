@@ -32,8 +32,11 @@ import type {
   AppInfo,
   ExclusionEntry,
   ExistingProject,
+  HeadingRecordWire,
+  HeadingUpdate,
   IpcCommands,
   MarkdownPreview,
+  MoveTarget,
   ProjectAddResultWire,
   ProjectLabelEntry,
   ScanCommitEntryWire,
@@ -646,6 +649,172 @@ function instructionRowOf(state: MockState, id: string): MockLibraryRow | Promis
 }
 
 // ---------------------------------------------------------------------------
+// The four structure commands (T-330): mock twins over the union-shaped
+// library rows. The backend owns ALG-060/061/062; these helpers mirror the
+// observable contracts for UI tests (semantic targets, all-or-nothing level
+// validation, dense positions and one journal entry per real change).
+// ---------------------------------------------------------------------------
+
+type HeadingRow = Extract<MockLibraryRow, { kind: 'heading' }>
+
+function isHeading(row: MockLibraryRow): row is HeadingRow {
+  return row.kind === 'heading'
+}
+
+/** The closed heading-level vocabulary after arithmetic has been checked. */
+function headingLevel(value: number): HeadingRow['headingLevel'] | null {
+  if (value === 2 || value === 3 || value === 4 || value === 5 || value === 6) return value
+  return null
+}
+
+/** The position-ordered rows the structure commands operate on. */
+function orderedLibrary(state: MockState): MockLibraryRow[] {
+  return [...state.library].sort((left, right) => left.position - right.position)
+}
+
+/** A row lookup with the real command's field-scoped, content-free refusal. */
+function structureRowIndex(
+  rows: readonly MockLibraryRow[],
+  id: string,
+  field: 'id' | 'target' | 'parent',
+): number | Promise<never> {
+  const index = rows.findIndex((row) => row.id === id)
+  if (index < 0) {
+    return rejectWith('E_VALIDATION', 'errors.validation', {
+      field,
+      reason: 'no library row has this id',
+    })
+  }
+  return index
+}
+
+/** A heading-only lookup; an instruction id is the same typed refusal. */
+function structureHeadingIndex(
+  rows: readonly MockLibraryRow[],
+  id: string,
+  field: 'id' | 'target' | 'parent',
+): number | Promise<never> {
+  const index = structureRowIndex(rows, id, field)
+  if (index instanceof Promise) return index
+  if (!isHeading(rows[index]!)) {
+    return rejectWith('E_VALIDATION', 'errors.validation', {
+      field,
+      reason: 'the row is not a heading',
+    })
+  }
+  return index
+}
+
+/** ALG-060's original-list branch range, hidden instructions included. */
+function mockBranchRange(
+  rows: readonly MockLibraryRow[],
+  headingIndex: number,
+): { start: number; end: number } | Promise<never> {
+  const root = rows[headingIndex]
+  if (!root || !isHeading(root)) {
+    return rejectWith('E_VALIDATION', 'errors.validation', {
+      field: 'id',
+      reason: 'the requested heading branch could not be resolved',
+    })
+  }
+  let end = rows.length
+  for (let index = headingIndex + 1; index < rows.length; index++) {
+    const row = rows[index]
+    if (row && isHeading(row) && row.headingLevel <= root.headingLevel) {
+      end = index
+      break
+    }
+  }
+  return { start: headingIndex, end }
+}
+
+/** ALG-061's original-list cut-and-insert. The caller checks the interior. */
+function mockMoveRange(
+  rows: readonly MockLibraryRow[],
+  start: number,
+  end: number,
+  target: number,
+): MockLibraryRow[] {
+  if (target >= end) {
+    return [
+      ...rows.slice(0, start),
+      ...rows.slice(end, target),
+      ...rows.slice(start, end),
+      ...rows.slice(target),
+    ]
+  }
+  return [
+    ...rows.slice(0, target),
+    ...rows.slice(start, end),
+    ...rows.slice(target, start),
+    ...rows.slice(end),
+  ]
+}
+
+/** Renumbers the complete table-wide sequence (DB-005/DB-011). */
+function renumberLibrary(rows: MockLibraryRow[]): void {
+  rows.forEach((row, index) => {
+    row.position = index + 1
+  })
+}
+
+/** Maps one heading row to the generated command DTO. */
+function toHeadingRecord(row: HeadingRow): HeadingRecordWire {
+  return {
+    id: row.id,
+    title: row.title,
+    level: row.headingLevel,
+    position: row.position,
+    created_at: row.createdAt,
+    updated_at: row.updatedAt,
+  }
+}
+
+/** §6.9 heading-name validation, with Rust trim and one positional scan. */
+function headingNameRejection(name: string): Promise<never> | null {
+  const trimmed = rustTrim(name)
+  const characters = Array.from(trimmed)
+  if (characters.length === 0) {
+    return rejectWith('E_VALIDATION', 'errors.validation', {
+      field: 'name',
+      reason: 'a heading name needs 1-200 characters after trimming',
+    })
+  }
+  if (characters.length > 200) {
+    return rejectWith('E_VALIDATION', 'errors.validation', {
+      field: 'name',
+      reason: 'a heading name is at most 200 characters',
+      length: String(characters.length),
+    })
+  }
+  const offense = firstNameOffense(trimmed)
+  if (offense) {
+    return rejectWith('E_VALIDATION', 'errors.validation', {
+      field: 'name',
+      reason:
+        offense.kind === 'nul'
+          ? 'a heading name must not contain NUL'
+          : 'a heading name is one line',
+      index: String(offense.index),
+      character: offense.character,
+    })
+  }
+  return null
+}
+
+/** Whether two ordered worlds have the same ids and heading levels. */
+function sameStructure(left: readonly MockLibraryRow[], right: readonly MockLibraryRow[]): boolean {
+  return left.every((row, index) => {
+    const other = right[index]
+    return (
+      other !== undefined &&
+      row.id === other.id &&
+      (!isHeading(row) || (isHeading(other) && row.headingLevel === other.headingLevel))
+    )
+  })
+}
+
+// ---------------------------------------------------------------------------
 // The command surface
 // ---------------------------------------------------------------------------
 
@@ -768,6 +937,255 @@ export const mockCommands: IpcCommands = {
       }
     })
   },
+  /** `heading_create` (§7.10, T-092): validated name/level, semantic placement, one journal row. */
+  async headingCreate(name, level, parent) {
+    const rejection = headingNameRejection(name)
+    if (rejection) return rejection
+    const validLevel = headingLevel(level)
+    if (!validLevel) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'level',
+        reason: 'heading levels must stay within 2 to 6',
+        level: String(level),
+      })
+    }
+    const state = mockState()
+    const rows = orderedLibrary(state)
+    let target = rows.length + 1
+    if (parent !== null) {
+      const index = structureHeadingIndex(rows, parent, 'parent')
+      if (index instanceof Promise) return index
+      const branch = mockBranchRange(rows, index)
+      if (branch instanceof Promise) return branch
+      target = branch.end + 1
+    }
+    const now = new Date().toISOString()
+    const row: HeadingRow = {
+      kind: 'heading',
+      id: freshRowId(),
+      position: 0,
+      headingLevel: validLevel,
+      title: rustTrim(name),
+      state: 'active',
+      createdAt: now,
+      updatedAt: now,
+    }
+    rows.splice(target - 1, 0, row)
+    renumberLibrary(rows)
+    state.library = rows
+    journal('heading.created', { entityType: 'heading', entityId: row.id })
+    return toHeadingRecord(row)
+  },
+
+  /** `heading_update` (§7.10, T-092/T-094): one typed operation, all-or-nothing level rules. */
+  async headingUpdate(id, update: HeadingUpdate) {
+    if (update.mode === 'rename') {
+      const rejection = headingNameRejection(update.value)
+      if (rejection) return rejection
+    }
+    const state = mockState()
+    const index = structureHeadingIndex(state.library, id, 'id')
+    if (index instanceof Promise) return index
+    const row = state.library[index]
+    if (!row || !isHeading(row)) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        reason: 'the row is not a heading',
+      })
+    }
+    const now = new Date().toISOString()
+    if (update.mode === 'rename') {
+      const renamed = rustTrim(update.value)
+      if (renamed === row.title) return toHeadingRecord(row)
+      row.title = renamed
+      row.updatedAt = now
+      journal('heading.changed', { entityType: 'heading', entityId: row.id })
+      return toHeadingRecord(row)
+    }
+    if (update.mode === 'change_level') {
+      const validLevel = headingLevel(update.value)
+      if (!validLevel) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'level',
+          reason: 'heading levels must stay within 2 to 6',
+          level: String(update.value),
+          index: String(orderedLibrary(state).findIndex((candidate) => candidate.id === id)),
+        })
+      }
+      if (validLevel === row.headingLevel) return toHeadingRecord(row)
+      row.headingLevel = validLevel
+      row.updatedAt = now
+      journal('heading.changed', { entityType: 'heading', entityId: row.id })
+      return toHeadingRecord(row)
+    }
+    if (update.value !== -1 && update.value !== 1) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'branch_shift',
+        reason: 'a manual branch level shift must be exactly -1 or +1',
+        delta: String(update.value),
+      })
+    }
+    const rows = orderedLibrary(state)
+    const orderedIndex = rows.findIndex((candidate) => candidate.id === id)
+    const branch = mockBranchRange(rows, orderedIndex)
+    if (branch instanceof Promise) return branch
+    const levels = new Map<number, HeadingRow['headingLevel']>()
+    for (let position = branch.start; position < branch.end; position++) {
+      const candidate = rows[position]
+      if (!candidate || !isHeading(candidate)) continue
+      const shifted = headingLevel(candidate.headingLevel + update.value)
+      if (!shifted) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'branch_shift',
+          reason: 'the whole branch was refused because a heading would leave 2 to 6',
+          index: String(orderedIndex),
+          delta: String(update.value),
+          offender: String(position),
+          offender_level: String(candidate.headingLevel),
+        })
+      }
+      levels.set(position, shifted)
+    }
+    state.library = rows.map((candidate, position) => {
+      const shifted = levels.get(position)
+      return shifted !== undefined && isHeading(candidate)
+        ? { ...candidate, headingLevel: shifted, updatedAt: now }
+        : candidate
+    })
+    journal('heading.changed', {
+      entityType: 'heading',
+      entityId: id,
+      details: JSON.stringify({ changed: levels.size }),
+    })
+    const stored = state.library.find((candidate) => candidate.id === id)
+    if (!stored || !isHeading(stored)) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        reason: 'the updated heading disappeared from the library',
+      })
+    }
+    return toHeadingRecord(stored)
+  },
+
+  /** `heading_delete` (§7.10, T-093): physical delete, dense positions, instructions kept. */
+  async headingDelete(id) {
+    const state = mockState()
+    const index = structureHeadingIndex(state.library, id, 'id')
+    if (index instanceof Promise) return index
+    state.library.splice(index, 1)
+    renumberLibrary(state.library)
+    journal('heading.deleted', { entityType: 'heading', entityId: id })
+    return null
+  },
+
+  /** `items_move` (§7.10, T-095): semantic drop targets, core-equivalent order/level guards. */
+  async itemsMove(id, target: MoveTarget) {
+    const state = mockState()
+    const rows = orderedLibrary(state)
+    const sourceIndex = structureRowIndex(rows, id, 'id')
+    if (sourceIndex instanceof Promise) return sourceIndex
+    const source = rows[sourceIndex]
+    if (!source) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        reason: 'no library row has this id',
+      })
+    }
+    const sourceIsHeading = isHeading(source)
+    // Resolve the dragged range before alignment or insertion can change
+    // which adjacent headings close it.
+    let sourceEnd = sourceIndex + 1
+    if (sourceIsHeading) {
+      const branch = mockBranchRange(rows, sourceIndex)
+      if (branch instanceof Promise) return branch
+      sourceEnd = branch.end
+    }
+    let targetIndex = 0
+    let alignedRootLevel: number | null = null
+    if (target.mode === 'after_item') {
+      const index = structureRowIndex(rows, target.id, 'target')
+      if (index instanceof Promise) return index
+      targetIndex = index + 1
+    } else if (target.mode === 'into_heading') {
+      const index = structureHeadingIndex(rows, target.id, 'target')
+      if (index instanceof Promise) return index
+      const targetRow = rows[index]
+      if (!targetRow || !isHeading(targetRow)) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'target',
+          reason: 'a drop target must be a heading row',
+        })
+      }
+      if (sourceIsHeading && index >= sourceIndex && index < sourceEnd) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'target',
+          reason: 'a branch cannot be dropped inside itself or its descendants',
+        })
+      }
+      const targetBranch = mockBranchRange(rows, index)
+      if (targetBranch instanceof Promise) return targetBranch
+      targetIndex = targetBranch.end
+      alignedRootLevel = sourceIsHeading ? targetRow.headingLevel + 1 : null
+    } else {
+      alignedRootLevel = sourceIsHeading ? 2 : null
+    }
+
+    if (sourceIndex < targetIndex && targetIndex < sourceEnd) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'target',
+        reason: 'a branch cannot move inside its own range',
+        range_start: String(sourceIndex),
+        range_end: String(sourceEnd),
+        target: String(targetIndex),
+      })
+    }
+    let moveInput = rows
+    if (alignedRootLevel !== null) {
+      const root = rows[sourceIndex]
+      if (!root || !isHeading(root)) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'id',
+          reason: 'the requested heading branch could not be resolved',
+        })
+      }
+      const delta = alignedRootLevel - root.headingLevel
+      const levelUpdates = new Map<number, HeadingRow['headingLevel']>()
+      for (let position = sourceIndex; position < sourceEnd; position++) {
+        const candidate = rows[position]
+        if (!candidate || !isHeading(candidate)) continue
+        const aligned = headingLevel(candidate.headingLevel + delta)
+        if (!aligned) {
+          return rejectWith('E_VALIDATION', 'errors.validation', {
+            field: 'heading_level',
+            reason: 'the whole branch was refused because a heading would leave 2 to 6',
+            index: String(sourceIndex),
+            delta: String(delta),
+            offender: String(position),
+            offender_level: String(candidate.headingLevel),
+          })
+        }
+        levelUpdates.set(position, aligned)
+      }
+      const now = new Date().toISOString()
+      moveInput = rows.map((row, index) => {
+        const aligned = levelUpdates.get(index)
+        return aligned !== undefined && isHeading(row) && aligned !== row.headingLevel
+          ? { ...row, headingLevel: aligned, updatedAt: now }
+          : row
+      })
+    }
+    let moved = mockMoveRange(moveInput, sourceIndex, sourceEnd, targetIndex)
+    if (sameStructure(rows, moved)) return null
+    moved = moved.map((row, index) => ({ ...row, position: index + 1 }))
+    state.library = moved
+    journal(sourceIsHeading ? 'heading.changed' : 'instruction.changed', {
+      entityType: sourceIsHeading ? 'heading' : 'instruction',
+      entityId: id,
+      details: JSON.stringify({ changed: sourceEnd - sourceIndex }),
+    })
+    return null
+  },
+
   /**
    * `projects_reorder` (§7.10, T-080): validates exactly like the real
    * command — the list must name every active project exactly once each

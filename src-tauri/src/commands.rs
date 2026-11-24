@@ -4590,8 +4590,11 @@ pub(crate) fn library_store_to_app_error(error: eunomia_store::library::LibraryE
                 | eunomia_store::library::LibraryError::ReplacementInvalid { .. } => {
                     "a delete-replacement outcome reached a command that does not map it"
                 }
-                eunomia_store::library::LibraryError::PositionOutOfRange { .. } => {
-                    "a position-range outcome reached a command that does not map it"
+                eunomia_store::library::LibraryError::PositionOutOfRange { .. }
+                | eunomia_store::library::LibraryError::InvalidItemOrder { .. }
+                | eunomia_store::library::LibraryError::DuplicateOrderId { .. }
+                | eunomia_store::library::LibraryError::UnknownOrderId { .. } => {
+                    "an order/position outcome reached a command that does not map it"
                 }
                 eunomia_store::library::LibraryError::AlreadyAssigned { .. }
                 | eunomia_store::library::LibraryError::VariantNotAssignable { .. }

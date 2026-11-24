@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { mockCommands } from './commands'
-import { mockState, resetMockState } from './state'
+import { mockState, resetMockState, type MockLibraryRow } from './state'
 import { mockEvents } from './events'
 import { PALETTE, type FixtureProfile } from '../fixtures/generator'
 import type { LibraryTreeItem } from '../contract'
@@ -1731,6 +1731,337 @@ describe('instructionCreate / instructionUpdate / instructionHide / instructionR
 
     expect(state.library.find((item) => item.id === H_B)?.state).toBe('active')
     expect(journalSize()).toBe(before)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The four structure commands (T-330): the mock twins of the Rust battery
+// over the same union-shaped library rows.
+// ---------------------------------------------------------------------------
+
+describe('headingCreate / headingUpdate / headingDelete / itemsMove (T-330)', () => {
+  const H_A = 'structure-h-a'
+  const I_A = 'structure-i-a'
+  const H_B = 'structure-h-b'
+  const I_B = 'structure-i-b'
+  const H_C = 'structure-h-c'
+  const I_C = 'structure-i-c'
+
+  function seedStructureLibrary(): void {
+    const stamp = (position: number): string =>
+      new Date(Date.UTC(2026, 10, 24, 12, 0, 0) + position * 1000).toISOString()
+    const instruction = (id: string, position: number, hidden = false): MockLibraryRow => ({
+      kind: 'instruction',
+      id,
+      position,
+      title: id,
+      state: hidden ? 'hidden' : 'active',
+      variants: [
+        {
+          id: `${id}-main`,
+          name: 'Main',
+          content: `${id} text`,
+          isMain: true,
+          state: 'active',
+          createdAt: stamp(position),
+          updatedAt: stamp(position),
+          deletedAt: null,
+        },
+      ],
+      createdAt: stamp(position),
+      updatedAt: stamp(position),
+    })
+    mockState().library = [
+      {
+        kind: 'heading',
+        id: H_A,
+        position: 1,
+        headingLevel: 2,
+        title: 'A',
+        state: 'active',
+        createdAt: stamp(1),
+        updatedAt: stamp(1),
+      },
+      instruction(I_A, 2),
+      {
+        kind: 'heading',
+        id: H_B,
+        position: 3,
+        headingLevel: 3,
+        title: 'B',
+        state: 'active',
+        createdAt: stamp(3),
+        updatedAt: stamp(3),
+      },
+      instruction(I_B, 4, true),
+      {
+        kind: 'heading',
+        id: H_C,
+        position: 5,
+        headingLevel: 2,
+        title: 'C',
+        state: 'active',
+        createdAt: stamp(5),
+        updatedAt: stamp(5),
+      },
+      instruction(I_C, 6),
+    ]
+  }
+
+  const ids = (): string[] =>
+    [...mockState().library]
+      .sort((left, right) => left.position - right.position)
+      .map((row) => row.id)
+  const heading = (id: string) => {
+    const row = mockState().library.find((candidate) => candidate.id === id)
+    return row?.kind === 'heading' ? row : undefined
+  }
+
+  it('validates create input and places root/child headings with one journal entry each', async () => {
+    seedStructureLibrary()
+    const state = mockState()
+    const beforeRows = ids()
+    const beforeJournal = state.activity.length
+    for (const name of ['', '   ', 'a\nb', 'a\0b', 'x'.repeat(201)]) {
+      await expect(commands.headingCreate(name, 2, null)).rejects.toMatchObject({
+        code: 'E_VALIDATION',
+        params: { field: 'name' },
+      })
+    }
+    for (const level of [1, 7, -1, 256, 300]) {
+      await expect(commands.headingCreate('Valid', level, null)).rejects.toMatchObject({
+        code: 'E_VALIDATION',
+        params: { field: 'level' },
+      })
+    }
+    await expect(commands.headingCreate('Valid', 3, I_A)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'parent' },
+    })
+    expect(ids()).toEqual(beforeRows)
+    expect(state.activity).toHaveLength(beforeJournal)
+
+    const child = await commands.headingCreate('  Child  ', 4, H_B)
+    const root = await commands.headingCreate('Root', 2, null)
+    expect(child).toMatchObject({ title: 'Child', level: 4, position: 5 })
+    expect(root).toMatchObject({ title: 'Root', level: 2, position: 8 })
+    expect(ids()).toEqual([H_A, I_A, H_B, I_B, child.id, H_C, I_C, root.id])
+    expect(state.activity.slice(beforeJournal).map((entry) => entry.action)).toEqual([
+      'heading.created',
+      'heading.created',
+    ])
+  })
+
+  it('renames, changes one level and shifts a branch, with verified no-ops', async () => {
+    seedStructureLibrary()
+    const state = mockState()
+    const beforeJournal = state.activity.length
+    await expect(
+      commands.headingUpdate(H_A, { mode: 'rename', value: '  Renamed  ' }),
+    ).resolves.toMatchObject({ title: 'Renamed' })
+    await expect(
+      commands.headingUpdate(H_A, { mode: 'rename', value: 'Renamed' }),
+    ).resolves.toMatchObject({ title: 'Renamed' })
+    expect(state.activity).toHaveLength(beforeJournal + 1)
+
+    await commands.headingUpdate(H_B, { mode: 'change_level', value: 5 })
+    await commands.headingUpdate(H_B, { mode: 'change_level', value: 5 })
+    expect(state.activity).toHaveLength(beforeJournal + 2)
+    await commands.headingUpdate(H_B, { mode: 'shift_branch', value: 1 })
+    expect(heading(H_B)?.headingLevel).toBe(6)
+    expect(state.activity).toHaveLength(beforeJournal + 3)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'heading.changed',
+      entity_type: 'heading',
+      entity_id: H_B,
+      details: JSON.stringify({ changed: 1 }),
+    })
+  })
+
+  it('validates every rename before writing or journaling', async () => {
+    seedStructureLibrary()
+    const state = mockState()
+    const beforeRows = JSON.stringify(state.library)
+    const beforeJournal = state.activity.length
+    for (const name of ['', '   ', 'a\nb', 'a\0b', 'x'.repeat(201)]) {
+      await expect(
+        commands.headingUpdate(H_A, { mode: 'rename', value: name }),
+      ).rejects.toMatchObject({ code: 'E_VALIDATION', params: { field: 'name' } })
+    }
+    expect(JSON.stringify(state.library)).toBe(beforeRows)
+    expect(state.activity).toHaveLength(beforeJournal)
+  })
+
+  it('refuses invalid level operations without changing rows or journaling', async () => {
+    seedStructureLibrary()
+    const state = mockState()
+    const beforeRows = JSON.stringify(state.library)
+    const beforeJournal = state.activity.length
+    for (const level of [1, 7, -1, 256, 300]) {
+      await expect(
+        commands.headingUpdate(H_A, { mode: 'change_level', value: level }),
+      ).rejects.toMatchObject({
+        code: 'E_VALIDATION',
+        params: { field: 'level', level: String(level), index: '0' },
+      })
+    }
+    for (const delta of [-1, 2, 128, -129, 300]) {
+      await expect(
+        commands.headingUpdate(H_A, { mode: 'shift_branch', value: delta }),
+      ).rejects.toMatchObject({ code: 'E_VALIDATION', params: { field: 'branch_shift' } })
+    }
+    expect(JSON.stringify(state.library)).toBe(beforeRows)
+    expect(state.activity).toHaveLength(beforeJournal)
+  })
+
+  it('physically deletes a heading while keeping instruction order and dense positions', async () => {
+    seedStructureLibrary()
+    const state = mockState()
+    const beforeJournal = state.activity.length
+    await expect(commands.headingDelete(H_B)).resolves.toBeNull()
+    expect(ids()).toEqual([H_A, I_A, I_B, H_C, I_C])
+    expect(state.library.map((row) => row.position)).toEqual([1, 2, 3, 4, 5])
+    expect(state.activity.slice(beforeJournal)).toHaveLength(1)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'heading.deleted',
+      entity_type: 'heading',
+      entity_id: H_B,
+    })
+    await expect(commands.headingDelete(I_A)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'id' },
+    })
+  })
+
+  it('moves an instruction after a row or to the end of a heading section', async () => {
+    seedStructureLibrary()
+    await commands.itemsMove(I_A, { mode: 'after_item', id: I_C })
+    expect(ids()).toEqual([H_A, H_B, I_B, H_C, I_C, I_A])
+    await commands.itemsMove(I_A, { mode: 'into_heading', id: H_A })
+    expect(ids()).toEqual([H_A, H_B, I_B, I_A, H_C, I_C])
+    expect(mockState().library.map((row) => row.position)).toEqual([1, 2, 3, 4, 5, 6])
+  })
+
+  it('moves a branch as the target heading’s last child and aligns every heading level', async () => {
+    seedStructureLibrary()
+    await commands.itemsMove(H_A, { mode: 'into_heading', id: H_C })
+    expect(ids()).toEqual([H_C, I_C, H_A, I_A, H_B, I_B])
+    expect(heading(H_A)?.headingLevel).toBe(3)
+    expect(heading(H_B)?.headingLevel).toBe(4)
+    expect(heading(H_C)?.headingLevel).toBe(2)
+  })
+
+  it('moves a branch to the root at level two, preserving relative depth', async () => {
+    seedStructureLibrary()
+    const a = heading(H_A)
+    const b = heading(H_B)
+    if (!a || !b) throw new Error('seed headings must exist')
+    a.headingLevel = 4
+    b.headingLevel = 5
+    await commands.itemsMove(H_A, { mode: 'root' })
+    expect(ids()).toEqual([H_A, I_A, H_B, I_B, H_C, I_C])
+    expect(heading(H_A)?.headingLevel).toBe(2)
+    expect(heading(H_B)?.headingLevel).toBe(3)
+  })
+
+  it('moves a root with a zero level delta without restamping its heading', async () => {
+    seedStructureLibrary()
+    const source = heading(H_C)
+    if (!source) throw new Error('seed heading must exist')
+    const before = source.updatedAt
+    await commands.itemsMove(H_C, { mode: 'root' })
+    expect(ids()[0]).toBe(H_C)
+    expect(heading(H_C)?.headingLevel).toBe(2)
+    expect(heading(H_C)?.updatedAt).toBe(before)
+  })
+
+  it('aligns only the dragged pre-move range, not the adjacent closing section', async () => {
+    seedStructureLibrary()
+    const source = heading(H_A)
+    const closer = heading(H_B)
+    const target = heading(H_C)
+    const iA = mockState().library.find((row) => row.id === I_A)
+    const iB = mockState().library.find((row) => row.id === I_B)
+    const iC = mockState().library.find((row) => row.id === I_C)
+    if (!source || !closer || !target || !iA || !iB || !iC) {
+      throw new Error('seed rows must exist')
+    }
+    target.headingLevel = 4
+    const finalRoot = { ...source, id: 'structure-final-root', position: 5 }
+    const finalItem = { ...iC, id: 'structure-final-item', position: 6 }
+    const nested = { ...closer, id: 'structure-nested', position: 9 }
+    const nestedItem = { ...iB, id: 'structure-nested-item', position: 10 }
+    mockState().library = [
+      { ...target, position: 1 },
+      { ...iC, position: 2 },
+      { ...closer, position: 3 },
+      { ...iB, position: 4 },
+      finalRoot,
+      finalItem,
+      { ...source, position: 7 },
+      { ...iA, id: 'structure-source-item', position: 8 },
+      nested,
+      nestedItem,
+    ]
+    await expect(commands.itemsMove(H_A, { mode: 'into_heading', id: H_C })).resolves.toBeNull()
+    expect(ids()).toEqual([
+      H_C,
+      I_C,
+      H_A,
+      'structure-source-item',
+      'structure-nested',
+      'structure-nested-item',
+      H_B,
+      I_B,
+      'structure-final-root',
+      'structure-final-item',
+    ])
+    expect(heading(H_A)?.headingLevel).toBe(5)
+    expect(heading('structure-nested')?.headingLevel).toBe(6)
+    expect(heading(H_B)?.headingLevel).toBe(3)
+    expect(heading('structure-final-root')?.headingLevel).toBe(2)
+  })
+
+  it('rejects self/descendant drops and an automatic shift past level six', async () => {
+    seedStructureLibrary()
+    const state = mockState()
+    const beforeRows = JSON.stringify(state.library)
+    const beforeJournal = state.activity.length
+    for (const target of [
+      { mode: 'into_heading' as const, id: H_A },
+      { mode: 'into_heading' as const, id: H_B },
+      { mode: 'after_item' as const, id: I_A },
+    ]) {
+      await expect(commands.itemsMove(H_A, target)).rejects.toMatchObject({
+        code: 'E_VALIDATION',
+        params: { field: 'target' },
+      })
+    }
+    expect(JSON.stringify(state.library)).toBe(beforeRows)
+    const target = heading(H_C)
+    const source = heading(H_A)
+    const nested = heading(H_B)
+    if (!target || !source || !nested) throw new Error('seed headings must exist')
+    target.headingLevel = 5
+    source.headingLevel = 5
+    nested.headingLevel = 6
+    const beforeOverflow = JSON.stringify(state.library)
+    await expect(commands.itemsMove(H_A, { mode: 'into_heading', id: H_C })).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'heading_level' },
+    })
+    expect(JSON.stringify(state.library)).toBe(beforeOverflow)
+    expect(state.activity).toHaveLength(beforeJournal)
+  })
+
+  it('journals nothing for an identity move', async () => {
+    seedStructureLibrary()
+    const state = mockState()
+    const beforeRows = JSON.stringify(state.library)
+    const beforeJournal = state.activity.length
+    await expect(commands.itemsMove(H_A, { mode: 'root' })).resolves.toBeNull()
+    expect(JSON.stringify(state.library)).toBe(beforeRows)
+    expect(state.activity).toHaveLength(beforeJournal)
   })
 })
 

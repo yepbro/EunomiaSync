@@ -335,7 +335,8 @@ pub enum Action {
     // physically; renaming and moving is recorded only here.
     /// A heading was created.
     HeadingCreated,
-    /// A heading was renamed or moved.
+    /// A heading was renamed, re-levelled (including a branch shift),
+    /// or moved.
     HeadingChanged,
     /// A heading was deleted (physical delete, §6.4).
     HeadingDeleted,
