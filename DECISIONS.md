@@ -22621,3 +22621,15 @@ run format:check`, `pnpm run lint`, `pnpm run typecheck`, `pnpm test`
 (333/333) — all exit 0. The Rust commands, their 32 tests and the
 twenty-kill mutation battery are unchanged by the rebase: only the
 mock layer and the docs adapted.
+
+Addendum (2026-11-24, post-merge): the task's real follow-up is carded
+on the board — one INBOX card, no T-number until the owner's triage:
+a machine-checked command-count tie (the `mode.spec` pinned set versus
+the `collect_commands!`/specta registration) so the ARCHITECTURE count
+cannot drift by hand again — this cycle caught main four short. The
+editor-UI and `sync_cancel`/`revision_*` items the report names are no
+cards: they are the existing backlog (T-186+, T-120, T-331). The card
+is the tracking unit; this line is the D-record duplicate the board
+rule asks for. Written as a service commit in main after the merge —
+md-only, no suites under the md-only regime; prettier and the
+pre-commit hook gate it.
