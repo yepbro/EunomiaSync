@@ -16,7 +16,11 @@
 //! * a fresh database reaches `PRAGMA user_version = 2` with the index
 //!   present, and `PRAGMA index_info` pins its columns to exactly the
 //!   approved set, in order (an independent oracle: the task card's
-//!   decision, not whatever the SQL happens to say);
+//!   decision, not whatever the SQL happens to say). The same shape is
+//!   pinned from the other side by schema_v1.rs's
+//!   `schema_v1_contains_the_spec_indexes` — a deliberate second list
+//!   (the owner's 2026-11-24 ruling, T-273): the two serve different
+//!   contracts, and a change to the pair index edits both files;
 //! * `EXPLAIN QUERY PLAN` for the exact `last_checked` statement
 //!   searches through the index — no `SCAN backup_records` (this is
 //!   the test that fails without the index; see the mirror note on

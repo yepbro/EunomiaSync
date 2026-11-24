@@ -331,7 +331,12 @@ fn schema_v1_contains_the_spec_indexes() {
     // comparison would miss. The partial-WHERE clause and the COLLATE
     // NOCASE of the two ux_ indexes are pinned behaviorally by the
     // main-variant and variant-name tests. The pair-lookup index is
-    // schema version 2's addition (T-256).
+    // schema version 2's addition (T-256); its column list is pinned a
+    // second time, independently, by schema_v2.rs's `index_info` check
+    // (`a_fresh_database_reaches_user_version_two_with_the_pair_index`).
+    // Both lists spell the index's shape out on purpose (the owner's
+    // 2026-11-24 ruling, T-273): they serve different contracts, so a
+    // change to the pair index edits this file and that one together.
     let expected: &[(&str, &str, &[&str])] = &[
         (
             "ix_backup_records_pair_lookup",
