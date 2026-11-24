@@ -21087,6 +21087,113 @@ message, exported with `opencode session export` and written verbatim
 under a provenance note. Its two questions repeat round 1's first two
 and go to the orchestrator in the report.
 
+Addendum (2026-11-23, T-129): T-129 — the card for scheme B's
+integration tests, spec §15.2's rows T-F4 (`docs/spec.md:936`) and
+T-F12 (`:944`) with §15.4's DoD 13, 14, 15 and 17
+(`docs/spec.md:969-970`, `:972`) — is closed as fully covered by this
+suite, with no code or test of its own. A read-only coverage check at
+`main` @ `2afbc0a` (report `.opencode/reviews/t129-coverage-check.md`
+— under the gitignored `.opencode/`, so not in the repo) mapped every
+claim of the two Expected cells and the four DoD items onto the suite
+and found zero gaps. This addendum is the card's only repo artifact: a
+dated addendum, no new D-number — D-125's posture in `760237e`.
+Closing a card on a gap analysis is D-158's precedent; that check
+found four gaps and filled them with tests, this one found none. Every
+line cited below was re-read in the tree at that base before writing
+(Rule 2); the suite file has one commit (`ae83a87`) and no diff since.
+Both primary tests drive the real `sync_run` command (`run_sync`,
+`src-tauri/src/sync_pipeline_tests.rs:700-708`):
+
+- _T-F4 — `skipped`, `E_MARKERS_INVALID`, the other projects are written._
+  `a_scheme_b_file_without_exactly_one_marker_pair_is_left_untouched_and_the_run_continues`
+  (`src-tauri/src/sync_pipeline_tests.rs:1149-1221`): a scheme-A
+  project, then five scheme-B files the parser refuses — no markers,
+  two pairs, reversed order, and each single missing half
+  (`:1159-1170`). The ordered statuses, `written` then five `skipped`
+  (`:1206-1211`); `E_MARKERS_INVALID` on every refused row
+  (`:1212-1218`); the other project written, its managed block equal
+  to the hand-spelled `BODY` (`:1219-1220`). Beyond the cell, the same
+  test pins §7.5's "nothing is written": each refused file stays byte
+  for byte (`:1183-1188`), makes no copy and gets no stamp
+  (`:1189-1197`), and the run is `partial` (`:1201-1204`). A written
+  project on both sides of a skip is the creation test's pin
+  (`a_first_sync_creates_the_missing_target_in_schemes_a_and_c_and_never_in_scheme_b`,
+  `:964-1064`; `:996`).
+- _T-F12 — The area outside the markers is kept byte for byte._
+  `a_scheme_b_file_with_bom_and_crlf_keeps_everything_outside_the_markers_byte_for_byte`
+  (`:1223-1275`): the head opens with the BOM and carries a blank
+  line, a line with trailing spaces and the begin marker, all on CRLF
+  (`:1232-1234`); the tail opens at the end marker (`:1235`). After a
+  `written` run (`:1246`) the file on disk must still begin with the
+  head and end with the tail (`:1249-1256`) — `assert_b_splice`'s
+  `strip_prefix` and `strip_suffix` over the raw bytes (`:323-328`;
+  `read` answers a `Vec<u8>`, `:728-730`), so the BOM is compared as
+  `EF BB BF` and every break as `0D 0A`. The second sync reads the file
+  back `unchanged` — the same bytes, no second copy (`:1266-1274`).
+- _DoD 13–15 and 17, by §15.4's short names._ "Full build with marker":
+  `the_creation_marker_matches_the_spec_template_and_closes_every_managed_block_with_one_run_timestamp`
+  (`:1336-1386`) and
+  `scheme_a_builds_the_full_file_with_the_extra_file_lines_in_their_positions`
+  (`:1388-1481`). The same §15.4 row's
+  "marker at the end of the block in scheme B": the first of the two —
+  the marker is the line right before the end marker (`:1361-1369`) and
+  names the run's instant (`:1380`). "External edits are overwritten":
+  `an_external_edit_is_overwritten_by_the_next_sync_and_backed_up_in_every_scheme`
+  (`:1485-1573`). "Last sync times":
+  `last_sync_times_follow_only_the_written_and_unchanged_statuses`
+  (`:2017-2180`). ALG-033, which the DoD 13 check names
+  (`docs/spec.md:969`), is what makes a status `unchanged`
+  (`docs/spec.md:668`); the suite asserts it throughout
+  (`sync_pipeline_tests.rs:1268`, `:1987`, `:2091`, `:2127`).
+- _Both tests bite, by this entry's own record._ The per-test table
+  above has a row for each. `refused marker pair`: red under B4
+  ("project 1: nothing is written into a refused scheme-B file") and
+  under I
+  ("§9.4 phase 4 step 3: five skipped projects beside a written one").
+  `BOM + CRLF`: red under D2
+  ("the T-F12 target after the sync: the bytes before the begin marker changed")
+  and under B1 (the statuses, `unchanged`). Nothing was re-run for the
+  closure.
+- _The check's one optional hardening: considered and declined._ A
+  written scheme-C project appended after the five refused ones would
+  kill no mutant the suite does not already kill — the report's
+  ground, which the tree bears out. Every broken-marker shape leaves
+  phase 1 through the one `skip_verdict(ErrorCode::MarkersInvalid, …)`
+  return (`src-tauri/src/sync_phase1.rs:580-585`) as one
+  `PreflightVerdict::Skipped` carrying that code (`:666-676`) — only
+  the message text differs — and a written project after a skip is
+  already asserted (`sync_pipeline_tests.rs:996`).
+
+What the closure does not claim. Nothing was executed for it: the
+green and the mutation evidence above are this entry's record, made on
+a suite file unchanged since. The three-OS proof rides the merge push,
+as the entry's own boundary says: at this writing `ae83a87` is not on
+`origin/main` (`git merge-base --is-ancestor` exits 1 against the
+local remote-tracking ref, `bc26146`); CI was not queried. The check
+judged what the repository can show, the two Expected cells and the
+four DoD items; the card's Description was elided in the brief the
+checker received (the report's caveat 4), so a clause outside those
+cells could not have been seen. The UI half is no automation claim at
+all: the `skipped` row with its code and the paste-the-block hint,
+like the byte-for-byte check itself, is in the manual smoke checklist
+(`docs/manual-smoke.md:574-576`, `:564-566`).
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t129-r1.md`, deepseek-v4.1-flash): APPROVE — 0×P0,
+0×P1, one P2, one P3; both taken in the amend, each re-verified in
+this session before acting. The reviewer opened every one of the
+thirty-nine distinct citations and found each true of this tree. P2-1:
+the four assertion messages quoted from the per-test table were tails
+of the real strings; they are the table's own now, character for
+character. P3-1: the D-158 parenthetical sat under "no new D-number",
+though D-158 is a full entry whose gap analysis found four gaps — the
+two precedents are separated above, with the difference stated. By
+P2-1's rule two more borrowings the reviewer did not list were put
+right unasked: §15.4's second short name and the T-F12 cell lead now
+carry the spec's own first letters. Checks: md-only diff — this
+addendum; no test suites run, the md-only regime; `pnpm run
+format:check` green.
+
 ### D-184 — T-228: the supply-chain gates land in CI — `cargo audit` beside cargo-deny, a full `pnpm audit`, and a dependency-free license allow-list check in place of the spec's `license-checker` (which sees 24 of 257 installed packages under pnpm) — 2026-11-23
 
 Problem: SEC-010 (docs/spec.md:897) has demanded `cargo audit`,
