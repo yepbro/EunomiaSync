@@ -7308,7 +7308,11 @@ pub(crate) fn wait_for_watch_passes(app: &tauri::App<tauri::test::MockRuntime>, 
 /// (OUT-014's "a watch event never writes a file" is about the
 /// service, and stays pinned). Returns the quiescent pass count —
 /// the baseline the act-window deltas below assert against.
-fn converge_startup_watch(
+/// `pub(crate)` for the `project_update_tests.rs` wiring proofs
+/// (T-107/D-204): their fixtures write the target before
+/// `spawn_service` too, so they take the settled baseline the same
+/// way instead of indexing passes absolutely.
+pub(crate) fn converge_startup_watch(
     app: &tauri::App<tauri::test::MockRuntime>,
     target: &std::path::Path,
 ) -> u64 {

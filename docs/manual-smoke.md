@@ -374,7 +374,8 @@ DB-040…042.
 Pending: the "+ Add project" button, the system folder picker flow and
 the "Project settings" modal — spec §16 M1. (The backend
 `project_add_manual`, `dialog_pick_folder` and the modal's save arm
-`project_update` are registered.)
+`project_update` are registered — the §6.9 fields and the PRJ-012
+scheme/file-name/extra-file half both.)
 
 **Prepare.** Four throwaway repos (`r1`–`r4`), one plain non-Git
 folder, one Git folder with read access denied (Windows: `icacls
@@ -815,7 +816,9 @@ synced" (MAIN-026).
 - After the sync the pill is gone.
 - Optional cross-check: changing a project's scheme or file name in
   its settings dirties it too (DB-023), and the old file under the
-  previous name is not deleted.
+  previous name is not deleted. (The save command behind the modal is
+  registered — backend-verified by tests — the modal itself is spec
+  §16 M1.)
 
 ### S10. Backup failure
 

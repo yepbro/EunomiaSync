@@ -824,7 +824,17 @@ describe('projectUpdate', () => {
     const journalBefore = (await changedEntries()).length
 
     await expect(
-      commands.projectUpdate(row.id, 'x'.repeat(100), 'L'.repeat(6), 'teal', 'd'.repeat(1000)),
+      commands.projectUpdate(
+        row.id,
+        'x'.repeat(100),
+        'L'.repeat(6),
+        'teal',
+        'd'.repeat(1000),
+        null,
+        null,
+        null,
+        null,
+      ),
     ).resolves.toBeNull()
 
     const stored = mockState().projects.find((candidate) => candidate.id === row.id)
@@ -869,7 +879,7 @@ describe('projectUpdate', () => {
     ]
     for (const [field, name, label, color, description] of cases) {
       await expect(
-        commands.projectUpdate(row.id, name, label, color, description),
+        commands.projectUpdate(row.id, name, label, color, description, null, null, null, null),
       ).rejects.toMatchObject({
         code: 'E_VALIDATION',
         params: { field },
@@ -888,7 +898,7 @@ describe('projectUpdate', () => {
     const row = activeRow()
     const before = { ...row }
     const rejection = await commands
-      .projectUpdate(row.id, 'New Name', 'NEWL', 'teal', 'd'.repeat(1001))
+      .projectUpdate(row.id, 'New Name', 'NEWL', 'teal', 'd'.repeat(1001), null, null, null, null)
       .then(
         () => undefined,
         (error: AppErrorWire) => error,
@@ -905,7 +915,17 @@ describe('projectUpdate', () => {
     // (an unknown id plus an invalid field answers about the FIELD),
     // and the §6.9 table order decides which invalid field answers.
     await expect(
-      commands.projectUpdate('no-such-row', 'x'.repeat(101), null, 'purple', null),
+      commands.projectUpdate(
+        'no-such-row',
+        'x'.repeat(101),
+        null,
+        'purple',
+        null,
+        null,
+        null,
+        null,
+        null,
+      ),
     ).rejects.toMatchObject({
       code: 'E_VALIDATION',
       params: {
@@ -922,7 +942,17 @@ describe('projectUpdate', () => {
     // a label/description swap.
     const row = activeRow()
     await expect(
-      commands.projectUpdate(row.id, 'New Name', 'ABCDEFG', null, 'd'.repeat(1001)),
+      commands.projectUpdate(
+        row.id,
+        'New Name',
+        'ABCDEFG',
+        null,
+        'd'.repeat(1001),
+        null,
+        null,
+        null,
+        null,
+      ),
     ).rejects.toMatchObject({
       code: 'E_VALIDATION',
       params: { field: 'label' },
@@ -935,10 +965,12 @@ describe('projectUpdate', () => {
     // never JSON.stringify's "\u0007" — so a UI test written against
     // the mock asserts a string the backend actually sends.
     const row = activeRow()
-    const rejection = await commands.projectUpdate(row.id, null, 'a\u0007b', null, null).then(
-      () => undefined,
-      (error: AppErrorWire) => error,
-    )
+    const rejection = await commands
+      .projectUpdate(row.id, null, 'a\u0007b', null, null, null, null, null, null)
+      .then(
+        () => undefined,
+        (error: AppErrorWire) => error,
+      )
     expect(rejection?.code).toBe('E_VALIDATION')
     expect(rejection?.params?.field).toBe('label')
     expect(rejection?.params?.reason).toBe(
@@ -956,7 +988,9 @@ describe('projectUpdate', () => {
     const row = activeRow()
     const before = { ...row }
 
-    await expect(commands.projectUpdate(row.id, null, '\uFEFF', null, null)).resolves.toBeNull()
+    await expect(
+      commands.projectUpdate(row.id, null, '\uFEFF', null, null, null, null, null, null),
+    ).resolves.toBeNull()
 
     const stored = mockState().projects.find((candidate) => candidate.id === row.id)
     expect(stored?.label).toBe('\uFEFF')
@@ -967,7 +1001,9 @@ describe('projectUpdate', () => {
     const row = activeRow()
     const before = { ...row }
 
-    await expect(commands.projectUpdate(row.id, null, 'ONLY', null, null)).resolves.toBeNull()
+    await expect(
+      commands.projectUpdate(row.id, null, 'ONLY', null, null, null, null, null, null),
+    ).resolves.toBeNull()
 
     const stored = mockState().projects.find((candidate) => candidate.id === row.id)
     expect(stored?.label).toBe('ONLY')
@@ -985,7 +1021,17 @@ describe('projectUpdate', () => {
     const journalBefore = (await changedEntries()).length
 
     await expect(
-      commands.projectUpdate(row.id, row.name, row.label, row.color, row.description),
+      commands.projectUpdate(
+        row.id,
+        row.name,
+        row.label,
+        row.color,
+        row.description,
+        null,
+        null,
+        null,
+        null,
+      ),
     ).resolves.toBeNull()
 
     const stored = mockState().projects.find((candidate) => candidate.id === row.id)
@@ -1000,7 +1046,9 @@ describe('projectUpdate', () => {
     const before = { ...row }
     const journalBefore = (await changedEntries()).length
 
-    await expect(commands.projectUpdate(row.id, null, null, null, null)).resolves.toBeNull()
+    await expect(
+      commands.projectUpdate(row.id, null, null, null, null, null, null, null, null),
+    ).resolves.toBeNull()
 
     const stored = mockState().projects.find((candidate) => candidate.id === row.id)
     expect(stored).toEqual(before)
@@ -1011,7 +1059,9 @@ describe('projectUpdate', () => {
     const row = activeRow()
     const before = { ...row }
 
-    await expect(commands.projectUpdate(row.id, '   ', null, null, null)).rejects.toMatchObject({
+    await expect(
+      commands.projectUpdate(row.id, '   ', null, null, null, null, null, null, null),
+    ).rejects.toMatchObject({
       code: 'E_VALIDATION',
       params: { field: 'name' },
     })
@@ -1029,7 +1079,9 @@ describe('projectUpdate', () => {
     row.description = 'seeded prose'
     const journalBefore = (await changedEntries()).length
 
-    await expect(commands.projectUpdate(row.id, null, null, null, '')).resolves.toBeNull()
+    await expect(
+      commands.projectUpdate(row.id, null, null, null, '', null, null, null, null),
+    ).resolves.toBeNull()
 
     const stored = mockState().projects.find((candidate) => candidate.id === row.id)
     expect(stored?.description).toBe('')
@@ -1040,7 +1092,17 @@ describe('projectUpdate', () => {
     const row = activeRow()
 
     await expect(
-      commands.projectUpdate(row.id, null, null, null, 'kept text\0stripped byte'),
+      commands.projectUpdate(
+        row.id,
+        null,
+        null,
+        null,
+        'kept text\0stripped byte',
+        null,
+        null,
+        null,
+        null,
+      ),
     ).resolves.toBeNull()
 
     const stored = mockState().projects.find((candidate) => candidate.id === row.id)
@@ -1058,7 +1120,7 @@ describe('projectUpdate', () => {
     const journalBefore = (await changedEntries()).length
 
     await expect(
-      commands.projectUpdate(second.id, first.name, null, null, null),
+      commands.projectUpdate(second.id, first.name, null, null, null, null, null, null, null),
     ).resolves.toBeNull()
 
     const stored = mockState().projects.find((candidate) => candidate.id === second?.id)
@@ -1072,7 +1134,7 @@ describe('projectUpdate', () => {
     const journalBefore = (await changedEntries()).length
 
     await expect(
-      commands.projectUpdate('no-such-row', 'New Name', null, null, null),
+      commands.projectUpdate('no-such-row', 'New Name', null, null, null, null, null, null, null),
     ).rejects.toMatchObject({
       code: 'E_VALIDATION',
       params: {
@@ -1084,7 +1146,9 @@ describe('projectUpdate', () => {
     // D-115's cap, pinned at the boundary: an over-long id echoes
     // truncated with the suffix, never whole.
     const longId = 'x'.repeat(70)
-    await expect(commands.projectUpdate(longId, null, null, null, null)).rejects.toMatchObject({
+    await expect(
+      commands.projectUpdate(longId, null, null, null, null, null, null, null, null),
+    ).rejects.toMatchObject({
       code: 'E_VALIDATION',
       params: {
         field: 'project_id',
@@ -1098,7 +1162,286 @@ describe('projectUpdate', () => {
     const archived = mockState().projects.find((candidate) => candidate.state === 'archived')
     expect(archived).toBeDefined()
     await expect(
-      commands.projectUpdate(archived?.id ?? '', 'New Name', null, null, null),
+      commands.projectUpdate(
+        archived?.id ?? '',
+        'New Name',
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+      ),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'project_id',
+        reason: 'no active project has this id',
+      },
+    })
+    expect((await changedEntries()).length).toBe(journalBefore)
+  })
+
+  it('saves the scheme, file name and extra files, and journals one attributable entry', async () => {
+    // T-107/D-204's happy path: the whole PRJ-012 half saved by one
+    // call — the scheme, the file name, and one extra file enabled at
+    // start (the other re-sent at its stored value: the patch's
+    // equal-strip on the new half) — readable back through the row,
+    // with the T-106 fields and the immutable half untouched and one
+    // `project.changed` entry where `activityList` reads it (no
+    // details — the row holds the facts, D-204 point 8).
+    const row = activeRow()
+    const before = { ...row }
+    const journalBefore = (await changedEntries()).length
+
+    await expect(
+      commands.projectUpdate(
+        row.id,
+        null,
+        null,
+        null,
+        null,
+        'B',
+        'CLAUDE.md',
+        { enabled: true, position: 'start' },
+        { enabled: false, position: 'end' },
+      ),
+    ).resolves.toBeNull()
+
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored?.scheme).toBe('B')
+    expect(stored?.baseName).toBe('CLAUDE.md')
+    expect(stored?.extraLocalEnabled).toBe(true)
+    expect(stored?.extraLocalPosition).toBe('start')
+    // The re-sent stored pair is stripped, not churned.
+    expect(stored?.extraProjectEnabled).toBe(before.extraProjectEnabled)
+    expect(stored?.extraProjectPosition).toBe(before.extraProjectPosition)
+    // The §6.9 fields are absent — unchanged.
+    expect(stored?.name).toBe(before.name)
+    expect(stored?.label).toBe(before.label)
+    expect(stored?.description).toBe(before.description)
+    expect(stored?.color).toBe(before.color)
+    // The immutable half (PRJ-008): the path and the origin stay.
+    expect(stored?.path).toBe(before.path)
+    expect(stored?.addedVia).toBe(before.addedVia)
+    const journal = await changedEntries()
+    expect(journal).toHaveLength(journalBefore + 1)
+    const entry = journal[0]
+    expect(entry?.action).toBe('project.changed')
+    expect(entry?.entity_id).toBe(row.id)
+    expect(entry?.project_id).toBe(row.id)
+    expect(entry?.details).toBeNull()
+  })
+
+  it('rejects invalid scheme, file name and extra position literals, changing nothing', async () => {
+    // D-204 point 2's vocabulary refusals, the Rust battery's mirror:
+    // an off-vocabulary literal refuses the whole save — the row
+    // stays verbatim (snapshot first: the store mutates in place)
+    // and the journal claims nothing. Case-sensitivity included: a
+    // lower-case member is not a member (the schema CHECK's posture).
+    const row = activeRow()
+    const before = { ...row }
+    const journalBefore = (await changedEntries()).length
+    const cases: Array<
+      [string, string | null, { enabled: boolean; position: string } | null, boolean]
+    > = [
+      ['scheme', 'D', null, false],
+      ['scheme', 'a', null, false],
+      ['base_name', 'GEMINI.md', null, false],
+      ['base_name', 'agents.md', null, false],
+      ['extra_local', null, { enabled: true, position: 'middle' }, false],
+      // The OTHER extra's own token (round 1's P3-1): the envelope
+      // names the wire field, so a swapped literal in either arm
+      // cannot survive here either.
+      ['extra_project', null, null, true],
+    ]
+    for (const [field, scheme, extraLocal, asExtraProject] of cases) {
+      await expect(
+        commands.projectUpdate(
+          row.id,
+          null,
+          null,
+          null,
+          null,
+          field === 'scheme' ? scheme : null,
+          field === 'base_name' ? scheme : null,
+          field === 'extra_local' ? extraLocal : null,
+          asExtraProject ? { enabled: true, position: 'middle' } : null,
+        ),
+      ).rejects.toMatchObject({
+        code: 'E_VALIDATION',
+        params: { field },
+      })
+    }
+    // The pair's own order (PRJ-012's sentence: extra_local before
+    // extra_project): a two-fault send with BOTH positions invalid
+    // answers about `extra_local`.
+    await expect(
+      commands.projectUpdate(
+        row.id,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        { enabled: true, position: 'middle' },
+        { enabled: true, position: 'middle' },
+      ),
+    ).rejects.toMatchObject({ params: { field: 'extra_local' } })
+    // The bounded echo, pinned at the boundary (D-115's cap): an
+    // over-long scheme literal echoes truncated with the suffix,
+    // never whole.
+    await expect(
+      commands.projectUpdate(row.id, null, null, null, null, 'A'.repeat(70), null, null, null),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'scheme',
+        value: `${'A'.repeat(64)} (+6 more code points)`,
+      },
+    })
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored).toEqual(before)
+    expect((await changedEntries()).length).toBe(journalBefore)
+  })
+
+  it('answers the new fields after the 6.9 fields, in their own order', async () => {
+    // D-204 point 2's ordering mirror: the §6.9 fields answer before
+    // the new half, and the new half answers in PRJ-012's own
+    // sentence order — scheme before file name before the extras.
+    await expect(
+      commands.projectUpdate(
+        'no-such-row',
+        'x'.repeat(101),
+        null,
+        null,
+        null,
+        'D',
+        null,
+        null,
+        null,
+      ),
+    ).rejects.toMatchObject({ params: { field: 'name' } })
+    await expect(
+      commands.projectUpdate('no-such-row', null, null, null, null, 'D', 'GEMINI.md', null, null),
+    ).rejects.toMatchObject({ params: { field: 'scheme' } })
+    await expect(
+      commands.projectUpdate(
+        'no-such-row',
+        null,
+        null,
+        null,
+        null,
+        null,
+        'GEMINI.md',
+        { enabled: true, position: 'middle' },
+        null,
+      ),
+    ).rejects.toMatchObject({ params: { field: 'base_name' } })
+  })
+
+  it('stores extra files under scheme B (the row, not the scheme window)', async () => {
+    // D-204 point 3's store-anyway mirror: the §6.2 columns are NOT
+    // NULL on every row and the builder — not the store — is what
+    // ignores them under B/C, so a scheme-B row saves an extra-file
+    // patch like any other (the modal hides the controls; the wire
+    // never refuses them). The row's scheme is stated directly (the
+    // mock's row-stated-facts habit), so the act is the extra change
+    // alone.
+    const row = activeRow()
+    row.scheme = 'B'
+    const journalBefore = (await changedEntries()).length
+
+    await expect(
+      commands.projectUpdate(
+        row.id,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        {
+          enabled: true,
+          position: 'start',
+        },
+        null,
+      ),
+    ).resolves.toBeNull()
+
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored?.scheme).toBe('B')
+    expect(stored?.extraLocalEnabled).toBe(true)
+    expect(stored?.extraLocalPosition).toBe('start')
+    expect(await changedEntries()).toHaveLength(journalBefore + 1)
+  })
+
+  it('the unchanged resend of the write configuration is a no-op', async () => {
+    // D-204 point 9's no-op mirror: a re-send of the stored write
+    // configuration (the extras as whole enabled-plus-position pairs)
+    // writes and journals nothing. The row is snapshotted first: the
+    // store mutates rows in place, so comparing the live object with
+    // itself can never fail (round 1's P3-5).
+    const row = activeRow()
+    const before = { ...row }
+    const journalBefore = (await changedEntries()).length
+
+    await expect(
+      commands.projectUpdate(
+        row.id,
+        null,
+        null,
+        null,
+        null,
+        row.scheme,
+        row.baseName,
+        { enabled: row.extraLocalEnabled, position: row.extraLocalPosition },
+        { enabled: row.extraProjectEnabled, position: row.extraProjectPosition },
+      ),
+    ).resolves.toBeNull()
+
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored).toEqual(before)
+    expect((await changedEntries()).length).toBe(journalBefore)
+  })
+
+  it('a disabled position change is a real row change (the whole pair)', async () => {
+    // D-204 point 9's whole-pair mirror (round 1's P2-2): a
+    // position-only change with the flag still off is a real row
+    // change — the column moves and the journal records it. A strip
+    // that compared `enabled` alone would silently swallow this send.
+    const row = activeRow()
+    const journalBefore = (await changedEntries()).length
+
+    await expect(
+      commands.projectUpdate(
+        row.id,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        { enabled: row.extraLocalEnabled, position: 'start' },
+        null,
+      ),
+    ).resolves.toBeNull()
+
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored?.extraLocalEnabled).toBe(row.extraLocalEnabled)
+    expect(stored?.extraLocalPosition).toBe('start')
+    expect(await changedEntries()).toHaveLength(journalBefore + 1)
+  })
+
+  it('answers a valid scheme over an unknown id with the id refusal', async () => {
+    // The stale-screen ordering mirror (D-201 point 6): the fields
+    // validate first, then the row read refuses — a VALID scheme over
+    // an unknown id is the id's refusal, never a save.
+    const journalBefore = (await changedEntries()).length
+    await expect(
+      commands.projectUpdate('no-such-row', null, null, null, null, 'B', null, null, null),
     ).rejects.toMatchObject({
       code: 'E_VALIDATION',
       params: {

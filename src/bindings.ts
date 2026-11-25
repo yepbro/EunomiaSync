@@ -412,17 +412,18 @@ export const commands = {
 	projectArchive: (projectId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("project_archive", { projectId }, options),
 	/**
 	 *  Updates the editable fields of the project with this id (PRJ-008:
-	 *  name, label, color, description) with §6.9 validation, in one
+	 *  name, label, color, description; PRJ-012: the scheme, the file
+	 *  name and the two extra-file options) with §6.9 validation, in one
 	 *  transaction that also journals the single `project.changed` entry
-	 *  (LOG-001…004, D-201 point 5).
+	 *  (LOG-001…004, D-201 point 5, D-204 point 8).
 	 * 
 	 *  Id-addressed like `project_archive` (the id comes from
-	 *  `projects_list`'s rows), and a PATCH: each field is
-	 *  `Option<String>` — absent (`null`) leaves the field unchanged, the
-	 *  store's own `ProjectUpdate` semantics — so a stale screen that
-	 *  re-sends one field cannot wipe the other three, and the modal's
-	 *  full save is the same contract. The answer is `()`: the screen
-	 *  re-reads through the already-landed `projects_list`.
+	 *  `projects_list`'s rows), and a PATCH: each field is optional —
+	 *  absent (`null`) leaves the field unchanged, the store's own
+	 *  [`ProjectUpdate`] semantics — so a stale screen that re-sends one
+	 *  field cannot wipe the others, and the modal's full save is the
+	 *  same contract. The answer is `()`: the screen re-reads through the
+	 *  already-landed `projects_list`.
 	 * 
 	 *  A duplicate name is SAVED, not refused (§6.9's "Duplicates are
 	 *  allowed with a warning"): the warning is the modal's live field
@@ -430,15 +431,29 @@ export const commands = {
 	 *  already serves — the command carries no warning arm.
 	 * 
 	 *  Validation order (§6.9, all-or-nothing): the present fields are
-	 *  validated through the shared core validators in table order
-	 *  (name, label, description, color) BEFORE the database is resolved
-	 *  — the first invalid field answers with the `E_VALIDATION`
-	 *  envelope naming it, and nothing is saved (the card's DoD). The
-	 *  name, label and color refusals echo the caller's field bounded
-	 *  (D-115's cap; the `rejected_title_field` shape); the description
-	 *  refusal carries NO value — stored prose is the one thing SEC-008
-	 *  keeps out of envelopes (the variant-text rule), and the
-	 *  validator's reason already carries the measured length.
+	 *  validated before the database is resolved — the §6.9 fields in the
+	 *  spec table's own order (name, label, description, color), then the
+	 *  PRJ-012 half in PRJ-012's own sentence order (scheme, file name,
+	 *  `extra_local`, `extra_project` — §6.9's table carries only the
+	 *  file name among them; D-204 point 2) — and the first invalid field
+	 *  answers with the `E_VALIDATION` envelope naming it, so nothing is
+	 *  saved (the card's DoD). The name, label and color refusals echo
+	 *  the caller's field bounded (D-115's cap; the
+	 *  `rejected_title_field` shape); the description refusal carries NO
+	 *  value — stored prose is the one thing SEC-008 keeps out of
+	 *  envelopes; the scheme, file-name and extra-position refusals echo
+	 *  the caller's literal bounded (closed-vocabulary words, the
+	 *  color/action-filter precedent).
+	 * 
+	 *  The extra-file fields apply to the ROW, not the scheme window
+	 *  (D-204 point 3, the spec's own words): the §6.2 columns are NOT
+	 *  NULL on every row, §6.5 seeds `default.extra_*` for every new
+	 *  project whatever the scheme, and the BUILDER — not the store — is
+	 *  what ignores them under schemes B and C (ALG-030's "(A only)";
+	 *  PRJ-008's "extra files only in scheme A" names the modal's
+	 *  scheme-conditional block). A B/C row therefore saves an extra-file
+	 *  patch like any other: stored, journaled, and dirtied through
+	 *  DB-020's no-qualifier formula.
 	 * 
 	 *  An id no ACTIVE row matches — unknown, or archived since the
 	 *  modal opened (PRJ-008's pencil rides an active column; the D-115
@@ -446,11 +461,12 @@ export const commands = {
 	 *  is the typed `E_VALIDATION` refusal naming `project_id` with the
 	 *  id echoed bounded; nothing is written.
 	 * 
-	 *  The verified no-op (D-201 point 5): a send whose present fields
-	 *  all equal the stored values is stripped to an empty patch BEFORE
-	 *  the store call, so nothing is written, `updated_at` is not
-	 *  restamped (the store's own empty-update rule), and nothing is
-	 *  journaled.
+	 *  The verified no-op (D-201 point 5, D-204 point 9): a send whose
+	 *  present fields all equal the stored values — the extras compared
+	 *  as whole enabled-plus-position pairs — is stripped to an empty
+	 *  patch BEFORE the store call, so nothing is written, `updated_at`
+	 *  is not restamped (the store's own empty-update rule), nothing is
+	 *  journaled, and no watch refresh runs.
 	 * 
 	 *  While a sync holds the global `sync_running` flag, the command
 	 *  answers the typed `E_SYNC_RUNNING` envelope instead (SYS-005, the
@@ -458,14 +474,26 @@ export const commands = {
 	 *  acquire), and the screen's retry after the run ends converges.
 	 *  Recovery mode answers the honest `NoDatabase` fallback (the flag
 	 *  is down there by construction, so the answer comes from
-	 *  [`managed_db`]).
+	 *  [`managed_db`]; the watch refresh is unreachable without a
+	 *  database by the same ordering).
+	 * 
+	 *  After the transaction commits, IF the patch changed at least one
+	 *  watch-verdict input (scheme, file name, an extra-file option —
+	 *  SYS-007's own list, the fields the watch pass's `ProjectFact`
+	 *  consumes), the command awaits ONE full watch pass through the
+	 *  bounded mutation seam (D-144/D-156, D-204 point 7):
+	 *  never-fatal aftermath — a refused or expired pass logs its class
+	 *  through [`logging::file_watch_mutation_refresh_degraded`] and the
+	 *  save stands, and the next watch anchor re-derives the set
+	 *  (D-144's convergence). A patch that changed none of them (the
+	 *  §6.9 fields only, or the verified no-op) runs no refresh.
 	 * 
 	 *  Failures reach the log with their §10 code
 	 *  ([`logging::project_update_failed`]); a successful save is the
 	 *  journal entry itself (the D-051 mirror policy — info+user+ok is
 	 *  not mirrored to the file log).
 	 */
-	projectUpdate: (projectId: string, name: string | null, label: string | null, color: string | null, description: string | null, options?: InvokeOptions) => __TAURI_INVOKE<null>("project_update", { projectId, name, label, color, description }, options),
+	projectUpdate: (projectId: string, name: string | null, label: string | null, color: string | null, description: string | null, scheme: string | null, baseName: string | null, extraLocal: ExtraFilePatch | null, extraProject: ExtraFilePatch | null, options?: InvokeOptions) => __TAURI_INVOKE<null>("project_update", { projectId, name, label, color, description, scheme, baseName, extraLocal, extraProject }, options),
 	/**
 	 *  Lists the projects for the main window's columns and the "Archived
 	 *  projects" screen (§7.10 Projects module `projects_list`; §7.1; the
@@ -1984,6 +2012,36 @@ export type ExistingProject = {
 	path: string,
 	/**  `active` or `archived` — which duplicate arm this is. */
 	state: string,
+};
+
+/**
+ *  One extra-file option of the `project_update` patch (§7.5 scheme A,
+ *  D-01): the include flag and where the "read this file" line goes,
+ *  in the §6.5 JSON object shape `{"enabled": …, "position": …}` the
+ *  settings table and the core `ExtraFile` serde form share.
+ * 
+ *  `position` arrives as the raw wire string, not a typed enum: it is
+ *  a closed-vocabulary literal the command itself parses, so an
+ *  off-list member answers the TYPED `E_VALIDATION` envelope naming
+ *  the field (the color's precedent — a specta-typed enum arg would
+ *  move the refusal to Tauri's arg-deserialization boundary, an
+ *  untyped string error with no `message_key` for UI-011 to
+ *  localize). `enabled` is a plain `bool`: a non-boolean shape is an
+ *  invoke-level deserialization failure, exactly as a non-string
+ *  `name` already is (the D-003 typed-IPC boundary's own behavior).
+ *  Unknown members are refused the same way
+ *  (`deny_unknown_fields`, the core `ExtraFile` serde shape:
+ *  missing members, unknown members and wrong types are rejected,
+ *  not defaulted).
+ */
+export type ExtraFilePatch = {
+	/**  Whether the line is added at all. */
+	enabled: boolean,
+	/**
+	 *  Where the line is added — `start` or `end`, parsed by
+	 *  [`parse_extra_file`].
+	 */
+	position: string,
 };
 
 /**

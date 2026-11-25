@@ -196,13 +196,19 @@ pub(crate) mod assignments;
 // no file I/O at all, and the SYS-005 gate first.
 pub(crate) mod project_archive;
 
-// The Projects module's `project_update` command (spec §7.10, T-106;
-// PRJ-008/009/011/021, §6.9, SYS-005, LOG-001…004; the contract is
-// D-201): one id-addressed patch over the four editable fields with
-// the core §6.9 validators, one transaction carrying the store update
-// and the single `project.changed` journal entry — the path, the
-// origin and every watch-set input untouched, no file I/O at all, and
-// the SYS-005 gate first.
+// The Projects module's `project_update` command (spec §7.10, T-106
+// and T-107; PRJ-008/009/011/021, PRJ-012, §6.9, §7.5, SYS-005,
+// SYS-007, LOG-001…004; the contracts are D-201 and D-204): one
+// id-addressed patch over the §6.9-validated editable fields and the
+// PRJ-012 write configuration (the scheme, the file name, the two
+// extra-file options), one transaction carrying the store update and
+// the single `project.changed` journal entry — the path and the
+// origin untouched by the command's own surface, no target file
+// written (DB-023: the old file stays; the dirty verdict is the
+// recalculation service's row-decidable answer), and after a
+// committed watch-input change ONE awaited watch pass through the
+// bounded mutation seam (never-fatal aftermath). The SYS-005 gate
+// first.
 pub(crate) mod project_update;
 
 // The History module's revision reads (spec §7.10, T-331):

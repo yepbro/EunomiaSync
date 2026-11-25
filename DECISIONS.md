@@ -24706,3 +24706,282 @@ taken in the amend; no finding declined.**
   record: the new requirement rows and the §7.10 notes cite it;
   presentation-level rows and error-table cells reference the
   requirement IDs.
+
+### D-204 — T-107: `project_update`'s scheme, file-name and extra-file arm — the watch-verdict inputs as a patch, extra files stored under every scheme (store-anyway), and the DB-023 dirty clause decided by the row, never written — 2026-11-25
+
+The card (§7.10 Projects `project_update`; PRJ-012, DB-023, D-01, D-03,
+§7.5, SYS-005, SYS-007, LOG-001…004) extends T-106's landed command
+(D-201, commit df6ef88) with the settings modal's write-configuration
+half: `scheme`, `base_name`, and the two extra-file options. The card
+leaves nine points open to more than one reading; the chosen readings
+were written here BEFORE the implementation (the rule-1 discipline).
+The command keeps D-201's contract whole — the same id-addressed patch
+surface (`Result<(), AppError>`), the same `reject_during_sync` first,
+the same `managed_db` honest `NoDatabase` answer, the same ONE
+`Db::run` transaction carrying the store update and the journal insert,
+the same module (`project_update.rs` + `project_update_tests.rs`,
+extended — no second command, the registry stays at 41).
+
+1. **The wire: four more flat optional args, two of them a typed
+   object.** `project_update(project_id, name, label, color,
+description, scheme, base_name, extra_local, extra_project)` —
+   D-201's flat-args reading extended (tauri-specta maps each arg to
+   one invoke key; `base_name`→`baseName`, the extras→`extraLocal`/
+   `extraProject`). `scheme` and `base_name` are `Option<String>`:
+   closed vocabularies the command itself parses, so an off-list
+   literal answers the TYPED `E_VALIDATION` envelope naming the field
+   (the color's own precedent — a specta-typed enum arg would move the
+   refusal to Tauri's arg-deserialization boundary, an untyped string
+   error with no `message_key` for UI-011 to localize). The extras are
+   `Option<ExtraFilePatch>` — a new wire DTO
+   `{enabled: bool, position: String}` (the §6.5 JSON object shape,
+   the core `ExtraFile` serde twin, both members required and unknown
+   members refused at the invoke boundary, the D-003 typed-IPC
+   reading): `position` stays a `String` for the same typed-refusal
+   reason; `enabled` is a `bool` (a non-boolean shape is an
+   invoke-level deserialization failure, exactly as a non-string
+   `name` already is — the boundary's own behavior, not a field
+   refusal). The store's `ProjectUpdate` already carries all four
+   fields (`crates/eunomia-store/src/projects.rs:747-765`) — the
+   command fills them; the store is untouched.
+2. **Validation order: the §6.9 fields first, then the PRJ-012 half in
+   its own sentence order.** §6.9's table carries only ONE of the new
+   fields (File name, near the table's end); scheme and the extra
+   positions are §7.5/§6.5 closed vocabularies, not §6.9 rows. The
+   order: name, label, description, color (D-201's table order,
+   unchanged), then scheme, base_name, extra_local, extra_project
+   (PRJ-012's own sentence — "its own scheme, file name, and extra
+   files"). The two-fault ordering precedent extends: an invalid name
+   plus an invalid scheme answers about `name`; an invalid scheme plus
+   an invalid base_name answers about `scheme`. The vocabulary
+   refusals echo the caller's literal bounded (D-115's cap — the wire
+   string is unbounded by definition) with a class-only reason: "the
+   scheme must be one of A, B, C (spec 7.5)" / "the file name must be
+   AGENTS.md or CLAUDE.md (spec D-03)" / "the position must be start
+   or end (spec 6.5)". Case-sensitive, like every schema CHECK
+   literal (`settings::Scheme::from_member`'s own posture).
+3. **Extra files under schemes B/C: STORE-ANYWAY — the spec's own
+   words, not a refusal and not a silent ignore.** The §6.2 columns
+   are NOT NULL on every row (every scheme); §6.5's `default.extra_*`
+   seeds EVERY new project whatever `default.scheme` is, so a scheme-B
+   row carries extra values by construction; the builder ignores them
+   under B/C (ALG-030's "(A only)"; the core `ExtraFile` doc's own
+   "under schemes B and C the builder ignores them, mirroring the
+   spec"); DB-020's formula hashes "extra-file flags and positions"
+   with NO scheme qualifier (`hash.rs`'s recorded reading — the hash
+   fingerprints the build configuration), so an extra flip under B/C
+   changes the hash and dirties the row; PRJ-008's "extra files only
+   in scheme A" names the MODAL's scheme-conditional block (the UI
+   hides the controls), never a store rule. A refusal would break the
+   B→A switch (the dormant value must survive it — PRJ-012's "a
+   project has its own … extra files" is the row's, not the scheme
+   window's), and a silent ignore would contradict the hash formula.
+   The command therefore stores extra-file fields under every
+   scheme, journals the change, and dirties through the hash arm; the
+   brief's DoD sketch ("extra fields on a B/C target → nothing
+   saved") was written against this unresolved reading — the
+   spec-decided oracle is its store-anyway opposite, pinned by a
+   test.
+4. **base_name and scheme validation (§6.9's File-name row, §7.5).**
+   The file name is "a value from the list", D-03's list —
+   `AGENTS.md`/`CLAUDE.md`, the closed `BaseName` vocabulary
+   (`BaseName::from_member`'s two literals); "path and extension are
+   not typed in" is why the vocabulary is closed at all. The scheme
+   is §7.5's A/B/C. An off-vocabulary literal refuses the whole save
+   (§6.9's all-or-nothing, D-201 point 6 extended): row verbatim,
+   journal absent.
+5. **The DB-023 dirty clause: decided by the row, never written
+   (D-194's DB-014 posture).** The command writes the row only — no
+   dirty flag, no hash cell, no `last_synced_*` churn (OUT-020's
+   fact stays the sync's own). The stored `last_synced_hash` was
+   computed over the OLD build configuration; DB-020 hashes scheme +
+   target path + the extra flags and positions + the build text; the
+   DB-022 service's next pass (the commit hook fires on the row
+   change; the tests drive `recalc_and_emit` directly — T-108's
+   surface) recomputes over the NEW configuration, the hash differs,
+   DB-021 answers dirty. Nothing in the command duplicates that
+   decision — the DoD asserts it through the real service's diff and
+   `projects_list`'s `dirty` column.
+6. **The old file on disk: NO file I/O in the command (the D-194
+   posture).** DB-023's "the old file with the previous name is not
+   deleted" is a prohibition on the app, and §7.5 assigns no cleanup
+   anywhere (scheme C "does not open the main file"; scheme A/C write
+   the new target at the next sync; scheme B splices in place) — the
+   old file's fate is the user's own. The command changes the DB row
+   only; the next sync writes the new target; the watch refresh's
+   pass READS target files (its verdicts) and writes nothing. The
+   DoD's disk oracle: a real file, a scheme/base_name change, the
+   bytes read back verbatim.
+7. **The watch refresh: the committed arm carries the four
+   watch-verdict inputs (T-279/D-144 — the OPPOSITE arm from D-201
+   point 7).** SYS-007's own list ties watch changes to "a project is
+   added or its scheme or file name changes" — and the pass's
+   `ProjectFact` consumes exactly the four fields this arm can change
+   (`file_watch.rs`: scheme, base_name, extra_local, extra_project —
+   the set membership through `target_file_name(scheme, base_name)`,
+   the VERDICTS through the extras feeding the expected target
+   content). So the committed arm — the patch actually changed at
+   least one of the four — awaits ONE full watch pass through the
+   BOUNDED mutation seam `file_watch::refresh_after_mutation`
+   (D-156/T-280: the brief names D-144's `refresh_after_sync`, but
+   the interactive-caller one-liner `project_add_manual` itself has
+   called since T-280 is the bounded twin; the unbounded seam stays
+   the sync pipeline's), never-fatal aftermath —
+   `logging::file_watch_mutation_refresh_degraded` on refusal, the
+   save stands, the next anchor re-converges the set (D-144's
+   convergence). A no-change patch AND a name/label/color/
+   description-only change run NO refresh: the pass would be file
+   I/O over inputs that did not move (D-201 point 7's own list, the
+   boundary this card extends). The refresh runs AFTER the commit
+   (the transaction's `Ok` carries whether the watch-input half
+   changed — the journal insert stays INSIDE the transaction, the
+   refresh strictly after it).
+8. **The journal: ONE `project.changed` entry, D-201 point 5's shape,
+   NO details.** Entity and `project_id` name the row; the field set
+   stays out — the row itself holds every fact this command writes
+   (D-201's own reading, extended to the new half), the entry shape
+   stays uniform across the command's whole field set (one modal
+   save = one entry whatever half changed), and nothing
+   user-content rides the entry (Rule 8).
+9. **The no-op extension.** A send whose present fields all equal the
+   stored values writes, journals and refreshes nothing (D-201 point
+   5 extended): the extras compare as whole values (enabled and
+   position together — a disabled-but-different position is a REAL
+   row change: the column changes and DB-020 hashes it), and the
+   store's own empty-update rule still refuses to churn `updated_at`.
+
+Tests: `project_update_tests.rs` extended — fifteen new tests and
+three extended ones. The card's DoD battery: the scheme-change and
+base-name-change dirty+untouched-file pins (DB-023's both halves,
+through the real `recalc_and_emit` pass and `projects_list`'s column
+over a clean baseline spelled through the public core `build_hash`
+seam), the extra-file dirty pin (DB-020's no-qualifier formula) and
+its scheme-B arm (the flags alone move the hash — the managed text
+under B gains no reading line), the disabled-position whole-pair pin
+(a position-only change with the flag off is a real, journaled,
+dirty-making row change), each invalid literal saves nothing (scheme,
+base_name, both extras' positions — case-sensitivity and the bounded
+echo pinned), the two-fault ordering pins (the §6.9 half first, then
+PRJ-012's own order, extra_local before extra_project), the
+store-anyway pin under scheme B, the four wiring pins (one awaited
+pass on a scheme, a file-name and an extra-file change each; none on
+a name-only change or the unchanged re-send — the pass counter over
+the quiescent `converge_startup_watch` baseline the deterministic
+observable, no sleeps and no absolute pass indexing), the
+whole-configuration happy path, and the E_SYNC_RUNNING / NoDatabase /
+unknown-id arms re-sent with the new fields. Frontend: the mock
+twin's `commands.spec.ts` battery (seven new tests: the happy path,
+the vocabulary refusals with bounded echo and both extras' tokens,
+the ordering mirror, the scheme-B store-anyway mirror, the
+whole-pair position mirror, the no-op mirror, the
+valid-scheme-over-unknown-id mirror) and the `mode.spec` surface pin
+unchanged at 41 names. Mutation groups are recorded in the review
+addendum below.
+
+Checks: BDD red-first (the new tests written against the un-widened
+command — the compile failure IS the red state — then green after the
+implementation); all runs exit-code-gated under `CARGO_BUILD_JOBS=2`,
+nextest `--test-threads=4`; the D-195 doc-test pass included;
+prettier/eslint/typecheck for the frontend half.
+
+**Round-1 review addendum (same task, 2026-11-25; model
+`opencode-go/deepseek-v4.1-flash`, report
+`.opencode/reviews/t107-round1-report.md`: REQUEST CHANGES, 0×P0,
+1×P1, 2×P2, 4×P3 — all taken or routed in the amend).**
+
+- _P1-1 (the wiring tests indexed `pass_count()` absolutely after a
+  bare startup wait — the repo's own recorded macOS FSEvents flake
+  shape)._ Verified against `converge_startup_watch`'s own doc (a
+  pre-spawn fixture write can deliver a late debounced pass; CI
+  45235995817/45245718226 are the two recorded reds): all four wiring
+  tests now take the quiescent baseline
+  (`crate::ipc_tests::converge_startup_watch`, widened to
+  `pub(crate)` for these proofs) and assert DELTAS (`settled + 1`,
+  `settled + 2`, `settled`) — the helper's own-bytes rewrite keeps
+  the disk oracles honest.
+- _P2-1 (`lib.rs`'s module doc still stated the pre-T-107 contract)._
+  The `mod project_update` comment now states the landed contract
+  (eight-field patch, three watch-set inputs written, the awaited
+  never-fatal pass, no target file written); the spec §7.10 sentence
+  is qualified the same way ("the command writes no file — the watch
+  pass it then awaits only reads"), and the module doc's own "no file
+  I/O at all" is narrowed to "no file WRITES at all" with the pass
+  named as the read-only exception.
+- _P2-2 (the two load-bearing claims had no test that could fail)._
+  Two tests added: `an_extra_file_change_dirties_a_scheme_b_row_too`
+  (the store-anyway DIRTY arm — under scheme B the managed text gains
+  no reading line, so the verdict can only come through DB-020's
+  no-qualifier inputs) and
+  `a_disabled_extra_position_change_is_a_real_row_change` (the
+  whole-pair comparison — a position-only change with the flag off
+  moves the column, journals, and dirties). The mock mirrors the
+  second; the mock has no recalculation service to mirror the first
+  (its `dirty` flag is fixture-stated — the known-limits posture),
+  recorded here as the boundary.
+- _P3-1 (`extra_project`'s wire token and its order unpinned)._ The
+  invalid-position battery now carries an `extra_project` case and a
+  both-extras two-fault send (extra_local answers); the mock's cases
+  array mirrors both.
+- _P3-2 (two dirty tests lacked the clean-baseline control)._ The
+  base-name and extra tests now assert the pre-act
+  `recalc_and_emit == []` control the scheme test had.
+- _P3-3 (the record said fourteen new Rust tests; the diff had
+  thirteen)._ The count is now fifteen (thirteen plus P2-2's two),
+  in both the entry and the commit message.
+- _P3-4 (the dangling mutation-groups reference)._ Resolved by the
+  table below.
+
+Mutation groups, red-then-green (Rust: M1 the refresh wiring dropped
+→ both wiring-presence tests red; M2 the watch-input guard dropped —
+refresh always runs → the name-only no-pass pin red, plus two §6.9
+battery tests red through the missing-state panic the always-refresh
+reaches; M3 the condition narrowed to the scheme alone → the
+base-name/extra wiring pin red; M4 the scheme's case-sensitivity
+dropped (`"a"` accepted) → the invalid-scheme pin red; M5 the bounded
+echo dropped on the scheme literal → the over-long-literal arm red;
+M6 the equal-strip dropped on the scheme field → the no-op pin red;
+M7 the journal insert dropped → the happy-path journal pin red; M8
+the scheme validation moved before the name's → the ordering pin
+red; M9 the extra comparison degraded to `enabled` alone (round 1's
+P2-2 shape) → the disabled-position pin red. Frontend: TM1 the
+mock's scheme strip dropped → the no-op mirror red; TM2 the mock's
+journal call dropped → five journal-asserting mirrors red; TM3 the
+mock's scheme vocabulary check dropped → the refusal battery red.)
+
+Re-checked after the fixes: fmt, clippy `-D warnings`, the full
+nextest suite (1907/1907 — two more tests than the commit's first
+run), doc tests, the export pin, and the frontend quartet — all
+green on real exit codes.
+
+**Round-2 review addendum (same task, 2026-11-25; model
+`opencode-go/hy4-flash-free`, report
+`.opencode/reviews/t107-round2-report.md`: APPROVE, 0×P0/P1/P2,
+1×P3 — taken in the second amend, after the round-1 fixes were
+verified landed).**
+
+- _P3-1 (the module doc called the read-only watch refresh "the one
+  deliberate exception to 'no file writes'")._ A self-contradiction
+  round 1's P2-1 fix introduced: line 21 says "No file writes at
+  all" (true — the pass only reads, OUT-011 pinned by the
+  byte-unchanged assert), so naming it a "no file writes" exception
+  lied about the mechanism. The sentence now names it the exception
+  to the command's otherwise complete lack of FILE-SYSTEM
+  INTERACTION, and the sibling "file I/O with no observable change"
+  wording follows the same precision ("read files with no observable
+  change"). No behavior change.
+
+The round independently verified every round-1 fix landed (the
+quiescent-baseline deltas, the corrected contract wording in
+lib.rs/spec §7.10, both P2-2 pins with the mock boundary, the
+`extra_project` tokens and the pair order in both suites, the
+clean-baseline controls, the fifteen-test count, the mutation
+table), the refresh wiring's shape (computed on the stripped patch,
+returned through the transaction's `Ok`, awaited strictly after
+commit, gated on exactly the four watch inputs, bounded,
+never-fatal), the no-file-writes boundary, D-201's unchanged
+semantics, and the 41-command surface with the regenerated bindings
+and the mock twin behind them.
+
+Re-checked after the wording fix: fmt, clippy `-D warnings`, the
+full nextest suite (1907/1907), doc tests, the export pin, and the
+frontend quartet — all green on real exit codes.

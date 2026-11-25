@@ -92,7 +92,7 @@ src-tauri/
   src/logging.rs           # File log: daily + 10 MB rotation, 5-file cap (working)
   src/markdown.rs          # Markdown preview renderer (pulldown-cmark; preview only) (working)
   src/project_archive.rs   # project_archive command: §6.4 row transition + PRJ-017 exclusion (working)
-  src/project_update.rs    # project_update command: PRJ-008 field patch + project.changed journal (working)
+  src/project_update.rs    # project_update command: PRJ-008/PRJ-012 patch + project.changed journal + mutation-seam watch refresh (working)
   src/recovery.rs          # Recovery-screen file mechanics       (working)
   src/revisions.rs         # revisions_list / revision_get: History reads (working)
   src/retention.rs         # LOG-006 retention task: journal/runs prune daily (working)
@@ -213,14 +213,21 @@ Rust commands are registered through `tauri-specta`:
    (DB-014), and the SYS-005 gate answers `E_SYNC_RUNNING` while a
    sync holds the flag — the Projects module's
    `project_update` (T-106, `src-tauri/src/project_update.rs`,
-   DECISIONS.md D-201): the PRJ-008 settings save — an id-addressed
-   patch over the four §6.9-validated editable fields (name, label,
-   color, description; absent fields unchanged, a duplicate name
-   saved) whose one `Db::run` transaction carries the store update and
-   the single `project.changed` journal entry; the path and the origin
-   are immutable by the command's own surface, an archived or unknown
-   id is the stale-screen `E_VALIDATION` refusal, and the SYS-005 gate
-   answers `E_SYNC_RUNNING` while a sync holds the flag — the Projects
+   DECISIONS.md D-201; the PRJ-012 half added by T-107, D-204): the
+   settings save — an id-addressed patch over the §6.9-validated
+   editable fields (name, label, color, description; absent fields
+   unchanged, a duplicate name saved) and the PRJ-012 write
+   configuration (the scheme, the file name, and the two extra-file
+   options — stored under every scheme, the build being what ignores
+   them outside scheme A) whose one `Db::run` transaction carries the
+   store update and the single `project.changed` journal entry; the
+   path and the origin are immutable by the command's own surface, an
+   archived or unknown id is the stale-screen `E_VALIDATION`
+   refusal, and the SYS-005 gate answers `E_SYNC_RUNNING` while a
+   sync holds the flag; a scheme/file-name/extra change makes the
+   project dirty by DB-023's row-decidable rule (no hash or flag is
+   written) and, once committed, awaits one full watch pass through
+   the bounded mutation seam (SYS-007, never-fatal) — the Projects
    module's `exclusions_list`/`exclusion_remove` (T-078): the §6.4
    path-exclusion read in the repository's stable oldest-first order
    and the by-id removal journaled in its own transaction — the

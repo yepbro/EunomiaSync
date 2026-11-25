@@ -65,8 +65,11 @@ import {
   toColumnEntry,
   toVariantRecord,
   type MockAssignmentRow,
+  type MockHintPosition,
   type MockLibraryRow,
+  type MockProjectBaseName,
   type MockProjectRow,
+  type MockProjectScheme,
   type MockState,
   type MockVariantRow,
 } from './state'
@@ -244,6 +247,40 @@ function validateProjectDescription(
     return { reason: `project description is ${length} characters; the limit is 1000` }
   }
   return { stripped }
+}
+
+// ---------------------------------------------------------------------------
+// The PRJ-012 write-configuration validators (T-107): the mock twins of
+// the closed vocabularies `project_update`'s new half routes through
+// (D-204 point 2) — the scheme (§7.5's A/B/C, case-sensitive like the
+// schema CHECK), the file name (§6.9's "a value from the list" over
+// D-03's two members), and the extra-file positions (§6.5's
+// start/end). Class-only reasons, exactly the real refusals' texts,
+// the caller's literal echoed bounded (D-115's cap) — the color's
+// own precedent.
+// ---------------------------------------------------------------------------
+
+/** One validated extra-file option: the §6.5 enabled-plus-position pair. */
+type ExtraOption = { enabled: boolean; position: MockHintPosition }
+
+/**
+ * The extra-file patch verdict (§6.5): the pair, or the typed
+ * rejection naming the WIRE field (`extra_local`/`extra_project` —
+ * the object the modal's control tree names) with the offending
+ * position echoed bounded.
+ */
+function validateExtraOption(
+  field: 'extra_local' | 'extra_project',
+  patch: { enabled: boolean; position: string },
+): { extra: ExtraOption } | { reason: string; rejection: Record<string, string> } {
+  if (patch.position !== 'start' && patch.position !== 'end') {
+    const reason = 'the position must be start or end (spec 6.5)'
+    return {
+      reason,
+      rejection: { field, value: boundedEcho(patch.position), reason },
+    }
+  }
+  return { extra: { enabled: patch.enabled, position: patch.position } }
 }
 
 /** Unicode Cc, the core validator's own `char::is_control` twin. */
@@ -1553,22 +1590,41 @@ export const mockCommands: IpcCommands = {
   },
 
   /**
-   * `project_update` (§7.10 Projects module, T-106/D-201): the PRJ-008
-   * settings save — a PATCH (absent fields unchanged), §6.9 validation
-   * all-or-nothing in the spec's table order (name, label, description,
-   * color; the duplicate-name warning is the modal's own live concern,
-   * so a duplicate saves here like the Rust command saves it), the
-   * verified no-op (a re-send of the stored values writes and journals
-   * nothing), the stale-screen refusal for an unknown OR archived id,
-   * and the one `project.changed` journal entry where `activityList`
-   * reads it. The description's silent NUL strip is mirrored (§6.9).
-   * The `E_SYNC_RUNNING` gate is not modelled (the `projectArchive`
+   * `project_update` (§7.10 Projects module, T-106/D-201, extended by
+   * T-107/D-204): the PRJ-008/PRJ-012 settings save — a PATCH (absent
+   * fields unchanged), §6.9 validation all-or-nothing in the spec's
+   * table order (name, label, description, color), then the PRJ-012
+   * half in PRJ-012's own sentence order (scheme, file name, the two
+   * extra-file options — closed vocabularies, D-204 point 2); the
+   * extra-file fields apply to the ROW under every scheme (the
+   * store-anyway reading, D-204 point 3: the builder, not the store,
+   * is what ignores them under B/C), the duplicate-name warning is
+   * the modal's own live concern, the verified no-op (a re-send of
+   * the stored values writes and journals nothing, the extras
+   * compared as whole enabled-plus-position pairs), the stale-screen
+   * refusal for an unknown OR archived id, and the one
+   * `project.changed` journal entry where `activityList` reads it —
+   * no details (the row itself holds the facts). The description's
+   * silent NUL strip is mirrored (§6.9). Known limits, deliberate:
+   * the `E_SYNC_RUNNING` gate is not modelled (the `projectArchive`
    * stand-in's own documented limit: no flag state exists here), and
-   * the stored description is read from the row directly — production
-   * serves no description on any read yet, so the mock mirrors that
-   * gap honestly.
+   * neither is the watch refresh the committed watch-input change
+   * runs in production (no watcher exists here — the save is the
+   * mock's whole truth); the stored description is read from the row
+   * directly — production serves no description on any read yet, so
+   * the mock mirrors that gap honestly.
    */
-  async projectUpdate(projectId, name, label, color, description) {
+  async projectUpdate(
+    projectId,
+    name,
+    label,
+    color,
+    description,
+    scheme,
+    baseName,
+    extraLocal,
+    extraProject,
+  ) {
     const state = mockState()
     // §6.9 first, the table order the Rust command runs (D-201 point 6).
     let validatedName: string | undefined
@@ -1620,6 +1676,48 @@ export const mockCommands: IpcCommands = {
       }
       validatedColor = color
     }
+    // The PRJ-012 half (D-204 point 2): scheme, file name, then the
+    // two extra files — the same order the Rust command validates
+    // them in, so a two-fault send answers about the same field on
+    // both sides.
+    let validatedScheme: MockProjectScheme | undefined
+    if (scheme !== null) {
+      if (scheme !== 'A' && scheme !== 'B' && scheme !== 'C') {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'scheme',
+          value: boundedEcho(scheme),
+          reason: 'the scheme must be one of A, B, C (spec 7.5)',
+        })
+      }
+      validatedScheme = scheme
+    }
+    let validatedBaseName: MockProjectBaseName | undefined
+    if (baseName !== null) {
+      if (baseName !== 'AGENTS.md' && baseName !== 'CLAUDE.md') {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'base_name',
+          value: boundedEcho(baseName),
+          reason: 'the file name must be AGENTS.md or CLAUDE.md (spec D-03)',
+        })
+      }
+      validatedBaseName = baseName
+    }
+    let validatedExtraLocal: ExtraOption | undefined
+    if (extraLocal !== null) {
+      const verdict = validateExtraOption('extra_local', extraLocal)
+      if ('reason' in verdict) {
+        return rejectWith('E_VALIDATION', 'errors.validation', verdict.rejection)
+      }
+      validatedExtraLocal = verdict.extra
+    }
+    let validatedExtraProject: ExtraOption | undefined
+    if (extraProject !== null) {
+      const verdict = validateExtraOption('extra_project', extraProject)
+      if ('reason' in verdict) {
+        return rejectWith('E_VALIDATION', 'errors.validation', verdict.rejection)
+      }
+      validatedExtraProject = verdict.extra
+    }
     // D-201 point 4 (the D-115 reorder precedent): the id must name an
     // ACTIVE row — unknown or archived is the same stale screen.
     const row = state.projects.find(
@@ -1636,21 +1734,49 @@ export const mockCommands: IpcCommands = {
         reason: 'no active project has this id',
       })
     }
-    // The verified no-op (D-201 point 5): only fields that actually
-    // change are written; an empty change set writes and journals
-    // nothing.
-    const change: { name?: string; label?: string; color?: string; description?: string } = {}
+    // The verified no-op (D-201 point 5, D-204 point 9): only fields
+    // that actually change are written — the extras as whole
+    // enabled-plus-position pairs (a disabled-but-different position
+    // is a real row change on both sides); an empty change set writes
+    // and journals nothing.
+    const change: {
+      name?: string
+      label?: string
+      color?: string
+      description?: string
+      scheme?: MockProjectScheme
+      baseName?: MockProjectBaseName
+      extraLocalEnabled?: boolean
+      extraLocalPosition?: MockHintPosition
+      extraProjectEnabled?: boolean
+      extraProjectPosition?: MockHintPosition
+    } = {}
     if (validatedName !== undefined && validatedName !== row.name) change.name = validatedName
     if (validatedLabel !== undefined && validatedLabel !== row.label) change.label = validatedLabel
     if (validatedColor !== undefined && validatedColor !== row.color) change.color = validatedColor
     if (validatedDescription !== undefined && validatedDescription !== row.description)
       change.description = validatedDescription
+    if (validatedScheme !== undefined && validatedScheme !== row.scheme)
+      change.scheme = validatedScheme
+    if (validatedBaseName !== undefined && validatedBaseName !== row.baseName)
+      change.baseName = validatedBaseName
     if (
-      change.name === undefined &&
-      change.label === undefined &&
-      change.color === undefined &&
-      change.description === undefined
+      validatedExtraLocal !== undefined &&
+      (validatedExtraLocal.enabled !== row.extraLocalEnabled ||
+        validatedExtraLocal.position !== row.extraLocalPosition)
     ) {
+      change.extraLocalEnabled = validatedExtraLocal.enabled
+      change.extraLocalPosition = validatedExtraLocal.position
+    }
+    if (
+      validatedExtraProject !== undefined &&
+      (validatedExtraProject.enabled !== row.extraProjectEnabled ||
+        validatedExtraProject.position !== row.extraProjectPosition)
+    ) {
+      change.extraProjectEnabled = validatedExtraProject.enabled
+      change.extraProjectPosition = validatedExtraProject.position
+    }
+    if (Object.keys(change).length === 0) {
       return null
     }
     Object.assign(row, change)
