@@ -302,9 +302,12 @@ export function toVariantRecord(
 // `(available, no reason)` baseline. The rows are the served state alone
 // (`projects_list` maps from them). Known limit, deliberate: the backend
 // prunes a project's cache entry when it leaves the active list, while
-// the mock's cache is replaced only by `resetMockState` — no mock command
-// mutates project state yet, and a row archived/restored by direct
-// editing keeps its recorded verdict.
+// the mock's cache is replaced only by `resetMockState` — the
+// project-row-mutating mock commands (`projectAddManual`/`scanCommit`
+// append rows, `projectsReorder` renumbers `sort_order`, `syncRun`
+// stamps and clears `dirty`/the §5.7 markings) never touch the cache,
+// so a mutated row keeps its recorded verdict until an explicit probe
+// of an active row or a reset.
 // ---------------------------------------------------------------------------
 
 /** The D-084 unavailable-reason spellings (single-sourced in the backend's

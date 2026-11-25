@@ -20281,6 +20281,21 @@ final tree afterwards, since the fixes had moved two mutation
 targets (the text gate was rewritten; the old "dedupe dropped"
 mutation now lands on the resolved-identity collapse).
 
+Closure addendum (dated; the follow-up list above stays as written —
+the dated-record posture, D-183's shape): follow-ups (4) and (5) are
+closed by T-345 (commit 8a97cbc, 2026-11-24) — the three T-076 facade
+edges have their line-shape pins (level, message, carried facts,
+mutation-observed reachability), and the mock note states the true
+cause of the stale-verdict limit (the row-mutating commands never
+touch the cache) — with the record's "unlike every other command's
+edge" clause corrected: the 2026-11-24 census found 32 of the 77
+facade functions still unpinned, so the gap was inherited breadth,
+not this edge's singularity. Follow-ups (6) and (7) are closed by
+T-344 (D-196, commit 933de44, same day, owner ruling variant 2): the
+commit over an excluded path lifts the exclusion, and the
+probe-join-failure posture is the typed partial success
+(`probe_failed`), not an `Err` after the commit.
+
 ### D-180 — T-271: D-142's "pre-migration copies' uncapped accumulation" follow-up closed by owner ruling as already discharged — D-129/T-253's age rule governed `pre-migration-*` before the line was written (D-038's own addendum said so); D-046's "retention stays uncapped" parenthetical annotated beside it — 2026-11-23
 
 Problem: the card (source: D-142's follow-ups paragraph and D-038;

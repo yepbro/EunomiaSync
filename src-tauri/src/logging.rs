@@ -4047,6 +4047,114 @@ mod tests {
     }
 
     #[test]
+    fn the_scan_start_failure_line_carries_the_code_and_payload() {
+        // The scan start's §10 edge (T-076), in the
+        // `scan_commit_failure` pin shape: the reachable-from-a-unit
+        // class is the SYS-005 second-start refusal — built through
+        // the command's OWN builder, so the vector cannot drift from
+        // production — and the line carries its code literal, the
+        // (empty) params map, the command's message, and no invented
+        // OS fact. The subscriber filters at ERROR, so the level is
+        // pinned too: a `warn!`/`info!` escalation leaves this file
+        // empty and the test red. A *successful* start logs nothing:
+        // that half is structural (no tracing call exists on the Ok
+        // path).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let busy = crate::commands::sync_running_refusal();
+
+        tracing::subscriber::with_default(subscriber, || {
+            scan_start_failed(&busy);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("code=\"E_SYNC_RUNNING\"")
+                && log.contains("params={}")
+                && log.contains("running a repository scan failed"),
+            "the refusal's line carries its code literal, its params and the command's message, \
+             got: {log}"
+        );
+        assert!(
+            log.contains("os_code=None"),
+            "no OS fact is invented for a typed refusal, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_scan_cancelled_line_is_info_with_the_folder_count() {
+        // The stop's own decision line (T-076, ERR-002): `info` — a
+        // decision, not a failure — carrying the count of folders the
+        // walk had decided by then. The count is the triage fact and
+        // must survive verbatim; the line is committed to the count
+        // ALONE (the facade's own class-only doc, the D-032 posture):
+        // no path field under any spelling, no path separator — the
+        // pin covers both separators and the `path=` field name, so a
+        // leaked path fails it on any platform. The subscriber sits at
+        // INFO, so the padded level is on the line and an escalation
+        // to `warn!`/`error!` (the doc's deliberate choice) fails it.
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+
+        tracing::subscriber::with_default(subscriber, || {
+            scan_cancelled(7);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains(" INFO ")
+                && log.contains("the repository scan was cancelled; nothing was saved")
+                && log.contains("checked=7"),
+            "the cancelled line is INFO and carries the count and the decision's message, \
+             got: {log}"
+        );
+        assert!(
+            !log.contains("path=") && !log.contains('/') && !log.contains('\\'),
+            "no path rides the cancelled line in any spelling (the facade's class-only doc), \
+             got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_scan_progress_emit_degradation_line_carries_the_error_display() {
+        // The emit half's warn (T-076): a refused `scan://progress`
+        // emission is a missed UI update, not lost state — the answer
+        // carries the terminal state — and the line is the error's own
+        // Display form, whole (it carries no user paths). The vector is
+        // a real `tauri::Error` value; `main` is the app's real webview
+        // label, a fixed test literal. The subscriber sits at WARN,
+        // matching the `file_watch_emit_failed` sibling, so the level
+        // is pinned: the doc's "warn, not error" is deliberate, and a
+        // `warn!`→`error!` escalation renders ` ERROR `, never
+        // ` WARN `.
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Warn)
+            .expect("building the subscriber must work");
+        let error = tauri::Error::WindowLabelAlreadyExists("main".to_owned());
+
+        tracing::subscriber::with_default(subscriber, || {
+            scan_progress_emit_failed(&error);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains(" WARN ")
+                && log.contains("emitting a scan progress event failed; the scan continues")
+                && log.contains("a window with label `main` already exists"),
+            "the degraded line is WARN and carries its message and the error's Display form, \
+             got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
     fn the_exclusion_failure_lines_carry_the_code_and_payload() {
         // The two exclusion commands' §10 edges (T-078), in the
         // `project_add_failed` pin shape — the round-2 review's ask:
