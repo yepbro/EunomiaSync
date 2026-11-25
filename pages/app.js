@@ -1643,13 +1643,21 @@
           item.append(badge)
         }
 
+        /* An empty variant — no name or no body — cannot become the
+           main/default one: the star is disabled until both are filled */
+        const isEmpty = v.name.trim() === '' || v.text === ''
+
         const mainBtn = document.createElement('button')
         mainBtn.type = 'button'
         mainBtn.className = 'cell-icon cell-icon--main'
         mainBtn.innerHTML = ICONS.main
-        mainBtn.title = v.main ? 'Already the main variant' : `Make main — ${v.name}`
+        mainBtn.title = v.main
+          ? 'Already the main variant'
+          : isEmpty
+            ? 'An empty variant — no name or no text — cannot be made main'
+            : `Make main — ${v.name}`
         mainBtn.setAttribute('aria-label', mainBtn.title)
-        mainBtn.disabled = v.main
+        mainBtn.disabled = v.main || isEmpty
 
         const delBtn = document.createElement('button')
         delBtn.type = 'button'
@@ -1937,6 +1945,9 @@
     v.text = editText.value.replace(/\r\n/g, '\n') // CRLF -> LF on save (§6.9)
     updateCharCount()
     validateMarkerLive()
+    /* The variant list reflects the empty-body state live: the dashed
+       mark and the disabled "make main" star follow the text as typed */
+    renderVariantList()
     if (previewActive()) renderPreviewPane()
   })
 
