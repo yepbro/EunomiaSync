@@ -1096,6 +1096,10 @@
     const mode = item.dataset.action
     const colIdx = columnMenuCol
     closeColumnMenu()
+    if (mode === 'preview') {
+      openFilePreview(colIdx)
+      return
+    }
     let count = 0
     for (const tr of rows()) {
       if (isHeading(tr) || tr.classList.contains('row-off')) continue
@@ -1143,6 +1147,52 @@
       passive: true,
     },
   )
+
+  /* ---------- File preview (per project column) ----------------------------- */
+  /* What the next sync would write into the project's base file: every
+     assigned instruction of the column with its effective text (selected
+     variant; custom replace / custom extend), in document order, hidden
+     instructions excluded (MAIN-012: hidden rows leave the built files).
+     Opened from the header preview button and the column "⋮" menu. */
+
+  const filePreviewDialog = document.getElementById('file-preview-dialog')
+  const fpTitle = document.getElementById('fp-title')
+  const fpPath = document.getElementById('fp-path')
+  const fpBody = document.getElementById('fp-body')
+
+  function openFilePreview(colIdx) {
+    const th = projectHeads[colIdx]
+    const proj = th?.querySelector('.proj-name')?.textContent.trim() ?? ''
+    const p = PROJECTS.get(proj)
+    fpTitle.textContent = `File preview — ${proj}`
+    fpPath.textContent = p ? `${p.path}/${p.baseFile}` : ''
+    const parts = []
+    for (const tr of rows()) {
+      if (isHeading(tr) || tr.classList.contains('row-hidden')) continue
+      const td = tr.cells[2 + colIdx]
+      const input = td?.querySelector('.assign')
+      if (!td || !input || !input.checked) continue
+      let text
+      if (td.dataset.custom === 'true') {
+        const custom = customTexts.get(td) ?? ''
+        const variant = td.querySelector('.variant-select')?.value ?? 'Default'
+        text =
+          customModes.get(td) === 'extend' && custom !== ''
+            ? `${optionText(tr, variant)}\n\n${custom}`
+            : custom
+      } else {
+        text = optionText(tr, td.querySelector('.variant-select')?.value ?? 'Default')
+      }
+      if (text.trim() === '') continue // an empty variant outputs no text
+      parts.push(`## ${instructionDisplay(tr)}\n\n${text}`)
+    }
+    fpBody.classList.toggle('fp-empty', parts.length === 0)
+    fpBody.innerHTML =
+      parts.length === 0
+        ? '<p class="fp-note">No instructions assigned — the next sync would leave the file without instruction texts.</p>'
+        : renderMarkdown(parts.join('\n\n'))
+    filePreviewDialog.showModal()
+  }
 
   /* ---------- Variant contents popover (per-cell "eye") --------------------- */
   /* Read-only: every variant of the row with its FULL text (no tooltip
@@ -2365,6 +2415,9 @@
     menu: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>',
     /* Save a backup copy to a chosen location (Material "save_alt") */
     save: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 13h-3V3h-2v10H8l4 4 4-4zM4 19v2h16v-2H4z"/></svg>',
+    /* Preview the generated project file (Material "description") */
+    preview:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>',
     /* Toolbar buttons (Activity, Settings): Material-style solid glyphs,
        14px, filled with currentColor like the cell icons */
     activity:
@@ -4874,6 +4927,18 @@
       openProjectSettings(th.querySelector('.proj-name').textContent.trim())
     })
     line.append(btn)
+    /* File preview icon: what the next sync would write into this
+       project's base file (also reachable from the column "⋮" menu) */
+    const prevBtn = document.createElement('button')
+    prevBtn.type = 'button'
+    prevBtn.className = 'cell-icon proj-preview'
+    prevBtn.innerHTML = ICONS.preview
+    prevBtn.title = `Preview file — ${proj}`
+    prevBtn.setAttribute('aria-label', prevBtn.title)
+    prevBtn.addEventListener('click', () => {
+      openFilePreview(projectHeads.indexOf(th))
+    })
+    line.append(prevBtn)
     /* Column actions menu button (§7.4 bulk operations): "Assign all
        visible" / "Clear column" for this project */
     const menuBtn = document.createElement('button')

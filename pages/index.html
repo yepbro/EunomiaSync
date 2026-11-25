@@ -2798,9 +2798,11 @@
 
       <!-- Column actions menu (§7.4 UI bulk operations): one reusable
          positioned menu opened by the "⋮" button of a project column
-         header; "Assign all visible" / "Clear column". app.js closes it on
-         outside click, Escape and scroll; 10+ changes confirm first. -->
+         header; "Preview file" plus "Assign all visible" / "Clear
+         column". app.js closes it on outside click, Escape and scroll;
+         10+ changes confirm first. -->
       <div id="column-menu" aria-label="Column actions" hidden>
+        <button type="button" data-action="preview">Preview file…</button>
         <button type="button" data-action="assign">Assign all visible</button>
         <button type="button" data-action="clear">Clear column</button>
       </div>
@@ -3107,6 +3109,21 @@
           <div class="modal-actions">
             <button value="cancel" class="btn btn-ghost">Cancel</button>
             <button value="save" class="btn btn-primary">Save</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- File preview (per project): opened from the header preview button
+         and the column "⋮" menu; filled by app.js — the file the next sync
+         would generate for the column (base file path + every assigned
+         instruction with its effective text, markdown-rendered). -->
+      <dialog id="file-preview-dialog" class="modal modal-lg" aria-labelledby="fp-title">
+        <form id="file-preview-form" method="dialog" novalidate>
+          <h2 id="fp-title">File preview</h2>
+          <p id="fp-path" class="fp-path"></p>
+          <div id="fp-body" class="fp-body ie-preview"></div>
+          <div class="modal-actions">
+            <button value="close" class="btn btn-primary">Close</button>
           </div>
         </form>
       </dialog>
