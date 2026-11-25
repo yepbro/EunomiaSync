@@ -24055,3 +24055,17 @@ fmt, clippy `-p eunomia-sync`, targeted nextest (library_tests), the
 bindings export pin, prettier/eslint/targeted vitest over the mock
 chain, and the D-195 doc-test pass. The full suite runs once after
 the flash batch. One review round.
+
+Addendum (2026-11-25, post-merge): the batch's real follow-up is
+carded on the board — one INBOX card, no T-number until the owner's
+triage: the store's `list_items` scope predicates silently omit rows
+with an out-of-vocabulary `state` (the module doc overstates the
+D-039 guarantee for the scoped reads; round-1 of this task surfaced
+it). The UI-002 two-live-results question stays the T-344 card's own
+open half (the owner's ruling), and the UI consumption items
+(`from_level`'s icon, `hidden_count`'s toggle, the `variant_get`
+editor command) are the existing backlog. The card is the tracking
+unit; this line is the D-record duplicate the board rule asks for.
+Written as a service commit in main after the merge — md-only, no
+suites under the md-only regime; prettier and the pre-commit hook
+gate it.
