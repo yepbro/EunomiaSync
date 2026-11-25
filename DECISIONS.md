@@ -25296,7 +25296,9 @@ The owner's rulings of 2026-11-25:
    `html` and `flash`. Afterwards the feature cards refine the existing
    components instead of building screens from scratch.
 4. **NFR-001's supported floor rises to macOS 12.3.** The spec edit is
-   T-361 (DRAFT, `flash`): three Markdown-only edits — the LIB-024 hint
+   T-361, processed right after this record and landed by D-207 — the
+   task commit was first created as `2bc6b84` and then amended in place
+   to carry it: three Markdown-only edits — the LIB-024 hint
    exception for single-variant instructions, the floor itself, and a
    note on UI-020's per-feature catalog files. The two code comments
    naming the old floor are updated by T-362.
@@ -25321,6 +25323,47 @@ rewritten (the last two retitled — the fork-variant flow and the
 per-project replacement dialog were removed by D-125), LIB-036 folded
 into T-193, LIB-037 into T-196, UI-023 into T-176 and T-160, the one
 prototype reference on the board (T-352) removed; T-361 created.
+
+### D-207 — three owner rulings land in the spec: the LIB-024 hint hidden for single-variant instructions, the supported floor at macOS 12.3, UI-020's temporary per-feature catalog — 2026-11-25
+
+Problem: three owner decisions existed only on the board and in
+conversation while the spec said otherwise. The LIB-024 hint — "Make
+another variant main first" (the D-125 wording, spec 7.3) — is
+meaningless when there is nothing to make main: an instruction that has
+only its main variant. NFR-001 said "macOS 12 and newer" while the UI
+relies on the native `<dialog>` element (all 23 of its dialogs), which
+needs Safari 15.4 = macOS 12.3 — the two claims could not both hold.
+UI-020 named a single `en.json`, but the frontend skeleton work (D-206's
+rulings 2 and 5) splits the catalog per feature so the owner can refine
+texts in small files. The rulings below resolve all three; the spec edit is
+T-361, one Markdown-only commit on branch `docs-prototype-import`
+(D-206's own snapshot of it, ruling 4, is refreshed by this record).
+
+Sources: card T-333 — the owner triage ruling of 2026-11-24 (the
+round-1 review of T-318, finding P3-3, D-176) — and the conversation
+with the owner of 2026-11-25.
+
+1. **The LIB-024 hint is hidden when the instruction has only the main
+   variant.** Nothing replaces it — no alternative text; the Delete
+   button stays disabled all the same (LIB-024 itself — the main
+   variant cannot be deleted — is untouched), and the D-125 wording
+   stays in every other case. Written into spec 7.3's LIB-023/024/025
+   row as an exception with a reference to this record.
+2. **The supported floor rises to macOS 12.3 and newer.** The native
+   `<dialog>` element needs Safari 15.4, which ships in macOS 12.3, and
+   the UI's 23 dialogs rely on it, while NFR-001 said "macOS 12 and
+   newer"; the contradiction resolves in favor of the newer floor.
+   Spec 12.1's NFR-001 bullet now says 12.3; spec 3.2's D-26 row keeps
+   the original "macOS 12+" wording and carries a change note pointing
+   here (the D-12 pattern). Markdown-only: the two code comments naming
+   the old floor (`src/assets/main.css`, `src/date/index.ts`) stay
+   outside this task and are updated by T-362 (the theme-tokens task).
+3. **UI-020's catalog is split per feature, temporarily.** During the
+   frontend work the texts live in per-feature files under
+   `src/locales/en/<feature>.json`, merged into one catalog at load
+   time; later the files are merged back into a single `en.json`.
+   Implemented by T-363; the note in spec 11.5's UI-020 bullet points
+   here.
 
 ### D-208 — T-110: the `project_relink` command's contract — the Locate flow's gate order (the add flow's mirror with the probe before the transaction), the subfolder resolved to the repository root, and the DB-015 archived collision carrying the restore offer's id — 2026-11-25
 
