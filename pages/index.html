@@ -2773,6 +2773,13 @@
         <button type="button" data-action="clear">Clear column</button>
       </div>
 
+      <!-- Variant contents popover: one reusable read-only box opened by
+         the per-cell "eye" button on variant rows; lists every variant of
+         the row with its FULL text (no tooltip truncation), the variant
+         currently assigned in that cell marked. app.js closes it on
+         outside click, Escape and scroll, like the column menu. -->
+      <div id="variants-popover" aria-label="Variant texts" hidden></div>
+
       <!-- Add/rename section dialog (MAIN-015…023, LIB-030…031): shared by
          the header "+" (top-level ## section at the end of the tree), a
          heading's "+" (child section, level+1 capped at 6) and the

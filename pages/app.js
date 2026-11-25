@@ -1127,11 +1127,93 @@
   })
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeColumnMenu()
+    if (e.key === 'Escape') {
+      closeColumnMenu()
+      closeVariantsPopover()
+    }
   })
-  document.querySelector('.matrix-wrap').addEventListener('scroll', closeColumnMenu, {
-    capture: true,
-    passive: true,
+  document.querySelector('.matrix-wrap').addEventListener(
+    'scroll',
+    (e) => {
+      closeColumnMenu()
+      closeVariantsPopover()
+    },
+    {
+      capture: true,
+      passive: true,
+    },
+  )
+
+  /* ---------- Variant contents popover (per-cell "eye") --------------------- */
+  /* Read-only: every variant of the row with its FULL text (no tooltip
+     truncation — the box clamps to the viewport and scrolls), the option
+     currently assigned in the cell marked. Closed on outside click,
+     Escape and scroll, like the column menu. */
+
+  const variantsPopover = document.getElementById('variants-popover')
+  let variantsPopoverBtn = null
+
+  function closeVariantsPopover() {
+    if (variantsPopover.hidden) return
+    variantsPopover.hidden = true
+    variantsPopoverBtn?.setAttribute('aria-expanded', 'false')
+    variantsPopoverBtn = null
+  }
+
+  function openVariantsPopover(btn, row, select) {
+    variantsPopoverBtn = btn
+    btn.setAttribute('aria-expanded', 'true')
+    const current = select.value
+    variantsPopover.replaceChildren(
+      ...variantOptionsFor(row).map((name) => {
+        const item = document.createElement('div')
+        item.className = 'vp-item'
+
+        const head = document.createElement('div')
+        head.className = 'vp-head'
+        const label = document.createElement('span')
+        label.className = 'vp-name'
+        label.textContent = name === 'Default' ? 'Default (main variant)' : name
+        head.append(label)
+        if (name === current) {
+          const badge = document.createElement('span')
+          badge.className = 'vp-current'
+          badge.textContent = 'assigned'
+          head.append(badge)
+        }
+        item.append(head)
+
+        const body = document.createElement('div')
+        const text = optionText(row, name)
+        if (text === '') {
+          body.className = 'vp-empty'
+          body.textContent = 'Empty variant — outputs no text (D-13)'
+        } else {
+          body.className = 'vp-text'
+          body.textContent = text
+        }
+        item.append(body)
+        return item
+      }),
+    )
+    /* Unhide before measuring: the box must be laid out for the clamp */
+    variantsPopover.hidden = false
+    const r = btn.getBoundingClientRect()
+    const w = variantsPopover.offsetWidth
+    const h = variantsPopover.offsetHeight
+    const margin = 8
+    const x = Math.min(Math.max(margin, r.left), Math.max(margin, window.innerWidth - w - margin))
+    let y = r.bottom + 6
+    if (y + h > window.innerHeight - margin) y = Math.max(margin, r.top - h - 6)
+    variantsPopover.style.left = `${Math.round(x)}px`
+    variantsPopover.style.top = `${Math.round(y)}px`
+  }
+
+  document.addEventListener('click', (e) => {
+    /* The eye toggles in its own listener; any other click outside the
+       popover closes it (clicks inside keep it open for text selection) */
+    if (e.target.closest('.cell-icon--eye')) return
+    if (!e.target.closest('#variants-popover')) closeVariantsPopover()
   })
 
   /* ---------- Matrix keyboard navigation (MAIN-010, NFR-022, §11.3) -------- */
@@ -2284,6 +2366,17 @@
       })
       box.append(edit, del)
     } else {
+      /* Variant rows get the read-only "eye": the full text of every
+         variant of the row in one popover (see its section below) */
+      const icons = []
+      if (select) {
+        const eye = mk('eye', `Show variant texts — ${instr}`)
+        eye.addEventListener('click', () => {
+          if (variantsPopoverBtn === eye) closeVariantsPopover()
+          else openVariantsPopover(eye, row, select)
+        })
+        icons.push(eye)
+      }
       const add = mk('add', `Create a custom instruction — ${instr} — ${proj}`)
       add.addEventListener('click', () => {
         pendingCustomCell = td
@@ -2294,7 +2387,7 @@
           placeholder: 'Write the custom instruction text…',
         })
       })
-      box.append(add)
+      box.append(...icons, add)
     }
   }
 

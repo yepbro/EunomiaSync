@@ -677,6 +677,65 @@ body {
   background: var(--row-hover);
 }
 
+/* ----- Variant contents popover (per-cell "eye") -------------------------- */
+/* Read-only full texts of every variant of the row: unlike the row
+   tooltip there is no 600-character truncation — long content scrolls
+   inside the viewport-clamped box */
+
+#variants-popover {
+  position: fixed;
+  z-index: 60;
+  inline-size: min(480px, calc(100vw - 16px));
+  max-block-size: min(72vh, 560px);
+  overflow-y: auto;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 0.18);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#variants-popover .vp-item + .vp-item {
+  margin-block-start: 12px;
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 12px;
+}
+
+.vp-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-block-end: 4px;
+}
+
+.vp-name {
+  font-weight: 700;
+}
+
+.vp-current {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.vp-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.vp-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 .proj-line .col-menu-btn {
   /* The "⋮" hugs the right edge of the header cell, away from the
      color/label/edit cluster (margin-inline-start: auto consumes the
