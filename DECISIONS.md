@@ -24490,3 +24490,219 @@ deliberate scan-twin boundary, not a gap. The full chain was
 re-run green after the two-line hardening: fmt, clippy
 `-D warnings`, nextest 1872/1872, doc tests, `pnpm test` 361/361,
 format:check, lint, typecheck.
+
+### D-203 — owner commission: the html-pages prototype delta batch — ten features read into the spec, the wire and guard rulings — 2026-11-25
+
+Problem: the refined main-window prototype (branch `html-pages`, the
+ten commits `d6f4069`…`cc24a86`) grew UI features the spec does not
+describe, several of which need backend work that has no contract yet.
+The owner's commission: verify what appeared, write it into the spec
+as contracts (§7.10's unimplemented-command pattern), and card the
+work. Every feature was verified against its commit's diff and the
+prototype code (`pages/`), per rule 2; the readings below were chosen
+before the spec text was written (rule 1), and the new requirement
+rows and the §7.10 command notes cite this record (presentation-level
+rows and error-table cells reference the requirement IDs instead).
+All ten map to the
+owner's bullet list one to one; the three CSS-only commits
+(`d6f4069` header dividers, `90e4410` "⋮" right alignment,
+`f8b6033` settings-modal scroll insets) are presentation-level and
+land in the spec as two sentences (UI-023, PRJ-008), not as
+behavior contracts.
+
+Readings chosen:
+
+- **(1) The empty-main oracle (commit `f717664`).** The prototype
+  disables the "Make main" star while the variant has no name or no
+  body (`v.name.trim() === '' || v.text === ''`), live as the text is
+  typed. The real contract splits by layer: the LIVE EDITOR gate is
+  the prototype's (a draft may carry an empty name — the star
+  disables until both are filled, the tooltip names the reason); the
+  COMMAND gate (`variant_set_main`, landed T-329 with no such guard —
+  `src-tauri/src/variants.rs:692-718` verified) uses the canonical
+  emptiness only: a variant whose normalized text is empty —
+  `is_empty`, the D-13/ALG-002 oracle D-187/D-198 already fixed for
+  the wire — cannot be promoted, refused with the typed `E_VALIDATION`
+  naming `id` (the LIB-024/025 layering — the typed command surface
+  behind a UI-disabled action; LIB-024/025 additionally never fire
+  through the UI, while LIB-036's star-disable is the feature
+  itself and the refusal serves stale or direct callers).
+  The prototype's raw `text === ''` is the demo's narrower twin — a
+  whitespace-only variant outputs no text and cannot serve as the
+  default replacement either, so the build's own oracle wins. The
+  rule gates the PROMOTION action only: create mode still starts with
+  an empty `Main` (LIB-002) and an already-main variant keeps its
+  badge while empty. New requirement LIB-036.
+- **(2) "Buttons for saving backups" is an EXPORT, not a restore
+  (commit `4c942d2`).** The per-row action saves the COPY to a chosen
+  location (an OS save dialog in the packaged app; the browser
+  equivalent is the download). It is deliberately not BKP-007's
+  restore — that stays P1 (D-17), untouched, and T-164's "restore
+  from UI is P1" line is not crossed. Contract: `backup_save(id)` —
+  the id-addressed row from D-193's list; the save dialog opens from
+  Rust (the SEC-001 dialog pattern, `dialog_pick_folder`'s sibling —
+  the §5.6 sentence gains this command); the suggested name carries
+  the backup's file stem and creation stamp
+  (`<stem>.backup-<stamp>.<ext>`, the prototype's layout); the file
+  is written to the chosen path and verified against the record's own
+  `size_bytes`/`sha256` columns (BKP-010's stored oracle — no new
+  digest policy), a mismatch or failed write per §9.5's
+  `E_VERIFY_FAILED`/`E_WRITE_FAILED` semantics; a row whose file is
+  gone from disk (`pruned`/`missing`/`discarded`, D-193's four
+  statuses) is refused with `E_RESTORE_SOURCE_MISSING` — §10's row
+  widens from its P1-restore-only wording; an unknown id is the typed
+  `E_VALIDATION`. No journal entry (an export of stored data, not a
+  recorded action; the prototype logs nothing), no SYS-005 gate (it
+  writes outside every managed area and changes no sync state).
+  New requirement BKP-012 (renumbered from the draft's BKP-011 by the round-1 review: the §7.6 row "BKP-001, 002, 008, 011" already owns that id — the family-max scan missed the compressed listing; BKP-012 is unused everywhere).
+- **(3) The variant-texts popover needs no new wire (commit
+  `4c7b6f7`).** The per-cell "eye" opens a read-only popover listing
+  every variant of the row — main first, full text, the assigned one
+  badged, empty ones noted (D-13) — with no 600-character truncation
+  (viewport clamp, inner scroll). D-187's ruling stands: `library_get`
+  serves no variant content; the popover fetches each variant's text
+  through `variant_get` (D-198's landed contract, per variant id) when
+  it opens, lazily. No new fields, no new commands. The popover joins
+  the column-menu machinery (outside click, Escape, scroll; the eye
+  toggles). New requirement MAIN-032.
+- **(4) Replace/extend is a new assignment TARGET, not a rendering
+  option (commit `0d33a1f`).** The prototype stores the mode per cell
+  and composes `base + BLANK_LINE + supplement`. Readings: (a) the
+  extend cell keeps a BASE VARIANT reference beside the supplement —
+  §6.2's CHECK gains the third arm `(variant_id NOT NULL AND
+custom_text NOT NULL)` (migration 0004 over the landed 0003 shape;
+  the v3 exactly-one-target rule is superseded for this arm);
+  (b) the composition is DYNAMIC — the build reads the base variant's
+  CURRENT text (`normalize(base)` joined with `normalize(supplement)`
+  by the §9.2 blank line, either half may be empty — ALG-023), so
+  library edits flow in; (c) the base is fixed while the cell is
+  custom: it is the cell's assigned variant at "+" press (the main
+  for an unassigned cell), the disabled select does not re-pick it,
+  and changing the base means deleting the custom instruction and
+  creating it again (the UI-010 flow); (d) `assignment_set_custom`
+  (landed T-331, `content: Option<String>` — verified) gains a `mode`
+  parameter (`replace` | `extend`); (e) everything already ruled for
+  custom cells carries over — the disabled "Custom" select, bulk
+  operations skip, ALG-020's counts-as-assigned, DB-016's
+  reserved-marker rule on the supplement; a variant deletion moves an
+  extend cell's BASE to the main variant and keeps the supplement
+  (LIB-023's move, the supplement is not an assignment). The
+  prototype's editor flow (mode radios visible only in the custom
+  mode, hint naming the appended-to pair, untouched-draft swap on
+  switching, preview composition, dashed "+" chip, "(supplements
+  <variant>)" edit title, delete clears the mode) is the UI
+  requirement MAIN-034; the cell-states table gains the extend row.
+- **(5) The file preview's contract is the REAL build text, not the
+  demo's rendering (commit `b52fff0`).** The prototype's code adds
+  each instruction's name as a `##` heading and omits the library's
+  section headings — its commit message says "mirrors the real sync
+  unit", the code does not quite (rule 2: trust the code, record the
+  discrepancy). The spec describes the honest contract: the preview
+  shows exactly the next sync's managed content (§9.2/9.3, without
+  the creation marker; scheme B shows the managed block only),
+  rendered as sanitized Markdown (SEC-005/D-15) for reading —
+  headings by ALG-020, no instruction names (ALG-022), effective cell
+  text with the ALG-023 composition. New command
+  `project_build_preview(project_id)` computes it from the current DB
+  state (a read: no SYS-005 gate, like `library_get`); the modal
+  renders through the existing `markdown_preview`; the active-project
+  scoping follows `project_update`'s typed refusal (unknown or
+  archived id → `E_VALIDATION` naming `project_id`). Empty column →
+  the note instead of an empty document. Both entry points (header
+  icon, first item of the column "⋮" menu) are described as they
+  stand; picking one is an explicit open point for the owner.
+  New requirement MAIN-033, the modal joins UI-002's list.
+- **(6) The section picker realizes S3, no new backend (commit
+  `53a2819`).** The create dialog gains a Section select (create mode
+  only): headings indented by depth, the FIRST TOP-LEVEL SECTION
+  preselected (the spec fixed no default — now it does), "(no
+  sections)" disabled when the library has no headings and the
+  instruction then lands at the table end. The wire is D-188's
+  `section: Option<String>` unchanged — the picked heading id places
+  the instruction at that heading's section end (the LIB-032
+  drop-on-heading target D-188 already chose); the prototype's
+  picker lists headings only (no explicit root entry — the root
+  placement stays a wire capability of the landed command, not a
+  picker option). Requirement text joins LIB-002's row.
+- **(7) The root-section deletion rule is mirrored in the command
+  (commit `cc24a86`).** The prototype disables the trash on a level-2
+  section while its section holds anything (instructions, nested
+  headings; hidden rows count), with the tooltip naming LIB-033's
+  ground: a root has no previous section to move the items to;
+  nested and empty root sections stay deletable; every membership
+  mutation refreshes the buttons and a stale click never opens the
+  confirm dialog. The landed `heading_delete` (T-330,
+  `src-tauri/src/headings.rs:723-733` verified) deletes
+  unconditionally — it gains the defensive refusal: a level-2 heading
+  whose section holds any item is refused with the typed
+  `E_VALIDATION` naming `id` (the LIB-024/025 pattern again). UI-010's
+  delete-heading confirmation and §6.4's outcome row stay; the rule is
+  a new requirement, LIB-037, and §6.4's heading row gains the
+  exception clause.
+- **(8) The three CSS commits land as presentation requirements.**
+  UI-023: adjacent project header cells carry a visible divider
+  (header row only; body cells keep their borderless look), and the
+  column "⋮" button sits at the header cell's right edge, the same
+  spot in every column regardless of label width. PRJ-008's row
+  gains the settings scroll-body sentence: inner side insets so the
+  fields never sit under an overlay scrollbar or flush against the
+  dialog borders.
+
+Scope and honesty boundaries (rule 11): every UI feature is written
+as the prototype behaves it; every backend piece that does not exist
+(`backup_save`, `project_build_preview`, the `variant_set_main`/
+`heading_delete` guards, the extend schema and command shape) is
+written as a CONTRACT in the §7.10 unimplemented-command pattern,
+with the implementation cards created on the board. The `variant_get`
+implementation itself has no TODO card yet (T-348 was spec-only by
+D-198's own ruling) — MAIN-032's popover depends on it, so the
+implementation card is part of this batch's cards. md-only change:
+docs/spec.md and this entry; prettier gates it, no suites run; ONE
+review round under the md-only exception.
+
+**Round-1 review addendum (same commission, 2026-11-25; chain:
+`opencode-go/deepseek-v4.1-flash` first — the invocation died
+mid-run on a transport error (`ECONNRESET`, no verdict produced), so
+the chain fell through to `opencode-go/hy4-flash-free`; report
+`.opencode/reviews/protospec-round1-report.md`: REQUEST CHANGES,
+2×P0, 2×P1, 2×P2, 2×P3 — all eight re-verified against the files and
+taken in the amend; no finding declined.**
+
+- _P0-1 (duplicate id)._ The new save-to-location requirement was
+  drafted as BKP-011 while §7.6's first row ("BKP-001, 002, 008,
+  011") already owns that id — the family-max scan grepped for
+  prefixed tokens only and the compressed listing hides the bare
+  numbers. Renumbered to BKP-012 everywhere (the §7.6 row, the
+  §7.10 note, the §10 row, this record).
+- _P0-2 (the §10 effect cell erased the restore's status
+  producer)._ The widened `E_RESTORE_SOURCE_MISSING` row had said
+  "the record keeps its stored status" for BOTH cases, deleting the
+  P1 restore's "the record gets the `missing` status" effect that
+  D-193 and S11 lean on. The effect cell now splits by case: the
+  export keeps the stored status; the P1 restore sets `missing`.
+- _P1-1 (SEC-001 not updated)._ D-203 promised the §5.6 sentence
+  gains `backup_save`; the spec's SEC-001 parenthetical now names
+  `backup_save`'s save dialog beside the other Rust-invoked dialog
+  commands.
+- _P1-2 (the extend shape read as already enforced)._ §6.2's CHECK
+  note and DB-012 now carry the contract marker: migration 0004 is
+  not landed, and until then the shipped v3 CHECK and the store/core
+  enums are the enforced floor (D-192 stays accurate).
+- _P2-1 (ALG-023's empty-half join)._ "Join normalize(base) with
+  normalize(supplement) by one blank line" taken literally emits a
+  bare blank line when both halves are empty. Reworded: compose the
+  NON-EMPTY halves; two empty halves contribute nothing.
+- _P2-2 (§9.5 semantics borrowed for the export)._ BKP-012 now says
+  the refusal is by the §10 codes `E_VERIFY_FAILED`/`E_WRITE_FAILED`
+  — a plain verified copy, no project status and no backup record
+  change — instead of "§9.5's semantics", which end in a project
+  `failed` status.
+- _P3-1 (the LIB-036 layering phrase)._ "The disable never fires
+  through the UI" was LIB-025's fact, not LIB-036's (there the
+  star-disable IS the feature). The record now states the layering
+  (the typed surface behind a UI-disabled action, the refusal for
+  stale/direct callers) without the copied claim.
+- _P3-2 (the "each spec edit cites D-203" claim)._ Softened in the
+  record: the new requirement rows and the §7.10 notes cite it;
+  presentation-level rows and error-table cells reference the
+  requirement IDs.
