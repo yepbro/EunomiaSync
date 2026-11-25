@@ -23928,4 +23928,109 @@ Checks: md-only diff (docs/spec.md, this file) — prettier and a
 factual re-read of every cited line (rule 2/11), the md-only regime
 (no test suites run), ONE review round.
 
+<<<<<<< HEAD
+
 > > > > > > > dc5aa62 (docs(spec): the variant_get contract joins §7.10 — the editor's body and the MAIN-006 tooltip's text source (T-348))
+> > > > > > > \=======
+
+### D-199 — T-349: the heading record carries `from_level`, the skipped-from level, beside the LIB-032 skip flag — 2026-11-24
+
+Problem: LIB-032 / T-083's follow-up — the boolean `level_skipped`
+flag answers "is this a skip", but a UI that wants to show WHICH
+level is skipped needs the pair's other half: the level the heading
+arrives FROM. `eunomia-core`'s gaps module already computes it
+(`HeadingLevelGap::from_level`, the pair's previous heading's level);
+`library_get`'s heading entry just never surfaced it. Owner ruling
+(triage 2026-11-24, variant 1): add `from_level` to the heading
+record now — wire, backend, mock twin, spec — and the battery gains
+the assertions, mutation-verified.
+
+Readings chosen (Rule 1, recorded before implementation):
+
+- **Type: `Option<u8>` on the wire (`from_level: number | null`).**
+  `Some(from_level)` exactly when the row IS the `to` half of a gap
+  (the same rows `level_skipped` is true for — the flag and the
+  level answer one pair, never disagreeing); `None` for every other
+  heading (the first heading, closes, siblings) — a skip-fact-less
+  row has no skipped-from level, and `0` would be a level value no
+  heading can carry while looking like data. The heading entry's
+  other numeric field (`level`) is already `u8` on the wire, so no
+  new numeric convention is introduced.
+- **One gaps pass, two facts.** The existing
+  `heading_level_gaps` call gains a second index map
+  (`to_index → from_level`); `level_skipped` keeps its exact
+  semantics (membership in the `to` set) and `from_level` reads the
+  new map — the two fields are built from one report, so a gap the
+  report missed (or invented) fails both, not one.
+- **The mock twin mirrors the backend, not core.** The mock computes
+  its own skip set (it has no core); it now computes the same pair
+  map, so the mock's contract matches the backend's on both fields.
+- **Spec: the contract rides §7.10's command notes.** The spec's
+  only existing LIB-032 wording is the requirement row's "warning
+  icon"; `library_get`'s payload is described in the command notes
+  since T-348's sentence shape. A `library_get` clause names both
+  skip facts — the boolean and the skipped-from level (`2`–`6`,
+  null when the row is not a skip).
+
+Checks: BDD red-first (the field added with a deliberately constant
+empty map — the shape battery's positive assertion and the dedicated
+battery went red on it — then the real map, green); mutation-verified
+twice, both observed: the empty-map red above, and the post-green
+poisoning of the map's values to garbage, which the dedicated
+battery caught (the shape battery's `None` rows cannot see it). fmt,
+clippy `-p eunomia-sync`, targeted nextest (library_tests), the
+bindings export pin, prettier/eslint/targeted vitest over the mock
+chain, and the D-195 doc-test pass. The full suite runs once after
+the flash batch. One review round (run 2026-11-25 after the batch's
+transport/limit interruptions: APPROVE WITH NITS, 4×P3 — the
+fixture's second skip now arrives from H3, killing the constant-2
+mutant class; the 2–6 range wording narrowed to the real 2–4; the
+skip set folded into the map; this record's mutation wording aligned
+with both observed runs).
+
+### D-200 — T-350: `library_get`'s answer widens to a struct carrying `hidden_count`, the UI's D-14 number, computed over the served transaction — 2026-11-24
+
+Problem: D-14's "Show hidden" toggle shows "the current number of
+hidden instructions", and the default (hidden-excluded) answer cannot
+supply it — the widened read serves the rows themselves, so the only
+client-side route is fetching the widened tree and counting it, a
+round trip the UI should never need. Owner ruling (triage 2026-11-24,
+variant 1): the count lands in the DEFAULT answer now; deferring or
+client-side recounting is not wanted.
+
+Readings chosen (Rule 1, recorded before implementation):
+
+- **The answer widens to a struct, both scopes.**
+  `LibraryGetResult { tree: Vec<LibraryTreeItem>, hidden_count: u32 }`
+  replaces the bare vector — a field cannot ride an array, and one
+  command keeps one answer shape under either scope. The name `tree`
+  is D-187's own word for the payload ("one flat position-ordered
+  vector"). This is a breaking wire change; the UI has no callers yet
+  (the editor tasks are queued), and the tests are this change's
+  callers.
+- **`hidden_count` counts HIDDEN INSTRUCTIONS** — the rows only the
+  widened scope serves (`state = 'hidden'`; headings are always
+  active, so the count is the toggle's number exactly). Scope-
+  independent: both scopes carry the same count, computed by one
+  `COUNT` in the SAME read transaction (D-037) — the default answer
+  knows its hidden half without serving it.
+- **The store gains the query, not the command.**
+  `eunomia_store::library::count_items(conn, scope)` — the COUNT
+  lives where the list lives (the module that owns the table's
+  read vocabulary); the command maps the i64 through the wire's
+  saturation rule (`u32::MAX`, the `variant_count` precedent —
+  specta forbids 64-bit integers).
+- **The mock twin computes the same number from its own rows**
+  (hidden fixtures), and the spec's §7.10 library_get clause names
+  the field.
+
+Checks: BDD red-first (the struct widened with a deliberately
+constant zero, the new battery red, then the real COUNT — green);
+mutation-verified (the count poisoned to zero turns the battery red).
+fmt, clippy `-p eunomia-sync`, targeted nextest (library_tests), the
+bindings export pin, prettier/eslint/targeted vitest over the mock
+chain, and the D-195 doc-test pass. The full suite runs once after
+the flash batch. One review round.
+
+> > > > > > > 62dfd44 (fixup! feat(library): the heading record carries from_level — the skipped-from half of the LIB-032 pair (T-349))
+> > > > > > > 19abacd (feat(library): the heading record carries from_level — the skipped-from half of the LIB-032 pair (T-349))

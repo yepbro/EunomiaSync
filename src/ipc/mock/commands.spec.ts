@@ -241,6 +241,7 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
     // The heading half carries its own field set.
     const heading = tree.find(isHeading)
     expect(Object.keys(heading ?? {}).sort()).toEqual([
+      'from_level',
       'id',
       'kind',
       'level',
@@ -379,7 +380,7 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
       ]),
       headingRow('h-tone', 3, 4, 'Tone'),
       headingRow('h-deep', 4, 5, 'Deep'),
-      headingRow('h-release', 5, 2, 'Release'),
+      headingRow('h-release', 5, 3, 'Release'),
       headingRow('h-max', 6, 6, 'Max'),
       headingRow('h-back', 7, 3, 'Back'),
     ]
@@ -387,17 +388,19 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
       const tree = await commands.libraryGet(flag)
       return tree
         .filter(isHeading)
-        .map((heading) => [heading.title, heading.level_skipped] as const)
+        .map((heading) => [heading.title, heading.level_skipped, heading.from_level] as const)
     }
     // The flag set is the same under either scope (hidden instructions
-    // are transparent to the pair walk).
+    // are transparent to the pair walk) — and D-199's second fact
+    // rides exactly the skip rows: the level each skip arrives FROM
+    // (two DIFFERENT values — H2 and H3 — so a constant cannot pass).
     const expected = [
-      ['Style', false],
-      ['Tone', true],
-      ['Deep', false],
-      ['Release', false],
-      ['Max', true],
-      ['Back', false],
+      ['Style', false, null],
+      ['Tone', true, 2],
+      ['Deep', false, null],
+      ['Release', false, null],
+      ['Max', true, 3],
+      ['Back', false, null],
     ] as const
     expect(await flags(null)).toEqual(expected)
     expect(await flags(true)).toEqual(expected)

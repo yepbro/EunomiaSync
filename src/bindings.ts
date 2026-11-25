@@ -2016,7 +2016,10 @@ export type InstructionCreated = {
 };
 
 /**  A heading's tree row (§2 "Section heading", LIB-030). */
-export type LibraryHeadingEntry = {
+export type LibraryHeadingEntry = LibraryHeadingEntry_Serialize | LibraryHeadingEntry_Deserialize;
+
+/**  A heading's tree row (§2 "Section heading", LIB-030). */
+export type LibraryHeadingEntry_Deserialize = {
 	/**  The row id (DB-002). */
 	id: string,
 	/**  The heading's title (§6.9, 1–200 after trimming). */
@@ -2031,6 +2034,40 @@ export type LibraryHeadingEntry = {
 	 *  over the served collection.
 	 */
 	level_skipped: boolean,
+	/**
+	 *  The skipped-from level (LIB-032/T-349, D-199): the pair's
+	 *  other half — the previous heading's level, 2–6 — exactly when
+	 *  this row IS the deep half of a gap (the same rows
+	 *  `level_skipped` is true for); `None` for every other heading.
+	 *  One report (`heading_level_gaps`) builds both facts.
+	 */
+	from_level?: number | null,
+};
+
+/**  A heading's tree row (§2 "Section heading", LIB-030). */
+export type LibraryHeadingEntry_Serialize = {
+	/**  The row id (DB-002). */
+	id: string,
+	/**  The heading's title (§6.9, 1–200 after trimming). */
+	title: string,
+	/**  The heading level, 2–6 (`##`…`######`). */
+	level: number,
+	/**
+	 *  The LIB-032 skip flag: this heading ARRIVES more than one
+	 *  level deeper than the heading before it (`##` then `####`).
+	 *  Legal input marked with the warning icon — never a validation
+	 *  (D-072); computed by [`eunomia_core::gaps::heading_level_gaps`]
+	 *  over the served collection.
+	 */
+	level_skipped: boolean,
+	/**
+	 *  The skipped-from level (LIB-032/T-349, D-199): the pair's
+	 *  other half — the previous heading's level, 2–6 — exactly when
+	 *  this row IS the deep half of a gap (the same rows
+	 *  `level_skipped` is true for); `None` for every other heading.
+	 *  One report (`heading_level_gaps`) builds both facts.
+	 */
+	from_level: number | null,
 };
 
 /**
@@ -2171,7 +2208,7 @@ export type LibraryTreeItem_Deserialize =
 /**  A section heading row (§2 "Section heading"). */
 {
 	kind: "heading",
-} & LibraryHeadingEntry;
+} & LibraryHeadingEntry_Deserialize;
 
 /**
  *  One row of the `library_get` tree: an instruction or a section
@@ -2192,7 +2229,7 @@ export type LibraryTreeItem_Serialize =
 /**  A section heading row (§2 "Section heading"). */
 {
 	kind: "heading",
-} & LibraryHeadingEntry;
+} & LibraryHeadingEntry_Serialize;
 
 /**
  *  One variant of the served instruction — the tree's own view, not

@@ -962,10 +962,17 @@ export const mockCommands: IpcCommands = {
     // skip per offending edge, instructions of either state
     // transparent (the gaps module's own rule).
     const skipped = new Set<number>()
+    // D-199: the second fact of the same pair — the skipped-from
+    // level rides exactly the rows the flag marks; one walk builds
+    // both, mirroring the backend's one-report rule.
+    const fromLevels = new Map<number, number>()
     let previous: { level: number } | null = null
     rows.forEach((row, index) => {
       if (row.kind !== 'heading') return
-      if (previous !== null && row.headingLevel > previous.level + 1) skipped.add(index)
+      if (previous !== null && row.headingLevel > previous.level + 1) {
+        skipped.add(index)
+        fromLevels.set(index, previous.level)
+      }
       previous = { level: row.headingLevel }
     })
     // The label join (D-187): the active projects in `sort_order` are
@@ -1004,6 +1011,7 @@ export const mockCommands: IpcCommands = {
           title: row.title,
           level: row.headingLevel,
           level_skipped: skipped.has(index),
+          from_level: fromLevels.get(index) ?? null,
         }
       }
       return {

@@ -319,17 +319,28 @@ fn library_get_serves_the_position_ordered_tree_with_the_full_instruction_shape(
     assert_eq!(heading_of(&tree[2]).id, tone);
     assert_eq!(instruction_of(&tree[3]).id, friendly);
 
-    // The heading half of the shape: level, title, and the skip flag
+    // The heading half of the shape: level, title, and the skip facts
     // (H2 → H4 across one transparent instruction is a skip — the
-    // dedicated battery below owns the rule; here it pins the field).
+    // dedicated battery below owns the rule; here it pins the fields):
+    // the boolean AND the skipped-from level (D-199) — the flag says
+    // "a skip", the level says WHICH level the skip leaves behind.
     let style_entry = heading_of(&tree[0]);
     assert_eq!(style_entry.title, "Style");
     assert_eq!(style_entry.level, 2);
     assert!(!style_entry.level_skipped, "the first heading has no pair");
+    assert_eq!(
+        style_entry.from_level, None,
+        "no pair, no skipped-from level"
+    );
     let tone_entry = heading_of(&tree[2]);
     assert_eq!(tone_entry.title, "Tone");
     assert_eq!(tone_entry.level, 4);
     assert!(tone_entry.level_skipped, "H4 arriving after H2 is a skip");
+    assert_eq!(
+        tone_entry.from_level,
+        Some(2),
+        "the skip's other half: the H2 it arrived from"
+    );
 
     // The instruction half (LIB-001/008/014): name, state, variant
     // count, dates, the variants inline with both flags, no labels
@@ -587,8 +598,8 @@ fn library_get_marks_level_skips_on_the_arriving_headings_only() {
     let shy = seed_instruction(&database, "Shy"); // transparent, hidden below
     seed_heading(&database, "Tone", 4); // 2 — ARRIVES two deeper: skip
     seed_heading(&database, "Deep", 5); // 3 — one step: no skip
-    seed_heading(&database, "Release", 2); // 4 — close: no skip
-    seed_heading(&database, "Max", 6); // 5 — ARRIVES four deeper: skip
+    seed_heading(&database, "Release", 3); // 4 — close: no skip
+    seed_heading(&database, "Max", 6); // 5 — ARRIVES three deeper: skip (from H3)
     seed_heading(&database, "Back", 3); // 6 — close: no skip
     tauri::async_runtime::block_on(database.run(move |tx| {
         eunomia_store::library::hide_item(tx, &shy)
@@ -598,6 +609,12 @@ fn library_get_marks_level_skips_on_the_arriving_headings_only() {
     .expect("hiding the instruction through the repository must work");
 
     let expected = [false, true, false, false, true, false];
+    // D-199: the second half of every pair — the skipped-from level.
+    // The skips' pairs are Tone←Style (H2) and Max←Release (H3) — two
+    // DIFFERENT skipped-from values, so a constant or first-gap
+    // implementation cannot pass; every non-skip row carries no level
+    // at all.
+    let expected_from = [None, Some(2u8), None, None, Some(3u8), None];
     let webview = main_webview(&app);
     for scope in [serde_json::Value::Null, serde_json::json!(true)] {
         let tree = invoke_library_get(&webview, scope.clone())
@@ -612,6 +629,17 @@ fn library_get_marks_level_skips_on_the_arriving_headings_only() {
         assert_eq!(
             flags, expected,
             "the skip flag set is the same under includeHidden={scope}"
+        );
+        let from_levels = tree
+            .iter()
+            .filter_map(|entry| match entry {
+                LibraryTreeItem::Heading(heading) => Some(heading.from_level),
+                LibraryTreeItem::Instruction(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            from_levels, expected_from,
+            "the skipped-from level rides exactly the skip rows, under includeHidden={scope}"
         );
         let titles = tree
             .iter()

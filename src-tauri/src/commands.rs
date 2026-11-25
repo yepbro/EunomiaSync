@@ -4302,6 +4302,12 @@ pub(crate) struct LibraryHeadingEntry {
     /// (D-072); computed by [`eunomia_core::gaps::heading_level_gaps`]
     /// over the served collection.
     pub(crate) level_skipped: bool,
+    /// The skipped-from level (LIB-032/T-349, D-199): the pair's
+    /// other half — the previous heading's level, 2–6 — exactly when
+    /// this row IS the deep half of a gap (the same rows
+    /// `level_skipped` is true for); `None` for every other heading.
+    /// One report (`heading_level_gaps`) builds both facts.
+    pub(crate) from_level: Option<u8>,
 }
 
 /// The `library_get` command's read, gathered by the one transaction
@@ -4495,9 +4501,14 @@ fn assemble_library_tree(read: LibraryRead) -> Vec<LibraryTreeItem> {
             }),
         })
         .collect::<Vec<_>>();
-    let skipped: std::collections::HashSet<usize> = heading_level_gaps(&core_items)
-        .into_iter()
-        .map(|gap| gap.to_index)
+    // One gaps pass, one fact container (D-199): the map is keyed by
+    // the gap's `to_index`, so its key set IS the skip set —
+    // `level_skipped` and `from_level` cannot disagree, because they
+    // are two reads of the same map.
+    let gaps = heading_level_gaps(&core_items);
+    let from_levels: std::collections::HashMap<usize, u8> = gaps
+        .iter()
+        .map(|gap| (gap.to_index, u8::from(gap.from_level)))
         .collect();
 
     let mut tree = Vec::with_capacity(read.items.len());
@@ -4513,7 +4524,8 @@ fn assemble_library_tree(read: LibraryRead) -> Vec<LibraryTreeItem> {
                     id: item.id.clone(),
                     title: item.title.clone(),
                     level: u8::from(heading.level),
-                    level_skipped: skipped.contains(&index),
+                    level_skipped: from_levels.contains_key(&index),
+                    from_level: from_levels.get(&index).copied(),
                 }));
             }
             CoreLibraryItem::Instruction(_) => {
