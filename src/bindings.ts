@@ -997,6 +997,7 @@ export const events = {
 	stateDirty: makeEvent<DirtyEvent, DirtyEvent>("state://dirty"),
 	stateFileChanged: makeEvent<FileChangedEvent, FileChangedEvent>("state://file-changed"),
 	stateProjectAvailability: makeEvent<ProjectAvailabilityEvent_Serialize, ProjectAvailabilityEvent_Deserialize>("state://project-availability"),
+	syncProgress: makeEvent<SyncProgressEvent, SyncProgressEvent>("sync://progress"),
 };
 
 /* Types */
@@ -3492,6 +3493,53 @@ export type SettingItem = {
 	 *  re-read (§6.5: values live in the `value` column as JSON).
 	 */
 	value: string,
+};
+
+/**
+ *  §9.4's phase words on the `sync://progress` wire, serialized as
+ *  the spec's own lower-case spellings — the [`crate::scan::
+ *  ScanClassWire`] shape. No `start` member: phase 0 is
+ *  command-internal (the flag, the ALG-001 snapshot build, the row —
+ *  one step with no per-project loop the event could report on, and
+ *  no injectable seam inside it), so its completion IS preflight's
+ *  start, and the first emission announces `preflight` (D-202).
+ */
+export type SyncPhaseWire = 
+/**  §9.4 phase 1 — the per-project preflight. */
+"preflight" | 
+/**  §9.4 phase 2 — the per-project backups. */
+"backups" | 
+/**  §9.4 phase 3 — the per-project atomic writes. */
+"write" | 
+/**  §9.4 phase 4 — the finish. */
+"finish";
+
+/**
+ *  The `sync://progress` event payload (§7.10, SYS-003, MAIN-026):
+ *  the live "k of N" region's two numbers and the current phase —
+ *  `done` counts the run's projects with a TERMINAL §9.4 verdict
+ *  (`skipped`/`unchanged` from phase 1's transaction on, plus
+ *  `written`/`failed` as phase 3 completes each write; the per-write
+ *  report rides the write's own completion, so it can lead the
+ *  verdict row's transaction by the microseconds between them — a
+ *  display-only preview, never a claim the row is already visible),
+ *  `total` is the run's active project count, constant for the whole
+ *  run (MAIN-026's region reads one scale per run, never rescales
+ *  mid-run).
+ * 
+ *  The event name is the spec's literal wire name, pinned by the
+ *  manual [`Event`] implementation (the D-112 ruling: the derive
+ *  macro cannot produce the `://` spelling). Emitted from Rust only;
+ *  the webview subscribes through the T-246 listen/unlisten grant
+ *  (SEC-001 — the generated `emit`/`emitTo` stay capability-denied).
+ */
+export type SyncProgressEvent = {
+	/**  The phase the run is in (§9.4's own word). */
+	phase: SyncPhaseWire,
+	/**  The run's projects with a terminal §9.4 verdict so far (k). */
+	done: number,
+	/**  The run's active project count (N, fixed at phase 0). */
+	total: number,
 };
 
 /**

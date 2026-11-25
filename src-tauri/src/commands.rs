@@ -97,6 +97,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, Manager, Runtime};
+use tauri_specta::Event;
 
 use jiff::Timestamp;
 
@@ -995,6 +996,183 @@ impl<R: Runtime> Drop for CancelLease<R> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The `sync://progress` event (T-119, §7.10's events line, SYS-003,
+// MAIN-026, §9.4): the run's live "k of N" and the current phase,
+// emitted no more than ten times per second. D-202 holds the readings.
+// ---------------------------------------------------------------------------
+
+/// The minimum spacing between two `sync://progress` emissions
+/// (SYS-003: "no more than 10 times per second" — one tenth of a
+/// second between consecutive emissions). Pinned by a unit test
+/// against the literal, the `dirty_recalc::DEBOUNCE` pin shape. The
+/// scan twin ([`crate::scan::PROGRESS_MIN_INTERVAL`]) stays scan's
+/// own const — its doc ties it to ALG-053's walk; two literals for
+/// one SYS-003 bound, each pinned by its own suite (D-202).
+pub(crate) const SYNC_PROGRESS_MIN_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
+/// §9.4's phase words on the `sync://progress` wire, serialized as
+/// the spec's own lower-case spellings — the [`crate::scan::
+/// ScanClassWire`] shape. No `start` member: phase 0 is
+/// command-internal (the flag, the ALG-001 snapshot build, the row —
+/// one step with no per-project loop the event could report on, and
+/// no injectable seam inside it), so its completion IS preflight's
+/// start, and the first emission announces `preflight` (D-202).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub(crate) enum SyncPhaseWire {
+    /// §9.4 phase 1 — the per-project preflight.
+    #[serde(rename = "preflight")]
+    Preflight,
+    /// §9.4 phase 2 — the per-project backups.
+    #[serde(rename = "backups")]
+    Backups,
+    /// §9.4 phase 3 — the per-project atomic writes.
+    #[serde(rename = "write")]
+    Write,
+    /// §9.4 phase 4 — the finish.
+    #[serde(rename = "finish")]
+    Finish,
+}
+
+/// The `sync://progress` event payload (§7.10, SYS-003, MAIN-026):
+/// the live "k of N" region's two numbers and the current phase —
+/// `done` counts the run's projects with a TERMINAL §9.4 verdict
+/// (`skipped`/`unchanged` from phase 1's transaction on, plus
+/// `written`/`failed` as phase 3 completes each write; the per-write
+/// report rides the write's own completion, so it can lead the
+/// verdict row's transaction by the microseconds between them — a
+/// display-only preview, never a claim the row is already visible),
+/// `total` is the run's active project count, constant for the whole
+/// run (MAIN-026's region reads one scale per run, never rescales
+/// mid-run).
+///
+/// The event name is the spec's literal wire name, pinned by the
+/// manual [`Event`] implementation (the D-112 ruling: the derive
+/// macro cannot produce the `://` spelling). Emitted from Rust only;
+/// the webview subscribes through the T-246 listen/unlisten grant
+/// (SEC-001 — the generated `emit`/`emitTo` stay capability-denied).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub(crate) struct SyncProgressEvent {
+    /// The phase the run is in (§9.4's own word).
+    pub(crate) phase: SyncPhaseWire,
+    /// The run's projects with a terminal §9.4 verdict so far (k).
+    pub(crate) done: u32,
+    /// The run's active project count (N, fixed at phase 0).
+    pub(crate) total: u32,
+}
+
+impl Event for SyncProgressEvent {
+    /// The §7.10 wire name, verbatim. Tauri permits exactly the
+    /// characters it contains (alphanumeric, `-`, `/`, `:`, `_`).
+    const NAME: &'static str = "sync://progress";
+}
+
+/// The rate-bounded `sync://progress` reporter (SYS-003): the ONE
+/// seam every progress fact consults — the four phase-boundary
+/// reports the command makes between phases and the per-write
+/// reports phase 3's injected operation carries (D-202).
+///
+/// Shared across the command's task and the write wrapper's
+/// blocking-pool closures (an [`Arc`]), so the last-emission instant
+/// lives behind a [`std::sync::Mutex`]; the guard covers exactly the
+/// rate decision and the EMIT is the caller's, outside the lock. The
+/// clock is the injected [`SyncRunSeams::progress_clock`] (the D-197
+/// abort-clock pattern): production answers [`std::time::Instant::now`],
+/// the tests answer simulated instants — the ≤10/s bound is a
+/// property of simulated windows, never wall seconds (the D-140
+/// posture; no fixed sleeps anywhere near the rate tests).
+pub(crate) struct SyncProgressReporter {
+    clock: ProgressClock,
+    min_interval: std::time::Duration,
+    state: std::sync::Mutex<SyncProgressReporterState>,
+}
+
+/// The reporter's shared half: when the last emission fired (the
+/// first report has emitted nothing yet).
+struct SyncProgressReporterState {
+    last_emit: Option<std::time::Instant>,
+}
+
+impl SyncProgressReporter {
+    /// The reporter over the seam's clock (the `min_interval` is
+    /// SYS-003's literal, [`SYNC_PROGRESS_MIN_INTERVAL`]).
+    pub(crate) fn new(clock: ProgressClock) -> Self {
+        Self {
+            clock,
+            min_interval: SYNC_PROGRESS_MIN_INTERVAL,
+            state: std::sync::Mutex::new(SyncProgressReporterState { last_emit: None }),
+        }
+    }
+
+    /// Records one progress fact and decides its emission:
+    /// `Some(payload)` iff this fact may reach the wire now — the
+    /// first report, or the first after a full `min_interval` since
+    /// the last emission. The coalescing rule is the scan
+    /// [`ProgressTracker`](crate::scan) rule: a suppressed report's
+    /// state is simply not sent, and the next emission carries its
+    /// OWN newest state — never a stale intermediate.
+    pub(crate) fn report(
+        &self,
+        phase: SyncPhaseWire,
+        done: u32,
+        total: u32,
+    ) -> Option<SyncProgressEvent> {
+        // The clock is read INSIDE the critical section (round-2's
+        // hardening note, taken): reading it before the lock would
+        // let an overlapping caller hand an earlier instant to a
+        // `last_emit` a later one installed, and `duration_since`
+        // panics on reversed instants. The shipped pipeline never
+        // overlaps the two callers (phase 3 awaits each write), but
+        // the invariant is structural here, not incidental.
+        let mut state = self
+            .state
+            .lock()
+            .expect("the sync progress reporter must not be poisoned");
+        let now = (self.clock)();
+        let may_emit = match state.last_emit {
+            None => true,
+            Some(last) => now.duration_since(last) >= self.min_interval,
+        };
+        if !may_emit {
+            return None;
+        }
+        state.last_emit = Some(now);
+        Some(SyncProgressEvent { phase, done, total })
+    }
+}
+
+/// The progress clock (the `SyncRunSeams::progress_clock` arm) —
+/// `Sync` for the same structural reason as the other arms: the seam
+/// struct crosses the command's await points whole, and the reporter
+/// consults it from phase 3's blocking-pool closures too.
+type ProgressClock = Arc<dyn Fn() -> std::time::Instant + Send + Sync>;
+
+/// A `usize` count on the `sync://progress` wire (u32, the
+/// `wire_count` reasoned-panic posture: a run's project count fits).
+fn progress_count(count: usize) -> u32 {
+    u32::try_from(count).expect("a run's project count fits the wire's u32")
+}
+
+/// Emits one `sync://progress` fact through the shared reporter —
+/// the display-only seam: the reporter's rate gate decides whether
+/// the fact reaches the wire, and a refused emission is logged and
+/// never fatal (the run's ANSWER carries the terminal state the
+/// events preview — the scan callback's posture).
+fn emit_sync_progress<R: Runtime>(
+    app: &AppHandle<R>,
+    progress: &SyncProgressReporter,
+    phase: SyncPhaseWire,
+    done: u32,
+    total: u32,
+) {
+    if let Some(payload) = progress.report(phase, done, total)
+        && let Err(error) = payload.emit(app)
+    {
+        logging::sync_progress_emit_failed(&error);
+    }
+}
+
 /// The injected pipeline operations of [`sync_run_with`] — the
 /// phase-2/3 `D-089 injector pattern` bundled for one call site:
 /// production closes over the real `eunomia-fs` operations, the tests
@@ -1022,6 +1200,16 @@ pub(crate) struct SyncRunSeams {
     /// clock: it is the best-effort corpse cleanup on a path whose
     /// FIRST error is the answer.
     pub(crate) abort_clock: AbortClock,
+    /// The PROGRESS clock (T-119, SYS-003's rate limit — the D-197
+    /// abort-clock pattern applied to the `sync://progress` seam):
+    /// [`SyncProgressReporter`] consults it on every report — the
+    /// four phase-boundary reports and phase 3's per-write reports —
+    /// and the spacing it observes bounds the emissions at ten per
+    /// second. Production is the real clock; the tests answer
+    /// simulated instants (a frozen clock, a jumping one), which
+    /// makes the rate bound a property of simulated windows, never
+    /// wall seconds (the D-140 posture).
+    pub(crate) progress_clock: ProgressClock,
 }
 
 /// Phase 2's injected copy operation (the `SyncRunSeams::backup` arm).
@@ -1039,12 +1227,13 @@ type AbortClock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
 
 impl SyncRunSeams {
     /// The production seams: the real `eunomia-fs` operations and the
-    /// real clock for the abort's instant.
+    /// real clocks for the abort's instant and the progress rate.
     pub(crate) fn production() -> Self {
         Self {
             backup: Arc::new(eunomia_fs::backup::backup_target_file),
             write: Arc::new(crate::sync_phase3::production_write),
             abort_clock: Arc::new(Timestamp::now),
+            progress_clock: Arc::new(std::time::Instant::now),
         }
     }
 }
@@ -1120,6 +1309,21 @@ pub(crate) async fn sync_run<R: Runtime>(
 ///    committed, and the next trigger retries everything that refused.
 /// 7. The summary — the committed rows read back ([`summary_of`]).
 ///
+/// **The progress emissions (T-119, SYS-003, D-202).** Throughout the
+/// run, [`SyncProgressReporter`] emits the `sync://progress` event:
+/// one report immediately before each of phases 1–4 begins (only
+/// when the run reaches the phase — the availability checkpoint's
+/// refusal, the D-25 gate and the cancel point all stop the run
+/// BEFORE the phase their report would announce), plus one report
+/// per write through the WRAPPED [`SyncRunSeams::write`] operation —
+/// the only place k moves within a phase. `done` counts terminal §9.4
+/// verdicts, `total` is phase 0's project count, and the reporter's
+/// rate gate bounds the whole stream at ten emissions per second
+/// (the clock is the seam's [`SyncRunSeams::progress_clock`]). A
+/// refused emission is display-only degradation — logged, never
+/// fatal. Nothing emits after the finish boundary: the terminal
+/// state is the ANSWER, the summary (the scan posture).
+///
 /// **The error wrapper (the P3-4 ruling, D-133's recorded follow-up).**
 /// An `Err` after phase 0 whose run row is still `running` gets its
 /// terminal status: [`abort_run`] with the error's own §10 literal and
@@ -1175,12 +1379,31 @@ pub(crate) async fn sync_run_with<R: Runtime>(
     app.state::<SyncCancelSlot>().publish_owned(&cancel);
     let run_id = phase0.run.id.clone();
 
+    // The run's progress reporter (T-119, SYS-003): the rate-bounded
+    // `sync://progress` seam the four phase-boundary reports and
+    // phase 3's per-write reports consult, over the seam's injected
+    // clock (D-202). Shared behind an `Arc` because the write
+    // wrapper's closure — phase 3's own injection point — reports
+    // from the blocking pool.
+    let progress = Arc::new(SyncProgressReporter::new(Arc::clone(&seams.progress_clock)));
+    // MAIN-026's N: the run's active project count, fixed at phase 0
+    // — the one scale the live "k of N" region reads for the whole
+    // run (captured before the outcome is destructured below).
+    let progress_total = progress_count(phase0.projects.len());
+
     // Step 2 — DB-032's "before a sync" checkpoint. The diff is the
     // event's business; a refusal stops the run (a pass that could not
     // see the project list cannot be "before a sync").
     if let Err(error) = availability::recheck_and_emit(&app).await {
         return Err(pipeline_refusal(&app, &run_id, "the availability checkpoint", error).await);
     }
+
+    // The preflight boundary (T-119): the run is live and phase 1 is
+    // the phase it is in — MAIN-026's region opens at zero. Emitted
+    // AFTER the availability checkpoint on purpose: a refusal there
+    // stops the run before preflight, and an emission names a phase
+    // the run actually reached (D-202's boundary-truthfulness rule).
+    emit_sync_progress(&app, &progress, SyncPhaseWire::Preflight, 0, progress_total);
 
     // Step 3 — phase 1 over the built content. The free-space seam is
     // the production closure the phase's docs prescribe.
@@ -1195,6 +1418,21 @@ pub(crate) async fn sync_run_with<R: Runtime>(
                 return Err(pipeline_refusal(&app, &run_id, "the preflight", error).await);
             }
         };
+
+    // The run's decided-so-far count (k, D-202): phase 1's terminal
+    // verdicts — every `skipped`/`unchanged` project; the `ready`
+    // projects join the count as phase 3 writes them. Computed once:
+    // the backups and write boundaries and every per-write report
+    // read the same base.
+    let progress_decided = progress_count(
+        phase1
+            .projects
+            .iter()
+            .filter(|(_, verdict)| {
+                !matches!(verdict, crate::sync_phase1::PreflightVerdict::Ready(_))
+            })
+            .count(),
+    );
 
     // §10's per-project skip lines over the outcome's structured OS
     // facts (the store row has no column for them — D-131's round-1
@@ -1272,6 +1510,19 @@ pub(crate) async fn sync_run_with<R: Runtime>(
         return Ok(SyncRunOutcome::Completed { summary });
     }
 
+    // The backups boundary (T-119): phase 1's verdicts are decided
+    // rows, so k opens at the decided count. Emitted after the gate
+    // and the cancel point — a run stopped at either never reached
+    // the backups, and an emission names a phase the run reached
+    // (D-202's boundary-truthfulness rule, pinned by the gate test).
+    emit_sync_progress(
+        &app,
+        &progress,
+        SyncPhaseWire::Backups,
+        progress_decided,
+        progress_total,
+    );
+
     // Step 5 — phases 2 → 3 → 4, each refusing through the wrapper.
     // Phase 2 gets the SAME abort clock as the command's own stops
     // (D-197): the D-25 gate's stop, this cancel checkpoint and the
@@ -1294,11 +1545,47 @@ pub(crate) async fn sync_run_with<R: Runtime>(
         return Err(pipeline_refusal(&app, &run_id, "the backups", error).await);
     }
 
+    // The write boundary (T-119): phase 2 decided no verdicts (a
+    // backup copies bytes, never a row), so k still reads the
+    // phase-1 count; the per-write reports below advance it.
+    emit_sync_progress(
+        &app,
+        &progress,
+        SyncPhaseWire::Write,
+        progress_decided,
+        progress_total,
+    );
+
+    // Phase 3's write operation, WRAPPED for progress (T-119, D-202):
+    // the command owns the composition, so the wrapper lives here —
+    // phase 3 calls the seam it always called, and each completed
+    // write reports k advancing one project at a time. A write
+    // ATTEMPT decides its project (success and failure both produce
+    // a row), so the counter counts attempts; a phase-3 `Err` (the
+    // join wrapper's case) aborts the run past this point and no
+    // further emission happens — the row's terminal state is the
+    // answer's. The closure runs on the blocking pool, so the
+    // reporter rides an `Arc` and the emit is display-only (a
+    // refusal is logged, never fatal — the scan callback's posture).
     let write = Arc::clone(&seams.write);
+    let write_progress = Arc::clone(&progress);
+    let writes_seen = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let progress_app = app.clone();
     let phase3 = match sync_phase3::run(
         &app,
         &phase1,
-        move |target, contents| write(target, contents),
+        move |target: &Path, contents: &[u8]| {
+            let outcome = write(target, contents);
+            let completed = 1 + writes_seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            emit_sync_progress(
+                &progress_app,
+                &write_progress,
+                SyncPhaseWire::Write,
+                progress_decided.saturating_add(completed),
+                progress_total,
+            );
+            outcome
+        },
         eunomia_core::marker_clock::now_marker_clock,
         Timestamp::now(),
     )
@@ -1330,6 +1617,18 @@ pub(crate) async fn sync_run_with<R: Runtime>(
             );
         }
     }
+
+    // The finish boundary (T-119): phase 3 decided every remaining
+    // project — k has reached N. Nothing emits AFTER this: the
+    // terminal state rides the command's answer (the summary), the
+    // scan posture (D-202).
+    emit_sync_progress(
+        &app,
+        &progress,
+        SyncPhaseWire::Finish,
+        progress_total,
+        progress_total,
+    );
 
     // The dirty seam through a closure that owns its handle (the
     // higher-ranked bound: a bare fn item's returned future borrows the
@@ -5684,7 +5983,11 @@ mod tests {
     //! The seam tests of the pure mappings — the opener mapping and
     //! the `activity_list`/settings store-error mappings are pure, so
     //! they are tested directly; the opener call itself is the
-    //! recorded untestable seam (module docs).
+    //! recorded untestable seam (module docs). The `sync://progress`
+    //! reporter's throttle is pure over an injected clock, so its
+    //! battery (the literal, the coalescing rule and the rate bound
+    //! over simulated windows) lives here too — the scan
+    //! `ProgressTracker` battery's shape (D-202).
 
     use super::*;
     use crate::errors::ErrorCode;
@@ -6857,5 +7160,201 @@ mod tests {
         let echoed = bounded_echo(&long);
         assert!(echoed.starts_with(&"x".repeat(64)));
         assert!(echoed.ends_with("(+236 more code points)"), "got: {echoed}");
+    }
+
+    // -------------------------------------------------------------------
+    // The `sync://progress` reporter (T-119, SYS-003, D-202): the
+    // literals, the coalescing rule and the rate bound — over a
+    // simulated clock, never wall seconds.
+    // -------------------------------------------------------------------
+
+    /// The simulated clock's epoch (the scan suite's `t0` shape:
+    /// `Instant::now()` is only the anchor synthetic offsets are
+    /// added to; every assertion compares offsets, so the anchor's
+    /// real value never matters).
+    fn t0() -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    /// A clock that answers the given instants in order, one per
+    /// call — the coalescing tests' scripted timeline. The queue
+    /// rides a `Mutex` so the closure stays `Fn` (the clock type's
+    /// bound).
+    fn scripted_clock(instants: Vec<std::time::Instant>) -> ProgressClock {
+        let queue = std::sync::Mutex::new(std::collections::VecDeque::from(instants));
+        Arc::new(move || {
+            queue
+                .lock()
+                .expect("the scripted clock queue must not be poisoned")
+                .pop_front()
+                .expect("the scripted clock answers one instant per call")
+        })
+    }
+
+    /// A clock that answers `start`, `start + 1 ms`,
+    /// `start + 2 ms`, … — one simulated millisecond per call, the
+    /// rate battery's timeline.
+    fn millisecond_clock(start: std::time::Instant) -> ProgressClock {
+        let tick = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let clock = Arc::clone(&tick);
+        Arc::new(move || {
+            let step = clock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            start + std::time::Duration::from_millis(step)
+        })
+    }
+
+    #[test]
+    fn the_sync_progress_min_interval_is_the_spec_derived_literal() {
+        // "No more than 10 times per second" (SYS-003) is one tenth
+        // of a second of spacing — pinned against the literal the
+        // way `dirty_recalc::DEBOUNCE` is.
+        assert_eq!(
+            SYNC_PROGRESS_MIN_INTERVAL,
+            std::time::Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn the_sync_progress_event_name_is_the_spec_literal() {
+        // The wire name is the frontend's whole contract; pinned
+        // against the §7.10 literal exactly like `scan://progress`'s.
+        assert_eq!(SyncProgressEvent::NAME, "sync://progress");
+    }
+
+    #[test]
+    fn the_phase_words_serialize_as_the_spec_spellings() {
+        // The wire vocabulary (round-1's P3): the generated bindings
+        // type the phase as a string-literal union, so the serde
+        // renames ARE the frontend's contract — each word pinned
+        // against §9.4's own spelling, the payload whole beside it.
+        for (phase, word) in [
+            (SyncPhaseWire::Preflight, "preflight"),
+            (SyncPhaseWire::Backups, "backups"),
+            (SyncPhaseWire::Write, "write"),
+            (SyncPhaseWire::Finish, "finish"),
+        ] {
+            let payload = serde_json::to_string(&SyncProgressEvent {
+                phase,
+                done: 1,
+                total: 2,
+            })
+            .expect("the event payload must serialize");
+            assert_eq!(
+                payload,
+                format!("{{\"phase\":\"{word}\",\"done\":1,\"total\":2}}"),
+                "the {word} word rides the wire as §9.4 spells it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_sync_progress_report_emits_immediately_with_its_own_facts() {
+        // MAIN-026's live region opens with the run: the very first
+        // report reaches the wire at once, carrying its own phase,
+        // k and N (a one-project run must not show a silent window
+        // for a tenth of a second).
+        let reporter = SyncProgressReporter::new(scripted_clock(vec![t0()]));
+        let payload = reporter
+            .report(SyncPhaseWire::Preflight, 0, 1)
+            .expect("the first report emits");
+
+        assert_eq!(
+            (payload.phase, payload.done, payload.total),
+            (SyncPhaseWire::Preflight, 0, 1)
+        );
+    }
+
+    #[test]
+    fn reports_inside_the_interval_are_suppressed_and_the_newest_state_lands() {
+        // The coalescing rule (SYS-003's bound made of spacing):
+        // reports inside the 100 ms quiet window are answered with
+        // `None`, and the first report after the window carries ITS
+        // OWN newest state — never the stale intermediate that opened
+        // the window.
+        let start = t0();
+        let reporter = SyncProgressReporter::new(scripted_clock(vec![
+            start,
+            start + std::time::Duration::from_millis(10),
+            start + std::time::Duration::from_millis(50),
+            start + std::time::Duration::from_millis(99),
+            start + SYNC_PROGRESS_MIN_INTERVAL,
+        ]));
+
+        reporter
+            .report(SyncPhaseWire::Preflight, 0, 4)
+            .expect("the first report emits");
+        assert!(
+            reporter.report(SyncPhaseWire::Preflight, 1, 4).is_none(),
+            "10 ms after the last emission is inside the window"
+        );
+        assert!(
+            reporter.report(SyncPhaseWire::Write, 2, 4).is_none(),
+            "50 ms after the last emission is inside the window"
+        );
+        assert!(
+            reporter.report(SyncPhaseWire::Write, 3, 4).is_none(),
+            "99 ms after the last emission is still inside the window"
+        );
+        let payload = reporter
+            .report(SyncPhaseWire::Write, 4, 4)
+            .expect("a full interval after the last emission emits");
+        assert_eq!(
+            (payload.phase, payload.done, payload.total),
+            (SyncPhaseWire::Write, 4, 4),
+            "the emission after the window carries the newest state"
+        );
+    }
+
+    #[test]
+    fn a_simulated_run_never_exceeds_ten_sync_progress_emissions_per_second() {
+        // The card's own bound, as SYS-003 words it: one report per
+        // simulated millisecond over a ten-second run (10_001
+        // reports — real runs report far faster, the bound must hold
+        // for any rate), and EVERY sliding one-second window of the
+        // emission timeline holds at most ten. The total is pinned
+        // to the arithmetic the interval dictates (emissions at 0,
+        // 100, …, 10_000 ms — 101), so a throttle that emitted one
+        // extra time anywhere fails the count, and one that lost the
+        // gate fails the window sweep by orders of magnitude.
+        let start = t0();
+        let reporter = SyncProgressReporter::new(millisecond_clock(start));
+        let mut emission_times: Vec<std::time::Instant> = Vec::new();
+
+        for step in 0..=10_000u64 {
+            let done = u32::try_from(step).expect("the simulated step fits the wire's u32");
+            if let Some(payload) = reporter.report(SyncPhaseWire::Write, done, 10_001) {
+                assert_eq!((payload.done, payload.total), (done, 10_001));
+                emission_times.push(start + std::time::Duration::from_millis(step));
+            }
+        }
+
+        assert_eq!(
+            emission_times.len(),
+            101,
+            "a 10-second run at one report per millisecond emits exactly at 0,100,…,10_000 ms"
+        );
+        for window in emission_times.windows(2) {
+            let spacing = window[1].duration_since(window[0]);
+            assert!(
+                spacing >= SYNC_PROGRESS_MIN_INTERVAL,
+                "consecutive emissions are at least {SYNC_PROGRESS_MIN_INTERVAL:?} apart; \
+                 saw {spacing:?}"
+            );
+        }
+        for from in &emission_times {
+            let in_window = emission_times
+                .iter()
+                .filter(|time| {
+                    let time = **time;
+                    time >= *from && time.duration_since(*from) < std::time::Duration::from_secs(1)
+                })
+                .count();
+            assert!(
+                in_window <= 10,
+                "a sliding one-second window holds at most 10 emissions; one starting at \
+                 {:?} holds {in_window}",
+                from.duration_since(start)
+            );
+        }
     }
 }

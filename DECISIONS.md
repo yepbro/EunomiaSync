@@ -24275,3 +24275,218 @@ were verified landed).**
   two-fault MIDDLE send (invalid label + over-long description →
   `field: label`) added to both suites, so a label/description
   validator swap reddens the battery too.
+
+### D-202 — T-119: the `sync://progress` event — k-of-N over terminal verdicts, §9.4's phase words, the rate limit as a `SyncRunSeams.progress_clock` seam, and per-write emissions riding the injected write operation — 2026-11-25
+
+Problem: SYS-003 (spec.md:163) and §7.10's events line (spec.md:585)
+name `sync://progress` — "progress … no more than 10 times per second"
+— but the registry (`collect_events!` in `lib.rs:316-321`; the card's
+"lib.rs:224-229" line numbers are stale, verified Rule 2) carries four
+events and zero code occurrences of the fifth. The card's own note
+(project review 2026-11-23, P2-3): emit at meaningful phase
+boundaries, at most 10 emissions per second, behavioral tests of
+delivery and rate. MAIN-026 (spec.md:494) is the consumer: a live
+"k of N" region while the sync runs.
+
+Readings chosen (Rule 1, recorded before implementation):
+
+- **k and N are §9.4 verdicts, not files or phases.** `done` (k)
+  counts the run's projects with a TERMINAL §9.4 verdict —
+  `skipped`/`unchanged` from phase 1's transaction on, plus
+  `written`/`failed` as phase 3 stamps them — a monotone 0 → N
+  counter (a write attempt decides its project: success and failure
+  both produce a row). `total` (N) is the run's active project count
+  (phase 0's snapshot), constant for the whole run, so MAIN-026's
+  region reads one scale per run and never rescales mid-run. Files
+  are not counted (a project is one file); phases are not counted
+  (four steps make a poor progress scale).
+- **One emission immediately before each of phases 1–4 begins, only
+  when the run reaches the phase.** `preflight` 0/N right before
+  phase 1 (after the DB-032 checkpoint — an emission for a phase a
+  refused run never reached would lie), `backups` decided/N right
+  before phase 2 (after the D-25 gate and the cancel point — a gated
+  or cancelled run has already answered), `write` decided/N right
+  before phase 3, `finish` N/N right before phase 4 (phase 3 decided
+  every remaining project). NO terminal flush after phase 4 — the
+  scan `ProgressTracker` precedent (scan.rs:457-463): the terminal
+  state lands in the command's ANSWER, the summary.
+- **The phase vocabulary is §9.4's own words, lower-case on the
+  wire:** `preflight`, `backups`, `write`, `finish` — the
+  `ScanClassWire` serde-rename shape. No `start` member: phase 0 is
+  instantaneous (flag + snapshot + row) and its completion IS
+  preflight's start; the first emission announces `preflight`.
+- **The seam is command-level; no phase module is rewritten.** The
+  event DTO, the phase enum, `SYNC_PROGRESS_MIN_INTERVAL` (SYS-003's
+  100 ms twin of scan's `PROGRESS_MIN_INTERVAL` — scan's own const
+  stays scan's, its doc ties it to ALG-053; two literals for one
+  SYS-003 bound is the honest split, each pinned by its own literal
+  test) and the shared `SyncProgressReporter` live in `commands.rs`'s
+  sync-run region. Per-write emissions — the only place k moves
+  WITHIN a phase — ride the injected `seams.write` operation wrapped
+  at the command level (a facade phase 3 already calls, the brief's
+  own option), so the wrapper's counter and base live where the
+  pipeline composition lives. Honest boundaries, recorded: phase 1's
+  per-project preflight loop has no injectable seam (adding one
+  rewrites the phase — its progress is the boundary pair 0/N →
+  decided/N), and phase 2's per-project backups change no verdict,
+  so k is static there — neither loop emits per-project events.
+- **The rate limit is a `SyncRunSeams` clock member, D-197's
+  pattern:** `progress_clock:
+Arc<dyn Fn() -> std::time::Instant + Send + Sync>`, production
+  `Instant::now` — the throttle's time source is one injectable fact
+  (the abort-clock posture, D-197/D-140: deterministic tests over
+  simulated instants, never fixed sleeps). The reporter is shared
+  (command task + phase 3's blocking-pool closure), so its
+  `last_emit` lives behind a `Mutex` whose guard covers exactly the
+  rate decision; the EMIT is the caller's (outside the lock — the
+  scan callback holds its lock across the emit, this design does
+  not need to: the payload is already built). The throttle rule is
+  scan's coalescing rule verbatim: the first report emits
+  immediately, a later report emits iff ≥ 100 ms passed since the
+  last emission, and a suppressed report's state is simply not sent
+  — the next emission carries ITS OWN newest state. A refused
+  emission is display-only: `logging::sync_progress_emit_failed`
+  (the `scan_progress_emit_failed` twin, one minimal widening
+  outside the owned pair — the D-147 logging-edge precedent), never
+  fatal to the run.
+- **The mock side follows the scan twin, exactly:** `IpcEventMap`
+  gains `'sync://progress'` typed over the generated payload, and
+  `mockEvents.syncProgress` is the typed accessor — but NO mock
+  source drives it (the mock `syncRun` emits nothing, the posture
+  `scan://progress` itself has on the mock side: the accessor and
+  the bus registration are the mock contract; the emitting backend
+  task is this one). The event-only rule: `collect_commands!` stays
+  40, `mode.spec.ts`'s command pin is untouched (it pins commands,
+  not events — verified).
+
+Tests: `commands.rs`'s inline suite — the interval literal
+(SYS-003's own arithmetic: 10/s = 100 ms), the wire-name literal,
+the immediate first emission, the in-window suppression with
+newest-state coalescing, and the rate battery (10_001 reports at
+1 ms spacing over a simulated clock → exactly 101 emissions at
+0, 100, …, 10_000 ms, consecutive spacing ≥ 100 ms, every sliding
+one-second window ≤ 10 — the scan battery's shape). `ipc_tests.rs`
+— the delivery test over the REAL phases through `run_sync_with`
+(3 projects: one `unchanged` from a first run, two rewritten after
+an external edit each) with a JUMPING injected clock (each call ≥
+200 ms apart, so every report emits): the exact ordered payload
+sequence [(preflight,0,3), (backups,1,3), (write,1,3), (write,2,3),
+(write,3,3), (finish,3,3)] and nothing after; the fixed-clock rate
+pin (a frozen instant, 6 reports → exactly ONE delivered event —
+the pipeline consults the throttle, mutation: bypassing it delivers
+all six); the D-25 gate path (a gated run emits only `preflight` —
+the emissions stop where the run stopped); and the registration
+census marker (`commands::SyncProgressEvent` exactly once in
+`lib.rs`, the scan registration-pin shape). `events.spec.ts` — the
+`syncProgress` accessor twin over the mock bus. `logging.rs` — the
+`sync_progress_emit_failed` line pin (the scan edge's twin: WARN,
+the message, the error's Display form). Mutation groups: M1 the
+throttle gate removed → the rate battery + the fixed-clock pin
+red; M2 the write wrapper's report dropped → the delivery sequence
+red; M3 a boundary emission dropped → the delivery sequence red;
+M4 the registration dropped → the census pin red (and the export
+pin rewrites the bindings); M5 the decided-count base broken →
+the delivery sequence red. All five were run red-then-reverted,
+M1 twice — once in the red-first round, once on the final
+(let-chain-refactored) code.
+
+Verified on the way (Rule 2): tauri-specta's `Event::emit` PANICS
+over an unmounted event on the mock runtime ("Event sync://progress
+not found in registry!") instead of answering `Err` — so EVERY
+harness that drives `sync_run_with` must mount the event, which is
+why `sync_pipeline_tests`' World harness gained the registration
+line beside `ipc_tests`' `sync_watch_app` (the display-only
+emit-failure posture holds for the real runtime; the mock runtime's
+panic is the mount wiring's own loud failure, the
+reasoning-panic posture). Clippy's `collapsible_if` forces the
+let-chain spelling at both emission sites (edition 2024). The
+process note: one mutation revert used `git checkout --` on the
+still-uncommitted `commands.rs` and wiped the round's work — fully
+rebuilt from the session's edit history with no residue, but the
+shape to avoid is real: mutation reverts on uncommitted files go
+through the same surgical apply/revert they came in with, never
+`git checkout`.
+
+Checks: `CARGO_BUILD_JOBS=2 cargo fmt --check` (green after one
+`cargo fmt` pass over the new code); `cargo clippy --workspace
+--all-targets -- -D warnings`; `cargo nextest run --workspace
+--test-threads=4` — 1871/1871; `cargo test --doc --workspace` (86 +
+12, the D-195 ruling); `pnpm test` (361/361), `pnpm run
+format:check` (green after prettier --write over this entry),
+`pnpm run lint`, `pnpm run typecheck`; `src/bindings.ts`
+regenerated through the export pin (first run red — the D-034
+mechanic — second run green, the regenerated file committed).
+
+Round-1 review addendum (D-202, same task; report
+`.opencode/reviews/t119-round1-report.md`, deepseek-v4.1-flash —
+VERDICT: findings; 1×P2, 5×P3): findings processed here —
+
+- P2-1 (taken, the round's substance): the boundary-truthfulness
+  rule was pinned only for the D-25 gate — the reviewer's two
+  mutations (the `backups` emission moved above the cancel check,
+  the `write` emission moved above phase 2) survived the whole
+  suite. Closed by extending the two EXISTING stop-path tests with
+  progress listeners: `a_cancelled_token_stops_the_run_before_the_
+backups` now asserts a cancelled run emits exactly
+  `[(preflight, 0, 1)]`, and `a_failing_backup_aborts_the_run_with_
+the_typed_envelope` asserts a phase-2 abort emits exactly
+  `[(preflight, 0, 1), (backups, 0, 1)]` — never the phase the run
+  never reached. Both re-run red under the reviewer's exact
+  mutations, then green after revert. One correction to the
+  reviewer's mechanism note, recorded here: the cancel pin NEEDS
+  the jumping clock too (the review proposed production seams for
+  it) — with the real clock the throttle suppresses a misplaced
+  emission by real time and the mutation stays invisible; the
+  jumping clock is what turns the absence into a pipeline fact.
+- P3-1 (taken): the DTO doc's "as phase 3 stamps them" overstated —
+  the per-write report rides the write's OWN completion and can
+  lead the verdict row's transaction by the microseconds between
+  them; the doc now states the lead explicitly (a display-only
+  preview, never a claim the row is visible).
+- P3-2 (taken as this record): "no more than 10 times per second"
+  reads as the SLIDING one-second window (the battery's own assert
+  shape: at most 10 in any [t, t+1s)); min-spacing alone would
+  allow 11 in a closed window with both endpoints — the same
+  reading the scan battery took, now named here.
+- P3-3 (taken): the four phase words had no serialization pin —
+  `the_phase_words_serialize_as_the_spec_spellings` now pins each
+  serde rename against §9.4's spelling with the payload whole (the
+  generated TS union is string-literal-typed, so the renames are
+  the frontend's contract).
+- P3-4 (taken): "phase 0 is instantaneous" contradicted §9.4 (the
+  ALG-001 snapshot build is real work) — reworded to the true
+  reason: phase 0 is command-internal, one step with no
+  per-project loop and no injectable seam, so its completion IS
+  preflight's start.
+- P3-5 (taken): the write wrapper now calls the shared
+  `emit_sync_progress` instead of inlining its body.
+
+Re-checked after the fixes: fmt, clippy `-D warnings`, the full
+nextest suite (1872/1872 — one more test than round 1: the new
+phase-words pin), doc tests, the export pin (the P3-1/P3-4 doc
+rewordings ride into the generated `bindings.ts` doc comments —
+regenerated again, first run red, second green, committed), and
+the frontend quartet — all green on real exit codes.
+
+Round-2 review addendum (D-202, same task; report
+`.opencode/reviews/t119-round2-report.md`, opencode-go/
+hy4-flash-free — **APPROVE**, no P0–P3 findings): the round
+verified every round-1 fix in place and discriminating (it
+independently re-ran the throttle-gate and misplaced-emission
+mutations in a throwaway copy — red as recorded), confirmed all
+six acceptance criteria with file:line evidence (the 40-command
+count, the registration census, the bindings freshness, the docs
+sweep), and passed the four-check test audit including
+determinism (no sleeps in any added line). One low-confidence
+NOTE it declined to raise as a finding — the clock read sat
+BEFORE the reporter's mutex, so an overlapping caller could in
+principle hand `duration_since` a reversed instant (a panic
+class; unreachable today because phase 3 awaits each write) —
+was taken anyway as the round's one change: the clock is now
+read inside the critical section, making the monotone
+`last_emit` invariant structural instead of incidental. The
+note's other half (no mock source drives the event) is the
+deliberate scan-twin boundary, not a gap. The full chain was
+re-run green after the two-line hardening: fmt, clippy
+`-D warnings`, nextest 1872/1872, doc tests, `pnpm test` 361/361,
+format:check, lint, typecheck.

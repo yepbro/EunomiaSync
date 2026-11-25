@@ -526,6 +526,7 @@ fn build(specs: &[WriteSettings]) -> World {
     tauri_specta::Builder::<MockRuntime>::new()
         .events(tauri_specta::collect_events![
             crate::availability::ProjectAvailabilityEvent,
+            crate::commands::SyncProgressEvent,
             crate::dirty_recalc::DirtyEvent,
             FileChangedEvent,
         ])
@@ -2098,6 +2099,7 @@ fn last_sync_times_follow_only_the_written_and_unchanged_statuses() {
         backup: Arc::new(eunomia_fs::backup::backup_target_file),
         write: refusing_c,
         abort_clock: SyncRunSeams::production().abort_clock,
+        progress_clock: SyncRunSeams::production().progress_clock,
     };
     let second = completed(
         tauri::async_runtime::block_on(crate::commands::sync_run_with(
@@ -2259,6 +2261,7 @@ fn an_aborted_run_stamps_the_abort_clock_and_never_moves_the_last_success() {
         backup: Arc::new(eunomia_fs::backup::backup_target_file),
         write: Arc::new(crate::sync_phase3::production_write),
         abort_clock: Arc::new(move || abort_instant),
+        progress_clock: SyncRunSeams::production().progress_clock,
     };
     let second = completed(
         tauri::async_runtime::block_on(crate::commands::sync_run_with(

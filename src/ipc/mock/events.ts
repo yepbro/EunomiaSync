@@ -1,29 +1,40 @@
 // The mock event bus (T-141) — the subscription seam for §7.10 events.
 //
-// `src/bindings.ts` generates four of §7.10's five events today — all but
-// `sync://progress`: `events.stateProjectAvailability` (T-079/D-112),
-// `events.scanProgress` (T-076/D-153), `events.stateDirty` (T-101) and
-// `events.stateFileChanged` (T-102). The bus below is keyed by
-// `IpcEventMap` — the spec's event names mapped to their generated payload
-// types (re-exported through `../contract`, D-003) — so mock emits and
-// subscriptions are payload-typed against the real wire, and `mockEvents`
-// exposes one typed accessor per event, named after the camelCase accessor
-// the generated `events` object uses (the facade task will serve the real
-// and mock sides behind one `ipc.events`). The map carries the two events
-// the mock emits today (`state://project-availability`,
-// `scan://progress`); `state://dirty` and `state://file-changed` join it
-// — their payload types and Rust registrations already exist — when their
-// mock sources land, and `sync://progress` with its emitting backend task.
+// `src/bindings.ts` generates all five of §7.10's events:
+// `events.stateProjectAvailability` (T-079/D-112),
+// `events.scanProgress` (T-076/D-153), `events.stateDirty` (T-101),
+// `events.stateFileChanged` (T-102) and `events.syncProgress`
+// (T-119/D-202). The bus below is keyed by `IpcEventMap` — the
+// spec's event names mapped to their generated payload types
+// (re-exported through `../contract`, D-003) — so mock emits and
+// subscriptions are payload-typed against the real wire, and
+// `mockEvents` exposes one typed accessor per event, named after the
+// camelCase accessor the generated `events` object uses (the facade
+// task will serve the real and mock sides behind one `ipc.events`).
+// The map carries the events the mock's sources emit or its tests
+// drive (`state://project-availability`, `scan://progress`,
+// `sync://progress`); `state://dirty` and `state://file-changed`
+// join it when their mock sources land (their payload types and
+// Rust registrations already exist).
 //
-// The bus itself stays deliberately plain: a small typed publish/subscribe
-// bus with listener lifetimes (subscribe → unsubscribe), payload-typed per
-// event name, no Vue reactivity — components wrap it in their own
-// subscriptions. The mock's event SOURCE for project availability lives in
-// `./state` (`applyMockAvailability`, the D-112 diff semantics); tests for
-// event names the backend does not emit yet instantiate their own
-// strictly-typed buses with local payload maps.
+// The bus itself stays deliberately plain: a small typed
+// publish/subscribe bus with listener lifetimes (subscribe →
+// unsubscribe), payload-typed per event name, no Vue reactivity —
+// components wrap it in their own subscriptions. The mock's event
+// SOURCE for project availability lives in `./state`
+// (`applyMockAvailability`, the D-112 diff semantics); the mock
+// `syncRun` emits no progress the same way the mock `scanRun`
+// stand-in emits none — the accessors are the mock contract, the
+// emitting backend is the Rust pipeline's (the scan twin's posture,
+// D-202's honest boundary). Tests for event names without mock
+// sources instantiate their own strictly-typed buses with local
+// payload maps.
 
-import type { ProjectAvailabilityEventWire, ScanProgressEventWire } from '../contract'
+import type {
+  ProjectAvailabilityEventWire,
+  ScanProgressEventWire,
+  SyncProgressEventWire,
+} from '../contract'
 
 /** Listener lifetime handle: call to stop receiving. */
 export type Unsubscribe = () => void
@@ -76,15 +87,16 @@ export function createEventBus<Events extends Record<string, unknown>>(): EventB
  * names and valued with the payload types generated into
  * `src/bindings.ts` (re-exported through `../contract` as the
  * `*_Serialize` wire halves — the shapes the Rust side emits).
- * `state://project-availability` (T-079/D-112) and `scan://progress`
- * (T-076/D-153). The next members join with their mock sources, not with
- * their Rust registration — `state://dirty` and `state://file-changed`
- * are already generated and registered (`collect_events!` in `lib.rs`),
- * `sync://progress` still waits for its emitting backend task.
+ * `state://project-availability` (T-079/D-112), `scan://progress`
+ * (T-076/D-153) and `sync://progress` (T-119/D-202). The next members
+ * join with their mock sources, not with their Rust registration —
+ * `state://dirty` and `state://file-changed` are already generated
+ * and registered (`collect_events!` in `lib.rs`).
  */
 export type IpcEventMap = {
   'state://project-availability': ProjectAvailabilityEventWire
   'scan://progress': ScanProgressEventWire
+  'sync://progress': SyncProgressEventWire
 }
 
 /** One event of a bus bound to a standalone accessor (see [`busEvent`]). */
@@ -132,4 +144,5 @@ export const mockEventBus: EventBus<IpcEventMap> = createEventBus()
 export const mockEvents = {
   stateProjectAvailability: busEvent(mockEventBus, 'state://project-availability'),
   scanProgress: busEvent(mockEventBus, 'scan://progress'),
+  syncProgress: busEvent(mockEventBus, 'sync://progress'),
 } as const

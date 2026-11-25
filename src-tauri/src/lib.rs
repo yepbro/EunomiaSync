@@ -309,23 +309,26 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // The registered §7.10 events: `state://project-availability`
         // (T-079, D-09/DB-032), `state://dirty` (T-101,
         // DB-021/DB-022), `state://file-changed` (T-102, §5.7
-        // SYS-007…009) and `scan://progress` (T-076, SYS-003/ALG-053)
+        // SYS-007…009), `scan://progress` (T-076, SYS-003/ALG-053)
+        // and `sync://progress` (T-119, SYS-003/MAIN-026, D-202)
         // — the events the builder carries, emitted by
         // `availability::recheck_and_emit` at DB-032's three check
         // points, by `dirty_recalc::recalc_and_emit` at DB-022's
         // three recalculation points, by `file_watch`'s service
-        // at §5.7's watch points, and by the scan command's walk
-        // callback through its throttled seam. The wire names are
-        // the spec's literal `state://…`/`scan://…` spellings
-        // (pinned by the manual `Event` implementations in
-        // `availability.rs`, `dirty_recalc.rs`, `file_watch.rs` and
-        // `scan.rs`); the generated TypeScript accessors are
-        // their camelCase forms (`stateProjectAvailability`,
-        // `stateDirty`, `stateFileChanged`, `scanProgress`). Every
-        // later event task (sync://progress, …) lists its own §7.10
-        // name here.
+        // at §5.7's watch points, by the scan command's walk
+        // callback through its throttled seam, and by the sync
+        // pipeline's `sync_run_with` through the rate-bounded
+        // `commands::SyncProgressReporter`. The wire names are
+        // the spec's literal `state://…`/`scan://…`/`sync://…`
+        // spellings (pinned by the manual `Event` implementations in
+        // `availability.rs`, `dirty_recalc.rs`, `file_watch.rs`,
+        // `scan.rs` and `commands.rs`); the generated TypeScript
+        // accessors are their camelCase forms
+        // (`stateProjectAvailability`, `stateDirty`,
+        // `stateFileChanged`, `scanProgress`, `syncProgress`).
         .events(collect_events![
             availability::ProjectAvailabilityEvent,
+            commands::SyncProgressEvent,
             dirty_recalc::DirtyEvent,
             file_watch::FileChangedEvent,
             scan::ScanProgressEvent,

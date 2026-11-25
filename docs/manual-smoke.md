@@ -719,8 +719,9 @@ Source: spec §8 S7; §9.4; §7.5 OUT-006…020; ALG-031…033; D-24; §10
 (the `E_*` table).
 
 Pending: "Run sync", the progress region, the summary modal and the
-per-column state icons — spec §16 M3/M5. (The backend `sync_run` and
-the phase modules are registered; the panel is not.)
+per-column state icons — spec §16 M3/M5. (The backend `sync_run`, the
+phase modules and the `sync://progress` event (T-119) are registered;
+the panel is not.)
 
 **Prepare.** Four projects, each assigned an instruction of its own
 (shared instructions would couple their dirty states): (a) a healthy

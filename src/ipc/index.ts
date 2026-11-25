@@ -17,17 +17,19 @@
 //   backend").
 // - Unset (production build, `tauri dev`) — the real generated commands.
 //
-// Events: `src/bindings.ts` generates the §7.10 events too — four of the
-// five names (all but `sync://progress`), payload types and `listen`/
-// `once` included; on the real side subscription runs behind the
+// Events: `src/bindings.ts` generates the §7.10 events too — all five
+// names, payload types and `listen`/`once` included (`sync://progress`
+// since T-119); on the real side subscription runs behind the
 // `core:event:allow-listen`/`-unlisten` grant (T-246/D-116). The same
 // generated objects carry `emit`/`emitTo`; those stay ACL-denied in
 // the webview — the grant covers the subscription pair only; emitting
 // events stays Rust-only (SEC-001). The facade still serves commands
 // only today: the mock-side seam is `./mock/events`
-// — it keys the two events the mock emits (`state://project-availability`,
-// `scan://progress`), typed over their generated payload types — and one
-// `ipc.events` serving both backends is still the facade task's line.
+// — it keys the events the mock's sources and tests drive
+// (`state://project-availability`, `scan://progress`,
+// `sync://progress`), typed over their generated payload types — and
+// one `ipc.events` serving both backends is still the facade task's
+// line.
 
 import { realCommands, type IpcCommands } from './contract'
 import { mockCommands } from './mock/commands'

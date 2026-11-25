@@ -274,7 +274,14 @@ Rust commands are registered through `tauri-specta`:
    `SyncCancelSlot` (T-258, D-147) for the future `sync_cancel`
    command; after phase 2 no stop exists), phases 2/3/4, the
    never-fatal after-sync refresh and finish reports, and the summary
-   read back from the committed rows. A post-phase-0 `Err` whose run
+   read back from the committed rows — emitting the §7.10
+   `sync://progress` event throughout (T-119, SYS-003, D-202): the
+   live "k of N" (terminal §9.4 verdicts over phase 0's project
+   count) and §9.4's current phase word, one report before each of
+   phases 1–4 begins (only when the run reaches the phase) plus one
+   per write through the wrapped write seam, bounded at ten
+   emissions per second by the `SyncRunSeams.progress_clock` seam
+   (D-197's clock-injection pattern). A post-phase-0 `Err` whose run
    row is still `running` gets that row a terminal `aborted` status
    with the error's own §10 code, decided by the row's state inside
    one transaction (D-138's wrapper) — and the Library

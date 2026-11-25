@@ -71,6 +71,8 @@ export type {
   ScannedRepository,
   SettingChange,
   SettingItem,
+  SyncPhaseWire,
+  SyncProgressEvent as SyncProgressEventWire,
   VariantRecord_Serialize as VariantRecordWire,
   VariantSource,
 } from '../bindings'

@@ -10303,6 +10303,7 @@ fn sync_watch_app() -> (
     tauri_specta::Builder::<tauri::test::MockRuntime>::new()
         .events(tauri_specta::collect_events![
             crate::availability::ProjectAvailabilityEvent,
+            crate::commands::SyncProgressEvent,
             crate::dirty_recalc::DirtyEvent,
             crate::file_watch::FileChangedEvent,
         ])
@@ -10584,6 +10585,305 @@ fn run_sync_with(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// `sync://progress` (T-119, §7.10's events line, SYS-003, MAIN-026,
+// §9.4; D-202): the rate-bounded "k of N" + phase event the pipeline
+// emits. The delivery, rate and boundary pins all drive the body seam
+// with an injected progress clock — the D-197 seam shape — so every
+// assertion is a property of simulated instants, never wall seconds.
+// ---------------------------------------------------------------------------
+
+/// Subscribes the typed listener the frontend's generated
+/// `events.syncProgress` mirrors (the `listen_progress` shape).
+/// Delivery to Rust listeners is synchronous inside `emit` (the
+/// availability suite's rule) — which is what makes the sequence
+/// assertions below deterministic: the receiver holds every payload
+/// the moment `sync_run_with` returns.
+fn listen_sync_progress(
+    app: &tauri::App<tauri::test::MockRuntime>,
+) -> std::sync::mpsc::Receiver<crate::commands::SyncProgressEvent> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    tauri_specta::Event::listen(app, move |event| {
+        let _ = sender.send(event.payload);
+    });
+    receiver
+}
+
+/// The production seams with ONLY the progress clock injected — the
+/// delivery/rate tests' seam (the pipeline is the real one; the rate
+/// oracle is the simulated clock).
+fn production_seams_with_progress_clock(
+    clock: std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync>,
+) -> crate::commands::SyncRunSeams {
+    let production = crate::commands::SyncRunSeams::production();
+    crate::commands::SyncRunSeams {
+        backup: production.backup,
+        write: production.write,
+        abort_clock: production.abort_clock,
+        progress_clock: clock,
+    }
+}
+
+/// A progress clock whose every answer advances `step_ms` past the
+/// previous one: every report lands a full interval after the last
+/// emission, so EVERY report reaches the wire — the delivery
+/// oracle's clock (the rate limit is pinned separately, over the
+/// frozen clock).
+fn jumping_progress_clock(
+    step_ms: u64,
+) -> std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync> {
+    let tick = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let clock = std::sync::Arc::clone(&tick);
+    std::sync::Arc::new(move || {
+        let step = clock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::time::Instant::now() + std::time::Duration::from_millis(step * step_ms)
+    })
+}
+
+/// A progress clock frozen at one instant: every report of a run
+/// lands inside the same 100 ms window, so only the FIRST may emit —
+/// the rate oracle's clock (SYS-003's bound, exercised through the
+/// command's own wiring; the sliding-window battery over a moving
+/// simulated clock lives in `commands.rs`'s suite).
+fn frozen_progress_clock() -> std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync> {
+    let instant = std::time::Instant::now();
+    std::sync::Arc::new(move || instant)
+}
+
+/// Drains every delivered `sync://progress` payload, in emission
+/// order, and asserts the stream ends where the receiver does (a
+/// late emission would surface as an unexpected extra payload).
+fn delivered_sync_progress(
+    receiver: &std::sync::mpsc::Receiver<crate::commands::SyncProgressEvent>,
+) -> Vec<crate::commands::SyncProgressEvent> {
+    let mut delivered = Vec::new();
+    while let Ok(payload) = receiver.try_recv() {
+        delivered.push(payload);
+    }
+    delivered
+}
+
+#[test]
+fn sync_run_emits_the_boundary_and_per_write_progress_events() {
+    // The delivery oracle (D-202, SYS-003/MAIN-026): three projects
+    // — one kept `unchanged` by a first run, two rewritten after an
+    // external edit each — over the REAL phases, with a jumping
+    // clock so every report emits. The exact ordered sequence:
+    // preflight opens the region at 0 of N; backups and write carry
+    // phase 1's decided count (the one unchanged verdict); the two
+    // per-write reports advance k one project at a time (the only
+    // place k moves WITHIN a phase); finish announces every verdict
+    // decided. Nothing emits after finish — the terminal state is
+    // the command's ANSWER, the summary (the scan posture).
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (alpha, alpha_repo) = sync_repo_project(
+        &app,
+        &repos,
+        21,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &alpha, "Be brief.");
+    let (beta, beta_repo) = sync_repo_project(
+        &app,
+        &repos,
+        22,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &beta, "Run the tests.");
+    let (gamma, _gamma_repo) = sync_repo_project(
+        &app,
+        &repos,
+        23,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &gamma, "Ship it.");
+
+    // Run 1 (no listener): every project written — the world the
+    // second run reads as `unchanged` until an edit says otherwise.
+    let webview = main_webview(&app);
+    let first =
+        invoke_sync_run(&webview, serde_json::json!(null)).expect("the first run must complete");
+    let crate::commands::SyncRunOutcome::Completed { summary } = first else {
+        panic!("the first run completes");
+    };
+    assert_eq!(summary.projects_written, 3);
+
+    // Two external edits: alpha's and beta's files no longer match
+    // their builds, so run 2 rewrites them; gamma stays `unchanged`.
+    std::fs::write(alpha_repo.join("AGENTS.md"), b"edited outside the app").expect("writable");
+    std::fs::write(beta_repo.join("AGENTS.md"), b"edited outside the app").expect("writable");
+
+    let events = listen_sync_progress(&app);
+    let outcome = run_sync_with(
+        &app,
+        None,
+        crate::commands::CancelToken::new(),
+        production_seams_with_progress_clock(jumping_progress_clock(200)),
+    )
+    .expect("the second run must complete");
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the second run completes");
+    };
+    assert_eq!(
+        (summary.verdict.as_str(), summary.projects_total),
+        ("success", 3),
+        "two written, one unchanged"
+    );
+
+    // The exact ordered payload sequence (SYS-003's "k of N" and the
+    // current phase; the payload vocabulary is §9.4's own words). The
+    // world: gamma stayed `unchanged` (k opens at 1), alpha and beta
+    // are rewritten (two per-write reports advance k to N).
+    use crate::commands::SyncPhaseWire::{Backups, Finish, Preflight, Write};
+    let delivered = delivered_sync_progress(&events);
+    let shape =
+        |payload: &crate::commands::SyncProgressEvent| (payload.phase, payload.done, payload.total);
+    assert_eq!(
+        delivered.iter().map(shape).collect::<Vec<_>>(),
+        [
+            (Preflight, 0, 3),
+            (Backups, 1, 3),
+            (Write, 1, 3),
+            (Write, 2, 3),
+            (Write, 3, 3),
+            (Finish, 3, 3),
+        ],
+        "the boundary + per-write sequence, in emission order"
+    );
+    // Nothing after finish: the terminal state rides the answer.
+    assert_eq!(delivered.len(), 6);
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn sync_run_progress_events_respect_the_rate_limit_over_the_real_pipeline() {
+    // The pipeline-level rate pin (SYS-003, the card's own DoD):
+    // the SAME run shape as the delivery test — a frozen clock puts
+    // every report inside one 100 ms window, so exactly the FIRST
+    // report reaches the wire. The run reports six facts (four
+    // boundaries + two writes); a bypassed throttle would deliver
+    // all six, and the sliding-window bound itself is pinned over
+    // the simulated moving clock in `commands.rs`'s suite. No wall
+    // seconds anywhere (the D-140 posture).
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (alpha, alpha_repo) = sync_repo_project(
+        &app,
+        &repos,
+        31,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &alpha, "Be brief.");
+    std::fs::write(alpha_repo.join("AGENTS.md"), b"stale bytes").expect("writable");
+    let (beta, beta_repo) = sync_repo_project(
+        &app,
+        &repos,
+        32,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &beta, "Run the tests.");
+    std::fs::write(beta_repo.join("AGENTS.md"), b"other stale bytes").expect("writable");
+
+    let events = listen_sync_progress(&app);
+    let outcome = run_sync_with(
+        &app,
+        None,
+        crate::commands::CancelToken::new(),
+        production_seams_with_progress_clock(frozen_progress_clock()),
+    )
+    .expect("the run must complete");
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the run completes");
+    };
+    assert_eq!(summary.projects_written, 2);
+
+    let delivered = delivered_sync_progress(&events);
+    assert_eq!(
+        delivered.len(),
+        1,
+        "six reports inside one interval window: only the first may emit"
+    );
+    assert_eq!(
+        (delivered[0].phase, delivered[0].done, delivered[0].total),
+        (crate::commands::SyncPhaseWire::Preflight, 0, 2),
+        "the one emission is the run's first report"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_d25_gated_run_emits_only_the_preflight_progress() {
+    // The boundary truthfulness (D-202): emissions exist only for
+    // phases the run actually REACHES. The D-25 gate stops the run
+    // after phase 1 — the answer is `NeedsConfirmation`, phase 2
+    // never starts — so `backups` never emits: the jumping clock
+    // guarantees every report WOULD emit, which is what makes "only
+    // preflight" a statement about the pipeline, not the throttle.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, project_repo) = sync_repo_project(
+        &app,
+        &repos,
+        41,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    // NO assignment — the build is empty — over a non-empty file.
+    std::fs::write(project_repo.join("AGENTS.md"), b"precious old bytes").expect("writable");
+    let _ = project;
+
+    let events = listen_sync_progress(&app);
+    let outcome = run_sync_with(
+        &app,
+        None,
+        crate::commands::CancelToken::new(),
+        production_seams_with_progress_clock(jumping_progress_clock(200)),
+    )
+    .expect("the gated call must answer, not fail");
+    assert!(matches!(
+        outcome,
+        crate::commands::SyncRunOutcome::NeedsConfirmation { .. }
+    ));
+
+    let delivered = delivered_sync_progress(&events);
+    assert_eq!(
+        delivered
+            .iter()
+            .map(|payload| (payload.phase, payload.done, payload.total))
+            .collect::<Vec<_>>(),
+        [(crate::commands::SyncPhaseWire::Preflight, 0, 1)],
+        "the run reached preflight only — the gate answered before the backups"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_sync_progress_event_is_registered_with_the_specta_builder() {
+    // The §7.10 events-line name, registered exactly once — the
+    // scan registration-pin shape (the D-034 wiring-pin rationale):
+    // without this pin, dropping the registration would leave
+    // `export_bindings_are_up_to_date` green while it silently
+    // rewrote the committed bindings without the event.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("commands::SyncProgressEvent").count(),
+        1,
+        "lib.rs must register the `sync://progress` event exactly once (§7.10, T-119)"
+    );
+}
+
 #[test]
 fn sync_run_without_confirm_returns_needs_confirmation_and_changes_nothing() {
     // The card's criterion (§9.4 phase 1 step 6, D-25): an empty build
@@ -10791,6 +11091,7 @@ fn a_second_sync_run_while_one_runs_is_refused_with_e_sync_running() {
     let seams = crate::commands::SyncRunSeams {
         backup: crate::commands::SyncRunSeams::production().backup,
         abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
         write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
             entered_tx
                 .send(target.to_path_buf())
@@ -10877,6 +11178,7 @@ fn the_published_token_reaches_the_live_run_and_no_other() {
     let seams = crate::commands::SyncRunSeams {
         backup: crate::commands::SyncRunSeams::production().backup,
         abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
         write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
             entered_tx
                 .send(target.to_path_buf())
@@ -11034,6 +11336,7 @@ fn the_slot_clears_and_the_census_stays_zero_on_an_error_abort() {
         }),
         write: crate::commands::SyncRunSeams::production().write,
         abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
     };
 
     let error = run_sync_with(&app, None, crate::commands::CancelToken::new(), seams)
@@ -11120,7 +11423,12 @@ fn a_cancelled_token_stops_the_run_before_the_backups() {
     // `aborted`, phase 1's verdicts stay: the `unchanged` project
     // keeps its honest row), no file moves, no backup, no stamp, and
     // the answer is the aborted summary, not an error (the user asked
-    // for this).
+    // for this). The progress listener (round-1 F1) pins the other
+    // half of the stop: the run never REACHED the backups, so the
+    // `backups` boundary never emits — over the jumping clock, which
+    // is what makes the absence a statement about the pipeline and
+    // not the throttle (the production clock would suppress the
+    // second report by real time and hide a misplaced emission).
     let (temp, app) = sync_app();
     let repos = temp.path().join("repos");
     std::fs::create_dir(&repos).expect("the repos root must be creatable");
@@ -11137,12 +11445,13 @@ fn a_cancelled_token_stops_the_run_before_the_backups() {
         .expect("writing the matching fixture must work");
     let cancel = crate::commands::CancelToken::new();
     cancel.cancel();
+    let events = listen_sync_progress(&app);
 
     let outcome = run_sync_with(
         &app,
         None,
         cancel,
-        crate::commands::SyncRunSeams::production(),
+        production_seams_with_progress_clock(jumping_progress_clock(200)),
     )
     .expect("a cancelled run is an outcome, not an error");
 
@@ -11160,6 +11469,16 @@ fn a_cancelled_token_stops_the_run_before_the_backups() {
         sync_project_stamps(&app, &written),
         (None, None),
         "OUT-020: a cancelled run stamps nothing"
+    );
+    // The emissions stopped where the run stopped: preflight ran, the
+    // backups never began (D-202's boundary-truthfulness rule).
+    assert_eq!(
+        delivered_sync_progress(&events)
+            .iter()
+            .map(|payload| (payload.phase, payload.done, payload.total))
+            .collect::<Vec<_>>(),
+        [(crate::commands::SyncPhaseWire::Preflight, 0, 1)],
+        "a run stopped at the cancel point emits only preflight"
     );
     // The D-131 tail shape: phase 1's `unchanged` verdict survives the
     // stop (it claims no write), the ready row stays `not_started`.
@@ -11302,7 +11621,11 @@ fn a_failing_backup_aborts_the_run_with_the_typed_envelope() {
     // aborts the whole run — the typed `E_BACKUP_FAILED` envelope with
     // BKP-005's fields, the run row `aborted` (written by the phase
     // itself; the command's wrapper recognizes the code and does not
-    // abort twice), and not one target byte moved.
+    // abort twice), and not one target byte moved. The progress
+    // listener (round-1 F1) pins the boundary truthfulness of the
+    // stop: the `backups` boundary DID emit (the run reached phase 2),
+    // the `write` boundary never did — over the jumping clock, so the
+    // absence is a statement about the pipeline, not the throttle.
     let (temp, app) = sync_app();
     let repos = temp.path().join("repos");
     std::fs::create_dir(&repos).expect("the repos root must be creatable");
@@ -11325,11 +11648,28 @@ fn a_failing_backup_aborts_the_run_with_the_typed_envelope() {
         }),
         write: crate::commands::SyncRunSeams::production().write,
         abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: jumping_progress_clock(200),
     };
+    let events = listen_sync_progress(&app);
 
     let error = run_sync_with(&app, None, crate::commands::CancelToken::new(), seams)
         .expect_err("the failing copy must abort the run");
 
+    // The emissions stopped where the run stopped: the backups
+    // boundary emitted, the write phase never began (D-202's
+    // boundary-truthfulness rule — the same pin the delivery test
+    // holds for the happy path).
+    assert_eq!(
+        delivered_sync_progress(&events)
+            .iter()
+            .map(|payload| (payload.phase, payload.done, payload.total))
+            .collect::<Vec<_>>(),
+        [
+            (crate::commands::SyncPhaseWire::Preflight, 0, 1),
+            (crate::commands::SyncPhaseWire::Backups, 0, 1),
+        ],
+        "a run aborted in phase 2 emits preflight and the backups boundary, never the write"
+    );
     assert_eq!(error.code.as_str(), "E_BACKUP_FAILED");
     assert_eq!(
         error.params.get("project").map(String::as_str),
@@ -11406,6 +11746,7 @@ fn a_phase_three_store_failure_aborts_the_run_and_a_retry_converges() {
     let seams = crate::commands::SyncRunSeams {
         backup: crate::commands::SyncRunSeams::production().backup,
         abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
         write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
             entered_tx
                 .send(target.to_path_buf())
@@ -11606,6 +11947,7 @@ fn the_summary_carries_the_skip_and_failure_codes_by_name() {
     let seams = crate::commands::SyncRunSeams {
         backup: crate::commands::SyncRunSeams::production().backup,
         abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
         write: std::sync::Arc::new(|target: &std::path::Path, _contents: &[u8]| {
             Err::<eunomia_fs::atomic::WrittenFile, _>(
                 eunomia_fs::atomic::AtomicWriteError::FileLocked(

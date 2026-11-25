@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ProjectAvailabilityEventWire, ScanProgressEventWire } from '../contract'
+import type {
+  ProjectAvailabilityEventWire,
+  ScanProgressEventWire,
+  SyncProgressEventWire,
+} from '../contract'
 import type { FixtureProfile } from '../fixtures/generator'
 import { mockCommands } from './commands'
 import {
@@ -168,6 +172,35 @@ describe('mockEvents', () => {
     }
 
     mockEvents.scanProgress.emit(payload)
+
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(mockEventBus.listenerCount()).toBe(0)
+  })
+
+  it('syncProgress carries the generated payload type over the bus', () => {
+    // T-119's §7.10 event on the mock side (D-202): the accessor is
+    // bound to the wire name `sync://progress` with the generated
+    // payload shape — the same subscribe/emit/unsubscribe lifetime
+    // pin as availability's and scan's. The payload's vocabulary is
+    // §9.4's own: the phase word, the decided count, the run total.
+    const listener = vi.fn()
+    const payload: SyncProgressEventWire = {
+      phase: 'write',
+      done: 4,
+      total: 9,
+    }
+    const stop = mockEvents.syncProgress.on(listener)
+    try {
+      mockEvents.syncProgress.emit(payload)
+
+      expect(listener).toHaveBeenCalledTimes(1)
+      expect(listener).toHaveBeenCalledWith(payload)
+      expect(mockEventBus.listenerCount()).toBe(1)
+    } finally {
+      stop()
+    }
+
+    mockEvents.syncProgress.emit(payload)
 
     expect(listener).toHaveBeenCalledTimes(1)
     expect(mockEventBus.listenerCount()).toBe(0)

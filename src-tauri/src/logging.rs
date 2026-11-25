@@ -1674,6 +1674,21 @@ pub(crate) fn sync_run_aborted(reason: &str) {
     );
 }
 
+/// Emitting a `sync://progress` event failed (T-119): the run itself
+/// is unaffected — the emission is display-only, throttled to at most
+/// ten per second, and the command's ANSWER carries the terminal
+/// state the dropped events previewed (the `scan_progress_emit_failed`
+/// twin, D-202). `warn`, not `error`, for exactly the scan edge's
+/// reason: a missed UI update, not lost state. The tauri error is the
+/// whole payload — it carries no user paths.
+pub(crate) fn sync_progress_emit_failed(error: &tauri::Error) {
+    tracing::warn!(
+        target: "eunomia::sync",
+        error = %error,
+        "emitting a sync progress event failed; the run continues"
+    );
+}
+
 /// The crash-recovery sweep's record line (§9.4's "recovery after a
 /// crash", T-258): N run rows a dead process left `running` were
 /// marked `interrupted`. Emitted at the TWO moments no run can be
@@ -4175,6 +4190,34 @@ mod tests {
         assert!(
             log.contains(" WARN ")
                 && log.contains("emitting a scan progress event failed; the scan continues")
+                && log.contains("a window with label `main` already exists"),
+            "the degraded line is WARN and carries its message and the error's Display form, \
+             got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_sync_progress_emit_degradation_line_carries_the_error_display() {
+        // The sync twin of the scan edge's pin (T-119, D-202): a
+        // refused `sync://progress` emission is a missed UI update,
+        // not lost state — the run's ANSWER carries the terminal
+        // state — the line is WARN on purpose, and the tauri error's
+        // Display form is the whole payload (no user paths).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Warn)
+            .expect("building the subscriber must work");
+        let error = tauri::Error::WindowLabelAlreadyExists("main".to_owned());
+
+        tracing::subscriber::with_default(subscriber, || {
+            sync_progress_emit_failed(&error);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains(" WARN ")
+                && log.contains("emitting a sync progress event failed; the run continues")
                 && log.contains("a window with label `main` already exists"),
             "the degraded line is WARN and carries its message and the error's Display form, \
              got: {log}"
