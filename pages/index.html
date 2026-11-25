@@ -2584,6 +2584,13 @@
 
             <!-- Right pane: name + variant name, Edit/Preview tabs -->
             <div class="ie-main">
+              <!-- Create mode only (S3 "pick a section"): the section the
+                 new instruction joins; filled by app.js on open, the row is
+                 inserted at the section's end on save -->
+              <div id="ie-section-field" class="ie-section-field">
+                <label class="field-label" for="ie-section">Section</label>
+                <select id="ie-section" class="ps-select"></select>
+              </div>
               <div id="ie-fields" class="ie-fields">
                 <div class="ie-field">
                   <label class="field-label" for="ie-name">Name</label>

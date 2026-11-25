@@ -1554,6 +1554,8 @@
     ...document.querySelectorAll('#ie-mode-group input[name="ie-custom-mode"]'),
   ]
   const ieModeBase = document.getElementById('ie-mode-base')
+  /* Create mode only: the section picker (S3 "pick a section") */
+  const ieSectionSelect = document.getElementById('ie-section')
   const unsavedDialog = document.getElementById('unsaved-dialog')
   const newInstructionBtn = document.getElementById('new-instruction-btn')
 
@@ -1891,6 +1893,137 @@
 
   /* ---------- Editor validation and save ------------------------------------ */
 
+  /* S3 "pick a section": the create dialog offers the library's headings,
+     indented by depth; the default is the first top-level section */
+  function fillSectionPicker() {
+    const headings = [...tbody.querySelectorAll('tr.row-heading')]
+    if (!headings.length) {
+      ieSectionSelect.disabled = true
+      ieSectionSelect.replaceChildren(new Option('(no sections)', ''))
+      return
+    }
+    ieSectionSelect.disabled = false
+    let picked = false
+    ieSectionSelect.replaceChildren(
+      ...headings.map((h, i) => {
+        const depth = Number(h.querySelector('.c-name').style.getPropertyValue('--depth') || 0)
+        const opt = new Option('\u00A0'.repeat(depth * 2) + headingName(h), String(i))
+        if (!picked && depth === 0) {
+          opt.selected = true
+          picked = true
+        }
+        return opt
+      }),
+    )
+    if (!picked) ieSectionSelect.options[0].selected = true
+  }
+
+  /* A full instruction <tr>, mirroring the static markup: selection
+     checkbox, name cell with edit button + variant chip, one cell per
+     project (bare or with a variant select — the chip drives the options,
+     same source buildVariantSelects uses) */
+  function buildInstructionRow({ name, text, depth }) {
+    const tr = document.createElement('tr')
+
+    const tdCheck = document.createElement('td')
+    tdCheck.className = 'c-check'
+    const rowSel = document.createElement('input')
+    rowSel.type = 'checkbox'
+    rowSel.className = 'row-sel'
+    rowSel.setAttribute('aria-label', `Select row: ${name}`)
+    tdCheck.append(rowSel)
+
+    const th = document.createElement('th')
+    th.setAttribute('scope', 'row')
+    th.className = 'c-name'
+    th.style.setProperty('--depth', String(depth))
+    if (text === '') {
+      /* Empty main variant: same shape as the static empty rows — a hint
+         title, no data-text (instructionText returns '' for these) */
+      th.title = 'No text yet — edit the instruction to write the main variant'
+    } else {
+      th.dataset.text = text
+    }
+    const wrap = document.createElement('span')
+    wrap.className = 'name-wrap'
+    const editBtn = document.createElement('button')
+    editBtn.type = 'button'
+    editBtn.className = 'edit-btn'
+    editBtn.setAttribute('aria-label', `Edit instruction: ${name}`)
+    const nameSpan = document.createElement('span')
+    nameSpan.className = 'name'
+    nameSpan.textContent = name
+    if (text === '') nameSpan.classList.add('name-empty')
+    wrap.append(editBtn, nameSpan)
+    if (text !== '') {
+      const chip = document.createElement('span')
+      chip.className = 'chip'
+      chip.title = '1 variant'
+      chip.textContent = '1'
+      wrap.append(chip)
+    }
+    th.append(wrap)
+    tr.append(tdCheck, th)
+
+    const options = variantOptionsFor(tr)
+    projectHeads.forEach((projTh, i) => {
+      const td = document.createElement('td')
+      td.className = 'c-cell'
+      const input = document.createElement('input')
+      input.type = 'checkbox'
+      input.className = 'assign'
+      const proj = projTh.querySelector('.proj-name')?.textContent.trim() ?? ''
+      input.setAttribute('aria-label', `${name} — ${proj}: not assigned`)
+      if (projTh.querySelector('.proj-sub.st-off')) input.disabled = true
+      td.append(input)
+      if (options.length) {
+        const assignWrap = document.createElement('span')
+        assignWrap.className = 'cell-assign'
+        td.append(assignWrap)
+        assignWrap.append(input)
+        const select = document.createElement('select')
+        select.className = 'variant-select'
+        select.setAttribute('aria-label', `Assigned text — ${name}`)
+        if (input.disabled) select.disabled = true
+        for (const optName of options) {
+          const opt = document.createElement('option')
+          opt.value = optName
+          opt.textContent = optName
+          if (optName === 'Default') opt.selected = true
+          select.append(opt)
+        }
+        assignWrap.append(select)
+      }
+      tr.append(td)
+    })
+    makeRowDraggable(tr)
+    return tr
+  }
+
+  /* Saving in CREATE mode inserts the row at the end of the picked
+     section (the position inside a section is not fixed by the spec;
+     the end matches the drop-on-heading rule of LIB-032/034). Without
+     sections it goes to the end of the table. */
+  function insertCreatedInstruction(st) {
+    const name = ieName.value.trim()
+    const text = st.variants[0].text
+    const headings = [...tbody.querySelectorAll('tr.row-heading')]
+    const heading = headings[Number(ieSectionSelect.value)] ?? null
+    const depth = heading
+      ? Number(heading.querySelector('.c-name').style.getPropertyValue('--depth') || 0) + 1
+      : 0
+    const tr = buildInstructionRow({ name, text, depth })
+    if (heading) {
+      const anchor = sectionEndAfter(heading)
+      if (anchor) tbody.insertBefore(tr, anchor)
+      else tbody.append(tr)
+    } else {
+      tbody.append(tr)
+    }
+    for (const input of tr.querySelectorAll('.assign')) updateCellState(input)
+    for (const td of tr.querySelectorAll('td.c-cell')) refreshCellIcons(td)
+  }
+
   function validateEditor() {
     let ok = true
     if (ieState.mode !== 'custom') {
@@ -1984,11 +2117,13 @@
     }
     editTitle.textContent = resolvedTitle
     ieBodyEl.classList.toggle('ie-custom', mode === 'custom')
+    ieBodyEl.classList.toggle('ie-create', mode === 'create')
     ieName.value = mode === 'custom' ? '' : name
     setFieldError(ieName, ieNameError, '')
     ieMarkerError.hidden = true
     selectIeTab(ieTabEdit, false)
     loadSelectedVariant()
+    if (mode === 'create') fillSectionPicker()
     if (mode === 'custom') {
       for (const radio of ieModeRadios) {
         radio.checked = radio.value === customMode
@@ -2153,7 +2288,12 @@
      finding their texts) */
   editDialog.addEventListener('close', () => {
     const st = ieState
-    if (!st || st.mode !== 'edit' || editDialog.returnValue !== 'save') return
+    if (!st || editDialog.returnValue !== 'save') return
+    if (st.mode === 'create') {
+      insertCreatedInstruction(st)
+      return
+    }
+    if (st.mode !== 'edit') return
     const name = ieName.value.trim()
     if (!st.row || name === st.rowName) return
     st.row.querySelector('.name').textContent = name

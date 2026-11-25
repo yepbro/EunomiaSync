@@ -1186,6 +1186,17 @@ input[type='checkbox']:disabled {
   gap: 14px;
 }
 
+/* Create mode only: the section picker (S3 "pick a section") */
+.ie-section-field {
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ie-create .ie-section-field {
+  display: flex;
+}
+
 .ie-body.ie-custom {
   grid-template-columns: minmax(0, 1fr);
 }
