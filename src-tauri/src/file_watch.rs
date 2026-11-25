@@ -294,6 +294,21 @@ pub(crate) enum Command {
     /// Debounced watcher deliveries: re-check only the projects whose
     /// target files are named here (SYS-008's noise filter).
     FilesChanged(Vec<PathBuf>),
+    /// Stop the service task (the tests' deterministic teardown seam,
+    /// T-342): the loop releases the `AppHandle` clone and the rest of
+    /// its state, then answers `done` and returns — without this the
+    /// task outlives every test that spawned it and keeps the temp
+    /// data root alive to process exit.
+    /// Production never sends it: there the task dies with the
+    /// process, and an app that stops watching mid-run would be a
+    /// behaviour change, not a teardown nicety.
+    #[cfg(test)]
+    Shutdown {
+        /// Receives the `()` once the loop has returned (the tests'
+        /// "the handles are released" fact). `None` is a fire-and-
+        /// forget stop for a caller that cannot await.
+        done: Option<tauri::async_runtime::Sender<()>>,
+    },
 }
 
 /// The two §5.7 flags as one comparable value — the diff cache's
@@ -496,6 +511,50 @@ impl FileWatchState {
     /// without naming the channel type.
     pub(crate) fn trigger(&self, command: Command) {
         let _ = self.trigger.try_send(command);
+    }
+
+    /// Stops the service task and waits until it has returned — the
+    /// tests' teardown seam (T-342). The loop releases its `AppHandle`,
+    /// the watcher, the bus's receiving half and its routing table
+    /// FIRST and only then answers this ack, so a caller that awaits
+    /// knows everything the task held is gone before it drops its temp
+    /// roots; without the seam the task lives to process exit and keeps
+    /// a temp data root alive. A `Refresh` still queued behind the stop
+    /// is not run: dropping the bus's receiving half drops it with its
+    /// ack sender, so an awaiting caller sees the closed channel at once
+    /// instead of waiting on a task that will never answer (the seam is
+    /// a teardown, called with no call in flight, but the queue cannot
+    /// strand anybody either way).
+    ///
+    /// # Panics
+    ///
+    /// Never on the happy path: a bus nobody consumes means the service
+    /// was not spawned (the caller has nothing to stop — the send
+    /// fails and the call returns), and a task that died before the
+    /// ack closes the channel, which also returns. Only being called
+    /// from outside a runtime panics, the same as every
+    /// `block_on`-driven seam here.
+    #[cfg(test)]
+    pub(crate) async fn shutdown(&self) {
+        let (done, mut ack) = tauri::async_runtime::channel::<()>(1);
+        if self
+            .trigger
+            .send(Command::Shutdown { done: Some(done) })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let _ = ack.recv().await;
+    }
+
+    /// Whether the service's bus still has a receiver — the tests'
+    /// "the task is gone" observable (T-342): after [`shutdown`] the
+    /// receiving half is dropped with the task, so a refresh request
+    /// can no longer be delivered.
+    #[cfg(test)]
+    pub(crate) fn service_alive(&self) -> bool {
+        !self.trigger.is_closed()
     }
 
     /// Notes that one pass ran (the tests' observable).
@@ -1178,7 +1237,18 @@ pub(crate) fn spawn_service<R: Runtime>(
     tauri::async_runtime::spawn(async move {
         let mut commands = commands;
         let mut by_path: HashMap<PathBuf, String> = HashMap::new();
-        while let Some(command) = commands.recv().await {
+        // The tests' stop ack (T-342): taken out of the command and
+        // answered only after this task has dropped everything it
+        // holds — see the tail below.
+        #[cfg(test)]
+        let mut stop_ack: Option<tauri::async_runtime::Sender<()>> = None;
+        #[cfg(test)]
+        let mut stopping = false;
+        // The label is consumed by the `cfg(test)` stop arms only, so a
+        // production build sees it unused (the trait of a test seam
+        // living inside the production loop).
+        #[cfg_attr(not(test), allow(unused_labels))]
+        'service: while let Some(command) = commands.recv().await {
             match command {
                 Command::Refresh { done } => {
                     let result = refresh_pass(&app, &service_watcher, &mut by_path, None).await;
@@ -1195,6 +1265,12 @@ pub(crate) fn spawn_service<R: Runtime>(
                     if let Some(done) = done {
                         let _ = done.try_send(result);
                     }
+                }
+                #[cfg(test)]
+                Command::Shutdown { done } => {
+                    stop_ack = done;
+                    stopping = true;
+                    break 'service;
                 }
                 Command::FilesChanged(paths) => {
                     // Coalesce: batches queued behind this one collapse
@@ -1219,6 +1295,14 @@ pub(crate) fn spawn_service<R: Runtime>(
                                 refresh_seen = true;
                                 refresh_done = done;
                                 break;
+                            }
+                            // A stop queued behind a file batch ends
+                            // the task now; the batch's work is moot.
+                            #[cfg(test)]
+                            Command::Shutdown { done } => {
+                                stop_ack = done;
+                                stopping = true;
+                                break 'service;
                             }
                         }
                     }
@@ -1255,6 +1339,21 @@ pub(crate) fn spawn_service<R: Runtime>(
                         app.state::<FileWatchState>().note_pass();
                     }
                 }
+            }
+        }
+        // The stop's ack is answered LAST (T-342): the loop only ends
+        // on a stop (or a bus that closed, where no ack exists), and
+        // the caller awaits this before dropping its temp roots — so
+        // the `AppHandle`, the watcher, the bus's receiving half and
+        // the routing table are released first, not concurrently.
+        #[cfg(test)]
+        if stopping {
+            drop(app);
+            drop(service_watcher);
+            drop(commands);
+            drop(by_path);
+            if let Some(done) = stop_ack.take() {
+                let _ = done.try_send(());
             }
         }
     });
@@ -2067,7 +2166,7 @@ mod tests {
                     "the batch names its own file"
                 );
             }
-            Command::Refresh { .. } => {
+            Command::Refresh { .. } | Command::Shutdown { .. } => {
                 panic!("a file delivery must become a FilesChanged batch, not a Refresh");
             }
         }
@@ -2110,7 +2209,7 @@ mod tests {
                 done.is_none(),
                 "the pump's Refresh is fire-and-forget: done must be None"
             ),
-            Command::FilesChanged(_) => {
+            Command::FilesChanged(_) | Command::Shutdown { .. } => {
                 panic!("the lost-events signal must become a full Refresh, not a batch");
             }
         }

@@ -753,7 +753,6 @@ fn a_failed_stage_leaves_the_live_file_in_place() {
     // staged. The writable-rights fixture is the portable stand-in
     // for every staging failure; root bypasses permission bits, so the
     // test skips there (the same gate as the store's suite).
-    use std::os::unix::fs::PermissionsExt;
     let (temp, root) = data_root();
     if running_as_root_is_untestable(temp.path()) {
         return;
@@ -764,9 +763,11 @@ fn a_failed_stage_leaves_the_live_file_in_place() {
     write_valid_backup(&root, "daily-20261117.sqlite3", "window");
     let damaged_bytes = write_damaged_database(&db_path);
 
-    // No write rights in `db/`: the staged copy cannot be created.
-    std::fs::set_permissions(root.join("db"), std::fs::Permissions::from_mode(0o555))
-        .expect("removing the db directory's write rights must work");
+    // No write rights in `db/`: the staged copy cannot be created. The
+    // guard restores the observed mode on every exit path (an assertion
+    // panic included) — a 0o555 `db/` makes the temp root unremovable,
+    // and `TempDir::drop` silently ignores that failure (T-342's leak).
+    let _sealed = SealedDirectory::seal(&root.join("db"));
     let error = recovery::restore_files(&root, "daily-20261117.sqlite3", seam_now(), |_| {})
         .expect_err("the unwritable db directory must fail the stage");
 
@@ -787,7 +788,47 @@ fn a_failed_stage_leaves_the_live_file_in_place() {
             .exists(),
         "a failed stage must not preserve anything"
     );
-    drop(temp);
+    // No `drop(temp)` here on purpose: the guard declared after it must
+    // drop FIRST (restoring the mode), or the explicit drop runs against
+    // the sealed directory and the temp root survives the scope.
+}
+
+/// Seals a directory to `0o555` and restores the mode it had when the
+/// guard drops — including on unwinding (T-342's teardown fix). The
+/// observed mode is what comes back, not a guessed `0o755`: the claim
+/// the fixture makes is "exactly as it was".
+#[cfg(unix)]
+struct SealedDirectory {
+    path: PathBuf,
+    mode: u32,
+}
+
+#[cfg(unix)]
+impl SealedDirectory {
+    fn seal(path: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .expect("the sealed directory must be statable")
+            .permissions()
+            .mode()
+            & 0o777;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555))
+            .expect("removing the directory's write rights must work");
+        Self {
+            path: path.to_path_buf(),
+            mode,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SealedDirectory {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        // Best-effort, like `TempDir`'s own removal: the guard exists to
+        // give the removal a chance, not to fail the test twice.
+        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
+    }
 }
 
 /// Root (uid 0) bypasses permission-bit fixtures, so a chmod-based

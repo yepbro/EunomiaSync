@@ -2250,6 +2250,7 @@ fn a_commit_joins_its_created_rows_to_the_watched_set_through_one_pass() {
             "the commit (and its watch pass) never writes the target file"
         );
     }
+    crate::ipc_tests::stop_watch_service(app.handle());
 }
 
 #[test]
@@ -2292,6 +2293,7 @@ fn a_commit_that_creates_no_row_runs_no_watch_pass() {
         after_startup,
         "no created row, no watch pass"
     );
+    crate::ipc_tests::stop_watch_service(app.handle());
 }
 
 // ---------------------------------------------------------------------------

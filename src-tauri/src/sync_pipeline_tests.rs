@@ -445,12 +445,13 @@ struct Library {
 /// `sync_watch_app` shape of `ipc_tests.rs`), a temp data root, real
 /// repositories, and the projects seeded over them in `sort_order`.
 struct World {
-    /// The mock app. Declared first so it drops before the temp roots,
-    /// but the teardown is best-effort: `tauri::App` has no `Drop` and
-    /// the live watch service task owns an `AppHandle`, so the managed
-    /// `Db` outlives the world and a temp root with a file still open
-    /// can survive its own drop (`TempDir` ignores a failed removal).
-    /// Every sibling suite that spawns the service shares this shape.
+    /// The mock app. Declared first so it drops before the temp roots;
+    /// the live watch service task owns an `AppHandle` and the managed
+    /// `Db`, so [`World`]'s `Drop` stops the service first (T-342's
+    /// teardown seam) — without it the task outlives the world, and on
+    /// Windows a temp root with a file still open survives its own drop
+    /// (there the open handle blocks the removal; on Unix unlinking an
+    /// open file succeeds, so only the Windows legs would notice).
     app: tauri::App<MockRuntime>,
     /// The watch command bus, held until [`go_live`] hands it to the
     /// service — a receiver nobody consumes is the D-137 hang shape.
@@ -460,6 +461,20 @@ struct World {
     /// the repositories with the world — nothing reads it back.
     _repos: TempRepos,
     projects: Vec<SeededProject>,
+}
+
+impl Drop for World {
+    fn drop(&mut self) {
+        // T-342: a live service task holds an `AppHandle` and the `Db`,
+        // so stopping it (and awaiting its return) is what lets the
+        // temp roots go with the world. A world that never went live
+        // still owns the bus's receiver (`bus` is `Some`), where a
+        // stop would wait for a consumer that does not exist — hence
+        // the guard.
+        if self.bus.is_none() {
+            tauri::async_runtime::block_on(self.app.state::<FileWatchState>().shutdown());
+        }
+    }
 }
 
 impl World {

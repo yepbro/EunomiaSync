@@ -7677,6 +7677,7 @@ fn an_external_edit_marks_the_project_externally_modified_without_writing_anythi
     // race note (round-1 review's P2-2) in its doc.
     drain_the_clearing(&events, expected_clearing);
     // Windows teardown rule: the app's managed `Db` closes first.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -7773,6 +7774,7 @@ fn deleting_a_synced_target_file_reports_target_deleted_a_never_synced_one_repor
          skip with E_MARKERS_INVALID (the sync pipeline's half)"
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -7890,6 +7892,7 @@ fn projects_list_carries_the_watch_service_verdicts_from_its_snapshot() {
         columns[2]
     );
     // Windows teardown rule: the app's managed `Db` closes first.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -8004,6 +8007,7 @@ fn an_archived_row_never_carries_watch_flags_even_from_a_stale_cache_entry() {
         columns[0]
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -8123,6 +8127,7 @@ fn an_unavailable_row_never_carries_watch_flags_even_from_a_stale_cache_entry() 
         "no further pass ran — the stale cache entry is the premise"
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -8164,6 +8169,7 @@ fn a_healthy_watch_set_serves_no_lost_watch_notice() {
         "a converged set lost nothing — the notice reports no losses"
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -8378,6 +8384,7 @@ fn a_scheme_b_project_reports_edits_and_deletion_through_its_own_semantics() {
         }]
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -8491,6 +8498,7 @@ fn an_unavailable_project_is_unwatched_until_its_folder_returns() {
          file is caught even though no watch event fired for it"
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -8601,6 +8609,7 @@ fn a_queued_fire_and_forget_refresh_behind_file_events_still_runs_a_full_pass() 
          edit is re-read, which no alpha-only partial pass would do"
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -8703,6 +8712,7 @@ fn a_symlinked_target_is_watched_by_its_real_file() {
         "the watch sits on the resolved name, not the link spelling"
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -8816,6 +8826,7 @@ fn a_correctly_synced_scheme_a_project_with_extras_at_different_positions_matche
         "the §7.5 placement the watcher expects is the one the sync wrote"
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -8987,6 +8998,7 @@ fn project_add_manual_refreshes_the_watch_set_through_the_bounded_mutation_seam(
         "the add (and its watch pass) never writes the target file"
     );
     // Windows teardown rule: the app's managed `Db` closes first.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -9030,6 +9042,7 @@ fn a_refused_add_runs_no_watch_pass() {
          committed arm's alone"
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -9177,6 +9190,7 @@ fn the_mutation_refresh_seam_answers_the_real_pass_within_the_budget() {
         "the seam's pass ran — the Ok is the pass's own answer, not a no-op"
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -9263,6 +9277,7 @@ fn project_add_manual_answers_within_the_refresh_budget_when_the_watch_pass_hang
          covered the committed row can record this"
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -9480,6 +9495,7 @@ fn a_healthy_add_logs_no_degrade_line() {
         "the add's own refresh ran — the silence covers a real Ok, not a skipped seam"
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -9755,6 +9771,7 @@ fn a_real_sync_run_overwrites_the_external_edit_backs_it_up_and_clears_the_state
         columns[0]
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -9833,6 +9850,7 @@ fn a_real_sync_run_recreates_a_deleted_target_and_clears_the_hint() {
         columns[0]
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -9978,6 +9996,7 @@ fn an_archived_projects_edits_no_longer_reach_the_wire_while_its_active_sibling_
         columns[0]
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -10173,6 +10192,7 @@ fn a_project_can_be_dirty_and_externally_modified_at_once() {
         "the file exists — the watch flags stay mutually exclusive"
     );
     // Windows teardown rule.
+    stop_watch_service(app.handle());
     drop(app);
     drop(temp);
 }
@@ -10213,6 +10233,44 @@ fn sync_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
 /// because a run awaits [`file_watch::refresh_after_sync`]'s ack and
 /// that await carries no budget — a bus nobody consumes is the D-137
 /// session-history hang, not a test shape.
+#[test]
+fn the_watch_service_stops_on_the_teardown_seam() {
+    // T-342's seam, driven directly: a live service is stopped, the
+    // call returns only after the loop's ack, and a second stop is the
+    // quiet no-op (the bus's receiving half went with the task — a
+    // stop with no consumer must not wait). A broken ack path hangs
+    // the first call instead of passing silently.
+    let (temp, app, commands) = sync_watch_app();
+    crate::file_watch::spawn_service(app.handle().clone(), commands, WATCH_DEBOUNCE)
+        .expect("the watcher must start");
+    wait_for_watch_passes(&app, 1);
+
+    let state = || app.state::<crate::file_watch::FileWatchState>();
+    assert!(state().service_alive(), "the spawned task holds the bus");
+
+    stop_watch_service(app.handle());
+
+    assert!(
+        !state().service_alive(),
+        "the stop's ack comes after the task dropped its receiving half — \
+         a task that acked but kept running would still hold it"
+    );
+    // A second stop finds no consumer and returns instead of waiting —
+    // the seam's own no-op contract.
+    stop_watch_service(app.handle());
+
+    drop(app);
+    drop(temp);
+}
+
+/// Stops the watch service a test spawned and waits until its handles
+/// are released (T-342's teardown seam): the task otherwise keeps the
+/// `AppHandle`, the `Db` and the temp data root alive to process exit,
+/// which leaks one root per suite run.
+pub(crate) fn stop_watch_service<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    tauri::async_runtime::block_on(app.state::<crate::file_watch::FileWatchState>().shutdown());
+}
+
 fn sync_watch_app() -> (
     tempfile::TempDir,
     tauri::App<tauri::test::MockRuntime>,
