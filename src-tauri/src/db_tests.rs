@@ -2700,23 +2700,20 @@ fn the_open_reports_orphaned_backup_copies_after_the_retention_pass() {
     // `db.rs`. The census is deliberately comment-blind (raw sources,
     // not stripped): a comment that names the call in another module is
     // still a drift signal, and this pin's own needle is assembled at
-    // run time so it cannot count itself.
+    // run time so it cannot count itself. `crate_source_files` is the
+    // recursive walk the `#[path]` pin uses (T-341), so a nested module
+    // directory cannot hide a caller from "repo-wide".
     let mut callers: Vec<String> = Vec::new();
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    for entry in std::fs::read_dir(&src).expect("the crate's src/ must be listable") {
-        let entry = entry.expect("a readable src/ entry");
-        if entry
-            .path()
-            .extension()
-            .and_then(|extension| extension.to_str())
-            != Some("rs")
-        {
-            continue;
-        }
-        let text = std::fs::read_to_string(entry.path())
-            .unwrap_or_else(|err| panic!("{} must read: {err}", entry.path().display()));
+    for path in crate_source_files() {
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("{} must read: {err}", path.display()));
         if text.contains(&needle) {
-            callers.push(entry.file_name().to_string_lossy().into_owned());
+            callers.push(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
     }
     callers.sort();
