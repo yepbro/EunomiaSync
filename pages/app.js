@@ -2212,6 +2212,8 @@
     eye: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4C7 4 2.73 7.11 1 11.5 2.73 15.89 7 19 12 19s9.27-3.11 11-7.5C21.27 7.11 17 4 12 4zm0 12.5c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>',
     /* Column actions menu (Material "more_vert") */
     menu: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>',
+    /* Save a backup copy to a chosen location (Material "save_alt") */
+    save: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 13h-3V3h-2v10H8l4 4 4-4zM4 19v2h16v-2H4z"/></svg>',
     /* Toolbar buttons (Activity, Settings): Material-style solid glyphs,
        14px, filled with currentColor like the cell icons */
     activity:
@@ -2625,7 +2627,8 @@
     return `${d.getDate()} ${MONTHS_SHORT[d.getMonth()]} ${d.getFullYear()}`
   }
 
-  /* BKP-004 demo rows: the three latest backups of the base file */
+  /* BKP-004 demo rows: the three latest backups of the base file; every
+     row ends with the "save to a chosen location" action */
   function renderBackups(p) {
     const [date, timeTz] = p.syncedAt.split(', ')
     const m = timeTz.match(/^(\d{2}:\d{2}) (.+)$/)
@@ -2634,12 +2637,9 @@
     const sizes = ['8.4 KB', '8.1 KB', '7.9 KB']
     psBackupsBody.innerHTML = [0, 1, 2]
       .map((i) => {
-        const cells = [
-          `${shiftedDate(date, i)}, ${time}${tz}`,
-          p.baseFile,
-          sizes[i],
-          `#${Math.max(1, p.runs - i)}`,
-        ]
+        const when = `${shiftedDate(date, i)}, ${time}${tz}`
+        const cells = [when, p.baseFile, sizes[i], `#${Math.max(1, p.runs - i)}`]
+        const saveTitle = `Save backup to a file — ${p.baseFile}, ${shiftedDate(date, i)}`
         return (
           '<tr>' +
           cells
@@ -2648,11 +2648,45 @@
                 `<td${ci === 1 ? ' class="ps-backup-file"' : ''}>${escapeHtml(cell)}</td>`,
             )
             .join('') +
+          `<td class="ps-backup-save"><button type="button" class="cell-icon cell-icon--save" title="${escapeHtml(saveTitle)}" aria-label="${escapeHtml(saveTitle)}">${ICONS.save}</button></td>` +
           '</tr>'
         )
       })
       .join('')
   }
+
+  /* "Save to a chosen location": the packaged app opens the OS save
+     dialog; in the browser the equivalent is the download flow, so the
+     button saves a demo placeholder file named after the backup */
+  psBackupsBody.addEventListener('click', (e) => {
+    const btn = e.target.closest('.cell-icon--save')
+    if (!btn) return
+    const cells = [...btn.closest('tr').querySelectorAll('td')].map((td) =>
+      td.textContent.trim(),
+    )
+    const [when, file, size, run] = cells
+    const m = when.match(/(\d{1,2}) (\w{3}) (\d{4}), (\d{2}):(\d{2})/)
+    const stamp = m
+      ? `${m[3]}-${String(MONTHS_SHORT.indexOf(m[2]) + 1).padStart(2, '0')}-${m[1].padStart(2, '0')}_${m[4]}-${m[5]}`
+      : 'backup'
+    const dot = file.lastIndexOf('.')
+    const stem = dot > 0 ? file.slice(0, dot) : file
+    const ext = dot > 0 ? file.slice(dot + 1) : 'txt'
+    const lines = [
+      'EunomiaSync prototype — demo placeholder for a backup file',
+      `Project: ${psCurrentName}`,
+      `Base file: ${file}`,
+      `Backup from: ${when} (sync run ${run}, demo size ${size})`,
+      'Restoring from a backup is a later stage (D-17); this file only',
+      'demonstrates the "save to a chosen location" action.',
+    ]
+    const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `${stem}.backup-${stamp}.${ext}`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  })
 
   function selectPsTab(tab, moveFocus) {
     for (const t of psTabs) {

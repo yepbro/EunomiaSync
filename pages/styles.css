@@ -1738,6 +1738,12 @@ input[type='checkbox']:disabled {
   font-size: 12px;
 }
 
+/* Per-row "save to a chosen location" action column */
+.ps-backups .ps-backup-save {
+  inline-size: 36px;
+  text-align: center;
+}
+
 /* Danger zone (PRJ-013…018: archive with type-to-confirm) */
 .ps-danger {
   display: flex;
