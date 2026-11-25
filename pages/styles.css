@@ -1195,6 +1195,65 @@ input[type='checkbox']:disabled {
   display: none;
 }
 
+/* Custom-instruction mode radios: hidden outside the custom mode */
+.ie-mode-group {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  margin-block-end: 2px;
+}
+
+.ie-custom .ie-mode-group {
+  display: flex;
+}
+
+.ie-mode-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.ie-mode-option input {
+  margin-block-start: 2px;
+}
+
+.ie-mode-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ie-mode-text strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.ie-mode-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ie-mode-base {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* Extend-type custom cells: a small "+" chip marks that the custom text
+   supplements the library variant instead of replacing it (the tooltip
+   carries the details) */
+.extend-mark {
+  flex: none;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-muted);
+  border: 1px dashed var(--border-strong);
+  border-radius: 4px;
+  padding: 2px 4px;
+  cursor: help;
+}
+
 /* Left pane: variant list (LIB-009…016) */
 .ie-variants {
   display: flex;

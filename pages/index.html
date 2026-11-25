@@ -2611,6 +2611,38 @@
                 </div>
               </div>
 
+              <!-- Custom-instruction mode: how the per-cell text relates to
+                 the library variant it was created from. Visible only in
+                 the custom mode (.ie-custom); app.js syncs the hint, the
+                 placeholder and the draft when the choice changes. -->
+              <div
+                id="ie-mode-group"
+                class="ie-mode-group"
+                role="radiogroup"
+                aria-labelledby="ie-mode-label"
+              >
+                <span id="ie-mode-label" class="field-label">Custom instruction</span>
+                <label class="ie-mode-option">
+                  <input type="radio" name="ie-custom-mode" value="replace" checked />
+                  <span class="ie-mode-text">
+                    <strong>Fully replaces the library variant</strong>
+                    <span class="ie-mode-hint">
+                      Only this text is output; the library variant is ignored.
+                    </span>
+                  </span>
+                </label>
+                <label class="ie-mode-option">
+                  <input type="radio" name="ie-custom-mode" value="extend" />
+                  <span class="ie-mode-text">
+                    <strong>Supplements the library variant</strong>
+                    <span class="ie-mode-hint">
+                      This text is appended after the library variant's text.
+                    </span>
+                  </span>
+                </label>
+                <p id="ie-mode-base" class="ie-mode-base" hidden></p>
+              </div>
+
               <div id="ie-tabs" class="ps-tabs" role="tablist" aria-label="Text editor views">
                 <button
                   type="button"

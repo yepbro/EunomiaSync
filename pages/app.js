@@ -1498,6 +1498,12 @@
   const ieMarkerError = document.getElementById('ie-marker-error')
   const ieHistoryBtn = document.getElementById('ie-history-btn')
   const ieCancelBtn = document.getElementById('ie-cancel-btn')
+  /* Custom-instruction mode radios (visible only in the custom mode) */
+  const ieModeGroup = document.getElementById('ie-mode-group')
+  const ieModeRadios = [
+    ...document.querySelectorAll('#ie-mode-group input[name="ie-custom-mode"]'),
+  ]
+  const ieModeBase = document.getElementById('ie-mode-base')
   const unsavedDialog = document.getElementById('unsaved-dialog')
   const newInstructionBtn = document.getElementById('new-instruction-btn')
 
@@ -1667,7 +1673,12 @@
   }
 
   function renderPreviewPane() {
-    const src = ieState.variants[ieState.selected].text
+    let src = ieState.variants[ieState.selected].text
+    if (ieState.mode === 'custom' && ieState.customMode === 'extend' && src !== '') {
+      /* Extend mode: the preview shows the effective cell output — the
+         library variant's text with the supplement appended */
+      src = ieState.customBaseText ? `${ieState.customBaseText}\n\n${src}` : src
+    }
     iePreview.innerHTML = renderMarkdown(src)
     const warnings = mdWarnings(src)
     ieWarningsList.hidden = warnings.length === 0
@@ -1892,6 +1903,9 @@
     text = '',
     placeholder = '',
     variants = [],
+    customMode = 'replace',
+    customBaseText = '',
+    customBaseLabel = '',
   }) {
     /* The main variant always heads the list; alternatives follow it */
     const list = [
@@ -1912,6 +1926,11 @@
       variants: list,
       selected: 0,
       initial: '',
+      /* Custom-instruction mode: how the cell text relates to the library
+         variant it was created from (radios in the custom mode only) */
+      customMode,
+      customBaseText,
+      customBaseLabel,
     }
     editTitle.textContent = resolvedTitle
     ieBodyEl.classList.toggle('ie-custom', mode === 'custom')
@@ -1920,6 +1939,12 @@
     ieMarkerError.hidden = true
     selectIeTab(ieTabEdit, false)
     loadSelectedVariant()
+    if (mode === 'custom') {
+      for (const radio of ieModeRadios) {
+        radio.checked = radio.value === customMode
+      }
+      updateCustomModeUI()
+    }
     renderVariantList()
     ieState.initial = ieSnapshot()
     editDialog.showModal()
@@ -1991,6 +2016,46 @@
 
   ieAddCopy.addEventListener('click', () => addVariant(true))
   ieAddEmpty.addEventListener('click', () => addVariant(false))
+
+  /* ---------- Custom-instruction mode radios -------------------------------- */
+
+  /* Syncs the hint, the placeholder and the Preview composition with the
+     checked radio; called on open and on every radio change */
+  function updateCustomModeUI() {
+    const extend = ieModeRadios.find((r) => r.checked)?.value === 'extend'
+    ieModeBase.hidden = !extend
+    if (extend) {
+      ieModeBase.textContent = `Appended after: ${ieState.customBaseLabel}`
+      editText.placeholder = 'Write the text to append to the library variant…'
+    } else {
+      editText.placeholder = ieState.placeholder
+    }
+  }
+
+  for (const radio of ieModeRadios) {
+    radio.addEventListener('change', () => {
+      if (!ieState || ieState.mode !== 'custom') return
+      const extend = radio.value === 'extend' && radio.checked
+      ieState.customMode = extend ? 'extend' : 'replace'
+      const text = ieState.variants[ieState.selected].text
+      if (extend && text === ieState.customBaseText) {
+        /* The untouched replace draft IS the variant text: an extend
+           supplement starts from empty, not from a copy to remove */
+        ieState.variants[ieState.selected].text = ''
+        editText.value = ''
+        updateCharCount()
+        validateMarkerLive()
+      } else if (!extend && text === '') {
+        /* Back to replace with nothing written: restore the draft */
+        ieState.variants[ieState.selected].text = ieState.customBaseText
+        editText.value = ieState.customBaseText
+        updateCharCount()
+        validateMarkerLive()
+      }
+      updateCustomModeUI()
+      if (previewActive()) renderPreviewPane()
+    })
+  }
 
   for (const tab of ieTabs) {
     tab.addEventListener('click', () => {
@@ -2280,6 +2345,10 @@
   let pendingCustomCell = null
   let pendingDeleteCell = null
   const customTexts = new WeakMap()
+  /* Mode of the custom cell: 'replace' (default) — the custom text is the
+     whole cell output; 'extend' — it is appended after the library
+     variant's text (the radio choice in the custom editor) */
+  const customModes = new WeakMap()
 
   /* Solid icons (Material-style paths), colored via currentColor */
   const ICONS = {
@@ -2347,7 +2416,14 @@
     }
     box.replaceChildren()
     if (isCustom) {
-      const edit = mk('edit', `Edit the custom instruction — ${instr} — ${proj}`)
+      const extendMode = customModes.get(td) === 'extend'
+      const variant = select ? select.value : 'Default'
+      const edit = mk(
+        'edit',
+        extendMode
+          ? `Edit the custom instruction (supplements ${variant}) — ${instr} — ${proj}`
+          : `Edit the custom instruction — ${instr} — ${proj}`,
+      )
       edit.addEventListener('click', () => {
         pendingCustomCell = td
         openEditModal({
@@ -2355,6 +2431,9 @@
           title: `Custom instruction — ${instr} — ${proj}`,
           text: customTexts.get(td) ?? '',
           placeholder: 'Write the custom instruction text…',
+          customMode: customModes.get(td) ?? 'replace',
+          customBaseText: optionText(row, variant),
+          customBaseLabel: `${instr} — ${variant}`,
         })
       })
       const del = mk('delete', `Delete the custom instruction — ${instr} — ${proj}`)
@@ -2380,14 +2459,34 @@
       const add = mk('add', `Create a custom instruction — ${instr} — ${proj}`)
       add.addEventListener('click', () => {
         pendingCustomCell = td
+        const variant = select ? select.value : 'Default'
         openEditModal({
           mode: 'custom',
           title: `Custom instruction — ${instr} — ${proj}`,
-          text: optionText(row, select ? select.value : 'Default'),
+          text: optionText(row, variant),
           placeholder: 'Write the custom instruction text…',
+          customMode: 'replace',
+          customBaseText: optionText(row, variant),
+          customBaseLabel: `${instr} — ${variant}`,
         })
       })
       box.append(...icons, add)
+    }
+
+    /* Mode marker: extend-type custom cells show a small "+" chip — the
+       custom text supplements the library variant instead of replacing */
+    let mark = wrap.querySelector('.extend-mark')
+    if (isCustom && customModes.get(td) === 'extend') {
+      const variant = select ? select.value : 'Default'
+      if (!mark) {
+        mark = document.createElement('span')
+        mark.className = 'extend-mark'
+        wrap.insertBefore(mark, box)
+      }
+      mark.textContent = '+'
+      mark.title = `Supplements ${variant} — appended after the library variant text`
+    } else {
+      mark?.remove()
     }
   }
 
@@ -2401,6 +2500,10 @@
     const input = td.querySelector('.assign')
     const select = td.querySelector('.variant-select')
     customTexts.set(td, editText.value)
+    customModes.set(
+      td,
+      ieModeRadios.find((r) => r.checked)?.value === 'extend' ? 'extend' : 'replace',
+    )
     td.dataset.custom = 'true'
     input.checked = true
     input.dataset.initial = 'true'
@@ -2419,6 +2522,7 @@
     if (!td || confirmDialog.returnValue !== 'delete') return
     delete td.dataset.custom
     customTexts.delete(td)
+    customModes.delete(td)
     const input = td.querySelector('.assign')
     const select = td.querySelector('.variant-select')
     input.disabled = false
