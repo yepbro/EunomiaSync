@@ -23473,3 +23473,14 @@ operation. Sibling note for the later union: T-108 and the flash
 session still fly from the old base — their landing rebes absorb
 this commit and bump the shared counts (collect_commands! 39+,
 logging tail, bindings regeneration, mode.spec surface) once.
+
+Addendum (2026-11-25, post-merge): the task's follow-ups are carded
+on the board — two INBOX cards, no T-numbers until the owner's
+triage: the backup_diff/backup_restore consumers' note (the row
+shape is their contract, `backup_path` the pick handle, per ruling 6)
+and the Backups-tab paging question (deferred to the first real
+heaviness signal, D-193's own default). The cards are the tracking
+unit; this line is the D-record duplicate the board rule asks for.
+Written as a service commit in main after the merge — md-only, no
+suites under the md-only regime; prettier and the pre-commit hook
+gate it.
