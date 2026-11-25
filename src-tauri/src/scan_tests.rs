@@ -52,7 +52,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use eunomia_fs::scan::CancelToken;
-use eunomia_store::action_log::LogRecord;
+use eunomia_store::action_log::{Action, EntityType, LogRecord};
 use eunomia_store::projects::{AddedVia, Project};
 use tauri::Manager;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -1104,7 +1104,8 @@ fn a_repeated_scan_and_commit_create_no_duplicates() {
     assert_eq!(
         empty,
         ScanCommitResult {
-            entries: Vec::new()
+            entries: Vec::new(),
+            probe_failed: false,
         }
     );
     assert_eq!(
@@ -1461,15 +1462,19 @@ fn twelve_rows_in_one_commit_take_twelve_distinct_colors() {
 }
 
 #[test]
-fn registered_and_excluded_paths_answer_typed_outcomes_and_the_rest_are_added() {
-    // The typed non-add outcomes (D-179): a path an ACTIVE project
-    // already holds answers `already_added` naming that row; one an
-    // ARCHIVED project holds answers `archived` with the same row —
-    // the id DB-015's restore offer calls back with; one that sits in
-    // `project_exclusions` with no project answers `excluded` (the scan
-    // showed it under "Skipped"; §6.4's removal is the way back). None
-    // of the three is an error and none writes a row or a journal
-    // entry: the fresh repository in the same selection is still added.
+fn an_excluded_path_commits_by_lifting_its_exclusion_and_the_typed_outcomes_hold() {
+    // D-196: a commit whose selection holds an excluded path LIFTS the
+    // exclusion and registers the project — the checked "Skipped" row's
+    // way back into the registry, which the manual re-add never offers
+    // (the store keeps the removal the caller's composition). The
+    // still-typed outcomes (D-179) hold beside it: a path an ACTIVE
+    // project already holds answers `already_added` naming that row; one
+    // an ARCHIVED project holds answers `archived` with the same row —
+    // the id DB-015's restore offer calls back with. Neither writes a
+    // thing; the exclusion branch writes the row, journals the row's
+    // `project.added` AND the lift's `exclusion.removed` (the D-119
+    // shape, with the created row as the `project_id` — here a project
+    // row IS involved), all inside the one transaction.
     let (temp, app) = scan_app();
     let root = temp.path().join("scan-root");
     std::fs::create_dir_all(&root).expect("the scan root fixture must be creatable");
@@ -1487,7 +1492,7 @@ fn registered_and_excluded_paths_answer_typed_outcomes_and_the_rest_are_added() 
     let webview = main_webview(&app);
     // The scan reports all four repositories with their ALG-053
     // classes — all four join the discovered set, since what the
-    // commit does with each is its own typed answer.
+    // commit does with each is its own answer.
     let reported = scan_completed(&webview, &picked);
     assert_eq!(reported.len(), 4);
     let class_of = |path: &Path| {
@@ -1500,6 +1505,19 @@ fn registered_and_excluded_paths_answer_typed_outcomes_and_the_rest_are_added() 
     assert_eq!(class_of(&archived), Some(ScanClassWire::Archived));
     assert_eq!(class_of(&excluded), Some(ScanClassWire::Excluded));
     assert_eq!(class_of(&fresh), Some(ScanClassWire::New));
+
+    // The seeded exclusion's id — the lift's journal entry names it.
+    let exclusion_id = {
+        let database = database_of(&app);
+        tauri::async_runtime::block_on(database.run(move |tx| {
+            eunomia_store::projects::list_exclusions(tx)
+                .map_err(crate::commands::projects_store_to_app_error)
+        }))
+        .expect("reading the seeded exclusion must work")
+        .pop()
+        .expect("the fixture seeded exactly one exclusion")
+        .id
+    };
 
     let selection: Vec<String> = [&archived, &excluded, &fresh, &known]
         .iter()
@@ -1518,22 +1536,20 @@ fn registered_and_excluded_paths_answer_typed_outcomes_and_the_rest_are_added() 
     let committed = invoke_scan_commit(&webview, &selection).expect("the commit must succeed");
     assert_eq!(
         outcomes_of(&committed),
-        ["archived", "excluded", "added", "already_added"]
+        ["archived", "added", "added", "already_added"]
     );
     assert_eq!(
         paths_of(&committed),
         selection.iter().map(String::as_str).collect::<Vec<_>>()
     );
 
-    let stored = stored_projects(&app);
-    let id_of = |path: &Path| {
-        stored
-            .iter()
-            .find(|project| project.path == path.to_string_lossy())
-            .expect("the seeded row")
-            .id
-            .as_str()
-    };
+    let excluded_entry = &committed.entries[1];
+    let excluded_row = excluded_entry
+        .project
+        .as_ref()
+        .expect("the excluded path commits with its created row");
+    assert_eq!(excluded_row.added_via, "scan");
+    assert_eq!(excluded_entry.path, excluded.to_string_lossy());
     let archived_entry = &committed.entries[0];
     assert_eq!(
         archived_entry.existing.as_ref().map(|existing| {
@@ -1544,47 +1560,162 @@ fn registered_and_excluded_paths_answer_typed_outcomes_and_the_rest_are_added() 
             )
         }),
         Some((
-            id_of(&archived),
+            stored_projects(&app)
+                .iter()
+                .find(|project| project.path == archived.to_string_lossy())
+                .expect("the seeded archived row")
+                .id
+                .as_str(),
             "archived",
             archived.to_string_lossy().as_ref()
         )),
         "the archived entry carries the restore offer's row"
     );
     assert!(archived_entry.project.is_none());
-    let excluded_entry = &committed.entries[1];
-    assert!(excluded_entry.project.is_none() && excluded_entry.existing.is_none());
-    assert_eq!(excluded_entry.path, excluded.to_string_lossy());
-    let fresh_entry = &committed.entries[2];
-    assert_eq!(
-        fresh_entry
-            .project
-            .as_ref()
-            .map(|project| project.added_via.as_str()),
-        Some("scan")
-    );
-    let known_entry = &committed.entries[3];
-    assert_eq!(
-        known_entry
-            .existing
-            .as_ref()
-            .map(|existing| (existing.id.as_str(), existing.state.as_str())),
-        Some((id_of(&known), "active"))
-    );
 
+    // The stored census: four project rows (the two seeds, the lifted
+    // path's new row, the fresh one), the exclusion row GONE, and three
+    // journal entries — the lifted row's `project.added`, the lift's
+    // `exclusion.removed`, the fresh row's `project.added`.
     assert_eq!(
         stored_counts(&app),
-        (3, 1, 1),
-        "one row and one journal entry — the typed outcomes wrote nothing"
+        (4, 0, 3),
+        "the exclusion row left and the two new rows arrived"
     );
+    let stored = stored_projects(&app);
+    let fresh_row = stored
+        .iter()
+        .find(|project| project.path == fresh.to_string_lossy())
+        .expect("the fresh row is registered");
     let journal = journal_entries(&app);
-    assert_eq!(journal.len(), 1);
+    assert_eq!(journal.len(), 3);
+    assert_eq!(journal[0].action, Action::ProjectAdded);
     assert_eq!(
         journal[0].project_id.as_deref(),
-        fresh_entry
-            .project
+        Some(excluded_row.id.as_str())
+    );
+    assert_eq!(journal[1].action, Action::ExclusionRemoved);
+    assert_eq!(
+        journal[1].entity,
+        Some((EntityType::Exclusion, exclusion_id.clone())),
+        "the lift's entry names the removed exclusion row"
+    );
+    assert_eq!(
+        journal[1].details.as_ref(),
+        Some(&serde_json::json!({ "path": excluded.to_string_lossy() })),
+        "the lift's entry carries the removed row's stored path (the D-119 shape)"
+    );
+    assert_eq!(
+        journal[1].project_id.as_deref(),
+        Some(excluded_row.id.as_str()),
+        "the lift is attributed to the row created in the same transaction"
+    );
+    assert_eq!(journal[2].action, Action::ProjectAdded);
+    assert_eq!(
+        journal[2].project_id.as_deref(),
+        Some(fresh_row.id.as_str())
+    );
+
+    // Convergence: re-sending the same selection answers the lifted
+    // path as any registered row — `already_added` — and writes nothing.
+    let second = invoke_scan_commit(&webview, &selection).expect("the re-send must succeed");
+    assert_eq!(
+        outcomes_of(&second),
+        [
+            "archived",
+            "already_added",
+            "already_added",
+            "already_added"
+        ]
+    );
+    assert_eq!(stored_counts(&app), (4, 0, 3), "the re-send writes nothing");
+}
+
+#[test]
+fn a_refused_lift_journal_rolls_the_lift_back_with_the_registration() {
+    // The lift's atomicity (D-196, the round-1 review's P2-2): the
+    // delete, the registration and the journal entry share the ONE
+    // `Db::run` transaction — the round-1 review's ask pins it in the
+    // house's staged-trigger shape. The `exclusion.removed` INSERT is
+    // refused; the failure lands AFTER the exclusion row was deleted
+    // and the project row created inside the transaction, so the
+    // census afterwards must show the exclusion row STILL THERE and no
+    // project row — an implementation that lifted in a second
+    // transaction would leave the exclusion gone. The control (the
+    // trigger dropped) commits: the lift, its journal pair and the row.
+    let (temp, app) = scan_app();
+    let (picked, _) = picked_root_with_repos(&app, temp.path(), &["lifted"]);
+    let webview = main_webview(&app);
+    let selection = scan_new_paths(&webview, &picked);
+    assert_eq!(selection.len(), 1);
+    seed_exclusion(&app, Path::new(&selection[0]));
+    stage_sql(
+        &app,
+        "CREATE TRIGGER reject_lift_journal BEFORE INSERT ON action_log
+         WHEN NEW.action = 'exclusion.removed'
+         BEGIN SELECT RAISE(ABORT, 'test: reject'); END;",
+    );
+
+    let error = invoke_scan_commit(&webview, &selection)
+        .expect_err("the refused lift journal must fail the whole commit");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"), "{error}");
+    assert_eq!(
+        stored_counts(&app),
+        (0, 1, 0),
+        "the exclusion row survived: the delete rolled back with the registration"
+    );
+
+    stage_sql(&app, "DROP TRIGGER reject_lift_journal;");
+    let committed =
+        invoke_scan_commit(&webview, &selection).expect("without the trigger the lift commits");
+    assert_eq!(outcomes_of(&committed), ["added"]);
+    assert_eq!(
+        stored_counts(&app),
+        (1, 0, 2),
+        "the control: the row, the lift's entry and the row's own entry"
+    );
+}
+
+#[test]
+fn an_exclusion_coexisting_with_a_project_row_is_untouched_by_the_commit() {
+    // The D-196 boundary (the round-1 review's P3-1): an exclusion row
+    // whose key an ARCHIVED project row also holds — the archive
+    // flow's by-design pair (§6.4; DB-015 keeps the archived row) — is
+    // NOT lifted by a commit: the commit answers the typed `"archived"`
+    // restore offer and writes nothing. The mutant this kills moves
+    // the exclusion check above the duplicate check, deleting a real
+    // exclusion while still answering `"archived"` — the archived
+    // project would silently lose its exclusion.
+    let (temp, app) = scan_app();
+    let (picked, _) = picked_root_with_repos(&app, temp.path(), &["paired"]);
+    let webview = main_webview(&app);
+    let selection = scan_new_paths(&webview, &picked);
+    assert_eq!(selection.len(), 1);
+    seed_archived_project(&app, Path::new(&selection[0]), "Paired");
+    seed_exclusion(&app, Path::new(&selection[0]));
+
+    let committed = invoke_scan_commit(&webview, &selection).expect("the commit must succeed");
+    assert_eq!(outcomes_of(&committed), ["archived"]);
+    let entry = &committed.entries[0];
+    assert!(entry.project.is_none());
+    assert_eq!(
+        entry
+            .existing
             .as_ref()
-            .map(|project| project.id.as_str()),
-        "the one entry is the fresh row's"
+            .map(|existing| existing.state.as_str()),
+        Some("archived"),
+        "the restore offer's row, not a lift"
+    );
+    assert_eq!(
+        stored_counts(&app),
+        (1, 1, 0),
+        "the archived row and the exclusion both survive; nothing is journaled"
+    );
+    assert!(
+        !journal_entries(&app)
+            .iter()
+            .any(|record| record.action == Action::ExclusionRemoved),
+        "the commit wrote no exclusion.removed entry"
     );
 }
 
@@ -2074,6 +2205,14 @@ fn the_write_access_warning_rides_its_own_added_entry() {
     let committed = invoke_scan_commit(&webview, &selection)
         .expect("a read-only target is a warning, not a rejection");
     assert_eq!(outcomes_of(&committed), ["added"; 4]);
+    // The delivered probe sets no marker (D-196): `probe_failed` is the
+    // degraded answer's fact, never a joined probe's (the round-1
+    // review's P3-2 — the call-site pass-through, not only the
+    // helpers).
+    assert!(
+        !committed.probe_failed,
+        "a delivered probe answers probe_failed: false"
+    );
     let warnings: Vec<Option<&str>> = committed
         .entries
         .iter()

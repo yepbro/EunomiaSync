@@ -1955,11 +1955,15 @@ export const mockCommands: IpcCommands = {
    * empty entry is the same field's rejection. Then one entry per
    * DISTINCT path in sent order: a path an ACTIVE project holds answers
    * `already_added` naming that row, one an ARCHIVED project holds
-   * `archived` with the same row (the restore offer's id), one in the
-   * exclusions answers `excluded`; every other path is appended through
-   * the shared add step with `added_via = 'scan'` and answers `added`.
-   * The typed outcomes are not errors and journal nothing; a re-sent
-   * selection converges. The empty selection answers `{ entries: [] }`.
+   * `archived` with the same row (the restore offer's id); every other
+   * path — an excluded one INCLUDED — is appended through the shared add
+   * step with `added_via = 'scan'` and answers `added` (D-196: the
+   * commit lifts the exclusion, journals `exclusion.removed` beside the
+   * row's `project.added`, and `"excluded"` can no longer occur). The
+   * typed outcomes are not errors and journal nothing; a re-sent
+   * selection converges. The empty selection answers the typed no-op.
+   * `probe_failed` is always `false` here: no filesystem exists to
+   * probe (the D-108 limits posture this file's header records).
    */
   async scanCommit(paths) {
     const state = mockState()
@@ -2001,8 +2005,28 @@ export const mockCommands: IpcCommands = {
         })
         continue
       }
-      if (state.exclusions.some((row) => row.path_key === key)) {
-        entries.push({ path: key, outcome: 'excluded', project: null, existing: null })
+      const exclusionIndex = state.exclusions.findIndex((row) => row.path_key === key)
+      if (exclusionIndex !== -1) {
+        // D-196, mock side: the commit over an excluded path LIFTS the
+        // exclusion — the row goes, the lift is journaled with the
+        // created row as its `project_id` — and the path registers like
+        // any other. The journal order mirrors the backend: the row's
+        // `project.added` (inside `appendProjectRow`) first, then the
+        // lift's `exclusion.removed`.
+        const [removed] = state.exclusions.splice(exclusionIndex, 1)
+        const row = appendProjectRow(state, key, 'scan')
+        journal('exclusion.removed', {
+          entityType: 'exclusion',
+          entityId: removed?.id ?? null,
+          projectId: row.id,
+          details: JSON.stringify({ path: removed?.path }),
+        })
+        entries.push({
+          path: key,
+          outcome: 'added',
+          project: toAddedProject(row),
+          existing: null,
+        })
         continue
       }
       entries.push({
@@ -2012,7 +2036,7 @@ export const mockCommands: IpcCommands = {
         existing: null,
       })
     }
-    return { entries }
+    return { entries, probe_failed: false }
   },
 
   /**

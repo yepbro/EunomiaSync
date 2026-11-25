@@ -23667,3 +23667,86 @@ must own it (the round-2 P3-6 note). The cards are the tracking unit;
 this line is the D-record duplicate the board rule asks for. Written
 as a service commit in main after the merge — md-only, no suites
 under the md-only regime; prettier and the pre-commit hook gate it.
+
+### D-196 — T-344: `scan_commit` answers a typed partial success when the post-commit probe's join fails (rows stay committed), and a commit over an excluded path lifts the exclusion and adds the project — 2026-11-24
+
+Problem: T-077's follow-up (the card, triaged 2026-11-24, owner
+ruling variant 2): (1) the §6.9 write-access probe's join failure
+surfaces as `Err` AFTER the transaction committed (the manual add's
+posture, inherited by construction) — for a batch that reads as "the
+command failed" while every row is merged; (2) a commit whose
+selection holds an excluded path answered the typed `"excluded"`
+outcome and wrote nothing, so the scan's "Skipped" row had no way
+back into the registry through the commit (the manual re-add never
+removes an exclusion either — the store's own doc names the removal
+the caller's composition).
+
+Readings chosen (Rule 1, recorded before implementation):
+
+- **The partial success is one result-level field, `probe_failed`**
+  (`ScanCommitResult { entries, probe_failed }`). The probe runs ONE
+  `spawn_blocking` over every created row's target, so a join failure
+  kills all verdicts at once — the fact is about the batch, not about
+  a row, and a per-row outcome spelling (`"added_probe_failed"`) would
+  duplicate it per row. `true` means: the rows ARE committed, the
+  entries are the committed truth, and the `"added"` rows carry
+  `write_access_warning: None` because UNCHECKED, not because
+  writable — the field's own doc states this, and how the UI presents
+  the two live kinds of answers stays open question (3), UI-002's to
+  design. The failure is logged once through the new class-only edge
+  `logging::scan_commit_probe_degraded` (the same mapped fields the
+  `scan_commit_failed` edge carries: code, params, os_code, os_kind,
+  os_message — a join failure has no stored user content, Rule 8).
+- **The excluded branch becomes delete + register + journal.** Inside
+  the same transaction: `find_exclusion_by_path_key` answering a row
+  now deletes it (`delete_exclusion`), registers the project
+  (`register_project`), and THEN journals ONE `exclusion.removed`
+  entry (the D-119 shape: entity = the exclusion row, `File` detail =
+  its stored path — with one deviation, recorded here: `project_id`
+  names the row created moments earlier in the same transaction,
+  which is why the journaling follows the registration — here a
+  project row IS involved and the Activity window's project filter
+  should attribute the lift to it; `exclusion_remove` itself keeps
+  its no-project shape). The journal order is therefore the row's
+  `project.added` first, then the lift's `exclusion.removed` — the
+  entry outcome is `"added"`. The answer's outcome vocabulary
+  shrinks to `"added"`/`"already_added"`/`"archived"`: `"excluded"`
+  can no longer occur. D-179's "typed non-add outcomes journal
+  nothing" narrows accordingly — the still-typed outcomes
+  (`already_added`, `archived`) journal nothing; the excluded case is
+  no longer a non-add outcome.
+- **Boundary — which exclusions the commit lifts.** Only the
+  no-project-holds-the-key case (the old typed-`excluded` branch). An
+  exclusion row coexisting with a project row — the archive flow's
+  by-design pair (§6.4: archiving adds the path to
+  `project_exclusions`; DB-015 keeps the archived row) — is
+  untouched: the commit answers `"archived"` with the restore offer,
+  and the restore owns that removal. The SEC-003 gate is unchanged:
+  excluded-class repositories are published into the discovered set
+  like every reported class (D-179), so the commit admits them.
+- **Scope boundary.** The manual add keeps its `Err`-after-commit
+  posture: its probe covers one row and the card's ruling is about
+  the batch command; changing the single-add contract is not this
+  card's. The mock twin models the lift (state exclusions shrink,
+  `exclusion.removed` journaled) and answers `probe_failed: false`
+  always — no filesystem, no probe half (the D-108 limits posture its
+  header records).
+
+Tests (BDD, red first, mutation-verified below): the T-077 battery
+`registered_and_excluded_paths_answer_typed_outcomes_and_the_rest_are_added`
+is rewritten — the excluded path now commits (`"added"`, row created,
+exclusion row gone, journal carries the new row's `project.added` plus
+the `exclusion.removed` entry naming it); two unit pins cover the
+probe halves the end-to-end path cannot reach without a fault-injection
+seam: the join mapping with a REAL `JoinError` (a panicking
+`spawn_blocking` task, awaited) answers the empty verdicts and the
+marker, and the result assembly carries `probe_failed` with the
+warnings still aligned to their rows.
+
+Checks: `CARGO_BUILD_JOBS=2 cargo fmt --check`; `CARGO_BUILD_JOBS=2
+cargo clippy -p eunomia-sync --all-targets -- -D warnings`; targeted
+`cargo nextest run -p eunomia-sync scan_tests logging`; prettier +
+eslint + targeted vitest over the mock chain; the full suite runs once
+after the flash batch (owner instruction). One review round.
+
+> > > > > > > 933de44 (feat(scan): scan_commit answers a typed partial success and lifts exclusions (T-344))

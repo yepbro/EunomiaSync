@@ -229,7 +229,10 @@ Rust commands are registered through `tauri-specta`:
    and the commit that adds the checked repositories in ONE
    transaction through the new-project rules `commands.rs` shares
    with `project_add_manual` (typed outcomes for paths already
-   registered or excluded; any error rolls back the whole batch) —
+   registered; a commit over an excluded path lifts the exclusion and
+   adds the project, D-179/D-196; any error rolls back the whole
+   batch, and a failed post-commit probe answers the typed partial
+   success `probe_failed` instead of an error) —
    the Library module's instruction lifecycle
    `instruction_create`/`instruction_update`/`instruction_hide`/
    `instruction_restore` (T-328, DECISIONS.md D-188): the create

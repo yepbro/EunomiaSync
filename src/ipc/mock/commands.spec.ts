@@ -1357,12 +1357,15 @@ describe('scanCommit', () => {
     })
   })
 
-  it('answers typed outcomes for registered and excluded paths and adds the rest', async () => {
+  it('answers typed outcomes, lifts an exclusion into an added row, and adds the rest', async () => {
     // The typed non-add outcomes mirror the real command: an active row is
     // `already_added` naming that row, an archived one `archived` with the
-    // restore offer's id, an excluded path `excluded`; the discovery in the
-    // same selection is still added — and re-sending the selection
-    // converges (one row, one journal entry for the discovery).
+    // restore offer's id; an excluded path commits (D-196) — the
+    // exclusion row goes, the lift is journaled
+    // `exclusion.removed` with the created row as its `project_id`, and
+    // the path answers `added` like any other — and the discovery in the
+    // same selection is still added. Re-sending the selection converges
+    // (the lifted path is `already_added` too, nothing new written).
     await scanWorld()
     const state = mockState()
     const known = state.projects.find((row) => row.state === 'active')
@@ -1370,6 +1373,7 @@ describe('scanCommit', () => {
     const excluded = state.exclusions[0]
     if (!known || !archived || !excluded) throw new Error('the fixture world must hold all three')
     const before = state.projects.length
+    const exclusionsBefore = state.exclusions.length
     const journalBefore = state.activity.length
 
     const first = await commands.scanCommit([archived.path, excluded.path, DISCOVERED, known.path])
@@ -1386,30 +1390,44 @@ describe('scanCommit', () => {
       project: null,
       existing: { id: archived.id, state: 'archived', path: archived.path },
     })
-    expect(byPath.get(excluded.path)).toEqual({
-      path: excluded.path,
-      outcome: 'excluded',
-      project: null,
-      existing: null,
-    })
+    expect(byPath.get(excluded.path)?.outcome).toBe('added')
+    expect(byPath.get(excluded.path)?.project?.path).toBe(excluded.path)
     expect(byPath.get(DISCOVERED)?.outcome).toBe('added')
     expect(byPath.get(known.path)).toMatchObject({
       outcome: 'already_added',
       project: null,
       existing: { id: known.id, state: 'active' },
     })
-    expect(state.projects).toHaveLength(before + 1)
-    expect(state.activity).toHaveLength(journalBefore + 1)
+    expect(state.projects).toHaveLength(before + 2)
+    expect(state.exclusions).toHaveLength(exclusionsBefore - 1)
+    expect(state.activity).toHaveLength(journalBefore + 3)
+    expect(state.activity.slice(-3)).toEqual([
+      expect.objectContaining({
+        action: 'project.added',
+        project_id: byPath.get(excluded.path)?.project?.id,
+      }),
+      expect.objectContaining({
+        action: 'exclusion.removed',
+        entity_type: 'exclusion',
+        entity_id: excluded.id,
+        project_id: byPath.get(excluded.path)?.project?.id,
+      }),
+      expect.objectContaining({
+        action: 'project.added',
+        entity_type: 'project',
+      }),
+    ])
 
     const second = await commands.scanCommit([archived.path, excluded.path, DISCOVERED, known.path])
     expect(second.entries.map((entry) => entry.outcome)).toEqual([
       'archived',
-      'excluded',
+      'already_added',
       'already_added',
       'already_added',
     ])
-    expect(state.projects).toHaveLength(before + 1)
-    expect(state.activity).toHaveLength(journalBefore + 1)
+    expect(state.projects).toHaveLength(before + 2)
+    expect(state.exclusions).toHaveLength(exclusionsBefore - 1)
+    expect(state.activity).toHaveLength(journalBefore + 3)
   })
 
   it('collapses duplicate spellings and answers an empty selection with no entries', async () => {
@@ -1425,7 +1443,7 @@ describe('scanCommit', () => {
     expect(result.entries).toHaveLength(1)
     expect(state.projects.filter((row) => row.path === DISCOVERED)).toHaveLength(1)
     expect(state.projects).toHaveLength(before + 1)
-    await expect(commands.scanCommit([])).resolves.toEqual({ entries: [] })
+    await expect(commands.scanCommit([])).resolves.toEqual({ entries: [], probe_failed: false })
     expect(state.projects).toHaveLength(before + 1)
   })
 

@@ -588,9 +588,12 @@ export const commands = {
 	 *     duplicate check (`find_by_path_key` — an active row answers the
 	 *     typed `"already_added"` entry, an archived row the `"archived"`
 	 *     one carrying the id of the DB-015 restore offer); the exclusion
-	 *     check (a `project_exclusions` row with no project answers the
-	 *     typed `"excluded"` entry — the scan showed it under "Skipped",
-	 *     and §6.4's removal is the way back); otherwise
+	 *     check (a `project_exclusions` row with no project has its
+	 *     exclusion LIFTED — `delete_exclusion` plus ONE `exclusion.removed`
+	 *     journal entry, the D-119 shape attributed to the created row —
+	 *     and the candidate registers like any other, answering `"added"`
+	 *     (D-196): the checked "Skipped" row's way back into the registry,
+	 *     which the manual re-add never offers); otherwise
 	 *     [`register_project`] with `added_via = scan` — the PRJ-012
 	 *     copy, D-29's color over the active set as it stands INSIDE the
 	 *     transaction (the batch's earlier rows count, so twelve rows
@@ -605,23 +608,29 @@ export const commands = {
 	 *     [`check_write_access`](eunomia_fs::write_access::
 	 *     check_write_access) per added row on the blocking pool — never
 	 *     inside the transaction (the D-096 probe-order rule) — riding
-	 *     the entry's `project` exactly as in the manual add.
+	 *     the entry's `project` exactly as in the manual add. A join
+	 *     failure of that task is NOT an error (D-196): the rows are
+	 *     committed, so the command answers the typed partial success
+	 *     (`probe_failed`, the verdicts absent) and logs the failure once
+	 *     through [`logging::scan_commit_probe_degraded`].
 	 *  7. **The watch refresh** (§5.7 SYS-007, D-144): when at least one
-	 *     row was created, ONE pass through
+	 *     row was created — whatever the probe half answered — ONE pass
+	 *     through
 	 *     [`refresh_after_mutation`](crate::file_watch::
 	 *     refresh_after_mutation) — never fatal to the answer; the DB-022
 	 *     recalculation rides the commit hook.
 	 * 
-	 *  An empty selection is the typed no-op `entries: []` — nothing is
-	 *  written and nothing journaled. A live scan does NOT refuse the
-	 *  commit: the walk's registry snapshot predates it by design, so its
-	 *  answer may show a just-added repository as `new`, and the
-	 *  duplicate check inside the transaction keeps that harmless.
+	 *  An empty selection is the typed no-op `entries: []`, `probe_failed`
+	 *  false — nothing is written and nothing journaled. A live scan does
+	 *  NOT refuse the commit: the walk's registry snapshot predates it by
+	 *  design, so its answer may show a just-added repository as `new`,
+	 *  and the duplicate check inside the transaction keeps that harmless.
 	 * 
 	 *  Failures reach the log with their §10 code through the ONE edge
 	 *  [`logging::scan_commit_failed`]; the typed outcomes and the empty
-	 *  selection log nothing, and a successful commit is its own journal
-	 *  entries (the D-051 mirror policy).
+	 *  selection log nothing (the probe's degraded half has its own edge,
+	 *  D-196), and a successful commit is its own journal entries (the
+	 *  D-051 mirror policy).
 	 */
 	scanCommit: (paths: string[], options?: InvokeOptions) => __TAURI_INVOKE<ScanCommitResult_Serialize>("scan_commit", { paths }, options),
 	/**
@@ -2960,7 +2969,9 @@ export type ScanCommitEntry_Deserialize = {
 	path: string,
 	/**
 	 *  What became of the repository, one of `"added"`,
-	 *  `"already_added"`, `"archived"`, `"excluded"`.
+	 *  `"already_added"`, `"archived"` — a commit over an excluded
+	 *  path lifts the exclusion and answers `"added"` (D-196), so
+	 *  `"excluded"` can no longer occur.
 	 */
 	outcome: string,
 	/**
@@ -2990,7 +3001,9 @@ export type ScanCommitEntry_Serialize = {
 	path: string,
 	/**
 	 *  What became of the repository, one of `"added"`,
-	 *  `"already_added"`, `"archived"`, `"excluded"`.
+	 *  `"already_added"`, `"archived"` — a commit over an excluded
+	 *  path lifts the exclusion and answers `"added"` (D-196), so
+	 *  `"excluded"` can no longer occur.
 	 */
 	outcome: string,
 	/**
@@ -3008,35 +3021,58 @@ export type ScanCommitEntry_Serialize = {
 
 /**
  *  The `scan_commit` answer (§7.10, PRJ-002's "Add selected"; T-077,
- *  D-179): one entry per DISTINCT repository of the selection, in the
- *  order the UI sent — which is also the order the rows appended in.
- *  Only failures are `Err`: the entries are the per-repository facts
- *  of a committed transaction (or of a selection with nothing to add).
+ *  D-179, D-196): one entry per DISTINCT repository of the selection,
+ *  in the order the UI sent — which is also the order the rows
+ *  appended in. Only failures are `Err`: the entries are the
+ *  per-repository facts of a committed transaction (or of a selection
+ *  with nothing to add).
  */
 export type ScanCommitResult = ScanCommitResult_Serialize | ScanCommitResult_Deserialize;
 
 /**
  *  The `scan_commit` answer (§7.10, PRJ-002's "Add selected"; T-077,
- *  D-179): one entry per DISTINCT repository of the selection, in the
- *  order the UI sent — which is also the order the rows appended in.
- *  Only failures are `Err`: the entries are the per-repository facts
- *  of a committed transaction (or of a selection with nothing to add).
+ *  D-179, D-196): one entry per DISTINCT repository of the selection,
+ *  in the order the UI sent — which is also the order the rows
+ *  appended in. Only failures are `Err`: the entries are the
+ *  per-repository facts of a committed transaction (or of a selection
+ *  with nothing to add).
  */
 export type ScanCommitResult_Deserialize = {
 	/**  The selection's verdicts, sent order, duplicates collapsed. */
 	entries: ScanCommitEntry_Deserialize[],
+	/**
+	 *  The typed partial success (D-196): `true` when the rows ARE
+	 *  committed but the post-commit §6.9 write-access probe did not
+	 *  run — its blocking task failed to join. The `"added"` entries'
+	 *  `write_access_warning` is then `None` because UNCHECKED, not
+	 *  because writable; the failure is logged once, class-only.
+	 *  How the UI presents the two live kinds of answers is the
+	 *  deferred UI-002 design.
+	 */
+	probe_failed: boolean,
 };
 
 /**
  *  The `scan_commit` answer (§7.10, PRJ-002's "Add selected"; T-077,
- *  D-179): one entry per DISTINCT repository of the selection, in the
- *  order the UI sent — which is also the order the rows appended in.
- *  Only failures are `Err`: the entries are the per-repository facts
- *  of a committed transaction (or of a selection with nothing to add).
+ *  D-179, D-196): one entry per DISTINCT repository of the selection,
+ *  in the order the UI sent — which is also the order the rows
+ *  appended in. Only failures are `Err`: the entries are the
+ *  per-repository facts of a committed transaction (or of a selection
+ *  with nothing to add).
  */
 export type ScanCommitResult_Serialize = {
 	/**  The selection's verdicts, sent order, duplicates collapsed. */
 	entries: ScanCommitEntry_Serialize[],
+	/**
+	 *  The typed partial success (D-196): `true` when the rows ARE
+	 *  committed but the post-commit §6.9 write-access probe did not
+	 *  run — its blocking task failed to join. The `"added"` entries'
+	 *  `write_access_warning` is then `None` because UNCHECKED, not
+	 *  because writable; the failure is logged once, class-only.
+	 *  How the UI presents the two live kinds of answers is the
+	 *  deferred UI-002 design.
+	 */
+	probe_failed: boolean,
 };
 
 /**

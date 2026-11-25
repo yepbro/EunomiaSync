@@ -1788,11 +1788,13 @@ pub(crate) fn scan_start_failed(error: &AppError) {
 /// cell, a rolled-back row) and the blocking-pool joins — flows
 /// through here with the error's own §7.10 vocabulary, in the
 /// `project_add_failed` shape. `error` level per §10's every-error
-/// rule. The typed non-add outcomes (`already_added`, `archived`,
-/// `excluded`) and the empty selection are success-shaped answers and
-/// log nothing; a successful commit is its own `project.added` journal
-/// entries, written inside the operation's transaction (D-051) — never
-/// duplicated into the file log (the info+user+ok unmirrored shape).
+/// rule. The typed non-add outcomes (`already_added`, `archived`) and
+/// the empty selection are success-shaped answers and log nothing; the
+/// excluded branch is a write — it lifts the exclusion, registers the
+/// row and journals `project.added` + `exclusion.removed` (D-196) —
+/// and a successful commit is its own journal entries, written inside
+/// the operation's transaction (D-051) — never duplicated into the
+/// file log (the info+user+ok unmirrored shape).
 pub(crate) fn scan_commit_failed(error: &AppError) {
     tracing::error!(
         target: "eunomia::scan",
@@ -1802,6 +1804,27 @@ pub(crate) fn scan_commit_failed(error: &AppError) {
         os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
         os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
         "adding the selected scanned repositories failed"
+    );
+}
+
+/// The post-commit §6.9 write-access probe of `scan_commit` did not
+/// run: its blocking task failed to join (a panic, or the runtime is
+/// shutting down) AFTER the transaction committed the rows (D-196).
+/// The command answers the typed partial success — `probe_failed`,
+/// verdicts absent — and this edge is the triage record of why,
+/// carrying exactly the mapped fields the failure edge carries (a
+/// join failure has no stored user content, Rule 8). `warn`, not
+/// `error`: the commit itself succeeded; only the warning-class half
+/// is missing.
+pub(crate) fn scan_commit_probe_degraded(error: &AppError) {
+    tracing::warn!(
+        target: "eunomia::scan",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "the committed scan selection's write-access probe did not run"
     );
 }
 
@@ -3984,6 +4007,41 @@ mod tests {
                 .count(),
             2,
             "each failure says what failed, exactly once per call, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_scan_commit_probe_degradation_line_carries_the_join_facts() {
+        // The probe's degraded half (T-344/D-196): a join failure of
+        // the post-commit probe maps through
+        // `join_failure_to_app_error` and reaches this warn line with
+        // the mapped OS kind — a REAL panicking blocking task's join
+        // error, the same vector the probe mapping unit test feeds
+        // `probe_verdicts`. Warn level: the commit succeeded; the
+        // subscriber at INFO still captures the warn line.
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+        let join_error = tauri::async_runtime::block_on(async {
+            tauri::async_runtime::spawn_blocking(|| -> () {
+                panic!("the probe task panicked");
+            })
+            .await
+            .expect_err("a panicked task's join fails")
+        });
+        let degraded = crate::db::join_failure_to_app_error(join_error);
+
+        tracing::subscriber::with_default(subscriber, || {
+            scan_commit_probe_degraded(&degraded);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("the committed scan selection's write-access probe did not run")
+                && log.contains("os_kind=Some("),
+            "the degraded line carries its message and the mapped join kind, got: {log}"
         );
         drop(temp);
     }

@@ -195,11 +195,15 @@ use specta::Type;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_specta::Event;
 
+use eunomia_store::action_log::{
+    Action, Details, Entity, EntityType, Level, LogEntry, Outcome, Visibility, insert,
+};
+
 use crate::commands::{
     AddedProject, ColorOccupancy, ExistingProject, ProjectFields, Registered, WriteDefaults,
-    managed_db, probe_target_name, projects_store_to_app_error, register_project,
-    reject_during_sync, rejected_field, repo_lookup_failed, settings_cell_to_app_error,
-    sync_running_refusal, write_access_warning,
+    activity_log_to_app_error, managed_db, probe_target_name, projects_store_to_app_error,
+    register_project, reject_during_sync, rejected_field, repo_lookup_failed,
+    settings_cell_to_app_error, sync_running_refusal, write_access_warning,
 };
 use crate::db;
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
@@ -369,14 +373,23 @@ pub(crate) enum ScanRunOutcome {
 }
 
 /// The `scan_commit` answer (§7.10, PRJ-002's "Add selected"; T-077,
-/// D-179): one entry per DISTINCT repository of the selection, in the
-/// order the UI sent — which is also the order the rows appended in.
-/// Only failures are `Err`: the entries are the per-repository facts
-/// of a committed transaction (or of a selection with nothing to add).
+/// D-179, D-196): one entry per DISTINCT repository of the selection,
+/// in the order the UI sent — which is also the order the rows
+/// appended in. Only failures are `Err`: the entries are the
+/// per-repository facts of a committed transaction (or of a selection
+/// with nothing to add).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub(crate) struct ScanCommitResult {
     /// The selection's verdicts, sent order, duplicates collapsed.
     pub(crate) entries: Vec<ScanCommitEntry>,
+    /// The typed partial success (D-196): `true` when the rows ARE
+    /// committed but the post-commit §6.9 write-access probe did not
+    /// run — its blocking task failed to join. The `"added"` entries'
+    /// `write_access_warning` is then `None` because UNCHECKED, not
+    /// because writable; the failure is logged once, class-only.
+    /// How the UI presents the two live kinds of answers is the
+    /// deferred UI-002 design.
+    pub(crate) probe_failed: bool,
 }
 
 /// One selected repository's verdict — the `ProjectAddResult`
@@ -389,7 +402,9 @@ pub(crate) struct ScanCommitEntry {
     /// stored `projects.path`.
     pub(crate) path: String,
     /// What became of the repository, one of `"added"`,
-    /// `"already_added"`, `"archived"`, `"excluded"`.
+    /// `"already_added"`, `"archived"` — a commit over an excluded
+    /// path lifts the exclusion and answers `"added"` (D-196), so
+    /// `"excluded"` can no longer occur.
     pub(crate) outcome: String,
     /// The created row with its §6.9 write-access warning — the
     /// `"added"` outcome only.
@@ -951,9 +966,12 @@ fn scan_slot_missing() -> AppError {
 ///    duplicate check (`find_by_path_key` — an active row answers the
 ///    typed `"already_added"` entry, an archived row the `"archived"`
 ///    one carrying the id of the DB-015 restore offer); the exclusion
-///    check (a `project_exclusions` row with no project answers the
-///    typed `"excluded"` entry — the scan showed it under "Skipped",
-///    and §6.4's removal is the way back); otherwise
+///    check (a `project_exclusions` row with no project has its
+///    exclusion LIFTED — `delete_exclusion` plus ONE `exclusion.removed`
+///    journal entry, the D-119 shape attributed to the created row —
+///    and the candidate registers like any other, answering `"added"`
+///    (D-196): the checked "Skipped" row's way back into the registry,
+///    which the manual re-add never offers); otherwise
 ///    [`register_project`] with `added_via = scan` — the PRJ-012
 ///    copy, D-29's color over the active set as it stands INSIDE the
 ///    transaction (the batch's earlier rows count, so twelve rows
@@ -968,23 +986,29 @@ fn scan_slot_missing() -> AppError {
 ///    [`check_write_access`](eunomia_fs::write_access::
 ///    check_write_access) per added row on the blocking pool — never
 ///    inside the transaction (the D-096 probe-order rule) — riding
-///    the entry's `project` exactly as in the manual add.
+///    the entry's `project` exactly as in the manual add. A join
+///    failure of that task is NOT an error (D-196): the rows are
+///    committed, so the command answers the typed partial success
+///    (`probe_failed`, the verdicts absent) and logs the failure once
+///    through [`logging::scan_commit_probe_degraded`].
 /// 7. **The watch refresh** (§5.7 SYS-007, D-144): when at least one
-///    row was created, ONE pass through
+///    row was created — whatever the probe half answered — ONE pass
+///    through
 ///    [`refresh_after_mutation`](crate::file_watch::
 ///    refresh_after_mutation) — never fatal to the answer; the DB-022
 ///    recalculation rides the commit hook.
 ///
-/// An empty selection is the typed no-op `entries: []` — nothing is
-/// written and nothing journaled. A live scan does NOT refuse the
-/// commit: the walk's registry snapshot predates it by design, so its
-/// answer may show a just-added repository as `new`, and the
-/// duplicate check inside the transaction keeps that harmless.
+/// An empty selection is the typed no-op `entries: []`, `probe_failed`
+/// false — nothing is written and nothing journaled. A live scan does
+/// NOT refuse the commit: the walk's registry snapshot predates it by
+/// design, so its answer may show a just-added repository as `new`,
+/// and the duplicate check inside the transaction keeps that harmless.
 ///
 /// Failures reach the log with their §10 code through the ONE edge
 /// [`logging::scan_commit_failed`]; the typed outcomes and the empty
-/// selection log nothing, and a successful commit is its own journal
-/// entries (the D-051 mirror policy).
+/// selection log nothing (the probe's degraded half has its own edge,
+/// D-196), and a successful commit is its own journal entries (the
+/// D-051 mirror policy).
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn scan_commit<R: Runtime>(
@@ -1130,14 +1154,72 @@ pub(crate) async fn scan_commit_impl<R: Runtime>(
                     )));
                     continue;
                 }
-                if eunomia_store::projects::find_exclusion_by_path_key(
+                if let Some(exclusion) = eunomia_store::projects::find_exclusion_by_path_key(
                     transaction,
                     &candidate.path_key,
                 )
                 .map_err(projects_store_to_app_error)?
-                .is_some()
                 {
-                    slots.push(CommitSlot::Entry(excluded_entry(&candidate.path)));
+                    // D-196: the commit over an excluded path LIFTS the
+                    // exclusion and registers the project — the checked
+                    // "Skipped" row's way back into the registry, which
+                    // the manual re-add never offers. The registered
+                    // project carries this branch: the row the scan
+                    // showed under "Skipped" answers `"added"` like any
+                    // other created row.
+                    eunomia_store::projects::delete_exclusion(transaction, &exclusion.id)
+                        .map_err(projects_store_to_app_error)?;
+                    // The lift's journal entry, inside the same
+                    // transaction (D-051): the D-119 shape (entity =
+                    // the removed row, `File` detail = its stored path)
+                    // with one recorded deviation — `project_id` names
+                    // the row created below, because here a project row
+                    // IS involved and the Activity window's project
+                    // filter attributes the lift to it.
+                    let registered = register_project(
+                        transaction,
+                        candidate,
+                        AddedVia::Scan,
+                        &defaults,
+                        &mut occupancy,
+                    )?;
+                    let mut lifted = LogEntry::new(
+                        Action::ExclusionRemoved,
+                        Level::Info,
+                        Visibility::User,
+                        Outcome::Ok,
+                    );
+                    lifted.entity = Some(Entity {
+                        kind: EntityType::Exclusion,
+                        id: exclusion.id.as_str(),
+                    });
+                    lifted.details = Some(Details::File {
+                        path: PathBuf::from(&exclusion.path),
+                    });
+                    let mut created_id: Option<String> = None;
+                    let slot = match registered {
+                        Registered::Created(created) => {
+                            created_id = Some(created.id.clone());
+                            CommitSlot::Created(created)
+                        }
+                        // Unreachable after the check above inside one
+                        // transaction; honest anyway — the same typed
+                        // duplicate answer the check would have built,
+                        // with the lift (which DID happen) still
+                        // journaled.
+                        Registered::Existing(existing) => {
+                            CommitSlot::Entry(duplicate_entry(&candidate.path, &existing))
+                        }
+                    };
+                    // The attribution: the row created in the same
+                    // transaction; the unreachable duplicate arm has no
+                    // row to name.
+                    lifted.project_id = created_id.as_deref();
+                    insert(transaction, &lifted).map_err(activity_log_to_app_error)?;
+                    // The D-051 mirror contract: one call per written
+                    // entry (info+user+ok is the unmirrored shape).
+                    logging::action_logged(&lifted);
+                    slots.push(slot);
                     continue;
                 }
                 match register_project(
@@ -1162,7 +1244,14 @@ pub(crate) async fn scan_commit_impl<R: Runtime>(
 
     // Step 6 — the §6.9 write-access probe per created row, after the
     // commit: the project IS added whatever the verdict (the manual
-    // add's step 5).
+    // add's step 5). The probe covers the whole batch in ONE blocking
+    // task, so its join failure kills every verdict at once — the
+    // typed partial success (D-196): the rows stay committed, the
+    // answer carries `probe_failed`, the verdicts are simply absent.
+    let created_count = slots
+        .iter()
+        .filter(|slot| matches!(slot, CommitSlot::Created(_)))
+        .count();
     let created: Vec<&Project> = slots
         .iter()
         .filter_map(|slot| match slot {
@@ -1170,15 +1259,16 @@ pub(crate) async fn scan_commit_impl<R: Runtime>(
             CommitSlot::Entry(_) => None,
         })
         .collect();
-    let mut warnings: Vec<Option<String>> = Vec::new();
-    if !created.is_empty() {
+    let (warnings, probe_failed) = if created.is_empty() {
+        (Vec::new(), false)
+    } else {
         let targets: Vec<PathBuf> = created
             .iter()
             .map(|project| {
                 Path::new(&project.path).join(probe_target_name(project.scheme, project.base_name))
             })
             .collect();
-        warnings = tauri::async_runtime::spawn_blocking(move || {
+        let joined = tauri::async_runtime::spawn_blocking(move || {
             targets
                 .iter()
                 .map(|target| {
@@ -1189,15 +1279,54 @@ pub(crate) async fn scan_commit_impl<R: Runtime>(
                 })
                 .collect()
         })
-        .await
-        .map_err(db::join_failure_to_app_error)?;
+        .await;
+        probe_verdicts(joined)
+    };
+    let result = commit_result(slots, warnings, probe_failed);
+
+    // Step 7 — one watch refresh for the whole batch, never fatal
+    // (the `project_add_manual` step 6 posture: the rows ARE added
+    // whatever the pass answers, and the next anchor re-converges).
+    // The gate counts CREATED rows, not delivered warnings: a probe
+    // that failed to join still leaves rows to arm the watch over.
+    if created_count > 0
+        && let Err(refused) = file_watch::refresh_after_mutation(&app).await
+    {
+        logging::file_watch_mutation_refresh_degraded(&refused);
     }
-    // The warnings are positional: one slot per created row, in the
-    // order `created` collected them — the same order the
-    // `CommitSlot::Created` slots have in `slots`. A `None` is a
-    // writable row's own verdict and must not be skipped over, or the
-    // next row's warning would land on it (the round-1 review's P1).
-    let added = warnings.len();
+    Ok(result)
+}
+
+/// The post-commit probe's verdicts from its join result (D-196): the
+/// positional warnings — one per created row — and whether the probe
+/// half failed. A failed join keeps the COMMITTED answer honest: the
+/// rows are merged and the command answers `Ok` with `probe_failed`
+/// and empty verdicts (the entries' warnings are `None` because
+/// unchecked), never the plain `Err` that would read as "the commit
+/// failed" while every row is merged. The failure logs once, through
+/// the class-only edge, exactly the fields the failure edge carries.
+fn probe_verdicts(join: Result<Vec<Option<String>>, tauri::Error>) -> (Vec<Option<String>>, bool) {
+    match join {
+        Ok(warnings) => (warnings, false),
+        Err(join_error) => {
+            let degraded = db::join_failure_to_app_error(join_error);
+            logging::scan_commit_probe_degraded(&degraded);
+            (Vec::new(), true)
+        }
+    }
+}
+
+/// The committed answer (D-196): one entry per slot — a created row
+/// rides its own warning positionally, a writable row's `None`
+/// included — plus the probe marker. The warnings arrive in the same
+/// order the `CommitSlot::Created` slots have in `slots`; a skipped
+/// `None` would land the next row's warning on this row (the round-1
+/// review's P1 of the original assembly).
+fn commit_result(
+    slots: Vec<CommitSlot>,
+    warnings: Vec<Option<String>>,
+    probe_failed: bool,
+) -> ScanCommitResult {
     let mut warnings = warnings.into_iter();
     let entries = slots
         .into_iter()
@@ -1206,16 +1335,10 @@ pub(crate) async fn scan_commit_impl<R: Runtime>(
             CommitSlot::Entry(entry) => entry,
         })
         .collect();
-
-    // Step 7 — one watch refresh for the whole batch, never fatal
-    // (the `project_add_manual` step 6 posture: the rows ARE added
-    // whatever the pass answers, and the next anchor re-converges).
-    if added > 0
-        && let Err(refused) = file_watch::refresh_after_mutation(&app).await
-    {
-        logging::file_watch_mutation_refresh_degraded(&refused);
+    ScanCommitResult {
+        entries,
+        probe_failed,
     }
-    Ok(ScanCommitResult { entries })
 }
 
 /// One candidate's result inside the commit's transaction: a typed
@@ -1252,17 +1375,6 @@ fn duplicate_entry(path: &str, existing: &Project) -> ScanCommitEntry {
         .to_owned(),
         project: None,
         existing: Some(ExistingProject::of(existing)),
-    }
-}
-
-/// The `"excluded"` entry: a `project_exclusions` row holds the key
-/// and no project does.
-fn excluded_entry(path: &str) -> ScanCommitEntry {
-    ScanCommitEntry {
-        path: path.to_owned(),
-        outcome: "excluded".to_owned(),
-        project: None,
-        existing: None,
     }
 }
 
@@ -1570,6 +1682,119 @@ mod tests {
         assert!(
             !findings.admits(Path::new(OsStr::from_bytes(b"/scan/repo\xff"))),
             "an unkeyable probe is admitted by nothing"
+        );
+    }
+
+    #[test]
+    fn a_probe_join_failure_answers_the_partial_marker_not_an_error() {
+        // D-196's mapping, fed a REAL join error — a panicking
+        // blocking task, the probe's one realistic failure (release
+        // builds abort before this; in tests the panic is the
+        // deterministic vector). The verdicts are absent and the
+        // marker is on: the committed answer must not become the
+        // plain `Err` that would read as "the commit failed" while
+        // every row is merged. The `Ok` arm is the pass-through: the
+        // delivered verdicts and no marker.
+        let join_error = tauri::async_runtime::block_on(async {
+            tauri::async_runtime::spawn_blocking(|| -> Vec<Option<String>> {
+                panic!("the probe task panicked");
+            })
+            .await
+            .expect_err("a panicked task's join fails")
+        });
+        let (warnings, probe_failed) = probe_verdicts(Err(join_error));
+        assert!(warnings.is_empty(), "a failed join delivers no verdicts");
+        assert!(probe_failed, "the marker rides the degraded answer");
+
+        let delivered = vec![None, Some("folder_not_writable".to_owned())];
+        let (passed, marker) = probe_verdicts(Ok(delivered.clone()));
+        assert_eq!(
+            passed, delivered,
+            "a joined probe passes its verdicts through"
+        );
+        assert!(!marker, "a joined probe sets no marker");
+    }
+
+    #[test]
+    fn the_commit_result_carries_the_probe_marker_with_warnings_aligned() {
+        // The assembly (D-196): each created row rides its OWN
+        // positional warning — the `None` of a writable row must not
+        // be skipped over (the round-1 review's P1) — and
+        // `probe_failed` rides the result, not any entry. With the
+        // marker on, the verdicts are absent and every added row's
+        // warning is `None` because unchecked.
+        let project = |id: &str| eunomia_store::projects::Project {
+            id: id.to_owned(),
+            path: format!("/repos/{id}"),
+            path_key: format!("/repos/{id}"),
+            name: id.to_owned(),
+            label: "PROJE".to_owned(),
+            color: "blue".to_owned(),
+            description: String::new(),
+            state: eunomia_store::projects::ProjectState::Active,
+            added_via: eunomia_store::projects::AddedVia::Scan,
+            sort_order: 1,
+            scheme: eunomia_store::settings::Scheme::A,
+            base_name: eunomia_store::settings::BaseName::AgentsMd,
+            extra_local: eunomia_store::settings::ExtraFile {
+                enabled: false,
+                position: eunomia_store::settings::Position::End,
+            },
+            extra_project: eunomia_store::settings::ExtraFile {
+                enabled: false,
+                position: eunomia_store::settings::Position::End,
+            },
+            last_synced_at: None,
+            last_synced_hash: None,
+            created_at: "2026-11-24T00:00:00.000Z".to_owned(),
+            updated_at: "2026-11-24T00:00:00.000Z".to_owned(),
+            archived_at: None,
+        };
+        let slots = vec![
+            CommitSlot::Created(project("first")),
+            CommitSlot::Entry(ScanCommitEntry {
+                path: "/repos/known".to_owned(),
+                outcome: "already_added".to_owned(),
+                project: None,
+                existing: None,
+            }),
+            CommitSlot::Created(project("second")),
+        ];
+        let warnings = vec![None, Some("folder_not_writable".to_owned())];
+        let result = commit_result(slots, warnings, false);
+        assert!(!result.probe_failed);
+        assert_eq!(result.entries.len(), 3);
+        let first = result.entries[0]
+            .project
+            .as_ref()
+            .expect("the first created row answers added");
+        assert_eq!(
+            first.write_access_warning, None,
+            "the writable row's own verdict"
+        );
+        let second = result.entries[2]
+            .project
+            .as_ref()
+            .expect("the second created row answers added");
+        assert_eq!(
+            second.write_access_warning.as_deref(),
+            Some("folder_not_writable"),
+            "the warning lands on ITS row, not on the earlier one"
+        );
+
+        // The degraded assembly: no verdicts arrived, the marker is
+        // on, every created row's warning is None because unchecked.
+        let slots = vec![CommitSlot::Created(project("first"))];
+        let result = commit_result(slots, Vec::new(), true);
+        assert!(result.probe_failed);
+        assert_eq!(
+            result.entries[0]
+                .project
+                .as_ref()
+                .expect("the committed row still answers added")
+                .write_access_warning,
+            None,
+            "unchecked is not writable — the marker is the distinguishing fact"
         );
     }
 
