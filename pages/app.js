@@ -367,6 +367,12 @@
     return tr
   }
 
+  /* Whether the heading's section holds anything at all (instructions,
+     nested headings — hidden rows count too, they are content). A
+     top-level section with content is not deletable: LIB-033 moves the
+     items to the previous section, and a root has none (owner ruling) */
+  const sectionHasContent = (headingRow) => headingRow.nextElementSibling !== sectionEndAfter(headingRow)
+
   /* New rows join the drag system: the drag listeners are delegated, so
      only the draggable attribute is needed per row */
   const makeRowDraggable = (tr) => {
@@ -391,6 +397,7 @@
       draggedSectionRows = []
       clearDropMark()
       applyFilters()
+      refreshAllHeadingButtons()
     }
 
     /* All rows belonging to the heading's section (heading excluded) */
@@ -721,9 +728,22 @@
     }
     const deleteBtn = row.querySelector('.hbtn--delete')
     if (deleteBtn) {
-      deleteBtn.title = `Delete section ${name}`
+      if (headingLevel(row) === 2 && sectionHasContent(row)) {
+        deleteBtn.disabled = true
+        deleteBtn.title =
+          'A top-level section with content cannot be deleted — there is no previous section to move the items to'
+      } else {
+        deleteBtn.disabled = false
+        deleteBtn.title = `Delete section ${name}`
+      }
       deleteBtn.setAttribute('aria-label', deleteBtn.title)
     }
+  }
+
+  /* Section membership changes (drag, create, section add/delete) move
+     the ground truth of the delete rule — refresh every heading */
+  function refreshAllHeadingButtons() {
+    for (const tr of tbody.querySelectorAll('tr.row-heading')) refreshHeadingButtons(tr)
   }
 
   /* Attaches the three action buttons to a heading row (init + new rows) */
@@ -795,6 +815,7 @@
       } else if (btn.classList.contains('hbtn--rename')) {
         openHeadingDialog({ mode: 'rename', row })
       } else if (btn.classList.contains('hbtn--delete')) {
+        if (btn.disabled) return // stale state guard — must not open
         pendingDeleteHeading = row
         headingDeleteDialog.showModal()
       }
@@ -856,6 +877,8 @@
       } else {
         tbody.append(tr)
       }
+      /* The parent root now holds a child */
+      refreshAllHeadingButtons()
     } else if (st.row) {
       st.row.querySelector('.hname').textContent = name
       st.row.querySelector('.caret-btn').setAttribute('aria-label', `Toggle section ${name}`)
@@ -871,6 +894,8 @@
        join the previous section. Drop the collapse state with it. */
     collapsed.delete(row)
     row.remove()
+    /* The containing root may have lost its last child */
+    refreshAllHeadingButtons()
   })
 
   /* ---------- Bulk assignment operations (§7.4 "UI (bulk operations)",
@@ -2022,6 +2047,8 @@
     }
     for (const input of tr.querySelectorAll('.assign')) updateCellState(input)
     for (const td of tr.querySelectorAll('td.c-cell')) refreshCellIcons(td)
+    /* The target section may have gained its first content */
+    refreshAllHeadingButtons()
   }
 
   function validateEditor() {
