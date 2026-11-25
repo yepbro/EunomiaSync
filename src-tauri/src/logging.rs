@@ -2475,6 +2475,22 @@ pub(crate) fn items_move_failed(error: &AppError) {
     );
 }
 
+/// The `backups_list` command failed (T-125, §10's every-error rule):
+/// the payload is the error's own §7.10 vocabulary, in the
+/// `revisions_list_failed` shape. A successful listing logs nothing —
+/// the tab's reads are not events.
+pub(crate) fn backups_list_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::backups",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "listing a project's backup copies failed"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     //! Behavior tests of the subscriber seam: a real subscriber is built

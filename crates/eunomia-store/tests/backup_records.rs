@@ -1,12 +1,15 @@
 //! Behavior tests for the `backup_records` repository (spec §6.2 DDL,
-//! §7.6 BKP-010, §9.4 phase 2; task T-115).
+//! §7.6 BKP-010, §9.4 phase 2; task T-115, the listing added by
+//! T-125).
 //!
 //! The tests run against a real database opened through `open_db` and
 //! migrated with `run_migrations` (the `tests/sync_runs.rs` pattern)
-//! and drive the repository through its public API — [`insert`] and
-//! [`last_checked`] — reading the `backup_records` table back with
-//! this module's own SQL: the table IS the specified artifact (§6.2),
-//! so its cells are the observable behavior.
+//! and drive the repository through its public API — [`insert`],
+//! [`last_checked`], `all_paths` (T-332's orphan-report claim set)
+//! and [`list_for_project`] (T-125's per-project listing) — reading
+//! the `backup_records` table back with this module's own SQL: the
+//! table IS the specified artifact (§6.2), so its cells are the
+//! observable behavior.
 //!
 //! Pinned behavior:
 //!
@@ -28,6 +31,12 @@
 //!   statuses (`pruned`/`missing`/`discarded` are history, not
 //!   copies), scopes strictly by the "project and file" pair, and
 //!   answers `None` honestly when the pair has no checked copy;
+//! * the BKP-004 listing (T-125): `list_for_project` answers one
+//!   project's whole row history — every §6.2 CHECK status, rows
+//!   never deleted (§6.4) — newest first (D-122's ordering, the id
+//!   tiebreak included), scoped strictly to the caller's project,
+//!   `Ok(vec![])` for a project without rows, and the typed `Member`
+//!   refusal for a corrupt status cell (D-039);
 //! * the T-114 handshake, end to end: rows written through THIS
 //!   writer over REAL files in a real data directory are pruned by
 //!   `backup_retention::apply` — the new writer and the shipped
@@ -41,7 +50,7 @@ use eunomia_core::backup_name::{BackupTime, backup_relative_path};
 use eunomia_core::project::{BaseName as CoreBaseName, ProjectId, Scheme as CoreScheme};
 use eunomia_store::backup_records::{
     BackupRecordStatus, BackupRecordsError, CheckedCopy, NewBackupRecord, all_paths, insert,
-    last_checked,
+    last_checked, list_for_project,
 };
 use eunomia_store::backup_retention;
 use eunomia_store::projects::{AddedVia, NewProject};
@@ -793,5 +802,206 @@ fn the_retention_service_prunes_rows_written_by_this_repository() {
     assert!(
         data_dir.join(&statuses[2].1).exists(),
         "the newest file stays"
+    );
+}
+
+// ---- the per-project listing (T-125, BKP-004) --------------------------
+
+/// One record with an explicit `created_at` cell: unlike
+/// [`sample_record`] (the fixed writer-side literal), the listing's
+/// timeline needs row-distinct DB-002 stamps so `created_at DESC` is
+/// observable on its own, not only through the id tiebreak.
+fn stamped_record<'a>(
+    project_id: &'a str,
+    run_id: &'a str,
+    source_path: &'a str,
+    backup_path: &'a str,
+    sha256_hex: &'a str,
+    status: BackupRecordStatus,
+    created_at: &'a str,
+) -> NewBackupRecord<'a> {
+    NewBackupRecord {
+        project_id,
+        sync_run_id: Some(run_id),
+        source_path,
+        backup_path,
+        size_bytes: sha256_hex.len() as i64,
+        sha256_hex,
+        status,
+        created_at,
+    }
+}
+
+#[test]
+fn list_for_project_returns_every_status_newest_first_and_scoped() {
+    // The Backups tab's read (BKP-004): the row set is the project's
+    // whole `backup_records` history — every §6.2 CHECK status, rows
+    // never deleted (§6.4) — newest first by the D-122 ordering, and
+    // strictly scoped to the caller's project.
+    let (conn, _guard, _data) = records_db("list");
+    let project = seed_project(&conn, 1);
+    let other = seed_project(&conn, 2);
+    let run = seed_run(&conn, &project);
+    let run_two = seed_run(&conn, &other);
+    let source = "/repos/repo-1/AGENTS.md";
+    // One row per status on a real timeline: stamp 4 is newest, 1 the
+    // oldest. The INSERT order mixes the timeline (3 first, 2 last), so
+    // an answer ordered by insertion is caught.
+    let wanted: [(usize, BackupRecordStatus, &str); 4] = [
+        (4, BackupRecordStatus::Ok, "2026-11-21T12:00:04.000Z"),
+        (3, BackupRecordStatus::Pruned, "2026-11-21T12:00:03.000Z"),
+        (2, BackupRecordStatus::Missing, "2026-11-21T12:00:02.000Z"),
+        (1, BackupRecordStatus::Discarded, "2026-11-21T12:00:01.000Z"),
+    ];
+    let inserted = [
+        (3, BackupRecordStatus::Pruned, "2026-11-21T12:00:03.000Z"),
+        (4, BackupRecordStatus::Ok, "2026-11-21T12:00:04.000Z"),
+        (1, BackupRecordStatus::Discarded, "2026-11-21T12:00:01.000Z"),
+        (2, BackupRecordStatus::Missing, "2026-11-21T12:00:02.000Z"),
+    ];
+    for (n, status, created_at) in inserted {
+        insert(
+            &conn,
+            &stamped_record(
+                &project,
+                &run,
+                source,
+                &agents_path(&project, "Project 1", n, stamp_time(n)),
+                &digest(n),
+                status,
+                created_at,
+            ),
+        )
+        .expect("the fixture record should insert");
+    }
+    // A foreign project's row: it must not leak into the listing.
+    insert(
+        &conn,
+        &stamped_record(
+            &other,
+            &run_two,
+            "/repos/repo-2/AGENTS.md",
+            &agents_path(&other, "Project 2", 9, stamp_time(9)),
+            &digest(9),
+            BackupRecordStatus::Ok,
+            "2026-11-21T12:00:09.000Z",
+        ),
+    )
+    .expect("the foreign record should insert");
+
+    let rows = list_for_project(&conn, &project).expect("the listing should work");
+    assert_eq!(
+        rows.iter().map(|row| row.status).collect::<Vec<_>>(),
+        wanted.map(|(_, status, _)| status).to_vec(),
+        "every status is listed, newest first (created_at DESC)"
+    );
+    for (row, (n, _, created_at)) in rows.iter().zip(wanted.iter()) {
+        assert_eq!(row.project_id, project);
+        assert_eq!(row.sync_run_id, Some(run.clone()));
+        assert_eq!(row.source_path, source);
+        assert_eq!(
+            row.backup_path,
+            agents_path(&project, "Project 1", *n, stamp_time(*n))
+        );
+        assert_eq!(row.size_bytes, digest(*n).len() as i64);
+        assert_eq!(row.sha256, digest(*n));
+        assert_eq!(row.created_at, *created_at);
+        assert_uuidv7_text(&row.id);
+    }
+}
+
+#[test]
+fn list_for_project_breaks_the_same_stamp_tie_by_id_desc() {
+    // D-122's tiebreak on the listing's side: same `created_at`, and
+    // the LATER insert (a greater UUIDv7, D-031's creation order)
+    // is the newer row.
+    let (conn, _guard, _data) = records_db("list-tie");
+    let project = seed_project(&conn, 1);
+    let run = seed_run(&conn, &project);
+    let source = "/repos/repo-1/AGENTS.md";
+    let time = stamp_time(1);
+    let first = insert(
+        &conn,
+        &sample_record(
+            &project,
+            &run,
+            source,
+            &agents_path(&project, "Project 1", 1, time),
+            &digest(1),
+            BackupRecordStatus::Ok,
+        ),
+    )
+    .expect("the first record should insert");
+    let second = insert(
+        &conn,
+        &sample_record(
+            &project,
+            &run,
+            source,
+            &agents_path(&project, "Project 1", 2, time),
+            &digest(2),
+            BackupRecordStatus::Ok,
+        ),
+    )
+    .expect("the second record should insert");
+    assert!(second > first, "UUIDv7 TEXT ids sort by creation");
+
+    let rows = list_for_project(&conn, &project).expect("the listing should work");
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec![second.as_str(), first.as_str()],
+        "the later insert wins the same-stamp tie"
+    );
+}
+
+#[test]
+fn list_for_project_answers_empty_for_a_project_without_records() {
+    let (conn, _guard, _data) = records_db("list-empty");
+    let project = seed_project(&conn, 1);
+
+    let rows = list_for_project(&conn, &project).expect("the listing should work");
+    assert_eq!(rows, Vec::new(), "no rows is the honest empty list");
+}
+
+#[test]
+fn list_for_project_refuses_a_corrupt_status_cell() {
+    // D-039's corrupt-cells policy on the read path: a status cell
+    // outside the CHECK (a newer app version or tampering) is the
+    // typed `Member` refusal naming the column — never a guess. The
+    // schema's own CHECK refuses the tampering write, so the cell is
+    // planted with `ignore_check_constraints` for the duration of the
+    // statement (the `sync_runs` suite's corrupt-cell pattern) — the
+    // read under test never bypasses anything.
+    let (conn, _guard, _data) = records_db("list-corrupt");
+    let project = seed_project(&conn, 1);
+    let run = seed_run(&conn, &project);
+    let id = insert(
+        &conn,
+        &sample_record(
+            &project,
+            &run,
+            "/repos/repo-1/AGENTS.md",
+            &agents_path(&project, "Project 1", 1, stamp_time(1)),
+            &digest(1),
+            BackupRecordStatus::Ok,
+        ),
+    )
+    .expect("the fixture record should insert");
+    conn.pragma_update(None, "ignore_check_constraints", true)
+        .expect("relaxing the CHECK for the tampering write should work");
+    conn.execute(
+        "UPDATE backup_records SET status = 'pending' WHERE id = ?1",
+        [&id],
+    )
+    .expect("tampering with the status cell should apply");
+    conn.pragma_update(None, "ignore_check_constraints", false)
+        .expect("restoring the CHECK should work");
+
+    assert_eq!(
+        list_for_project(&conn, &project),
+        Err(BackupRecordsError::Member {
+            column: "status",
+            found: "pending".to_owned(),
+        })
     );
 }

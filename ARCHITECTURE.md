@@ -61,7 +61,7 @@ crates/
     src/write_access.rs        #   §9.4 preflight: write-rights probe (tmp create, read-only) (working)
   eunomia-store/               # Database layer (SQLite), no Tauri dependency
     src/action_log.rs          #   Journal repository: LOG-001…005 + LOG-006 cleanup (working)
-    src/backup_records.rs      #   Per-run backup records + the BKP-010 dedup lookup (working)
+    src/backup_records.rs      #   Per-run backup records, the BKP-010 dedup lookup, the BKP-004 listing (working)
     src/backup_retention.rs    #   BKP-003 retention: newest N copies per pair (working)
     src/build_snapshot.rs      #   ALG-001 snapshot read: one read transaction (SYS-005) (working)
     src/data_sets.rs           #   Deterministic benchmark data sets M and L (working)
@@ -81,6 +81,7 @@ src-tauri/
   src/availability.rs      # Availability service: re-probes + state://project-availability (working)
   src/assignments.rs       # assignment_set / assignments_bulk / assignment_set_custom (working)
   src/backup_orphans.rs    # Orphaned .bak report at Db::open (read-only, T-332) (working)
+  src/backups.rs           # backups_list: the Backups tab read (BKP-004, T-125) (working)
   src/commands.rs          # IPC commands, the §7.10 registered set (working)
   src/config.rs            # config.toml load-or-create; broken file falls back to defaults (working)
   src/data_dirs.rs         # Data-directory layout + SEC-007 Unix modes (working)
@@ -165,7 +166,7 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is thirty-eight commands — the §7.10 names that
+   The registered set is thirty-nine commands — the §7.10 names that
    are implemented so far, matching the `mode.spec` surface list. It comprises the
    recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
@@ -301,7 +302,17 @@ Rust commands are registered through `tauri-specta`:
    History module's `revisions_list`/`revision_get` (T-331,
    `src-tauri/src/revisions.rs`) read instruction+variant summaries
    newest-first without materializing snapshots, or one full revision by id,
-   through the store's typed history repository. Every further command name is fixed by §7.10
+   through the store's typed history repository — and the Backups
+   module's `backups_list` (T-125, `src-tauri/src/backups.rs`,
+   BKP-004): one project's whole `backup_records` history — date,
+   file, size, sync run id and status, every §6.2 CHECK status (§6.4
+   keeps the history as status), newest
+   first (D-122's ordering) — through the store's per-project read
+   (`backup_records::list_for_project`) on one `Db::run` read
+   transaction; an unknown project id is the typed `E_VALIDATION`
+   refusal, a known project without rows the honest empty list, and
+   the no-database answer is the `E_DB_LOCKED`/`NoDatabase` refusal
+   the other read commands share. Every further command name is fixed by §7.10
    and belongs to its own task.
 3. On debug builds the specta `Builder` exports `src/bindings.ts`
    (`specta_typescript::Typescript`). The file is **committed** so the

@@ -12,6 +12,7 @@ import type {
   AddedProjectWire,
   AssignmentRecordWire,
   AssignmentTargetWire,
+  BackupCopyRecordWire,
   DbBackupInfo,
   ExclusionEntry,
   ProjectAvailabilityEventWire,
@@ -100,6 +101,15 @@ export type MockState = {
   assignments: MockAssignmentRow[]
   /** LIB-026/027 history rows written by the mock library commands. */
   revisions: MockRevisionRow[]
+  /**
+   * The §6.2 `backup_records` rows (T-125, BKP-004): the project
+   * Backups tab's listing. Seeded deterministically per project (the
+   * fixture era's stamps, mixed statuses, one run-orphaned `None`
+   * link — §6.4's run cleanup leaves those honestly); no mock command
+   * writes them yet (the `syncRun` stand-in does not model phase 2),
+   * so tests edit the rows directly, exactly like the §5.7 markings.
+   */
+  backupRecords: MockBackupRecordRow[]
   /** The journal's next autoincrement id (§6.2 `action_log.id`). */
   nextActivityId: number
   /**
@@ -179,6 +189,17 @@ export type MockAssignmentRow = {
 
 /** One stored history row; the wire shape is already the table's shape. */
 export type MockRevisionRow = RevisionRecordWire
+
+/**
+ * One `backup_records` row in the mock store (§6.2 columns the
+ * `backups_list` wire reaches): the mutable twin of the store's
+ * `BackupRecord` — the wire shape plus the scoping `projectId` the
+ * wire deliberately omits (D-193: the project is the scope, not
+ * per-row data). Ids and run ids derive from the project id (the
+ * fixture world has no runs table — the wire row is the whole claim),
+ * and the sizes are plain fixture numbers.
+ */
+export type MockBackupRecordRow = BackupCopyRecordWire & { projectId: string }
 
 /** Maps a mock assignment row to the generated command DTO. */
 export function toAssignmentRecord(row: MockAssignmentRow): AssignmentRecordWire {
@@ -447,6 +468,70 @@ function toExclusionEntry(row: ExclusionFixture): ExclusionEntry {
   }
 }
 
+/** Maps a mock backup-record row to the `backups_list` wire shape
+ * (the store row keeps the scoping key the wire deliberately omits —
+ * D-193's ruling: the project is the scope, not per-row data). */
+export function toBackupCopyRecord(row: MockBackupRecordRow): BackupCopyRecordWire {
+  return {
+    id: row.id,
+    sync_run_id: row.sync_run_id,
+    source_path: row.source_path,
+    backup_path: row.backup_path,
+    size_bytes: row.size_bytes,
+    status: row.status,
+    created_at: row.created_at,
+  }
+}
+
+/**
+ * Builds the deterministic per-project backup-record rows (T-125,
+ * BKP-004): one row per §6.2 CHECK status on a fixed timeline, oldest
+ * to newest — the run-orphaned `discarded` row (§6.4's run cleanup
+ * swept its run, hence the `null` link), the `missing` copy, the
+ * limit-`pruned` row, the live `ok` copy. Stamps sit in the fixture
+ * era (one second per row, offset past every other table's slots),
+ * ids and run ids derive from the project id, and the sizes are plain
+ * distinct fixture numbers. Every project gets its history — the
+ * read is state-agnostic (DB-014), archived rows included.
+ */
+function backupRecordsFromProjects(projects: readonly MockProjectRow[]): MockBackupRecordRow[] {
+  const rows: MockBackupRecordRow[] = []
+  projects.forEach((project, projectIndex) => {
+    const slug = project.path.split('/').pop() ?? 'project'
+    const statuses: BackupCopyRecordWire['status'][] = ['discarded', 'missing', 'pruned', 'ok']
+    statuses.forEach((status, n) => {
+      const stamp = isoUtc(BASE_TS_MS + (300 + projectIndex * 4 + n) * 1000)
+      rows.push({
+        id: `${project.id}-bak-${n}`,
+        // The oldest row's run was swept by the §6.4 cleanup: the FK's
+        // SET NULL leaves the honest `null` link.
+        sync_run_id: n === 0 ? null : `${project.id}-run-${n}`,
+        source_path: `${project.path.replace(/\/$/, '')}/AGENTS.md`,
+        // The §5.5 layout name with its compact UTC stamp derived from
+        // the row's own DB-002 stamp (BKP-001's `YYYYMMDDTHHMMSSmmmZ`
+        // shape), so the name and the record agree about when the copy
+        // was made — the store module's invariant, mock twin.
+        backup_path: `backups/${project.id}__${slug}/AGENTS.md.${compactStamp(stamp)}.${`${n}`.padStart(8, '0')}.bak`,
+        size_bytes: 64 * (n + 1),
+        status,
+        created_at: stamp,
+        projectId: project.id,
+      })
+    })
+  })
+  return rows
+}
+
+/**
+ * The §5.5 backup name's compact UTC stamp (BKP-001:
+ * `YYYYMMDDTHHMMSSmmmZ`), derived from the row's DB-002 stamp —
+ * the mock twin of the core builder's time component, so the
+ * name and the record never disagree about the copy's instant.
+ */
+function compactStamp(stamp: string): string {
+  return stamp.replace(/[-:.]/g, '')
+}
+
 let state: MockState | undefined
 
 /**
@@ -468,8 +553,9 @@ export function mockState(): MockState {
 export function resetMockState(profile: FixtureProfile): MockState {
   const bundle = generateFixtures(profile)
   const settings = DEFAULT_SETTINGS.map((s) => ({ ...s }))
+  const projects = rowsFromFixtures(bundle, settings)
   const next: MockState = {
-    projects: rowsFromFixtures(bundle, settings),
+    projects,
     settings,
     activity: generateActivityEntries(bundle.projects, profile),
     backups: generateDbBackups(profile),
@@ -519,6 +605,7 @@ export function resetMockState(profile: FixtureProfile): MockState {
       }
     }),
     revisions: [],
+    backupRecords: backupRecordsFromProjects(projects),
     nextActivityId: 1_000_000,
     scanning: false,
     scanCancelled: false,

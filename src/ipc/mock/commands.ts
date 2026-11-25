@@ -61,6 +61,7 @@ import {
   mockState,
   toAddedProject,
   toAssignmentRecord,
+  toBackupCopyRecord,
   toColumnEntry,
   toVariantRecord,
   type MockAssignmentRow,
@@ -2636,6 +2637,42 @@ export const mockCommands: IpcCommands = {
     )
     journal('variant.restored', { entityType: 'variant', entityId: row.id })
     return toVariantRecord(instruction, row)
+  },
+
+  // -------------------------------------------------------------------------
+  // The Backups read (§7.10 Backups module, T-125, BKP-004): the mock
+  // twin of the Rust `backups_list` — the same typed unknown-id
+  // refusal, the same newest-first order (D-122's ordering with the id
+  // tiebreak), over the seeded `backupRecords` rows. Read-only: no
+  // journal entry, no row change. Known limit, deliberate (D-108's
+  // posture): no mock command writes backup rows (the `syncRun`
+  // stand-in does not model phase 2), so tests edit the rows
+  // directly.
+  // -------------------------------------------------------------------------
+
+  /**
+   * `backups_list` (§7.10, BKP-004): one project's whole backup-copy
+   * history — date, file, size, sync run and status — every §6.2
+   * CHECK status (§6.4 keeps the history as status), newest first. An
+   * unknown project id is the typed `E_VALIDATION` refusal (the
+   * `revisions_list` twin: a caller bug, never silently "no
+   * backups"); a known project with no rows is the honest empty list.
+   */
+  async backupsList(projectId) {
+    const state = mockState()
+    if (!state.projects.some((row) => row.id === projectId)) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'project_id',
+        reason: 'no project has this id',
+      })
+    }
+    return state.backupRecords
+      .filter((row) => row.projectId === projectId)
+      .sort(
+        (left, right) =>
+          right.created_at.localeCompare(left.created_at) || right.id.localeCompare(left.id),
+      )
+      .map(toBackupCopyRecord)
   },
 }
 

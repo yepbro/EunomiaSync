@@ -192,6 +192,13 @@ pub(crate) mod assignments;
 // `revisions_list` and `revision_get` over the store's version repository.
 pub(crate) mod revisions;
 
+// The Backups module's project-copy listing (spec §7.10, BKP-004,
+// T-125): `backups_list` — one project's whole `backup_records`
+// history, every §6.2 CHECK status (§6.4 keeps the history as
+// status), newest first, through the store's
+// per-project read on the one `Db::run` transaction executor.
+pub(crate) mod backups;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -229,8 +236,10 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // module's `exclusions_list`/`exclusion_remove` (T-078), the
         // Projects module's `projects_reorder` (T-080), the
         // Projects module's `scan_start`/`scan_cancel`/`scan_commit`
-        // (T-076/T-077) and the Sync module's `sync_run` (T-118,
-        // D-138). Every later command task lists its own §7.10 names here.
+        // (T-076/T-077), the Sync module's `sync_run` (T-118,
+        // D-138) and the Backups module's `backups_list` (T-125,
+        // D-193 — the project-settings "Backups" tab's read). Every
+        // later command task lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
         // commands that take an `AppHandle`), so the registration pins
         // the concrete runtime of the shipped app; `markdown_preview`
@@ -274,6 +283,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             assignments::assignments_bulk::<tauri::Wry>,
             revisions::revision_get::<tauri::Wry>,
             revisions::revisions_list::<tauri::Wry>,
+            backups::backups_list::<tauri::Wry>,
         ])
         // The registered §7.10 events: `state://project-availability`
         // (T-079, D-09/DB-032), `state://dirty` (T-101,
@@ -968,6 +978,9 @@ mod assignments_tests;
 
 #[cfg(test)]
 mod revisions_tests;
+
+#[cfg(test)]
+mod backups_tests;
 
 #[cfg(test)]
 mod tests {

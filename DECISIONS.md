@@ -23231,3 +23231,245 @@ close it structurally). The cards are the tracking unit; this line is
 the D-record duplicate the board rule asks for. Written as a service
 commit in main after the merge — md-only, no suites under the md-only
 regime; prettier and the pre-commit hook gate it.
+
+### D-193 — T-125: the `backups_list` contract — the "sync run number" is the run's id, all four statuses are listed, and the row shape is every column the tab can reach — 2026-11-24
+
+Problem: T-125 lands spec §7.10's Backups-module read (BKP-004,
+§7.6): in project settings, the "Backups" tab shows "the date, file,
+size, and sync run number"; the card's field list adds "status". Four
+readings were open before any code: what a "sync run number" is (the
+`sync_runs` schema of §6.2 has no numeric column — `id` is a UUIDv7
+TEXT), which of the four §6.2 CHECK statuses a "list of copies" lists,
+the row's ordering, and the shape of the "file" field.
+
+Question and chosen readings (recorded before implementation, Rule 1):
+
+1. **"Sync run number" = `sync_run_id`, the run's UUIDv7 TEXT id.**
+   §6.2's `sync_runs` carries no ordinal, and the wire already names a
+   run this way — `ActivityEntry.sync_run_id` is "the sync run
+   involved" (T-027's precedent). A derived per-project ordinal was
+   declined: the §6.4 run cleanup keeps the last 500 runs, so any
+   numbering derived from surviving rows silently renumbers under
+   retention, and nothing in the store owns such a column. The field
+   is `Option<String>`: the `backup_records.sync_run_id` foreign key is
+   `ON DELETE SET NULL`, and §6.4's run cleanup can legitimately
+   orphan a row whose run was swept — `None` is the honest cell, not
+   an error.
+2. **All four statuses are listed.** §6.4's "Backup | File deleted by
+   limit | the record gets the `pruned` status" and "rows are never
+   deleted — §6.4 keeps the history as status" make the table the
+   copy's lifecycle log, and the card's own field list includes
+   "status": a list filtered to `ok` would carry a constant column in
+   v1 (§10's `missing` detection has no v1 producer), and S11's "the
+   copy is missing on disk (status `missing`)" requires non-`ok` rows
+   to survive into the P1 restore's pick list. The D-122 ok-only set
+   is the dedup/retention window's rule over LIVE copies, not the
+   visible history's.
+3. **Ordering: newest first — `created_at DESC, id DESC`.** The same
+   "newest" D-122 fixed for the retention window and the BKP-010 dedup
+   lookup (the same-millisecond id tiebreak included), and the order
+   every house list already serves (activity, revisions, DB copies).
+4. **The row shape: every `backup_records` column the tab can reach
+   except `project_id` and `sha256`.** `created_at` is BKP-004's date
+   (DB-002 UTC), `source_path` is the "file" (the §9.4 phase-1
+   RESOLVED target path — one stable spelling per file, D-122),
+   `backup_path` is the copy's own §5.5 relative layout name
+   (BKP-001's "the backup name shows the project, file, and time" —
+   and the P1 restore's pick handle), `size_bytes` is the
+   BKP-010-checked size, `status` the stored literal, `id` the row's
+   own UUIDv7 id (the house row-DTO handle), `sync_run_id` reading 1.
+   `project_id` is deliberately absent: the list is scoped by the
+   caller's project, so the column is the scope, not per-row data —
+   the `RevisionSummaryRecord` precedent of omitting what the view
+   cannot vary. `sha256` is deliberately absent as well: the tab shows
+   no digest — the BKP-010 check is Rust-side, and the P1 restore
+   re-hashes the copy it reads, so the column is the dedup's input,
+   not the tab's data. `size_bytes` is `u32` saturated at `u32::MAX`
+   on the wire (D-049, the `DbBackupInfo` decision; a real target
+   file never approaches 4 GiB).
+5. **Scoping: unknown project id = the typed `E_VALIDATION` refusal**
+   (field `project_id`, reason "no project has this id") — the
+   `revisions_list` precedent: an unknown id is a caller bug, never
+   silently "no backups". A KNOWN project with no rows answers `[]`
+   (the tab's empty state). The validation lives in the command layer
+   through `projects::get` (a projects fact, not a backup-records
+   fact — the store read stays a pure per-project keying, the
+   `last_checked` shape), and the read is state-agnostic: an archived
+   project's history lists too (DB-014 keeps an archived project's
+   data; a read never branches on state).
+6. **Volume: the whole history, no paging.** The tab loads the
+   project's every row in one answer — BKP-004 names no page or limit
+   (the card's field list is date, file, size, run, status), and the
+   row count grows one row per copy ever made (rows are never
+   deleted, §6.4), so the payload is bounded by the project's real
+   sync volume, not by a `MAX_PAGE_LIMIT`. `activity_list` paginates
+   because the journal mixes every project's events; this read is one
+   project's copy history, the retention's own scale. If a real
+   project ever makes the tab heavy, paging is a future task with its
+   own card.
+7. **No-database answer:** the `answer_honestly_without_a_database`
+   battery's refusal — `E_DB_LOCKED` with `details.os_kind
+"NoDatabase"` from `managed_db`, exactly the history reads' posture
+   (T-331).
+
+Solution: `eunomia_store::backup_records::list_for_project` (the
+store's per-project read, joined to the caller's transaction, statuses
+decoded through `BackupRecordStatus::from_member` — a corrupt cell is
+the typed `Member` refusal, D-039) + `src-tauri/src/backups.rs`
+(`backups_list`, the T-331 revisions module shape: one `Db::run` read
+transaction, write nothing, journal nothing) registered through
+`collect_commands!` — the thirty-ninth command. Frontend: the
+regenerated `src/bindings.ts`, the mock twin over a seeded
+`backupRecords` store (deterministic fixture-era rows, mixed statuses,
+one run-orphaned `None`), and the `mode.spec` surface pin at 39 names.
+Docs: ARCHITECTURE.md's count and IPC list, the manual-smoke
+registered-command list, this entry.
+
+Tests: the store half in `tests/backup_records.rs` (the house split)
+— `list_for_project_returns_every_status_newest_first_and_scoped`
+(the four CHECK statuses on a real DB-002 timeline with the insert
+order mixed, every column asserted, the foreign project's row
+absent), `list_for_project_breaks_the_same_stamp_tie_by_id_desc`
+(D-031's creation-order tiebreak), the honest empty answer, and the
+corrupt-cell `Member` refusal (planted with `ignore_check_constraints`,
+the `sync_runs` suite's pattern). The command half in
+`src-tauri/src/backups_tests.rs` (mock IPC over a real migrated
+database): the content test pins every wire field of the row shape —
+typed asserts plus the raw-JSON key set (exactly the seven BKP-004
+columns), the four-status set, the newest-first order, the
+run-orphaned `None` link (seeded by sweeping the run, the FK's own
+SET NULL), the `u32::MAX` saturation arm, and that nothing is
+journaled; the refusal/empty/archived test pins the typed
+`E_VALIDATION` (field + reason), the `[]` answer, and DB-014's
+state-agnostic read; the no-database battery pins
+`E_DB_LOCKED`/`NoDatabase`; the registration pin counts
+`backups::backups_list` once in `lib.rs`; and the mapping test holds
+the wire row equal to the store row field by field. The mock twin in
+`src/ipc/mock/commands.spec.ts` pins the seeded world's order,
+fields, the archived project's rows, the refusal, the empty answer
+and the read-only posture. Every new test was mutation-verified
+(rule 4, each restored byte-for-byte): the ordering flipped ASC →
+the two order tests red; the scoping `WHERE` dropped → the scoping
+test red; the corrupt-cell decode made a guess (`unwrap_or(Ok)`) →
+the Member test red; the command's project validation removed → the
+unknown-id test red; the status mapped to a constant → two command
+tests red; the size's `u32::MAX` fallback zeroed → the saturation
+assert red; the mock's sort flipped → the mock test red; the mock's
+validation removed → the mock test red.
+
+Docs: ARCHITECTURE.md — the count thirty-nine, the module-table row
+`src/backups.rs`, the store-tree row for `backup_records.rs`'s third
+read, and the IPC-contract clause after the History reads.
+manual-smoke.md's registered-command list gains `backups_list`
+(T-125). The spec itself needed no change: §7.10's Backups row
+already names the command; this task makes it true.
+
+Round-1 review (deepseek-v4.1-flash, report
+`.opencode/reviews/t125-prompt-r1.md` after its `--- REPORT ---`
+marker — the CLI's stdout copy ended with a transport ECONNRESET
+after the report was written, so the prompt file is the report's
+landing spot): **APPROVE — no P0/P1, 3×P2, 5×P3, all eight taken.**
+
+- P2-1 (taken): ruling 4 claimed one omission and made two —
+  `sha256` was also dropped without a word. The ruling now names it:
+  the tab shows no digest; the BKP-010 check is Rust-side and the P1
+  restore re-hashes the copy, so the column is the dedup's input, not
+  the tab's data.
+- P2-2 (taken): ruling 1 cited "the D-030 same reading" — D-030 is
+  the `open_db`/DB-001 record and rules nothing about nullable
+  links. The parenthetical is gone; the assertion stands on the
+  schema's own FK action.
+- P2-3 (taken): the listing's volume was the one open reading
+  D-193 had not ruled (every other user-facing list paginates).
+  Ruling 6 now records the chosen reading: the whole history in one
+  answer — BKP-004 names no page or limit, the row count is bounded
+  by the project's real sync volume, and paging is a future card if
+  a real project ever makes the tab heavy.
+- P3-1 (taken): three "every §6.4 status" wordings misattributed the
+  status set — the vocabulary is §6.2's CHECK, §6.4's history-as-
+  status is WHY all are listed. Fixed in `lib.rs`'s module comment,
+  the mock command's doc and ARCHITECTURE.md's IPC clause.
+- P3-2 (taken): the store suite's header still described the T-115
+  API pair and had no listing bullet (nor `all_paths`). The header
+  now names all four entry points and pins the listing's contract.
+- P3-3 (taken): the raw-row constructor sat on the public
+  `BackupRecord` impl — the opposite of the shape its own comment
+  cites. `from_row` now lives under `impl RawBackupRecord`.
+- P3-4 (taken): the mock test's order could ride on the id tiebreak
+  alone — only a regex checked `created_at`. The stamps are pinned
+  literally now (the seed's own formula, `isoUtc(BASE_TS_MS +
+(300 + n) * 1000)`), so a stamp-equality regression goes red.
+- P3-5 (taken): both fixture families built hand-made §5.5 names
+  with a 15-digit time field, disagreeing with the record's stamp —
+  the very invariant the module pins. The Rust command suite now
+  builds every `backup_path` through the real
+  `eunomia_core::backup_name::backup_relative_path` (the store
+  suite's D-122 discipline) with the record's own second, bundled
+  into a `SeedRow` (the param count had also crossed clippy's
+  8-argument line); the mock derives the compact stamp from the
+  row's own DB-002 stamp (`compactStamp`), 17 digits, and the spec
+  asserts the derived shape.
+
+Checks after the fixes, all exit 0: `cargo fmt --check`;
+`cargo clippy --workspace --all-targets -- -D warnings`;
+`cargo nextest run --workspace --test-threads=4` (**1840/1840**);
+`pnpm test` (**354/354**); `pnpm run format:check`; `pnpm run lint`;
+`pnpm run typecheck`. The new doc-test check
+(`cargo test --doc --workspace`) is red at exactly one spot —
+`eunomia-core/src/snapshot.rs`'s `BuildSnapshot` doc-test, the
+breakage D-195 landed in main to fix (main is at `233f2f1`, my base
+748c7de predates it, and this diff touches no `eunomia-core` file —
+the failure is the base's, absorbed by the landing rebase, not by
+this branch).
+
+Round-2 review (hy4-flash-free — the chain's next different model;
+report `.opencode/reviews/t125-prompt-r2.md` after its `--- REPORT ---`
+marker, stdout copy `.opencode/reviews/t125-round2-report.md`):
+**APPROVE — no P0/P1/P2, 3×P3, all three taken.** The reviewer
+re-verified the whole amended diff independently (the command's
+contract, the one read transaction, the seven-field row, the ordering,
+the status set, the scoping and no-database answers, the mock twin,
+the docs' counts and pins, and the test audit — every section "checks
+out"). The three findings are documentation nits, each verified in
+the tree before the fix:
+
+- P3-1 (taken): `lib.rs`'s big registration comment above
+  `collect_commands!` still enumerated 38 of the 39 commands — the
+  Backups clause was missing while the comment claims to list them.
+  The comment now names the Backups module's `backups_list`
+  (T-125, D-193) beside `sync_run`.
+- P3-2 (taken): the ARCHITECTURE.md IPC sentence was a fragment —
+  "and the no-database answer the `E_DB_LOCKED`/`NoDatabase`
+  refusal" lacked its verb; it now reads "…the no-database answer
+  **is** the … refusal".
+- P3-3 (taken): the store test's fixture comment said "the INSERT
+  order mixes the timeline (3 first, 1 last)" while the array's last
+  element is `n = 2`; the comment now says "2 last".
+
+The review phase is complete after these fixes (no third round).
+Comment-and-markdown-only changes; the batteries re-run green and the
+doc-test caveat is unchanged (the base's `snapshot.rs` breakage,
+absorbed by the landing rebase per D-195, not this branch).
+
+**Landing addendum (same task, 2026-11-25; rebase onto `233f2f1`).**
+The landing rebase onto the CI-fix commit was the expected clean
+mechanical pick-up: no code file overlapped (snapshot.rs/schema_v3
+untouched by this diff), and the one conflict was the DECISIONS.md
+tail itself — main's D-195 entry and this D-193 are both clean tail
+appends, and the union keeps both (D-195 first, D-193 after; a
+missing blank line between the glued sides was restored before the
+continue). The rebase absorbs D-195's base fixes under this branch:
+the doc-test chain that was red on the old base at exactly
+`snapshot.rs`'s `BuildSnapshot` doctest is now green on this tree —
+`cargo test --doc --workspace` runs **98/98** — closing the caveat
+the round-2 addendum recorded. Rebased checks, all exit 0:
+`cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D
+warnings`; `cargo nextest run --workspace --test-threads=4`
+(**1840/1840**); `cargo test --doc --workspace` (**98/98**);
+`pnpm test` (**354/354**); `pnpm run format:check`; `pnpm run lint`;
+`pnpm run typecheck`. Everything stays folded into the single T-125
+commit (one ahead of `233f2f1`, clean tree); no push, merge or board
+operation. Sibling note for the later union: T-108 and the flash
+session still fly from the old base — their landing rebes absorb
+this commit and bump the shared counts (collect_commands! 39+,
+logging tail, bindings regeneration, mode.spec surface) once.

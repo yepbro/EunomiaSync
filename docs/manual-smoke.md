@@ -271,8 +271,9 @@ instruction lifecycle
 `variant_delete`/`variant_restore`, the structure commands
 `heading_create`/`heading_update`/`heading_delete`/`items_move`, the
 assignment commands `assignment_set`/`assignment_set_custom`/
-`assignments_bulk` (T-331), and the history reads
-`revisions_list`/`revision_get` (T-331)) are registered
+`assignments_bulk` (T-331), the history reads
+`revisions_list`/`revision_get` (T-331), and the Backups read
+`backups_list` (T-125)) are registered
 (`src-tauri/src/lib.rs`). No entry below is executable until its surfaces
 land; each entry's Pending line names them, with the spec §16
 milestone that owns them (the milestone table maps S1/S2 → M1,

@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { mockCommands } from './commands'
 import { mockState, resetMockState, type MockLibraryRow } from './state'
 import { mockEvents } from './events'
-import { PALETTE, type FixtureProfile } from '../fixtures/generator'
+import { BASE_TS_MS, PALETTE, type FixtureProfile } from '../fixtures/generator'
+import { isoUtc } from '../fixtures/rng'
 import type { LibraryTreeItemWire } from '../contract'
 
 /** A small pinned world: 4 projects (last one archived), 3 instructions. */
@@ -2778,6 +2779,66 @@ describe('revisionsList / revisionGet (T-331)', () => {
         reason: 'a heading has no version history (LIB-026/6.2)',
       },
     })
+  })
+})
+
+describe('backupsList (T-125)', () => {
+  /** The first project's seeded stamp for row `n` (the seed's own
+   * formula: the fixture era's base instant, 5 minutes in, one second
+   * per row) — the literal oracle the ordering and the §5.5 name's
+   * compact stamp both derive from. */
+  const stampOf = (n: number): string => isoUtc(BASE_TS_MS + (300 + n) * 1000)
+
+  it("serves a project's whole backup history — every status, newest first, run-orphaned null last", async () => {
+    const state = mockState()
+    const project = state.projects[0]!
+    const archived = state.projects.find((row) => row.state === 'archived')
+    if (!archived) throw new Error('the fixture world must hold an archived project')
+    const journalBefore = state.activity.length
+
+    const rows = await commands.backupsList(project.id)
+
+    // The seeded history, newest first: the live copy, the limit-pruned
+    // row, the missing copy, and the run-orphaned discarded row (its
+    // §6.4-swept run leaves the honest null link).
+    expect(rows.map((row) => row.status)).toEqual(['ok', 'pruned', 'missing', 'discarded'])
+    expect(rows.map((row) => row.id)).toEqual([
+      `${project.id}-bak-3`,
+      `${project.id}-bak-2`,
+      `${project.id}-bak-1`,
+      `${project.id}-bak-0`,
+    ])
+    expect(rows.map((row) => row.sync_run_id)).toEqual([
+      `${project.id}-run-3`,
+      `${project.id}-run-2`,
+      `${project.id}-run-1`,
+      null,
+    ])
+    // The stamps pinned literally, newest first — the order cannot ride
+    // on the id tiebreak alone.
+    expect(rows.map((row) => row.created_at)).toEqual([3, 2, 1, 0].map(stampOf))
+    // Every field of the row shape (BKP-004's set plus the status); the
+    // §5.5 name's compact stamp is the row's own stamp in BKP-001's
+    // `YYYYMMDDTHHMMSSmmmZ` form.
+    for (const [index, row] of rows.entries()) {
+      const n = rows.length - 1 - index
+      expect(row.source_path).toBe(`${project.path}/AGENTS.md`)
+      expect(row.backup_path).toBe(
+        `backups/${project.id}__${project.path.split('/').pop()}/AGENTS.md.${stampOf(n).replace(/[-:.]/g, '')}.${`${n}`.padStart(8, '0')}.bak`,
+      )
+      expect(row.size_bytes).toBe(64 * (n + 1))
+    }
+    // Read-only and strictly scoped: no journal entry, and the archived
+    // project's own history lists (DB-014 — the read is state-agnostic).
+    expect(state.activity).toHaveLength(journalBefore)
+    expect(await commands.backupsList(archived.id)).toHaveLength(4)
+    // The unknown-id refusal and the known-empty answer.
+    await expect(commands.backupsList('missing')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'project_id', reason: 'no project has this id' },
+    })
+    state.backupRecords = state.backupRecords.filter((row) => row.projectId !== project.id)
+    await expect(commands.backupsList(project.id)).resolves.toEqual([])
   })
 })
 

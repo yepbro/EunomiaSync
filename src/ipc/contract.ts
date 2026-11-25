@@ -36,6 +36,7 @@ export type {
   AddedProject_Serialize as AddedProjectWire,
   AssignmentRecord as AssignmentRecordWire,
   AssignmentTargetRecord as AssignmentTargetWire,
+  BackupCopyRecord_Serialize as BackupCopyRecordWire,
   BulkAssignmentResult as BulkAssignmentResultWire,
   AppError_Serialize as AppErrorWire,
   AppInfo,

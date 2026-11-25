@@ -877,6 +877,13 @@ export const commands = {
 	 *  `rev_no DESC`, `id DESC`).
 	 */
 	revisionsList: (instructionId: string, options?: InvokeOptions) => __TAURI_INVOKE<RevisionSummaryRecord_Serialize[]>("revisions_list", { instructionId }, options),
+	/**
+	 *  Lists the project's backup copies for the "Backups" tab (BKP-004):
+	 *  date, file, size, sync run and status of every record, newest
+	 *  first. One `Db::run` read transaction; nothing is written or
+	 *  journaled.
+	 */
+	backupsList: (projectId: string, options?: InvokeOptions) => __TAURI_INVOKE<BackupCopyRecord_Serialize[]>("backups_list", { projectId }, options),
 };
 
 /** Events */
@@ -1511,6 +1518,106 @@ export type AssignmentTargetRecord =
 { kind: "variant"; value: string } | 
 /**  Per-project custom text stored on the assignment itself. */
 { kind: "custom"; value: string };
+
+/**
+ *  One Backups-tab row: BKP-004's "the date, file, size, and sync run
+ *  number" plus the card's status — every `backup_records` column the
+ *  tab can reach except `project_id` (the scope the caller named, not
+ *  per-row data; D-193's ruling).
+ */
+export type BackupCopyRecord = BackupCopyRecord_Serialize | BackupCopyRecord_Deserialize;
+
+/**
+ *  One Backups-tab row: BKP-004's "the date, file, size, and sync run
+ *  number" plus the card's status — every `backup_records` column the
+ *  tab can reach except `project_id` (the scope the caller named, not
+ *  per-row data; D-193's ruling).
+ */
+export type BackupCopyRecord_Deserialize = {
+	/**  The record row's UUIDv7 TEXT id. */
+	id: string,
+	/**
+	 *  The id of the run that created the copy — BKP-004's "sync run
+	 *  number" (the schema's run identifier; D-193's ruling). `None`
+	 *  when the run was swept by §6.4's run cleanup (`ON DELETE SET
+	 *  NULL`) or a future non-run producer wrote the row.
+	 */
+	sync_run_id?: string | null,
+	/**
+	 *  The copied file's resolved path text — BKP-004's "file" (the
+	 *  §9.4 phase-1 resolved spelling, one stable form per file).
+	 */
+	source_path: string,
+	/**
+	 *  The copy's §5.5 relative layout path
+	 *  (`backups/<project_id>__<slug>/<file>.<UTC>.<hash8>.bak`) —
+	 *  the copy's own name and the future restore flow's pick handle.
+	 */
+	backup_path: string,
+	/**
+	 *  The copy's size in bytes — the size the BKP-010 check passed,
+	 *  saturated at `u32::MAX` (specta forbids 64-bit integers on the
+	 *  TS wire, D-049's `DbBackupInfo` decision).
+	 */
+	size_bytes: number,
+	/**
+	 *  `ok`, `pruned`, `missing` or `discarded` (the §6.2 CHECK's
+	 *  stored literal — the row's lifecycle place, §6.4).
+	 */
+	status: string,
+	/**
+	 *  The copy's creation time, DB-002 UTC ISO-8601 — BKP-004's
+	 *  "date" (the run's one backup instant, the same stamp the copy
+	 *  name carries).
+	 */
+	created_at: string,
+};
+
+/**
+ *  One Backups-tab row: BKP-004's "the date, file, size, and sync run
+ *  number" plus the card's status — every `backup_records` column the
+ *  tab can reach except `project_id` (the scope the caller named, not
+ *  per-row data; D-193's ruling).
+ */
+export type BackupCopyRecord_Serialize = {
+	/**  The record row's UUIDv7 TEXT id. */
+	id: string,
+	/**
+	 *  The id of the run that created the copy — BKP-004's "sync run
+	 *  number" (the schema's run identifier; D-193's ruling). `None`
+	 *  when the run was swept by §6.4's run cleanup (`ON DELETE SET
+	 *  NULL`) or a future non-run producer wrote the row.
+	 */
+	sync_run_id: string | null,
+	/**
+	 *  The copied file's resolved path text — BKP-004's "file" (the
+	 *  §9.4 phase-1 resolved spelling, one stable form per file).
+	 */
+	source_path: string,
+	/**
+	 *  The copy's §5.5 relative layout path
+	 *  (`backups/<project_id>__<slug>/<file>.<UTC>.<hash8>.bak`) —
+	 *  the copy's own name and the future restore flow's pick handle.
+	 */
+	backup_path: string,
+	/**
+	 *  The copy's size in bytes — the size the BKP-010 check passed,
+	 *  saturated at `u32::MAX` (specta forbids 64-bit integers on the
+	 *  TS wire, D-049's `DbBackupInfo` decision).
+	 */
+	size_bytes: number,
+	/**
+	 *  `ok`, `pruned`, `missing` or `discarded` (the §6.2 CHECK's
+	 *  stored literal — the row's lifecycle place, §6.4).
+	 */
+	status: string,
+	/**
+	 *  The copy's creation time, DB-002 UTC ISO-8601 — BKP-004's
+	 *  "date" (the run's one backup instant, the same stamp the copy
+	 *  name carries).
+	 */
+	created_at: string,
+};
 
 /**  The measured result of one bulk operation. */
 export type BulkAssignmentResult = {

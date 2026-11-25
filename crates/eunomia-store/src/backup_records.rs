@@ -2,10 +2,12 @@
 //! §9.4 phase 2; task T-115): the store's writer for one run's backup
 //! copies and the dedup lookup the phase consults before making one.
 //!
-//! Three entry points. [`insert`] and [`last_checked`] join **the
+//! Four entry points. [`insert`] and [`last_checked`] join **the
 //! caller's** transaction (D-037/D-051, the `sync_runs` shape);
 //! [`all_paths`] runs on the caller's connection and joins nothing —
-//! it is the read-only claim set of the orphan report (T-332/D-190):
+//! it is the read-only claim set of the orphan report (T-332/D-190) —
+//! and [`list_for_project`] is the BKP-004 listing read (T-125),
+//! which joins the caller's transaction like the writer does:
 //!
 //! * [`insert`] — one row per copy a run produced. §9.4 phase 2 step 1
 //!   inserts a record only after the BKP-010 size + SHA-256 check
@@ -30,6 +32,11 @@
 //!   statuses: the set the orphan report subtracts from the files it
 //!   lists under `backups/`, so a copy no row mentions is the only
 //!   thing that report can name (D-190).
+//! * [`list_for_project`] — one project's whole row history, every
+//!   status, newest first (D-122's ordering): the Backups tab's read
+//!   (BKP-004, T-125) — the scope is the caller's project id, and the
+//!   read itself never validates it (the command layer does, a
+//!   projects fact, not a backup-records fact).
 //!
 //! # The writer contracts D-122 fixed (T-114's reader is the oracle)
 //!
@@ -377,6 +384,118 @@ pub fn all_paths(conn: &Connection) -> Result<Vec<String>, BackupRecordsError> {
     let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(BackupRecordsError::Sql)
+}
+
+/// One `backup_records` row as data — the BKP-004 listing's row (the
+/// "Backups" tab, T-125): every column the read serves, the status
+/// decoded through [`BackupRecordStatus::from_member`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupRecord {
+    /// The row's UUIDv7 TEXT id (DB-002).
+    pub id: String,
+    /// The project the copy belongs to.
+    pub project_id: String,
+    /// The run that created the copy; `None` for rows whose run was
+    /// swept by §6.4's run cleanup (`ON DELETE SET NULL`) or written
+    /// by a future non-run producer.
+    pub sync_run_id: Option<String>,
+    /// The copied file's resolved path text (one stable spelling per
+    /// file — D-122's writer contract).
+    pub source_path: String,
+    /// The copy's §5.5 relative layout path, unique in the table.
+    pub backup_path: String,
+    /// The copy's size in bytes — the size the BKP-010 check passed.
+    pub size_bytes: i64,
+    /// The copy's SHA-256, 64 lowercase hex characters.
+    pub sha256: String,
+    /// The copy's lifecycle status (§6.2 CHECK member).
+    pub status: BackupRecordStatus,
+    /// The row's DB-002 UTC timestamp (the run's one backup instant).
+    pub created_at: String,
+}
+
+/// Raw row cells; the status is decoded after the SQL succeeds so a
+/// corrupt cell is the typed [`BackupRecordsError::Member`] refusal,
+/// not a rusqlite mapping error (the `RevisionSummaryRow` shape).
+struct RawBackupRecord {
+    id: String,
+    project_id: String,
+    sync_run_id: Option<String>,
+    source_path: String,
+    backup_path: String,
+    size_bytes: i64,
+    sha256: String,
+    status: String,
+    created_at: String,
+}
+
+impl RawBackupRecord {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            sync_run_id: row.get(2)?,
+            source_path: row.get(3)?,
+            backup_path: row.get(4)?,
+            size_bytes: row.get(5)?,
+            sha256: row.get(6)?,
+            status: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    }
+
+    fn into_record(self) -> Result<BackupRecord, BackupRecordsError> {
+        Ok(BackupRecord {
+            id: self.id,
+            project_id: self.project_id,
+            sync_run_id: self.sync_run_id,
+            source_path: self.source_path,
+            backup_path: self.backup_path,
+            size_bytes: self.size_bytes,
+            sha256: self.sha256,
+            status: BackupRecordStatus::from_member(&self.status)?,
+            created_at: self.created_at,
+        })
+    }
+}
+
+/// Lists one project's whole `backup_records` history — every §6.2
+/// CHECK status, rows never deleted (§6.4) — newest first
+/// (`created_at DESC, id DESC`: the same "newest" D-122 fixed for the
+/// retention window and the BKP-010 dedup lookup, the same-millisecond
+/// id tiebreak included). BKP-004's Backups tab read (T-125); the
+/// scope is the caller's project id, state-agnostic (DB-014: an
+/// archived project keeps its data).
+///
+/// The listing joins **the caller's** transaction (D-037, the
+/// `last_checked` shape — a pure per-project keying that never
+/// validates the project itself: an unknown id is the caller's
+/// boundary fact, refused in the command layer through
+/// `eunomia_store::projects`).
+///
+/// # Errors
+///
+/// Returns [`BackupRecordsError::Member`] when a returned row's
+/// `status` cell is outside its closed vocabulary (D-039's
+/// corrupt-cells policy — surfaced, never guessed around), and
+/// [`BackupRecordsError::Sql`] when the query fails. A project with
+/// no rows is `Ok(vec![])`, not an error.
+pub fn list_for_project(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<Vec<BackupRecord>, BackupRecordsError> {
+    let mut statement = conn.prepare(
+        "SELECT id, project_id, sync_run_id, source_path, backup_path,
+                size_bytes, sha256, status, created_at
+           FROM backup_records
+          WHERE project_id = ?1
+          ORDER BY created_at DESC, id DESC",
+    )?;
+    let rows = statement
+        .query_map([project_id], RawBackupRecord::from_row)?
+        .map(|raw| raw.map_err(BackupRecordsError::from))
+        .collect::<Result<Vec<_>, BackupRecordsError>>()?;
+    rows.into_iter().map(RawBackupRecord::into_record).collect()
 }
 
 #[cfg(test)]
