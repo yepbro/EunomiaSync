@@ -23870,4 +23870,62 @@ Checks: `CARGO_BUILD_JOBS=2 cargo fmt --check`; clippy
 `sync_pipeline_tests sync_phase1_tests`; mutation checks recorded in
 the task report. One review round.
 
-> > > > > > > bd29d7a (test(sync): the abort's clock becomes a command-level seam; MAIN-027's immovability under abort pinned; phase 1's abort gets an oracle (T-346))
+### D-198 — T-348: the `variant_get` contract the editor and the MAIN-006 tooltip will code against — 2026-11-24
+
+Problem: the T-329 batch landed the variant WRITE commands
+(`variant_create`/`variant_update`/`variant_set_main`/`variant_delete`/
+`variant_restore`), but no §7.10 command carries a variant's TEXT —
+the instruction editor's body (§7.3 LIB-002, 009…016's field rules —
+MAIN-006 only opens the editor and owns the tooltip) and the name
+tooltip's text half (MAIN-006: "A tooltip with the text (first 600
+characters, 400 ms delay)") have no source to read. The owner split the follow-up
+out of T-083's card and ruled it spec-only (this task describes the
+contract; the implementation is its own future card).
+
+Readings chosen (Rule 1, recorded before the spec edit; the card
+delegates every contract detail not fixed by a ruling to this
+record):
+
+- **One parameter, `id`** — the variant's row id (DB-002), the same
+  identity every variant command addresses and the id
+  `library_get`'s inline entries already serve the UI.
+- **The answer is the stored row plus the derived emptiness.** The
+  §6.2 row columns exactly as the landed variant commands' answer
+  carries them (the `VariantRecord` wire shape: `id`,
+  `instruction_id`, `name`, `content`, `is_main`, `state`,
+  `created_at`, `updated_at`, `deleted_at` — checked field for field
+  against `src/bindings.ts`'s `VariantRecord_Serialize`,
+  `deleted_at` nullable) — the row body reuses that shape with ONE
+  derived addition: `is_empty`, LIB-014/D-13's "outputs no
+  text" flag, computed by the build's own oracle (ALG-002's
+  normalize), exactly the flag `library_get`'s inline entries carry
+  (D-187; the oracle's identity checked against
+  `LibraryVariantEntry`'s own doc in the same file). The field is DERIVED — the schema has no column for it —
+  so the two readers of a variant (the inline list, the by-id read)
+  cannot disagree about what "empty" means.
+- **Any state is answered as stored.** The read serves the row
+  whatever its §6.4 state (`active` or `deleted`): it is a read, the
+  state column rides the answer, and a stale screen re-reading an
+  id that was soft-deleted in another window sees the truth instead
+  of a refusal (the convergence posture of D-179's typed outcomes).
+  An unknown id is the typed refusal of the `exclusion_remove`
+  unknown-id shape (`E_VALIDATION` naming `id`;
+  `src-tauri/src/commands.rs`, `exclusion_remove_impl`) — §10 has no
+  not-found code, and the frozen registry keeps that shape.
+- **The command never truncates.** `content` is the full stored text
+  (DB-006's 262,144-character bound); the MAIN-006 tooltip's "first
+  600 characters" is the UI's own clamp over the returned text, not
+  a command parameter — the same full text feeds the editor's body,
+  and a server-side truncation would make the tooltip's source
+  useless for the editor (two commands where one read suffices).
+- **§7.10 placement, no count drift.** The command joins the Library
+  module's row and gains a sentence in §7.10's command notes. The
+  registered-command counts (ARCHITECTURE.md's 38,
+  `mode.spec.ts`'s shipped-set pin) stay untouched — the spec
+  describes the contract, the implementation card lands the command.
+
+Checks: md-only diff (docs/spec.md, this file) — prettier and a
+factual re-read of every cited line (rule 2/11), the md-only regime
+(no test suites run), ONE review round.
+
+> > > > > > > dc5aa62 (docs(spec): the variant_get contract joins §7.10 — the editor's body and the MAIN-006 tooltip's text source (T-348))
