@@ -1,0 +1,3136 @@
+/* ==========================================================================
+   EunomiaSync — main window prototype (static layout only).
+   Spec: docs/spec.md § 7.4 (MAIN-001…031), § 7.3 (UI-003 instruction
+   editor modal, LIB-026…027 history modal, D-16), § 7.1 PRJ-002…007
+   (repository scan modal, NFR-015), PRJ-008…012 (project settings
+   modal), § 7.5 OUT-009 + § 6.2 run statuses (sync summary modal,
+   MAIN-024…031), § 7.2 DEF-001…005 (app settings modal, §6.5 keys),
+   D-10 (archived + excluded paths modals, PRJ-013…018, §6.2
+   exclusions, DB-014/015), § 7.7 LOG-001…006 (activity modal),
+   § 7.8 HLP-001…005 (help modal: two-pane FAQ, article list +
+   client-side search with <mark> highlights, §11.3 F1), § 7.9
+   UPD-001…005 (About modal: info rows, license expander, simulated
+   update check, REL-004), DB-041/042 (project labels in the column
+   headers), MAIN-006 (#text-tooltip: instruction text, 400 ms delay),
+   MAIN-012…014 / LIB-005…007 (hide/restore instruction: .hide-btn eye
+   buttons, #hide-dialog confirm), MAIN-015…023 / LIB-030…034 (heading
+   add/rename/delete: .hbtn buttons, #heading-dialog,
+   #heading-delete-dialog), §7.4 UI bulk operations / UI-010 / NFR-021
+   (#bulk-dialog, #bulk-confirm-dialog, #column-menu, .bulk-row),
+   UI-001, UI-011, UI-012, UI-021, UI-022, NFR-020.
+   Pure CSS, no frameworks. Sticky header row and first columns per MAIN-010.
+   ========================================================================== */
+
+:root {
+  color-scheme: light dark;
+
+  /* Light theme (UI-021: follows the OS setting via the media query below) */
+  --bg: #eef2f7;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+
+  --text: #0f172a;
+  --text-muted: #64748b;
+  --text-faint: #94a3b8;
+
+  --accent: #059669;
+  --accent-strong: #047857;
+  --accent-soft: #d1fae5;
+  --on-accent: #ffffff;
+
+  --warning: #b45309;
+  --danger: #dc2626;
+  --focus: #2563eb;
+
+  --row-hover: #f1f5f9;
+
+  --radius: 6px;
+  --radius-sm: 4px;
+
+  /* Column widths (MAIN-010: minimum row height 28px) */
+  --w-check: 40px;
+  --w-name: 300px;
+  --w-proj: 150px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1220;
+    --surface: #16213a;
+    --surface-2: #1d2a45;
+    --border: #2b3a58;
+    --border-strong: #3d4f73;
+
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --text-faint: #64748b;
+
+    --accent: #10b981;
+    --accent-strong: #34d399;
+    --accent-soft: #064e3b;
+    --on-accent: #052e22;
+
+    --warning: #f59e0b;
+    --danger: #f87171;
+    --focus: #60a5fa;
+
+    --row-hover: #22304e;
+  }
+}
+
+/* ----- Base ------------------------------------------------------------ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  block-size: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* One main window, minimum 960×600 (UI-001) */
+.app {
+  display: flex;
+  flex-direction: column;
+  block-size: 100dvh;
+  min-inline-size: 960px;
+  min-block-size: 600px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Screen-reader-only text (accessible names for icon-only controls) */
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
+/* ----- Toolbar (D-14, UI: search + project filter + "Show hidden") ----- */
+/* Sized so the right cluster fits the UI-001 minimum width of 960px:
+   Activity and Settings are compact icon buttons (28px, glyphs from the
+   ICONS idiom, accessible names kept), the gap is tightened to 8px, and
+   the search input is the flex victim — it may shrink to its small
+   floor at the minimum width. */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap; /* the "Assign to projects…" button + chip may exceed the
+                       960px minimum width with a large selection: the right
+                       cluster wraps instead of clipping */
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border-block-end: 1px solid var(--border);
+  flex: none;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.brand-mark {
+  inline-size: 12px;
+  block-size: 12px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, #10b981, #0ea5e9);
+}
+
+.toolbar input[type='search'],
+.toolbar select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  min-block-size: 28px;
+}
+
+.toolbar input[type='search'] {
+  /* Small base + growth: the base sizes drive the flex-wrap line break, so
+     a large basis would wrap the toolbar whenever the "Assign to
+     projects…" button and the selection chip are visible (the demo rows
+     come pre-selected). The search grows into the free space instead. */
+  flex: 1 1 120px;
+  min-inline-size: 110px;
+  max-inline-size: 300px;
+}
+
+.toolbar select {
+  max-inline-size: 180px;
+}
+
+/* Toolbar buttons keep their labels on one line (the two add buttons)
+   and never compress below their text */
+.toolbar .btn {
+  white-space: nowrap;
+  flex: none;
+  padding-inline: 8px;
+}
+
+/* Icon-only toolbar buttons (Activity, Settings): square ghost buttons
+   with the cell-icon 14px glyph. The accessible name is the aria-label,
+   the tooltip is the title attribute — no visible text is needed. */
+.toolbar .btn-icon {
+  inline-size: 28px;
+  block-size: 28px;
+  min-inline-size: 0;
+  padding: 0;
+  justify-content: center;
+  gap: 0;
+}
+
+.toolbar .btn-icon svg {
+  inline-size: 14px;
+  block-size: 14px;
+  fill: currentColor;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap; /* the label must not stack at the 960px minimum */
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+/* ----- Buttons ---------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-weight: 600;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  padding: 5px 12px;
+  min-block-size: 28px;
+  cursor: pointer;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.btn-primary:hover {
+  background: var(--accent-strong);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+}
+
+.btn-ghost:hover {
+  color: var(--text);
+  border-color: var(--text-faint);
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: #ffffff;
+}
+
+.btn-danger:hover {
+  filter: brightness(0.92);
+}
+
+/* ----- Matrix region (MAIN-010: pinned header row and first columns) ---- */
+
+.matrix-wrap {
+  flex: 1 1 auto;
+  min-block-size: 0; /* allow the flex item to shrink so the table scrolls */
+  overflow: auto;
+  background: var(--bg);
+}
+
+.matrix-wrap:focus-visible {
+  outline-offset: -2px;
+}
+
+.matrix {
+  table-layout: fixed;
+  inline-size: max-content;
+  min-inline-size: 100%;
+  border-collapse: separate; /* required for position:sticky cells */
+  border-spacing: 0;
+}
+
+.matrix .col-check {
+  width: var(--w-check);
+}
+.matrix .col-name {
+  width: var(--w-name);
+}
+.matrix .col-proj {
+  width: var(--w-proj);
+}
+
+.matrix th,
+.matrix td {
+  padding: 3px 10px;
+  font-weight: inherit;
+  text-align: start;
+}
+
+/* Header row: pinned to the top */
+.matrix thead th {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 20;
+  background: var(--surface-2);
+  border-block-end: 1px solid var(--border-strong);
+}
+
+/* Body cells */
+.matrix tbody th,
+.matrix tbody td {
+  border-block-end: 1px solid var(--border);
+}
+
+/* First columns: pinned to the left (checkbox + instruction name) */
+.matrix .c-check {
+  inset-inline-start: 0;
+}
+
+.matrix .c-name {
+  inset-inline-start: var(--w-check);
+}
+
+.matrix tbody .c-check,
+.matrix tbody .c-name {
+  position: sticky;
+  z-index: 10;
+  background: var(--surface);
+  border-inline-end: 1px solid var(--border);
+}
+
+.matrix thead .c-check {
+  z-index: 32;
+  border-inline-end: 1px solid var(--border);
+}
+
+.matrix thead .c-name {
+  z-index: 31;
+  border-inline-end: 1px solid var(--border);
+}
+
+/* Visible divider between adjacent project column headers: the header
+   clusters (color + label + edit/menu icons) otherwise blend together */
+.matrix thead .c-proj + .c-proj {
+  border-inline-start: 1px solid var(--border-strong);
+}
+
+/* Row hover (sticky cells need a solid background to cover scrolled text) */
+.matrix tbody tr:hover .c-check,
+.matrix tbody tr:hover .c-name,
+.matrix tbody tr:hover .c-cell,
+.matrix tbody tr:hover .c-fill {
+  background-color: var(--row-hover);
+}
+
+/* Row height: at least 28 px (MAIN-010) */
+.matrix tbody th,
+.matrix tbody td {
+  block-size: 28px;
+}
+
+/* ----- Project column headers (MAIN-028: state as icon + text; DB-041/042:
+     a 1–6 character label next to the color, the full name only in the
+     tooltip — kept also as a visually-hidden span for screen readers) ----
+     NB: `th` must keep its table-cell display (flex on the cell itself
+     breaks the table layout); the inner spans provide the two lines. --- */
+
+.proj-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-inline-size: 0;
+  margin-block-end: 3px;
+}
+
+.proj-color {
+  inline-size: 10px;
+  block-size: 10px;
+  border-radius: 3px;
+  background: var(--c, var(--text-faint));
+  flex: none;
+}
+
+.proj-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+/* Short 1–6 character label next to the color dot (DB-041/042): the
+   full name moved to the th tooltip; the ~52px cap is the hint of the
+   6-character label limit */
+.proj-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  max-inline-size: 52px;
+}
+
+.proj-sub {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.proj-sub .ic {
+  inline-size: 12px;
+  block-size: 12px;
+  flex: none;
+}
+
+.proj-sub.st-dirty {
+  color: var(--warning);
+}
+.proj-sub.st-warn {
+  color: var(--warning);
+}
+.proj-sub.st-off {
+  color: var(--danger);
+}
+
+.dot {
+  inline-size: 7px;
+  block-size: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+/* ----- Tree rows: headings (MAIN-015…023: nesting via indents) ---------- */
+
+.row-heading .c-check,
+.row-heading .c-name,
+.row-heading .c-fill {
+  background: var(--surface-2);
+}
+
+.row-heading .hname {
+  font-weight: 600;
+}
+
+.caret {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+/* Tree depth indent: 18 px per level */
+.matrix tbody .c-name {
+  padding-inline-start: calc(10px + var(--depth, 0) * 18px);
+}
+
+.name-wrap {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-inline-size: 0;
+}
+
+.name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Empty instruction (MAIN-009): special icon + dimmed name, shape-based */
+.name-empty {
+  color: var(--text-muted);
+}
+
+.empty-mark {
+  inline-size: 10px;
+  block-size: 10px;
+  border: 1.5px dashed var(--text-faint);
+  border-radius: 3px;
+  flex: none;
+}
+
+.chip {
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 6px;
+  flex: none;
+}
+
+.edit-btn {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  inline-size: 24px; /* target size ≥ 24 px (WCAG 2.5.8) */
+  block-size: 24px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex: none;
+}
+
+.edit-btn::before {
+  content: '✎';
+  font-size: 13px;
+  line-height: 1;
+}
+
+.edit-btn:hover {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+/* Hide/restore instruction button (MAIN-012…014): same box as the edit
+   pencil, a Material eye-off / eye glyph injected by app.js */
+.hide-btn {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  inline-size: 24px;
+  block-size: 24px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex: none;
+}
+
+.hide-btn svg {
+  inline-size: 14px;
+  block-size: 14px;
+  fill: currentColor;
+}
+
+.hide-btn:hover {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+/* Heading action buttons (MAIN-015…023: add child, rename, delete) —
+   the per-row icon idiom sized to the tree row; also used by the "+"
+   in the "Instruction" column header */
+.hbtn {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  inline-size: 20px;
+  block-size: 20px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex: none;
+}
+
+.hbtn svg {
+  inline-size: 13px;
+  block-size: 13px;
+  fill: currentColor;
+}
+
+.hbtn:hover {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.hbtn--delete:hover {
+  color: var(--danger);
+  background: transparent;
+}
+
+.hbtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.hbtn:disabled:hover {
+  color: var(--text-faint);
+  background: transparent;
+}
+
+#instruction-header .hbtn {
+  margin-inline-start: 4px;
+  vertical-align: middle;
+}
+
+/* ----- Bulk assignment operations (§7.4 UI bulk operations) --------------- */
+
+/* The toolbar ghost button must really disappear without a selection:
+   .btn sets display, which would defeat the [hidden] attribute */
+#bulk-assign-btn[hidden] {
+  display: none;
+}
+
+/* Project/variant rows of #bulk-dialog: the .ps-check-row idiom plus the
+   header color dot */
+.bulk-row {
+  padding-block: 3px;
+}
+
+.bulk-row .proj-color {
+  inline-size: 10px;
+  block-size: 10px;
+}
+
+/* Column actions menu: one reusable fixed-position menu per project
+   header "⋮" button; app.js positions and clamps it like the tooltip.
+   display:flex would defeat the [hidden] attribute, so it is re-applied
+   explicitly. */
+#column-menu {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 180px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 0.18);
+}
+
+#column-menu[hidden] {
+  display: none;
+}
+
+#column-menu button {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: start;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#column-menu button:hover {
+  background: var(--row-hover);
+}
+
+/* ----- Variant contents popover (per-cell "eye") -------------------------- */
+/* Read-only full texts of every variant of the row: unlike the row
+   tooltip there is no 600-character truncation — long content scrolls
+   inside the viewport-clamped box */
+
+#variants-popover {
+  position: fixed;
+  z-index: 60;
+  inline-size: min(480px, calc(100vw - 16px));
+  max-block-size: min(72vh, 560px);
+  overflow-y: auto;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 0.18);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#variants-popover .vp-item + .vp-item {
+  margin-block-start: 12px;
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 12px;
+}
+
+.vp-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-block-end: 4px;
+}
+
+.vp-name {
+  font-weight: 700;
+}
+
+.vp-current {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.vp-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.vp-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.proj-line .col-menu-btn {
+  /* The "⋮" hugs the right edge of the header cell, away from the
+     color/label/edit cluster (margin-inline-start: auto consumes the
+     free width of the flex line) */
+  margin-inline-start: auto;
+}
+
+/* ----- Matrix cells (MAIN-001…005: four states, shape-based, NFR-020) --- */
+
+.c-cell {
+  text-align: center;
+}
+
+.c-fill {
+  background: var(--surface);
+}
+
+/* Custom checkbox: unchecked = outline, checked = filled with a check mark */
+input[type='checkbox'] {
+  appearance: none;
+  inline-size: 16px;
+  block-size: 16px;
+  margin: 0;
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 12px 12px;
+  cursor: pointer;
+  flex: none;
+}
+
+input[type='checkbox']:hover {
+  border-color: var(--accent);
+}
+
+input[type='checkbox']:checked {
+  border-color: var(--accent);
+  background-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+input[type='checkbox']:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+/* Assigned cell: checkbox + variant select (rows with a variant badge) */
+.cell-assign {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.variant-select {
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 3px;
+  min-block-size: 18px;
+  max-inline-size: 64px;
+  cursor: pointer;
+}
+
+.variant-select:hover {
+  border-color: var(--accent);
+}
+
+.variant-select:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.proj-line .cell-icon--edit {
+  margin-inline-start: 3px;
+}
+
+/* Section drop target: the "Instruction" column header */
+#instruction-header.drop-target {
+  background-color: var(--row-drop);
+}
+
+/* Netlify "Powered by" badge (injected by the edge for free-plan sites):
+   hidden for every visitor — it overlaps the sync bar in the corner */
+#nl-badge-frame {
+  display: none !important;
+}
+
+/* Per-project custom instruction icons (add / edit / delete) */
+.cell-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-inline-start: 6px;
+  block-size: 18px;
+  vertical-align: middle;
+}
+
+.cell-icon {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  inline-size: 20px;
+  block-size: 20px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.cell-icon svg {
+  inline-size: 14px;
+  block-size: 14px;
+  fill: currentColor;
+}
+
+.cell-icon:hover {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.cell-icon--delete:hover {
+  color: var(--danger);
+  background: transparent;
+}
+
+/* Row drag-and-drop between sections */
+:root {
+  --row-drop: #dbeafe;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --row-drop: #14315c;
+  }
+}
+
+.matrix tbody tr:not(.row-heading) {
+  cursor: grab;
+}
+
+.matrix tbody tr.dragging {
+  opacity: 0.5;
+}
+
+.matrix tbody tr.drop-target > .c-check,
+.matrix tbody tr.drop-target > .c-name,
+.matrix tbody tr.drop-target > .c-cell,
+.matrix tbody tr.drop-target > .c-fill {
+  background-color: var(--row-drop);
+}
+
+/* ----- Sync panel (MAIN-024…027: pinned below the scroll area) ---------- */
+
+.syncbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border-block-start: 1px solid var(--border);
+  flex: none;
+}
+
+.sync-last {
+  color: var(--text-muted);
+}
+
+.sync-last strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.sync-counter {
+  appearance: none;
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 4px 12px;
+  min-block-size: 28px;
+  cursor: pointer;
+}
+
+.sync-counter:hover {
+  color: var(--text);
+  border-color: var(--text-faint);
+}
+
+.badge {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: #ffffff;
+  background: var(--warning);
+  border-radius: 999px;
+  padding: 3px 7px;
+}
+
+/* ----- Interactive states (app.js) --------------------------------------- */
+
+/* Hidden column: the project filter collapses the whole column */
+.col-off {
+  visibility: collapse;
+}
+
+/* Hidden row: search / collapsed section */
+.row-off {
+  display: none;
+}
+
+/* Row selected via the leading checkbox (solid bg — sticky cells) */
+:root {
+  --row-selected: #d9f2e6;
+  --cell-changed: #d4dae2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --row-selected: #14382b;
+    --cell-changed: #060a12;
+  }
+}
+
+.matrix tbody tr.row-selected .c-check,
+.matrix tbody tr.row-selected .c-name,
+.matrix tbody tr.row-selected .c-cell,
+.matrix tbody tr.row-selected .c-fill {
+  background-color: var(--row-selected);
+}
+
+/* Assignment differs from the last synced state: the whole cell gets a
+   gray shade darker than the base cell background; survives hover and
+   selection */
+.matrix tbody td.c-cell.cell-changed {
+  background-color: var(--cell-changed);
+}
+
+/* Unassigned cell: everything but the checkbox is hidden */
+.matrix tbody td.c-cell.cell-unchecked .variant-select,
+.matrix tbody td.c-cell.cell-unchecked .cell-icons {
+  display: none;
+}
+
+/* Hidden instructions (LIB-005…007): dimmed + dashed "hidden" chip */
+.row-hidden .name {
+  color: var(--text-muted);
+}
+
+.hidden-chip {
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--text-muted);
+  border: 1px dashed var(--text-faint);
+  border-radius: 999px;
+  padding: 2px 6px;
+  flex: none;
+}
+
+/* Caret buttons: collapse/expand of sections (click anywhere on the row) */
+.row-heading {
+  cursor: pointer;
+  user-select: none;
+}
+
+.caret-btn {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  inline-size: 24px;
+  block-size: 24px;
+  min-inline-size: 24px;
+  min-block-size: 24px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex: none;
+}
+
+.caret-btn::before {
+  content: '▾';
+  font-size: 11px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.caret-btn[aria-expanded='false']::before {
+  transform: rotate(-90deg);
+}
+
+.caret-btn:hover {
+  color: var(--text);
+  background: var(--row-hover);
+}
+
+/* "N rows selected" chip in the toolbar */
+.selected-chip {
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+/* Instruction text tooltip (MAIN-006): one fixed-position element shared
+   by every row; app.js clamps it to the viewport. Themed via CSS vars. */
+#text-tooltip {
+  position: fixed;
+  z-index: 60;
+  max-inline-size: min(440px, calc(100vw - 16px));
+  max-block-size: 260px;
+  overflow: auto;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 0.18);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Hidden-instruction counter next to the "Show hidden" toggle: dashed
+   border echoes the "hidden" chip on the rows */
+.toggle-count {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-muted);
+  border: 1px dashed var(--text-faint);
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
+/* Empty search state (UI-012) */
+.empty-state {
+  padding: 72px 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+/* ----- Modal base (native <dialog>: focus management, inert background,
+   Esc-close; shared by every modal in the file) ---------------------------- */
+
+.modal {
+  inline-size: min(520px, calc(100vw - 32px));
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 0;
+}
+
+.modal::backdrop {
+  background: rgb(15 23 42 / 0.5);
+}
+
+.modal form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 22px;
+}
+
+.modal h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.modal-text {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+/* Shared field label + monospace editor text (UI-003; also used by the
+   project settings modal) */
+.field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.edit-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  resize: vertical;
+  min-block-size: 110px;
+}
+
+/* ----- Instruction editor modal (UI-003, LIB-002) ------------------------ */
+/* Large two-pane dialog: variant list on the left, name fields and
+   Edit/Preview tabs on the right. The custom-instruction mode hides the
+   left pane and the name fields via .ie-custom. The old stub styles
+   (.variants-accordion, .variants-list, .variant-item, .variant-name,
+   .variant-textarea) were removed — unused after the rework. */
+
+.modal-xl {
+  inline-size: min(920px, calc(100vw - 32px));
+}
+
+/* Fixed-height form: the actions stay visible on short windows */
+.modal-xl form {
+  block-size: min(640px, calc(100dvh - 32px));
+}
+
+.modal-xl h2,
+.modal-xl .modal-actions {
+  flex: none;
+}
+
+.ie-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: grid;
+  grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
+  gap: 14px;
+}
+
+/* Create mode only: the section picker (S3 "pick a section") */
+.ie-section-field {
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ie-create .ie-section-field {
+  display: flex;
+}
+
+.ie-body.ie-custom {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ie-custom .ie-variants,
+.ie-custom .ie-fields {
+  display: none;
+}
+
+/* Custom-instruction mode radios: hidden outside the custom mode */
+.ie-mode-group {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  margin-block-end: 2px;
+}
+
+.ie-custom .ie-mode-group {
+  display: flex;
+}
+
+.ie-mode-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.ie-mode-option input {
+  margin-block-start: 2px;
+}
+
+.ie-mode-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ie-mode-text strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.ie-mode-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ie-mode-base {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* Extend-type custom cells: a small "+" chip marks that the custom text
+   supplements the library variant instead of replacing it (the tooltip
+   carries the details) */
+.extend-mark {
+  flex: none;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-muted);
+  border: 1px dashed var(--border-strong);
+  border-radius: 4px;
+  padding: 2px 4px;
+  cursor: help;
+}
+
+/* Left pane: variant list (LIB-009…016) */
+.ie-variants {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-block-size: 0;
+  border-inline-end: 1px solid var(--border);
+  padding-inline-end: 14px;
+}
+
+.ie-variant-list {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ie-variant-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.ie-variant-item {
+  appearance: none;
+  font: inherit;
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  min-block-size: 28px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  text-align: start;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.ie-variant-item:hover {
+  background: var(--row-hover);
+}
+
+.ie-variant-item[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.ie-variant-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-inline-size: 0;
+}
+
+/* Empty variant (LIB-014): the dashed .empty-mark from the matrix rows
+   plus a dimmed name */
+.ie-variant-empty .ie-variant-label {
+  color: var(--text-muted);
+}
+
+/* "Main" badge (LIB-021: "Make main" moves it) */
+.ie-main-badge {
+  font-size: 10.5px;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--accent-strong);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 2px 6px;
+  flex: none;
+}
+
+.ie-variant-row .cell-icon {
+  flex: none;
+}
+
+.ie-variant-row .cell-icon:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Add variant (LIB-017): a copy of the main one or empty */
+.ie-add-variant {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 10px;
+}
+
+.ie-add-row {
+  display: flex;
+  gap: 6px;
+}
+
+.ie-add-row .btn {
+  font-size: 12px;
+  min-block-size: 26px;
+  padding: 3px 10px;
+}
+
+/* Right pane */
+.ie-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-block-size: 0;
+  min-inline-size: 0;
+}
+
+.ie-fields {
+  flex: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.ie-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-inline-size: 0;
+}
+
+.ie-panel {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ie-panel[hidden] {
+  display: none;
+}
+
+.ie-panel .edit-text {
+  flex: 1 1 auto;
+  resize: none;
+}
+
+.ie-meta {
+  flex: none;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  text-align: end;
+}
+
+/* Preview (D-15): sanitized renderer output + non-blocking warnings.
+   The same markdown styles serve the file-preview modal body (.fp-body) */
+.ie-preview,
+.fp-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+}
+
+:is(.ie-preview, .fp-body) p {
+  margin: 0 0 8px;
+}
+
+:is(.ie-preview, .fp-body) h2,
+:is(.ie-preview, .fp-body) h3,
+:is(.ie-preview, .fp-body) h4,
+:is(.ie-preview, .fp-body) h5,
+:is(.ie-preview, .fp-body) h6 {
+  margin: 12px 0 6px;
+  line-height: 1.3;
+}
+
+:is(.ie-preview, .fp-body) h2 {
+  font-size: 15px;
+}
+:is(.ie-preview, .fp-body) h3 {
+  font-size: 14px;
+}
+:is(.ie-preview, .fp-body) h4 {
+  font-size: 13px;
+}
+:is(.ie-preview, .fp-body) h5,
+:is(.ie-preview, .fp-body) h6 {
+  font-size: 12.5px;
+}
+
+:is(.ie-preview, .fp-body) ul,
+:is(.ie-preview, .fp-body) ol {
+  margin: 0 0 8px;
+  padding-inline-start: 22px;
+}
+
+:is(.ie-preview, .fp-body) li {
+  margin: 2px 0;
+}
+
+:is(.ie-preview, .fp-body) pre {
+  margin: 0 0 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+
+:is(.ie-preview, .fp-body) code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+:is(.ie-preview, .fp-body) :not(pre) > code {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+}
+
+/* ----- File preview modal (per project) ----------------------------------- */
+
+.modal-lg .fp-path {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.fp-note {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.ie-warnings {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ie-warnings-list {
+  margin: 0;
+  padding-inline-start: 18px;
+  font-size: 11.5px;
+  color: var(--warning);
+}
+
+/* Narrow window: the panes stack */
+@media (max-width: 760px) {
+  .ie-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ie-variants {
+    border-inline-end: 0;
+    padding-inline-end: 0;
+  }
+
+  .ie-variant-list {
+    max-block-size: 160px;
+  }
+
+  .ie-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ----- Project settings modal (PRJ-008…012) ------------------------------ */
+
+.modal-lg {
+  inline-size: min(680px, calc(100vw - 32px));
+}
+
+/* Fixed rows + scrolling body: the actions stay visible on short windows */
+.modal-lg form {
+  block-size: min(700px, calc(100dvh - 32px));
+}
+
+.modal-lg h2,
+.modal-lg .ps-tabs,
+.modal-lg .ps-danger,
+.modal-lg .modal-actions {
+  flex: none;
+}
+
+.modal-lg .ps-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  /* Inner side insets: with overlay scrollbars the fields otherwise sit
+     flush against (and partly under) the scrollbar, and the content
+     touches the dialog borders on both sides while scrolling */
+  padding-inline: 12px;
+}
+
+/* `hidden` must win over the flex display of panels and fields */
+.ps-panel[hidden],
+.ps-field[hidden] {
+  display: none;
+}
+
+/* Tabs: General / Backups (BKP-004) */
+.ps-tabs {
+  display: flex;
+  gap: 4px;
+  border-block-end: 1px solid var(--border);
+}
+
+.ps-tab {
+  appearance: none;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-block-end: 2px solid transparent;
+  margin-block-end: -1px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.ps-tab:hover {
+  color: var(--text);
+}
+
+.ps-tab[aria-selected='true'] {
+  color: var(--text);
+  border-block-end-color: var(--accent);
+}
+
+.ps-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ps-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 12px;
+}
+
+.ps-section-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-muted);
+}
+
+/* Fields */
+.ps-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.ps-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-inline-size: 0;
+}
+
+.ps-input,
+.ps-textarea {
+  font: inherit;
+  inline-size: 100%;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+}
+
+.ps-select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+}
+
+.ps-textarea {
+  resize: vertical;
+  min-block-size: 64px;
+}
+
+.ps-pos-select {
+  inline-size: 92px;
+  flex: none;
+}
+
+.ps-label-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ps-label-row .ps-input {
+  inline-size: auto;
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+
+.ps-label-chip {
+  text-transform: uppercase;
+  font-weight: 600;
+  flex: none;
+}
+
+.ps-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ps-error {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--danger);
+}
+
+.ps-hint code,
+.ps-scheme code,
+.ps-check-row code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+/* Palette fieldset (DB-040): selected = ring + check mark, never color-only */
+.ps-palette,
+.ps-scheme-set {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font: inherit;
+  min-inline-size: 0;
+}
+
+.ps-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-block: 2px;
+}
+
+.ps-swatch {
+  position: relative;
+  display: inline-grid;
+  place-content: center;
+  inline-size: 30px;
+  block-size: 30px;
+  cursor: pointer;
+}
+
+/* The radio itself is transparent but covers the swatch for clicks and
+   keyboard focus; the visual state is drawn on the sibling fill span */
+.ps-swatch input {
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.ps-swatch-fill {
+  display: grid;
+  place-content: center;
+  inline-size: 20px;
+  block-size: 20px;
+  border-radius: 6px;
+  background: var(--c, var(--text-faint));
+}
+
+.ps-swatch input:checked + .ps-swatch-fill {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+.ps-swatch input:checked + .ps-swatch-fill::after {
+  content: '';
+  inline-size: 4px;
+  block-size: 9px;
+  border-inline-end: 2px solid #ffffff;
+  border-block-end: 2px solid #ffffff;
+  transform: rotate(45deg);
+  filter: drop-shadow(0 0 1px rgb(0 0 0 / 0.5));
+}
+
+.ps-swatch input:focus-visible + .ps-swatch-fill {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Schemes (PRJ-012) */
+.ps-schemes {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.ps-scheme {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.ps-scheme input {
+  margin-block-start: 2px;
+  accent-color: var(--accent);
+}
+
+.ps-scheme strong {
+  font-weight: 650;
+}
+
+.ps-extra-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ps-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  cursor: pointer;
+}
+
+/* Read-only project meta (PRJ-009, PRJ-021) */
+.ps-readonly {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.ps-readonly-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-inline-size: 0;
+}
+
+.ps-readonly-key {
+  flex: none;
+  inline-size: 150px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.ps-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Ready-to-copy blocks: D-19 marker pair, D-21 snippet for scheme C */
+.ps-snippet {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+}
+
+.ps-field > .btn {
+  align-self: flex-start;
+}
+
+/* Backups tab (BKP-004) */
+.ps-backups {
+  border-collapse: collapse;
+  inline-size: 100%;
+  font-size: 12.5px;
+}
+
+.ps-backups th,
+.ps-backups td {
+  text-align: start;
+  padding: 6px 8px;
+  border-block-end: 1px solid var(--border);
+}
+
+.ps-backups th {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.ps-backup-file {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* Per-row "save to a chosen location" action column */
+.ps-backups .ps-backup-save {
+  inline-size: 36px;
+  text-align: center;
+}
+
+/* Danger zone (PRJ-013…018: archive with type-to-confirm) */
+.ps-danger {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 12px;
+}
+
+.ps-danger .ps-hint {
+  min-inline-size: 0;
+}
+
+/* Disabled confirm button (typed name does not match yet) */
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn-danger:disabled:hover {
+  filter: none;
+}
+
+/* ----- History modal (LIB-026, D-16) -------------------------------------- */
+/* Revisions table inside the shared .modal-lg chrome: the body scrolls
+   like .ps-body, the header and the Close footer stay visible */
+
+.modal-lg .hist-subtitle {
+  flex: none;
+}
+
+.modal-lg .hist-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+
+.hist-table {
+  border-collapse: collapse;
+  inline-size: 100%;
+  font-size: 12.5px;
+}
+
+.hist-table th,
+.hist-table td {
+  text-align: start;
+  padding: 7px 8px;
+  border-block-end: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.hist-table th {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.hist-col-no {
+  inline-size: 44px;
+}
+
+.hist-col-when {
+  inline-size: 168px;
+}
+
+.hist-col-op {
+  inline-size: 96px;
+}
+
+.hist-col-snap {
+  inline-size: 110px;
+}
+
+.hist-no {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.hist-when {
+  white-space: nowrap;
+}
+
+.hist-op-cell {
+  white-space: nowrap;
+}
+
+.hist-entity {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+.hist-entity .hist-restore-btn {
+  margin-block-start: 6px;
+}
+
+/* Operation badges (NFR-020: the op is always in the text; the tint is a
+   secondary cue mixed from the theme vars so both themes stay readable) */
+.hist-op {
+  font-weight: 600;
+}
+
+.hist-op--create,
+.hist-op--restore {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.hist-op--update {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.hist-op--hide {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+.hist-op--delete {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+.hist-op--revert {
+  color: var(--focus);
+  background: color-mix(in srgb, var(--focus) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--focus) 40%, var(--border));
+}
+
+/* Demo feedback after a restore */
+.hist-restored {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}
+
+/* Snapshot disclosure */
+.hist-snap summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.hist-snap summary:hover {
+  color: var(--text);
+}
+
+.hist-snap summary::marker {
+  color: var(--text-faint);
+}
+
+.hist-snap-body {
+  margin-block-start: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+}
+
+.hist-snap-row {
+  display: flex;
+  gap: 8px;
+  min-inline-size: 0;
+}
+
+.hist-snap-key {
+  flex: none;
+  inline-size: 44px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.hist-snap-text {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-block-size: 140px;
+  overflow-y: auto;
+}
+
+/* Restore action on delete rows */
+.hist-table .btn {
+  font-size: 12px;
+  min-block-size: 26px;
+  padding: 3px 10px;
+}
+
+.hist-empty {
+  margin: 32px 0;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+/* ----- Scan modal (PRJ-002, NFR-015) -------------------------------------- */
+/* Simulated repository scan of ~/projects: phase 1 live progress (SYS-003:
+   at most 10 updates/s), phase 2 grouped results — New / Already added /
+   Skipped with a reason (D-05, D-06, PRJ-007). Both phases share one
+   fixed-height dialog, so the phase switch does not jump. */
+
+#scan-dialog form {
+  block-size: min(560px, calc(100dvh - 32px));
+}
+
+/* `hidden` must win over the flex display of the phase blocks and the
+   phase-dependent action buttons */
+#scan-dialog .scan-progress[hidden],
+#scan-dialog .scan-results[hidden],
+#scan-dialog .modal-actions .btn[hidden] {
+  display: none;
+}
+
+/* Phase 1: the progress block fills the dialog between header and actions */
+.scan-progress {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
+}
+
+.scan-counters {
+  display: flex;
+  gap: 24px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.scan-counters strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Current path: fixed height + ellipsis — fast path changes do not jitter
+   the layout (PRJ-002) */
+.scan-path {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Thin indeterminate bar; under reduced motion the animation is dropped
+   and a static sliver stays on the track */
+.scan-bar {
+  block-size: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.scan-bar-fill {
+  inline-size: 40%;
+  block-size: 100%;
+  background: var(--accent);
+  animation: scan-bar-slide 1.2s linear infinite;
+}
+
+@keyframes scan-bar-slide {
+  from {
+    translate: -100% 0;
+  }
+  to {
+    translate: 250% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-bar-fill {
+    animation: none;
+    translate: 30% 0;
+  }
+}
+
+/* Phase 2: scrolling results body, like .ps-body / .hist-body */
+.scan-results {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-inline-end: 4px;
+}
+
+.scan-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scan-group h3 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.scan-group-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.scan-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-inline-size: 0;
+  padding: 6px 10px;
+  border-block-end: 1px solid var(--border);
+}
+
+.scan-row:last-child {
+  border-block-end: 0;
+}
+
+label.scan-row {
+  cursor: pointer;
+}
+
+label.scan-row:hover {
+  background: var(--row-hover);
+}
+
+.scan-row-name {
+  flex: none;
+  font-weight: 600;
+}
+
+.scan-row-path {
+  flex: 0 1 auto;
+  min-inline-size: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Already added: muted, no checkboxes (PRJ-002) */
+.scan-row-known .scan-row-name {
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+/* Skipped: reason badge (the reason is in the text, not color-only) and
+   an OS-style hint, per UI-011 */
+.scan-reason {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.scan-reason--warn {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+.scan-reason--bad {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+.scan-reason-hint {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ----- Sync summary modal (MAIN-024…031) ---------------------------------- */
+/* One dialog, two modes rendered by app.js (OUT-009): the per-project
+   result of a sync run — outcome badge (§6.2 sync_runs), counters,
+   status badges with error codes and "what to do" hints (UI-011) — and
+   the pending-changes list opened from the sync counter (MAIN-026). */
+
+/* Run progress in the sync bar (MAIN-030): "k of N" live region next to
+   the disabled button + a small spinner; reduced motion keeps a static
+   ring (UI-022) */
+.sync-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-progress[hidden] {
+  display: none;
+}
+
+.sync-spinner {
+  inline-size: 12px;
+  block-size: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-block-start-color: var(--accent);
+  flex: none;
+  animation: sync-spin 0.9s linear infinite;
+}
+
+@keyframes sync-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sync-spinner {
+    animation: none;
+    border-block-start-color: var(--border-strong);
+  }
+}
+
+/* Run outcome badge (§6.2 sync_runs status enum: success | partial) */
+.ss-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ss-run-badge {
+  font-weight: 600;
+}
+
+.ss-run-badge--success {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.ss-run-badge--partial {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+/* Counters row: Written n · Unchanged n · Skipped n · Failed n */
+.ss-counters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ss-count strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.ss-count--written {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.ss-count--unchanged {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.ss-count--skipped {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+.ss-count--failed {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+/* Results table: scrolling body like .ps-body / .hist-body. The mode
+   wrappers are flex columns so the inner .ss-body shrinks and scrolls
+   while the title, outcome and counters stay fixed. */
+#ss-result,
+#ss-pending {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  min-inline-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* `hidden` must win over the flex display of the mode wrappers */
+#ss-result[hidden],
+#ss-pending[hidden] {
+  display: none;
+}
+
+.modal-lg .ss-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+
+.ss-table {
+  border-collapse: collapse;
+  inline-size: 100%;
+  font-size: 12.5px;
+}
+
+.ss-table th,
+.ss-table td {
+  text-align: start;
+  padding: 7px 8px;
+  border-block-end: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.ss-table th {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.ss-col-proj {
+  inline-size: 110px;
+}
+
+.ss-col-status {
+  inline-size: 92px;
+}
+
+.ss-proj {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ss-file code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.ss-st-cell {
+  white-space: nowrap;
+}
+
+/* Status badges (NFR-020: the status is in the text; the tint is a
+   secondary cue mixed from the theme vars so both themes stay readable) */
+.ss-st {
+  font-weight: 600;
+}
+
+.ss-st--written {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.ss-st--unchanged {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.ss-st--skipped {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+.ss-st--failed {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+/* Reason cell: sentence, then error-code chip + "what to do" hint
+   (UI-011). Inner spans only — the td keeps its table-cell display. */
+.ss-reason {
+  min-inline-size: 0;
+}
+
+.ss-reason-text {
+  display: block;
+  min-inline-size: 0;
+}
+
+.ss-code-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-block-start: 4px;
+}
+
+.ss-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.ss-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* The "Run sync" convenience button of pending mode is hidden in result
+   mode; `hidden` must win over the .btn display */
+#sync-summary-dialog .modal-actions .btn[hidden] {
+  display: none;
+}
+
+/* ----- Settings modal (DEF-001…004, §6.5) -------------------------------- */
+/* Five vertical sections in one scrollable body (no tabs): reuses the
+   project settings form idioms (.ps-section/.ps-field/.ps-scheme/
+   .ps-check-row/.ps-hint/.ps-error); only the parts without an existing
+   class are added below. All colors go through theme variables. */
+
+/* The first section sits right under the title — no separator above it */
+.set-body > .ps-section:first-child {
+  border-block-start: 0;
+  padding-block-start: 0;
+}
+
+/* Three limits side by side (history + log sizes) */
+.ps-grid-3 {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+}
+
+/* Number inputs stay compact: the §6.5 ranges are short */
+.set-number {
+  inline-size: 140px;
+}
+
+/* Excluded folder names (D-05): chip rows with a delete icon each */
+.set-excl-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.set-excl-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Delete icon at the 24 px target size (standalone control, unlike the
+   in-cell 20 px cell-icon instances) */
+.set-excl-remove {
+  inline-size: 24px;
+  block-size: 24px;
+}
+
+/* "Add folder name" row */
+.set-excl-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.set-excl-add .ps-input {
+  inline-size: 240px;
+}
+
+/* D-10 screens + About / Check for updates */
+.set-buttons {
+  display: flex;
+  gap: 10px;
+}
+
+/* Static status line above the footer: hint must not shrink or scroll */
+.modal-lg .set-status {
+  flex: none;
+}
+
+/* ----- Archived projects modal (D-10, PRJ-013…018) ------------------------ */
+/* The archived list: one row per archived project in the scan-results
+   row idiom (.scan-row), DB-014 subtitle in the header and a DB-015
+   hint under the list; Restore is confirmed in the small dedicated
+   dialog. The demo list only shrinks, so the dialog sizes to its
+   content instead of the fixed .modal-lg height. */
+
+#archived-dialog form {
+  block-size: auto;
+}
+
+.ar-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+/* `hidden` must win over the flex display above (UI-012 empty state) */
+.ar-list[hidden] {
+  display: none;
+}
+
+.ar-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* "Restore <name>" sits at the end of the row */
+.ar-restore {
+  margin-inline-start: auto;
+}
+
+/* "Archived 3 Nov 2026" / "Found by scan": muted, never wraps */
+.ar-meta {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* ----- Excluded paths modal (D-10) ---------------------------------------- */
+/* The exclusions list: one row per excluded path in the same row idiom
+   (.scan-row) as the archived modal, reusing .ar-list/.ar-meta/.chip.
+   reason mirrors the §6.2 project_exclusions enum; the badge wording
+   carries the meaning and the tint only supports it. Remove is
+   confirmed in the small dedicated dialog; like the archived list the
+   demo list only shrinks, so the dialog sizes to its content instead
+   of the fixed .modal-lg height. */
+
+#exclusions-dialog form {
+  block-size: auto;
+}
+
+/* "Remove ~/…" sits at the end of the row */
+.ex-remove {
+  margin-inline-start: auto;
+}
+
+/* Reason badge: neutral for "Added manually" (the default .chip look),
+   tinted for "Removed by archiving" — readable without color either way */
+.ex-reason {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ex-reason--removed_scanned {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}
+
+/* ----- Activity modal (LOG-001…006) --------------------------------------- */
+/* The action-log window: fixed-height body with an internal scroll (the
+   history-modal idiom — .hist-table is reused), a compact filter row in
+   the toolbar-control idiom and one row per user-visible entry (LOG-005:
+   diagnostic entries go only to the file log). Result badges extend the
+   hist-op idiom — the result is always readable as text, the tint is a
+   secondary cue mixed from the theme vars (NFR-020). */
+
+.act-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* The toolbar-select idiom, repeated outside .toolbar */
+.act-filters select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  min-block-size: 28px;
+  max-inline-size: 180px;
+}
+
+/* Everything but the scrolling body stays fixed in the modal-lg form */
+.modal-lg .act-subtitle,
+.modal-lg .act-filters,
+.modal-lg .act-limits {
+  flex: none;
+}
+
+.modal-lg .act-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+
+.act-col-when {
+  inline-size: 168px;
+}
+
+.act-col-res {
+  inline-size: 76px;
+}
+
+.act-action {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Operation-type chip in front of the action text */
+.act-type {
+  margin-inline-end: 6px;
+}
+
+/* Error-code chip after the action text (the sync summary's .ss-code
+   idiom) */
+.act-code {
+  margin-inline-start: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.act-object {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Target path of a file write (LOG-004), below the project name */
+.act-path {
+  display: block;
+  margin-block-start: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Result badges: ok in the accent tint, skipped in warning, error in
+   danger — the same mixes as the history op badges */
+.act-res {
+  font-weight: 600;
+}
+
+.act-res--ok {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.act-res--skipped {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+.act-res--error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+/* ----- Help modal (HLP-001…004) ------------------------------------------- */
+/* The FAQ window: a fixed-height modal-xl two-pane body in the
+   instruction-editor idiom — article list + search on the left, the
+   selected article on the right. List items repeat the variant-list
+   idiom (.ie-variant-item: buttons with aria-pressed). Search matches
+   are wrapped in <mark> in both the list titles and the article body
+   (HLP-001): the accent-soft background is the standard highlight
+   idiom, readable in both themes (UI-021). Body typography mirrors the
+   editor preview (.ie-preview); article sections are <h4> under the
+   pane's <h3> title, which sits under the dialog's <h2>. */
+
+.help-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: grid;
+  grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.help-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-block-size: 0;
+  border-inline-end: 1px solid var(--border);
+  padding-inline-end: 14px;
+}
+
+.help-list {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* `hidden` must win over the flex display above (UI-012 empty state) */
+.help-list[hidden] {
+  display: none;
+}
+
+.help-item {
+  appearance: none;
+  font: inherit;
+  min-inline-size: 0;
+  min-block-size: 28px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  text-align: start;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.help-item:hover {
+  background: var(--row-hover);
+}
+
+.help-item[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* `hidden` must win over the flex display above */
+.help-item[hidden] {
+  display: none;
+}
+
+.help-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-inline-size: 0;
+}
+
+/* The client-side search (HLP-001) sits under the list, like the
+   editor's "Add variant" block */
+.help-search {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-block-start: 8px;
+  border-block-start: 1px solid var(--border);
+}
+
+.help-search input[type='search'] {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  min-block-size: 28px;
+}
+
+/* "N of M articles match" under the search box */
+.help-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.help-article-pane {
+  min-inline-size: 0;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.help-article-pane h3 {
+  flex: none;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.help-article {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+}
+
+.help-article p {
+  margin: 0 0 8px;
+}
+
+.help-article h3,
+.help-article h4,
+.help-article h5,
+.help-article h6 {
+  margin: 12px 0 6px;
+  line-height: 1.3;
+}
+
+.help-article h3 {
+  font-size: 14px;
+}
+.help-article h4 {
+  font-size: 13px;
+}
+.help-article h5,
+.help-article h6 {
+  font-size: 12.5px;
+}
+
+.help-article ul,
+.help-article ol {
+  margin: 0 0 8px;
+  padding-inline-start: 22px;
+}
+
+.help-article li {
+  margin: 2px 0;
+}
+
+.help-article pre {
+  margin: 0 0 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+
+.help-article code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.help-article :not(pre) > code {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+}
+
+/* Search matches (HLP-001) in the list titles and the article body:
+   the accent-soft background is the cue, the text color stays --text
+   for AA contrast in both themes */
+.help-item mark,
+.help-article mark {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* ----- About modal (UPD-001…005, REL-004) -------------------------------- */
+/* The last UI-002 modal: static product info as definition rows, a
+   dependency-license demo expander (REL-004 — the real list is
+   generated at build time) and the simulated update check with its
+   deterministic two-phase result rendered by app.js (UPD-001…003).
+   Reuses .chip, .brand-mark, .ps-hint and the global :focus-visible
+   outline; every color goes through theme variables. */
+
+/* Brand row under the title */
+.about-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.about-brand .brand-mark {
+  inline-size: 16px;
+  block-size: 16px;
+  border-radius: 4px;
+}
+
+/* Definition rows in the project-settings read-only row idiom: the dt
+   is the muted label column, the dd the value */
+.about-info {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.about-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.about-row dt {
+  flex: none;
+  inline-size: 104px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.about-row dd {
+  margin: 0;
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+.about-row code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+}
+
+/* External links (both license texts, repository): the title marks the
+   new tab, the underline marks the link itself */
+.about-info a {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.about-info a:hover {
+  color: var(--accent);
+}
+
+/* Dependency licenses (REL-004): compact demo list inside a <details> */
+.about-licenses summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+}
+
+.about-licenses[open] summary {
+  margin-block-end: 8px;
+}
+
+.about-license-list {
+  margin: 0;
+  padding: 8px 10px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+}
+
+/* Muted REL-004 note under the list (closed hides it with the list) */
+.about-licenses .ps-hint {
+  margin-block-start: 6px;
+}
+
+/* Update check block (UPD-001…003): primary button + aria-live result
+   area under it */
+.about-update {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 12px;
+}
+
+.about-check-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* Badge + text line ("Update available: 0.2.0", "Installed — …") */
+.about-result-line {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.about-chip-update,
+.about-chip-installed {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.about-changes {
+  margin: 0;
+  padding-inline-start: 18px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.about-changes li {
+  margin: 2px 0;
+}
+
+/* Install action with the UPD-003 note under it */
+.about-install {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+/* ----- Motion (UI-022: honor the OS "reduce motion" setting) ------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

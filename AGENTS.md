@@ -2,7 +2,12 @@
 
 Instructions for coding agents working in this repository.
 
-Main-window prototype (html-pages branch): https://es-demo-634.netlify.app
+Visual reference (layout and look): `docs/prototype/` — the approved
+main-window mock-up, frozen byte-identical at commit `cc24a86` (branch
+`html-pages`). The spec (`docs/spec.md`) is the behavioral truth: where
+the mock-up and the spec disagree, the spec wins (the demo deviations
+are listed in D-125 and D-203). Live demo of the same mock-up:
+https://es-demo-634.netlify.app
 
 ## 1. Read Local Instructions First
 

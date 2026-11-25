@@ -1,0 +1,3945 @@
+<!doctype html>
+<!--
+  EunomiaSync — main window prototype.
+  Markup: HTML + pure CSS (styles.css). Interactivity: light vanilla JS
+  (app.js) — search, project filter, "Show hidden", row selection,
+  section collapse, instruction editor (UI-003 two-pane modal: variant
+  list, Edit/Preview tabs, unsaved-changes guard), instruction history
+  modal (LIB-026…027, D-16: revisions, snapshots, restore variant),
+  project settings modal (PRJ-008…012, PRJ-013…018 archive confirm),
+  repository scan modal (PRJ-002…007: scripted walk, grouped results),
+  sync summary modal (MAIN-024…031, OUT-009: simulated run with k-of-N
+  progress, per-project result table, pending-changes list), app settings
+  modal (DEF-001…005: five sections, applies immediately, no Save button),
+  archived projects modal (D-10: list + Restore flow, DB-014/015),
+  excluded paths modal (D-10: list + Remove flow, §6.2 exclusions),
+  activity modal (§7.7 LOG-001…006: user entries only, live
+  date/project/type/result filters),
+  help modal (HLP-001…005: two-pane FAQ, article list + client-side
+  search with <mark> highlights, toolbar "?" button + F1 per §11.3),
+  about modal (UPD-005, REL-004: product info rows, dependency-license
+  demo list, simulated two-phase update check),
+  toolbar shortcuts (§11.3: Ctrl/Cmd+F search, Ctrl/Cmd+N new
+  instruction, Ctrl/Cmd+Shift+N add project, Ctrl/Cmd+Shift+Enter run
+  sync — all guarded while a dialog is open),
+  project labels in the column headers (DB-041/042: a 1–6 character
+  label next to the color dot, the full name only in the tooltip and
+  a visually-hidden span for screen readers),
+  instruction text tooltip (MAIN-006: the row text lives in data-text,
+  shown by one reusable #text-tooltip after a 400 ms delay),
+  hide/restore instruction from the matrix (MAIN-012…014, LIB-005…007:
+  eye-off button per instruction row, #hide-dialog confirm, restore
+  without confirmation while "Show hidden" is on),
+  heading add/rename/delete (MAIN-015…023, LIB-030…034: header "+" and
+  per-heading child/rename/delete buttons, #heading-dialog,
+  #heading-delete-dialog keeping the section's instructions),
+  bulk assignment operations (§7.4 UI bulk operations, UI-010, NFR-021:
+  "Assign to projects…" dialog with project multi-select and a variant
+  choice for a single row, per-column "⋮" menu with assign-all/clear,
+  10+ changes confirm with the exact number),
+  matrix keyboard navigation (MAIN-010, NFR-022, §11.3: roving-focus
+  grid over the assign checkboxes — arrows, Space, Enter, Shift+arrows
+  for a row range, Escape from the variant select).
+  No dependencies, no build step.
+  Implements docs/spec.md § 7.4 "Main Window: Assignment Matrix"
+  (MAIN-001…031, D-14, UI bulk operations) + § 7.1 PRJ-002…007 (scan) +
+  PRJ-008…012 (project settings) + § 7.3 LIB-026…027 (instruction
+  history) + § 7.5 OUT-009 + § 6.2 run statuses + § 7.2 DEF-001…005
+  (settings, §6.5 keys, §11.3 Ctrl/Cmd+,) + D-10 (archived and
+  excluded-paths screens, PRJ-013…018 restore, exclusion remove,
+  DB-014/015) + § 7.7 LOG-001…006 (activity modal) + § 7.8 HLP-001…005
+  (help modal, §11.3 F1) + § 7.9 UPD-001…005 (About window, simulated
+  update check; REL-004 dependency licenses, D-27 updater) + UI-001
+  (window, pinned sync panel), UI-012
+  (empty states), UI-021 (light/dark via OS setting), UI-022
+  (reduced motion).
+  Tooltips are native `title` attributes; accessible names are real labels.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>EunomiaSync — Assignment Matrix (prototype)</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- ===== Toolbar: search, project filter, "Show hidden" (D-14, UI) ===== -->
+      <header class="toolbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          EunomiaSync
+        </div>
+
+        <label class="visually-hidden" for="search">Search by instruction name</label>
+        <input
+          id="search"
+          class="search"
+          type="search"
+          placeholder="Search instructions…"
+          title="Search instructions (Ctrl+F)"
+          autocomplete="off"
+        />
+
+        <label class="visually-hidden" for="proj-filter">Project filter</label>
+        <select id="proj-filter" class="filter">
+          <option selected value="all">All projects</option>
+          <option>EunomiaSync</option>
+          <option>yepbro/site</option>
+          <option>quotameter</option>
+          <option>task-id-mcp</option>
+          <option>utils/deja-vu</option>
+          <option>docktree</option>
+          <option>moli</option>
+          <option>sandbox-cf</option>
+        </select>
+
+        <label class="toggle">
+          <input id="show-hidden" type="checkbox" />
+          Show hidden
+          <span id="hidden-count" class="toggle-count" title="Hidden instructions">0</span>
+        </label>
+
+        <span class="spacer"></span>
+
+        <span id="selected-chip" class="selected-chip" hidden></span>
+
+        <!-- Bulk assignment (§7.4 UI bulk operations, UI-010): appears with
+             a row selection; opens #bulk-dialog -->
+        <button id="bulk-assign-btn" type="button" class="btn btn-ghost" hidden>
+          Assign to projects…
+        </button>
+
+        <!-- Activity (§7.7 UI row) and Settings (DEF-001…004): icon ghost
+             buttons in the right cluster, per the spec toolbar sketch.
+             Icon-only keeps the cluster inside the UI-001 minimum width
+             of 960px; the glyphs are injected by app.js from the ICONS
+             idiom, the accessible names and tooltips are kept here. The
+             other Settings entry point is Ctrl/Cmd + , (§11.3). -->
+        <button
+          id="activity-btn"
+          type="button"
+          class="btn btn-ghost btn-icon"
+          title="Activity"
+          aria-label="Activity"
+        ></button>
+
+        <button
+          id="settings-btn"
+          type="button"
+          class="btn btn-ghost btn-icon"
+          title="Settings (Ctrl+,)"
+          aria-label="Settings"
+        ></button>
+        <button
+          id="add-project-btn"
+          type="button"
+          class="btn btn-ghost"
+          title="Add project (Ctrl+Shift+N)"
+        >
+          + Add project
+        </button>
+        <button
+          id="new-instruction-btn"
+          type="button"
+          class="btn btn-ghost"
+          title="New instruction (Ctrl+N)"
+        >
+          + New instruction
+        </button>
+
+        <!-- Help (HLP-001): ghost button, the last toolbar button per the
+             §11.1 sketch (…[Activity] [Settings] [?]); the other entry
+             point is F1 (§11.3) -->
+        <button id="help-btn" type="button" class="btn btn-ghost" title="Help (F1)" aria-label="Help">
+          ?
+        </button>
+      </header>
+
+      <!-- ===== Assignment matrix (MAIN-001…023, MAIN-010: pinned first column
+         and header row are CSS position:sticky; virtualization is a runtime
+         concern and is intentionally out of scope for this static layout) ==== -->
+      <main class="matrix-wrap" role="region" aria-label="Assignment matrix" tabindex="0">
+        <table class="matrix">
+          <caption class="visually-hidden">
+            Assignment matrix: instructions by project
+          </caption>
+
+          <colgroup>
+            <col class="col-check" />
+            <col class="col-name" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+            <col class="col-proj" />
+          </colgroup>
+
+          <thead>
+            <tr>
+              <th scope="col" class="c-check">
+                <input id="select-all" type="checkbox" aria-label="Select all rows" />
+              </th>
+              <th scope="col" class="c-name" id="instruction-header">
+                Instruction
+                <!-- "+" adds a top-level section (MAIN-015): the header
+                     stays the drag-drop target for moving a section. -->
+                <button
+                  id="add-section-btn"
+                  type="button"
+                  class="hbtn hbtn--add"
+                  title="Add top-level section"
+                  aria-label="Add top-level section"
+                ></button>
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="EunomiaSync — last successful sync: 19 Nov 2026, 14:32 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #10b981" aria-hidden="true"></span>
+                  <span class="proj-label">EUNOMI</span>
+                  <span class="proj-name visually-hidden">EunomiaSync</span>
+                </span>
+                <span class="proj-sub st-dirty"
+                  ><span class="dot" aria-hidden="true"></span>unsynced changes</span
+                >
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="yepbro/site — last successful sync: 19 Nov 2026, 09:14 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #3b82f6" aria-hidden="true"></span>
+                  <span class="proj-label">YEPBR</span>
+                  <span class="proj-name visually-hidden">yepbro/site</span>
+                </span>
+                <span class="proj-sub">19 Nov, 09:14</span>
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="quotameter — target file changed outside the app (see 5.7). Last successful sync: 12 Nov 2026, 09:10 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #8b5cf6" aria-hidden="true"></span>
+                  <span class="proj-label">QUOTA</span>
+                  <span class="proj-name visually-hidden">quotameter</span>
+                </span>
+                <span class="proj-sub st-warn">
+                  <svg class="ic" viewBox="0 0 16 16" aria-hidden="true">
+                    <path
+                      d="M8 2.6 14.4 13.4H1.6Z"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linejoin="round"
+                    />
+                    <path
+                      d="M8 6.8v3"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                    />
+                    <circle cx="8" cy="11.6" r=".9" fill="currentColor" />
+                  </svg>
+                  modified externally
+                </span>
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="task-id-mcp — last successful sync: 18 Nov 2026, 20:41 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #f59e0b" aria-hidden="true"></span>
+                  <span class="proj-label">TASK-</span>
+                  <span class="proj-name visually-hidden">task-id-mcp</span>
+                </span>
+                <span class="proj-sub st-dirty"
+                  ><span class="dot" aria-hidden="true"></span>unsynced changes</span
+                >
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="utils/deja-vu — folder unavailable (moved or drive disconnected). Last successful sync: 3 Nov 2026, 21:05 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #14b8a6" aria-hidden="true"></span>
+                  <span class="proj-label">UTILS</span>
+                  <span class="proj-name visually-hidden">utils/deja-vu</span>
+                </span>
+                <span class="proj-sub st-off">
+                  <svg class="ic" viewBox="0 0 16 16" aria-hidden="true">
+                    <circle
+                      cx="8"
+                      cy="8"
+                      r="5.4"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    />
+                    <path
+                      d="M4.6 11.4l6.8-6.8"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                    />
+                  </svg>
+                  unavailable
+                </span>
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="docktree — last successful sync: 17 Nov 2026, 11:02 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #ec4899" aria-hidden="true"></span>
+                  <span class="proj-label">DOCKT</span>
+                  <span class="proj-name visually-hidden">docktree</span>
+                </span>
+                <span class="proj-sub st-dirty"
+                  ><span class="dot" aria-hidden="true"></span>unsynced changes</span
+                >
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="moli — last successful sync: 15 Nov 2026, 18:27 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #6366f1" aria-hidden="true"></span>
+                  <span class="proj-label">MOLI</span>
+                  <span class="proj-name visually-hidden">moli</span>
+                </span>
+                <span class="proj-sub st-dirty"
+                  ><span class="dot" aria-hidden="true"></span>unsynced changes</span
+                >
+              </th>
+
+              <th
+                scope="col"
+                class="c-proj"
+                title="sandbox-cf — target file AGENTS.md not found. Last successful sync: 10 Nov 2026, 08:55 (UTC+3)"
+              >
+                <span class="proj-line">
+                  <span class="proj-color" style="--c: #64748b" aria-hidden="true"></span>
+                  <span class="proj-label">SANDB</span>
+                  <span class="proj-name visually-hidden">sandbox-cf</span>
+                </span>
+                <span class="proj-sub st-warn">
+                  <svg class="ic" viewBox="0 0 16 16" aria-hidden="true">
+                    <path
+                      d="M8 2.6 14.4 13.4H1.6Z"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linejoin="round"
+                    />
+                    <path
+                      d="M8 6.8v3"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                    />
+                    <circle cx="8" cy="11.6" r=".9" fill="currentColor" />
+                  </svg>
+                  target deleted
+                </span>
+              </th>
+            </tr>
+          </thead>
+
+          <tbody>
+            <!-- ======================== ## General ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section General"
+                  ></button
+                  ><span class="hname">General</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="3" style="--depth: 1">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Communication"
+                  ></button
+                  ><span class="hname">Communication</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: Language of responses"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 2"
+                data-text="Always answer in the user's language; default is English."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Language of responses"
+                  ></button>
+                  <span class="name">Language of responses</span>
+                  <span class="chip" title="2 variants">2</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Language of responses — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <button
+                  type="button"
+                  class="variant-btn"
+                  aria-label="Language of responses — yepbro/site: variant Spanish"
+                  title="Variant: Spanish"
+                ></button>
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Language of responses — quotameter: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  data-initial="true"
+                  aria-label="Language of responses — task-id-mcp: not assigned (changed)"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Language of responses — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Language of responses — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Language of responses — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Language of responses — sandbox-cf: main variant"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Response tone" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 2"
+                data-text="Direct and friendly; no filler phrases."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Response tone"
+                  ></button>
+                  <span class="name">Response tone</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Response tone — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Response tone — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Response tone — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Response tone — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Response tone — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  data-initial="false"
+                  checked
+                  aria-label="Response tone — docktree: main variant (changed)"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Response tone — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Response tone — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="3" style="--depth: 1">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Code comments"
+                  ></button
+                  ><span class="hname">Code comments</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Comment style" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 2"
+                data-text="Comments explain why, not what."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Comment style"
+                  ></button>
+                  <span class="name">Comment style</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Comment style — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Comment style — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Comment style — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  data-initial="false"
+                  checked
+                  aria-label="Comment style — task-id-mcp: main variant (changed)"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Comment style — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Comment style — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Comment style — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Comment style — sandbox-cf: main variant"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: When to comment" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 2"
+                data-text="Public API, workarounds, non-obvious algorithms."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: When to comment"
+                  ></button>
+                  <span class="name">When to comment</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="When to comment — quotameter: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="When to comment — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- ======================== ## Code Style ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Code Style"
+                  ></button
+                  ><span class="hname">Code Style</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: Formatting and linting"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="The formatter is the source of truth; never argue with it."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Formatting and linting"
+                  ></button>
+                  <span class="name">Formatting and linting</span>
+                  <span class="chip" title="2 variants">2</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Formatting and linting — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Formatting and linting — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Formatting and linting — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Formatting and linting — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Formatting and linting — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Formatting and linting — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Formatting and linting — moli: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Formatting and linting — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: Naming conventions"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="Descriptive names; no single-letter identifiers outside loop counters."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Naming conventions"
+                  ></button>
+                  <span class="name">Naming conventions</span>
+                  <span class="chip" title="2 variants">2</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  data-initial="true"
+                  aria-label="Naming conventions — EunomiaSync: not assigned (changed)"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Naming conventions — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Naming conventions — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <button
+                  type="button"
+                  class="variant-btn"
+                  aria-label="Naming conventions — task-id-mcp: variant Strict"
+                  title="Variant: Strict"
+                ></button>
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Naming conventions — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Naming conventions — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Naming conventions — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Naming conventions — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Type hints" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="Full annotations on all public signatures."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Type hints"
+                  ></button>
+                  <span class="name">Type hints</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Type hints — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Type hints — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Type hints — quotameter: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Type hints — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Type hints — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  data-initial="true"
+                  aria-label="Type hints — docktree: not assigned (changed)"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Type hints — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Type hints — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Line length" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="Soft limit 100 characters, hard limit 120."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Line length"
+                  ></button>
+                  <span class="name">Line length</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Line length — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Line length — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- Hidden instruction (LIB-005…007): visible only with "Show hidden" -->
+            <tr class="row-hidden">
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Docstring format" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="Hidden instruction — visible only with the Show hidden toggle on."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Docstring format"
+                  ></button>
+                  <span class="name">Docstring format</span>
+                  <span class="chip" title="1 variant">1</span>
+                  <span class="hidden-chip">hidden</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Docstring format — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Docstring format — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- ======================== ## Git Workflow ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Git Workflow"
+                  ></button
+                  ><span class="hname">Git Workflow</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  checked
+                  aria-label="Select row: Commit messages"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="Imperative mood, subject up to 72 characters; the body explains why."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Commit messages"
+                  ></button>
+                  <span class="name">Commit messages</span>
+                  <span class="chip" title="2 variants">2</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Commit messages — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Commit messages — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <button
+                  type="button"
+                  class="variant-btn"
+                  aria-label="Commit messages — quotameter: variant Conventional Commits"
+                  title="Variant: Conventional Commits"
+                ></button>
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Commit messages — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Commit messages — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <button
+                  type="button"
+                  class="variant-btn"
+                  aria-label="Commit messages — docktree: variant Conventional Commits"
+                  title="Variant: Conventional Commits"
+                ></button>
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Commit messages — moli: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Commit messages — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Branch naming" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="feature/t-&lt;n&gt;-&lt;slug&gt; — from the task card number."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Branch naming"
+                  ></button>
+                  <span class="name">Branch naming</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Branch naming — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Branch naming — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Branch naming — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Branch naming — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Branch naming — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Branch naming — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Branch naming — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Branch naming — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- Empty instruction (MAIN-009): special icon, dimmed name -->
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Pre-commit checks" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Empty instruction — the text is not written yet."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Pre-commit checks"
+                  ></button>
+                  <span class="empty-mark" aria-hidden="true"></span>
+                  <span class="name name-empty">Pre-commit checks</span>
+                  <span class="visually-hidden">(empty instruction)</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Pre-commit checks — EunomiaSync: empty variant assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Pre-commit checks — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- Hidden instruction (LIB-005…007): visible only with "Show hidden" -->
+            <tr class="row-hidden">
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: PR review checklist"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="Hidden instruction — visible only with the Show hidden toggle on."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: PR review checklist"
+                  ></button>
+                  <span class="name">PR review checklist</span>
+                  <span class="chip" title="2 variants">2</span>
+                  <span class="hidden-chip">hidden</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="PR review checklist — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- ======================== ## Testing ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Testing"
+                  ></button
+                  ><span class="hname">Testing</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Unit tests" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="Test behavior, not implementation."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Unit tests"
+                  ></button>
+                  <span class="name">Unit tests</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Unit tests — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Unit tests — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Unit tests — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Unit tests — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Unit tests — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Unit tests — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  data-initial="false"
+                  checked
+                  aria-label="Unit tests — moli: main variant (changed)"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Unit tests — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: E2E tests" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="Smoke scenarios run on every pull request."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: E2E tests"
+                  ></button>
+                  <span class="name">E2E tests</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="E2E tests — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="E2E tests — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="E2E tests — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="E2E tests — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="E2E tests — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="E2E tests — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input type="checkbox" class="assign" aria-label="E2E tests — moli: not assigned" />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="E2E tests — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Coverage targets" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="Critical paths are covered at 80% or more."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Coverage targets"
+                  ></button>
+                  <span class="name">Coverage targets</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  data-initial="false"
+                  checked
+                  aria-label="Coverage targets — moli: main variant (changed)"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Coverage targets — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: Bug-driven development"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="A red test first, then the fix that makes it green."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Bug-driven development"
+                  ></button>
+                  <span class="name">Bug-driven development</span>
+                  <span class="chip" title="2 variants">2</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <button
+                  type="button"
+                  class="variant-btn"
+                  aria-label="Bug-driven development — EunomiaSync: variant Bug-first"
+                  title="Variant: Bug-first"
+                ></button>
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bug-driven development — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bug-driven development — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bug-driven development — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bug-driven development — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Bug-driven development — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bug-driven development — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bug-driven development — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- ======================== ## Documentation ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Documentation"
+                  ></button
+                  ><span class="hname">Documentation</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: README updates" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="README is updated with any user-visible behavior change."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: README updates"
+                  ></button>
+                  <span class="name">README updates</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="README updates — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="README updates — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="README updates — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="README updates — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="README updates — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="README updates — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="README updates — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="README updates — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: DECISIONS.md entries"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="Every solved problem gets a D-NNN entry."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: DECISIONS.md entries"
+                  ></button>
+                  <span class="name">DECISIONS.md entries</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="DECISIONS.md entries — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="DECISIONS.md entries — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="DECISIONS.md entries — quotameter: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="DECISIONS.md entries — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="DECISIONS.md entries — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="DECISIONS.md entries — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="DECISIONS.md entries — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="DECISIONS.md entries — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- Empty instruction, nowhere assigned -->
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Changelog" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                title="Empty instruction — the text is not written yet."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Changelog"
+                  ></button>
+                  <span class="empty-mark" aria-hidden="true"></span>
+                  <span class="name name-empty">Changelog</span>
+                  <span class="visually-hidden">(empty instruction)</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input type="checkbox" class="assign" aria-label="Changelog — moli: not assigned" />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Changelog — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- ======================== ## Security ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Security"
+                  ></button
+                  ><span class="hname">Security</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  checked
+                  aria-label="Select row: Secrets handling"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="Never commit secrets; use environment variables and secret stores."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Secrets handling"
+                  ></button>
+                  <span class="name">Secrets handling</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — yepbro/site: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — quotameter: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Secrets handling — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — docktree: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — moli: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Secrets handling — sandbox-cf: main variant"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Dependency audit" />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="cargo-deny and npm audit run on CI."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Dependency audit"
+                  ></button>
+                  <span class="name">Dependency audit</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Dependency audit — EunomiaSync: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Dependency audit — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Dependency audit — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  checked
+                  aria-label="Dependency audit — task-id-mcp: main variant"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Dependency audit — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Dependency audit — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Dependency audit — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Dependency audit — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <!-- ======================== ## Performance ======================== -->
+            <tr class="row-heading">
+              <td class="c-check" aria-hidden="true"></td>
+              <th scope="row" class="c-name" data-level="2" style="--depth: 0">
+                <span class="name-wrap"
+                  ><button
+                    type="button"
+                    class="caret-btn"
+                    aria-expanded="true"
+                    aria-label="Toggle section Performance"
+                  ></button
+                  ><span class="hname">Performance</span></span
+                >
+              </th>
+              <td class="c-fill" colspan="8"></td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input
+                  type="checkbox"
+                  class="row-sel"
+                  aria-label="Select row: Bundle size budget"
+                />
+              </td>
+              <th
+                scope="row"
+                class="c-name"
+                style="--depth: 1"
+                data-text="Initial bundle is at most 200 KB gzip."
+              >
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Bundle size budget"
+                  ></button>
+                  <span class="name">Bundle size budget</span>
+                  <span class="chip" title="1 variant">1</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  data-initial="false"
+                  checked
+                  aria-label="Bundle size budget — EunomiaSync: main variant (changed)"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — moli: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Bundle size budget — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+
+            <tr>
+              <td class="c-check">
+                <input type="checkbox" class="row-sel" aria-label="Select row: Profiling" />
+              </td>
+              <th scope="row" class="c-name" style="--depth: 1" data-text="Measure before optimizing.">
+                <span class="name-wrap">
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    aria-label="Edit instruction: Profiling"
+                  ></button>
+                  <span class="name">Profiling</span>
+                </span>
+              </th>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — EunomiaSync: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — yepbro/site: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — quotameter: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — task-id-mcp: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — utils/deja-vu: not assigned"
+                  disabled
+                />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — docktree: not assigned"
+                />
+              </td>
+              <td class="c-cell">
+                <input type="checkbox" class="assign" aria-label="Profiling — moli: not assigned" />
+              </td>
+              <td class="c-cell">
+                <input
+                  type="checkbox"
+                  class="assign"
+                  aria-label="Profiling — sandbox-cf: not assigned"
+                />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Empty search state (UI-012) -->
+        <div id="empty-state" class="empty-state" hidden>
+          No instructions match the current search.
+        </div>
+      </main>
+
+      <!-- ===== Sync panel: pinned outside the scroll area (MAIN-024…027) ===== -->
+      <footer class="syncbar">
+        <button id="run-sync" type="button" class="btn btn-primary" title="Run sync (Ctrl+Shift+Enter)">
+          Run sync
+        </button>
+
+        <!-- Run progress (MAIN-030): shown by app.js while the simulated
+           run ticks; "k of N" is a polite live region, the spinner is
+           decorative and drops its animation under reduced motion -->
+        <span id="sync-progress" class="sync-progress" aria-live="polite" hidden>
+          <span class="sync-spinner" aria-hidden="true"></span>
+          <span id="sync-progress-text">0 of 8</span>
+        </span>
+
+        <span class="sync-last">
+          Last successful sync:
+          <strong>19 Nov 2026, 14:32 (UTC+3)</strong>
+        </span>
+
+        <span class="spacer"></span>
+
+        <button
+          type="button"
+          class="sync-counter"
+          title="Projects with unsynced changes — click for the list"
+        >
+          <span class="badge" aria-hidden="true">4</span>
+          <span id="sync-counter-text">4 projects with unsynced changes</span>
+        </button>
+      </footer>
+
+      <!-- Instruction editor (UI-003, LIB-002…025): large two-pane modal —
+         variant list on the left (Main badge, dashed mark for empty
+         variants, make-main/delete actions, add "Copy of main"/"Empty");
+         name + variant name fields, Edit/Preview tabs, monospace textarea
+         with character counter (DB-006), reserved-marker validation
+         (DB-016) and a sanitized Markdown preview with non-blocking
+         warnings (D-15) on the right. Modes are wired by app.js: editing a
+         row, creating a new instruction, per-project custom text.
+         Cancel/Esc with unsaved changes opens #unsaved-dialog (UI-010). -->
+      <dialog id="edit-dialog" class="modal modal-xl" aria-labelledby="edit-title">
+        <form id="edit-form" method="dialog" novalidate>
+          <h2 id="edit-title">Edit instruction</h2>
+
+          <div id="ie-body" class="ie-body">
+            <!-- Left pane: variant list, rendered by app.js -->
+            <aside id="ie-variants" class="ie-variants" aria-label="Variants">
+              <span class="field-label" id="ie-variants-label">Variants</span>
+              <div
+                id="ie-variant-list"
+                class="ie-variant-list"
+                aria-labelledby="ie-variants-label"
+              ></div>
+              <div class="ie-add-variant">
+                <span class="field-label" id="ie-add-label">Add variant</span>
+                <div class="ie-add-row" role="group" aria-labelledby="ie-add-label">
+                  <button
+                    type="button"
+                    id="ie-add-copy"
+                    class="btn btn-ghost"
+                    title="Add a copy of the main variant (LIB-017)"
+                  >
+                    Copy of main
+                  </button>
+                  <button
+                    type="button"
+                    id="ie-add-empty"
+                    class="btn btn-ghost"
+                    title="Add an empty variant — outputs no text, can be assigned (D-13, LIB-015)"
+                  >
+                    Empty
+                  </button>
+                </div>
+              </div>
+            </aside>
+
+            <!-- Right pane: name + variant name, Edit/Preview tabs -->
+            <div class="ie-main">
+              <!-- Create mode only (S3 "pick a section"): the section the
+                 new instruction joins; filled by app.js on open, the row is
+                 inserted at the section's end on save -->
+              <div id="ie-section-field" class="ie-section-field">
+                <label class="field-label" for="ie-section">Section</label>
+                <select id="ie-section" class="ps-select"></select>
+              </div>
+              <div id="ie-fields" class="ie-fields">
+                <div class="ie-field">
+                  <label class="field-label" for="ie-name">Name</label>
+                  <input
+                    id="ie-name"
+                    class="ps-input"
+                    type="text"
+                    autocomplete="off"
+                    maxlength="200"
+                    aria-describedby="ie-name-error"
+                  />
+                  <p id="ie-name-error" class="ps-error" hidden></p>
+                </div>
+                <div class="ie-field">
+                  <label class="field-label" for="ie-vname">Variant name</label>
+                  <input
+                    id="ie-vname"
+                    class="ps-input"
+                    type="text"
+                    autocomplete="off"
+                    maxlength="100"
+                    aria-describedby="ie-vname-error"
+                  />
+                  <p id="ie-vname-error" class="ps-error" hidden></p>
+                </div>
+              </div>
+
+              <!-- Custom-instruction mode: how the per-cell text relates to
+                 the library variant it was created from. Visible only in
+                 the custom mode (.ie-custom); app.js syncs the hint, the
+                 placeholder and the draft when the choice changes. -->
+              <div
+                id="ie-mode-group"
+                class="ie-mode-group"
+                role="radiogroup"
+                aria-labelledby="ie-mode-label"
+              >
+                <span id="ie-mode-label" class="field-label">Custom instruction</span>
+                <label class="ie-mode-option">
+                  <input type="radio" name="ie-custom-mode" value="replace" checked />
+                  <span class="ie-mode-text">
+                    <strong>Fully replaces the library variant</strong>
+                    <span class="ie-mode-hint">
+                      Only this text is output; the library variant is ignored.
+                    </span>
+                  </span>
+                </label>
+                <label class="ie-mode-option">
+                  <input type="radio" name="ie-custom-mode" value="extend" />
+                  <span class="ie-mode-text">
+                    <strong>Supplements the library variant</strong>
+                    <span class="ie-mode-hint">
+                      This text is appended after the library variant's text.
+                    </span>
+                  </span>
+                </label>
+                <p id="ie-mode-base" class="ie-mode-base" hidden></p>
+              </div>
+
+              <div id="ie-tabs" class="ps-tabs" role="tablist" aria-label="Text editor views">
+                <button
+                  type="button"
+                  id="ie-tab-edit"
+                  class="ps-tab"
+                  role="tab"
+                  aria-selected="true"
+                  aria-controls="ie-panel-edit"
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  id="ie-tab-preview"
+                  class="ps-tab"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="ie-panel-preview"
+                  tabindex="-1"
+                >
+                  Preview
+                </button>
+              </div>
+
+              <div id="ie-panel-edit" class="ie-panel" role="tabpanel" aria-labelledby="ie-tab-edit">
+                <textarea
+                  id="edit-text"
+                  class="edit-text"
+                  rows="8"
+                  maxlength="262144"
+                  aria-label="Variant text (Markdown)"
+                  aria-describedby="ie-char-count ie-marker-error"
+                  placeholder="Instruction text (Markdown)…"
+                ></textarea>
+                <p id="ie-marker-error" class="ps-error" hidden></p>
+                <p class="ie-meta"><span id="ie-char-count">0 / 262,144</span></p>
+              </div>
+
+              <div
+                id="ie-panel-preview"
+                class="ie-panel"
+                role="tabpanel"
+                aria-labelledby="ie-tab-preview"
+                hidden
+              >
+                <div id="ie-preview" class="ie-preview"></div>
+                <div class="ie-warnings">
+                  <span class="field-label">Warnings (do not block saving)</span>
+                  <ul id="ie-warnings-list" class="ie-warnings-list" hidden></ul>
+                  <p id="ie-no-warnings" class="ps-hint">No Markdown warnings.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" id="ie-history-btn" class="btn btn-ghost">History</button>
+            <span class="spacer"></span>
+            <button id="ie-cancel-btn" value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="save" class="btn btn-primary">Save</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Unsaved-changes guard (UI-010): opened from the instruction
+         editor's Cancel/Esc when something changed since the last open. -->
+      <dialog id="unsaved-dialog" class="modal" aria-labelledby="unsaved-title">
+        <form method="dialog">
+          <h2 id="unsaved-title">Unsaved changes</h2>
+          <p id="unsaved-text" class="modal-text">
+            The instruction has unsaved changes. Close the editor and discard them?
+          </p>
+          <div class="modal-actions">
+            <button value="keep" class="btn btn-ghost">Keep editing</button>
+            <button value="discard" class="btn btn-danger">Discard</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Delete-custom confirmation -->
+      <dialog id="confirm-dialog" class="modal" aria-labelledby="confirm-title">
+        <form method="dialog">
+          <h2 id="confirm-title">Delete custom instruction</h2>
+          <p id="confirm-text" class="modal-text">Placeholder.</p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="delete" class="btn btn-danger">Delete</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Hide-instruction confirmation (MAIN-012…014, LIB-005, UI-010): a
+         dedicated dialog — the shared #confirm-dialog is hard-labeled
+         "Delete". Confirming marks the row hidden in memory: assignments
+         are kept and files change only after the next sync. -->
+      <dialog id="hide-dialog" class="modal" aria-labelledby="hide-title">
+        <form method="dialog">
+          <h2 id="hide-title">Hide instruction</h2>
+          <p class="modal-text">
+            The instruction will be excluded from built files. Assignments are kept; files change
+            only after the next sync.
+          </p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="hide" class="btn btn-primary">Hide</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Bulk assignment dialog (§7.4 UI bulk operations, UI-010, NFR-021):
+         multi-select of the demo projects (color dots + names, rendered by
+         app.js from PROJECTS); with exactly one instruction row selected a
+         variant radio list appears (Default + the instruction's variants,
+         the same source the cell selects use). With several rows selected
+         every row gets the Default/main variant. Apply flows through
+         updateCellState/refreshDirtyState; 10 or more affected assignments
+         ask in #bulk-confirm-dialog first. -->
+      <dialog id="bulk-dialog" class="modal" aria-labelledby="bulk-title">
+        <form id="bulk-form" method="dialog" novalidate>
+          <h2 id="bulk-title">Assign to projects</h2>
+          <p class="modal-text">Choose the projects for the selected instructions.</p>
+
+          <fieldset class="ps-field">
+            <legend class="field-label">Projects</legend>
+            <div id="bulk-projects"></div>
+          </fieldset>
+
+          <div id="bulk-variant-block" class="ps-field" hidden>
+            <span class="field-label">Variant</span>
+            <div id="bulk-variants"></div>
+          </div>
+
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button id="bulk-apply-btn" value="apply" class="btn btn-primary">Apply</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Bulk-change confirmation (UI-010, NFR-021): shared by the bulk
+         dialog and the column menu; states the exact number of changed
+         assignments before anything is applied. -->
+      <dialog id="bulk-confirm-dialog" class="modal" aria-labelledby="bc-title">
+        <form method="dialog">
+          <h2 id="bc-title">Bulk change</h2>
+          <p id="bc-text" class="modal-text">Placeholder.</p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="continue" class="btn btn-primary">Continue</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Column actions menu (§7.4 UI bulk operations): one reusable
+         positioned menu opened by the "⋮" button of a project column
+         header; "Preview file" plus "Assign all visible" / "Clear
+         column". app.js closes it on outside click, Escape and scroll;
+         10+ changes confirm first. -->
+      <div id="column-menu" aria-label="Column actions" hidden>
+        <button type="button" data-action="preview">Preview file…</button>
+        <button type="button" data-action="assign">Assign all visible</button>
+        <button type="button" data-action="clear">Clear column</button>
+      </div>
+
+      <!-- Variant contents popover: one reusable read-only box opened by
+         the per-cell "eye" button on variant rows; lists every variant of
+         the row with its FULL text (no tooltip truncation), the variant
+         currently assigned in that cell marked. app.js closes it on
+         outside click, Escape and scroll, like the column menu. -->
+      <div id="variants-popover" aria-label="Variant texts" hidden></div>
+
+      <!-- Add/rename section dialog (MAIN-015…023, LIB-030…031): shared by
+         the header "+" (top-level ## section at the end of the tree), a
+         heading's "+" (child section, level+1 capped at 6) and the
+         heading's pencil (rename, prefilled). Name: 1–200 characters,
+         one line (§6.9). -->
+      <dialog id="heading-dialog" class="modal" aria-labelledby="hd-title">
+        <form id="hd-form" method="dialog" novalidate>
+          <h2 id="hd-title">Add section</h2>
+          <div class="ps-field">
+            <label class="field-label" for="hd-name">Section name</label>
+            <input
+              id="hd-name"
+              class="ps-input"
+              type="text"
+              autocomplete="off"
+              maxlength="200"
+              aria-describedby="hd-name-error"
+            />
+            <p id="hd-name-error" class="ps-error" hidden></p>
+          </div>
+          <p class="ps-hint">Name: 1–200 characters, one line (§6.9).</p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="save" class="btn btn-primary">Save</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Delete-section confirmation (MAIN-015…023, LIB-033, §6.4, UI-010):
+         a dedicated dialog. Confirming removes only the heading row — the
+         section's instructions stay in place and become part of the
+         previous section. -->
+      <dialog id="heading-delete-dialog" class="modal" aria-labelledby="hdel-title">
+        <form method="dialog">
+          <h2 id="hdel-title">Delete section</h2>
+          <p class="modal-text">
+            The section's instructions stay in place and become part of the previous section.
+          </p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="delete" class="btn btn-danger">Delete</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Project settings (PRJ-008…012): General / Backups tabs (BKP-004),
+         editable name/label/color/description (DB-040/042), read-only path
+         and origin, scheme A/B/C with copy helpers (D-19/20/21, DB-023) and
+         a type-to-confirm archive danger zone (PRJ-013…018, D-09). Fields
+         are prefilled from the demo data and saved by app.js. -->
+      <dialog id="project-settings-dialog" class="modal modal-lg" aria-labelledby="ps-title">
+        <form id="ps-form" method="dialog" novalidate>
+          <h2 id="ps-title">Project settings</h2>
+
+          <div id="ps-tabs" class="ps-tabs" role="tablist" aria-label="Project settings sections">
+            <button
+              type="button"
+              id="ps-tab-general"
+              class="ps-tab"
+              role="tab"
+              aria-selected="true"
+              aria-controls="ps-panel-general"
+            >
+              General
+            </button>
+            <button
+              type="button"
+              id="ps-tab-backups"
+              class="ps-tab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="ps-panel-backups"
+              tabindex="-1"
+            >
+              Backups
+            </button>
+          </div>
+
+          <div class="ps-body">
+            <!-- General: editable fields, read-only meta, sync settings -->
+            <div
+              id="ps-panel-general"
+              class="ps-panel"
+              role="tabpanel"
+              aria-labelledby="ps-tab-general"
+            >
+              <div class="ps-grid">
+                <div class="ps-field">
+                  <label class="field-label" for="ps-name">Name</label>
+                  <input
+                    id="ps-name"
+                    class="ps-input"
+                    type="text"
+                    autocomplete="off"
+                    maxlength="100"
+                    aria-describedby="ps-name-error"
+                  />
+                  <p id="ps-name-error" class="ps-error" hidden></p>
+                </div>
+
+                <div class="ps-field">
+                  <label class="field-label" for="ps-label">Label</label>
+                  <div class="ps-label-row">
+                    <input
+                      id="ps-label"
+                      class="ps-input"
+                      type="text"
+                      autocomplete="off"
+                      maxlength="6"
+                      aria-describedby="ps-label-error"
+                    />
+                    <span id="ps-label-preview" class="chip ps-label-chip" title="Label preview">—</span>
+                  </div>
+                  <p id="ps-label-error" class="ps-error" hidden></p>
+                </div>
+              </div>
+              <p class="ps-hint">
+                Name: 1–100 characters after trimming. Label: 1–6 visible characters, case is
+                kept (DB-042).
+              </p>
+
+              <div class="ps-field">
+                <label class="field-label" for="ps-description">Description</label>
+                <textarea
+                  id="ps-description"
+                  class="ps-textarea"
+                  rows="3"
+                  maxlength="1000"
+                  placeholder="Optional, up to 1000 characters…"
+                ></textarea>
+                <p id="ps-desc-count" class="ps-hint">0 / 1000</p>
+              </div>
+
+              <fieldset class="ps-field ps-palette">
+                <legend class="field-label">Color</legend>
+                <div id="ps-swatches" class="ps-swatches">
+                  <!-- 12 palette radios (DB-040) are generated by app.js -->
+                </div>
+                <p class="ps-hint">
+                  Fixed 12-color palette (DB-040); if no color is chosen, the app assigns the
+                  least used one (PRJ-010, D-29).
+                </p>
+              </fieldset>
+
+              <!-- Read-only (PRJ-009/021): path, origin, last sync -->
+              <div class="ps-readonly">
+                <div class="ps-readonly-row">
+                  <span class="ps-readonly-key">Path</span>
+                  <code id="ps-path" class="ps-path"></code>
+                </div>
+                <div class="ps-readonly-row">
+                  <span class="ps-readonly-key">Added</span>
+                  <span id="ps-added-via">Manual</span>
+                </div>
+                <div class="ps-readonly-row">
+                  <span class="ps-readonly-key">Last successful sync</span>
+                  <span id="ps-last-sync">—</span>
+                </div>
+              </div>
+
+              <section class="ps-section">
+                <h3 class="ps-section-title">Sync settings</h3>
+
+                <fieldset class="ps-field ps-scheme-set">
+                  <legend class="field-label">Scheme</legend>
+                  <div id="ps-schemes" class="ps-schemes">
+                    <label class="ps-scheme">
+                      <input type="radio" name="ps-scheme" value="A" />
+                      <span><strong>A</strong> — full overwrite of the main file</span>
+                    </label>
+                    <label class="ps-scheme">
+                      <input type="radio" name="ps-scheme" value="B" />
+                      <span
+                        ><strong>B</strong> — write into a marked area &lt;!-- EUNOMIASYNC:BEGIN
+                        --&gt;…&lt;!-- EUNOMIASYNC:END --&gt;</span
+                      >
+                    </label>
+                    <label class="ps-scheme">
+                      <input type="radio" name="ps-scheme" value="C" />
+                      <span
+                        ><strong>C</strong> — separate <code>&lt;STEM&gt;.project.md</code> file;
+                        the app never edits the main file</span
+                      >
+                    </label>
+                  </div>
+                </fieldset>
+
+                <div class="ps-field">
+                  <label class="field-label" for="ps-base-file">Base file name</label>
+                  <select id="ps-base-file" class="ps-input ps-select">
+                    <option>AGENTS.md</option>
+                    <option>CLAUDE.md</option>
+                  </select>
+                </div>
+
+                <div id="ps-extra-files" class="ps-field">
+                  <span class="field-label">Extra files (scheme A)</span>
+                  <div class="ps-extra-row">
+                    <label class="ps-check-row">
+                      <input id="ps-extra-local" type="checkbox" />
+                      Include <code id="ps-extra-local-name">AGENTS.local.md</code>
+                    </label>
+                    <select
+                      id="ps-extra-local-pos"
+                      class="ps-input ps-select ps-pos-select"
+                      aria-label="Position of the local.md line"
+                    >
+                      <option value="start">Start</option>
+                      <option value="end">End</option>
+                    </select>
+                  </div>
+                  <div class="ps-extra-row">
+                    <label class="ps-check-row">
+                      <input id="ps-extra-project" type="checkbox" />
+                      Include <code id="ps-extra-project-name">AGENTS.project.md</code>
+                    </label>
+                    <select
+                      id="ps-extra-project-pos"
+                      class="ps-input ps-select ps-pos-select"
+                      aria-label="Position of the project.md line"
+                    >
+                      <option value="start">Start</option>
+                      <option value="end">End</option>
+                    </select>
+                  </div>
+                  <p class="ps-hint">
+                    <code>AGENTS.local.md</code> is usually not added to Git; the app does not edit
+                    <code>.gitignore</code>.
+                  </p>
+                </div>
+
+                <div id="ps-scheme-b" class="ps-field" hidden>
+                  <p class="ps-hint">
+                    The file must contain exactly one marker pair, each marker on its own line; the
+                    app does not insert them itself.
+                  </p>
+                  <button type="button" id="ps-copy-markers" class="btn btn-ghost">
+                    Copy marker block
+                  </button>
+                </div>
+
+                <div id="ps-scheme-c" class="ps-field" hidden>
+                  <p class="ps-hint">Add this line to the main file yourself (D-20, D-21):</p>
+                  <code id="ps-snippet" class="ps-snippet"></code>
+                  <button type="button" id="ps-copy-snippet" class="btn btn-ghost">Copy</button>
+                </div>
+
+                <p class="ps-hint">
+                  Changing the scheme or the file name makes the project dirty; the old file is not
+                  deleted (DB-023).
+                </p>
+              </section>
+            </div>
+
+            <!-- Backups (BKP-004): rows are rendered by app.js -->
+            <div
+              id="ps-panel-backups"
+              class="ps-panel"
+              role="tabpanel"
+              aria-labelledby="ps-tab-backups"
+              hidden
+            >
+              <table class="ps-backups">
+                <thead>
+                  <tr>
+                    <th scope="col">Date and time</th>
+                    <th scope="col">File</th>
+                    <th scope="col">Size</th>
+                    <th scope="col">Sync run</th>
+                    <th scope="col" class="ps-backup-save">
+                      <span class="visually-hidden">Save backup to a file</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody id="ps-backups-body"></tbody>
+              </table>
+              <p class="ps-hint">
+                Up to 10 backups are kept per file; restoring from a backup is a later stage
+                (D-17).
+              </p>
+            </div>
+          </div>
+
+          <div class="ps-danger">
+            <button type="button" id="ps-archive-btn" class="btn btn-danger">
+              Archive project…
+            </button>
+            <p class="ps-hint">
+              Nothing on disk changes; the project stops taking part in syncs (PRJ-013…018).
+            </p>
+          </div>
+
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="save" class="btn btn-primary">Save</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- File preview (per project): opened from the header preview button
+         and the column "⋮" menu; filled by app.js — the file the next sync
+         would generate for the column (base file path + every assigned
+         instruction with its effective text, markdown-rendered). -->
+      <dialog id="file-preview-dialog" class="modal modal-lg" aria-labelledby="fp-title">
+        <form id="file-preview-form" method="dialog" novalidate>
+          <h2 id="fp-title">File preview</h2>
+          <p id="fp-path" class="fp-path"></p>
+          <div id="fp-body" class="fp-body ie-preview"></div>
+          <div class="modal-actions">
+            <button value="close" class="btn btn-primary">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Archive confirmation (PRJ-013: type-to-confirm). The prototype
+         closes both dialogs and keeps the column — non-destructive demo. -->
+      <dialog id="archive-dialog" class="modal" aria-labelledby="archive-title">
+        <form method="dialog">
+          <h2 id="archive-title">Archive project</h2>
+          <p id="archive-text" class="modal-text">Placeholder.</p>
+          <div class="ps-field">
+            <label class="field-label" for="archive-input">Type the project name to confirm</label>
+            <input id="archive-input" class="ps-input" type="text" autocomplete="off" />
+          </div>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button id="archive-confirm-btn" value="archive" class="btn btn-danger" disabled>
+              Archive
+            </button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Instruction history (LIB-026, LIB-027, D-16): the revisions panel
+         of the instruction opened in the editor — instruction and variant
+         versions, newest first, operation badges (NFR-020: the text carries
+         the meaning), snapshot disclosures and a "Restore variant" action
+         on delete rows. Rows are rendered by app.js from demo data; the
+         panel is read-only apart from restore. -->
+      <dialog id="history-dialog" class="modal modal-lg" aria-labelledby="hist-title">
+        <form method="dialog">
+          <h2 id="hist-title">History</h2>
+          <p id="hist-subtitle" class="modal-text hist-subtitle">
+            A version is created only on a real change; up to 200 versions per entity, the oldest
+            beyond that are deleted.
+          </p>
+
+          <div class="hist-body">
+            <table class="hist-table">
+              <caption class="visually-hidden">
+                Revisions: number, time, operation, entity and snapshot
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col" class="hist-col-no">#</th>
+                  <th scope="col" class="hist-col-when">When</th>
+                  <th scope="col" class="hist-col-op">Operation</th>
+                  <th scope="col" class="hist-col-entity">Entity</th>
+                  <th scope="col" class="hist-col-snap">Snapshot</th>
+                </tr>
+              </thead>
+              <tbody id="hist-rows"></tbody>
+            </table>
+            <p id="hist-empty" class="hist-empty" hidden>No versions yet.</p>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Restore-variant confirmation (LIB-027): the demo flips the delete
+         row to a restore badge and, while the editor is open for the same
+         instruction, appends the variant back into its in-memory list;
+         no versions change. -->
+      <dialog id="restore-dialog" class="modal" aria-labelledby="restore-title">
+        <form method="dialog">
+          <h2 id="restore-title">Restore variant</h2>
+          <p id="restore-text" class="modal-text">Placeholder.</p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="restore" class="btn btn-primary">Restore</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Repository scan (PRJ-002, PRJ-005…007, NFR-015): the toolbar
+         «+ Add project» simulates a picked root folder (~/projects, the
+         picker of PRJ-001) and opens the scan directly. Phase 1: live
+         progress — folders checked, repositories found, current path
+         (SYS-003: at most 10 updates/s). Phase 2: three result groups —
+         New (checked checkboxes), Already added, Skipped with a reason
+         (D-05 exclusions, D-06 submodule/worktree, PRJ-007 access
+         errors). Closing the window cancels the scan; "Add selected" is
+         a demo stub that never touches the matrix. Rows are rendered by
+         app.js from the scripted walk. -->
+      <dialog id="scan-dialog" class="modal modal-lg" aria-labelledby="scan-title">
+        <form method="dialog" novalidate>
+          <h2 id="scan-title" title="/home/brooks/projects">Scan — ~/projects</h2>
+          <p
+            id="scan-config"
+            class="modal-text"
+            title="Depth is configurable from 1 to 20 and the exclusion list is editable (D-04, D-05) — a later stage"
+          >
+            Depth 6 · Excluded: node_modules, vendor, .git, dist, build, target, .venv
+          </p>
+
+          <!-- Phase 1: progress, starts automatically when the dialog opens -->
+          <div id="scan-progress" class="scan-progress">
+            <div id="scan-counters" class="scan-counters" aria-live="polite">
+              <span><strong id="scan-count-folders">0</strong> Folders checked</span>
+              <span><strong id="scan-count-repos">0</strong> Repositories found</span>
+            </div>
+            <code id="scan-current-path" class="scan-path">~/projects</code>
+            <div class="scan-bar" aria-hidden="true"><div class="scan-bar-fill"></div></div>
+          </div>
+
+          <!-- Phase 2: results in three groups (PRJ-002), rendered by app.js -->
+          <div id="scan-results" class="scan-results" hidden>
+            <section class="scan-group" aria-labelledby="scan-new-heading">
+              <h3 id="scan-new-heading">New <span id="scan-new-count" class="chip">0</span></h3>
+              <div id="scan-new-list" class="scan-group-list"></div>
+            </section>
+            <section class="scan-group" aria-labelledby="scan-known-heading">
+              <h3 id="scan-known-heading">
+                Already added <span id="scan-known-count" class="chip">0</span>
+              </h3>
+              <div id="scan-known-list" class="scan-group-list"></div>
+            </section>
+            <section class="scan-group" aria-labelledby="scan-skipped-heading">
+              <h3 id="scan-skipped-heading">
+                Skipped <span id="scan-skipped-count" class="chip">0</span>
+              </h3>
+              <div id="scan-skipped-list" class="scan-group-list"></div>
+            </section>
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" id="scan-again-btn" class="btn btn-ghost" hidden>
+              Scan again
+            </button>
+            <span class="spacer"></span>
+            <button type="button" id="scan-cancel-btn" class="btn btn-ghost">Cancel</button>
+            <button type="button" id="scan-add-btn" class="btn btn-primary" hidden disabled>
+              Add selected
+            </button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Sync summary (MAIN-024…027, MAIN-030…031, OUT-009): one dialog,
+         two modes rendered by app.js. Result mode opens when the simulated
+         run finishes: run outcome badge (§6.2 sync_runs: success|partial),
+         counters, and a per-project table (§6.2 sync_run_projects:
+         written|unchanged|skipped|failed) with target file, reason, error
+         code and a "what to do" hint (UI-011). Pending mode opens from the
+         sync counter chip (MAIN-026) and lists the projects with unsynced
+         changes (G5: nothing is written outside "Run sync"). -->
+      <dialog id="sync-summary-dialog" class="modal modal-lg" aria-labelledby="ss-title">
+        <form method="dialog">
+          <h2 id="ss-title">Sync summary</h2>
+
+          <!-- Result mode: outcome + per-project table -->
+          <div id="ss-result" hidden>
+            <p class="modal-text ss-subtitle">
+              <span id="ss-run-badge" class="chip ss-run-badge">partial</span>
+              <span id="ss-run-note"></span>
+            </p>
+
+            <div id="ss-counters" class="ss-counters" role="group" aria-label="Run counters">
+              <span class="chip ss-count ss-count--written">
+                Written <strong id="ss-n-written">0</strong>
+              </span>
+              <span class="chip ss-count ss-count--unchanged">
+                Unchanged <strong id="ss-n-unchanged">0</strong>
+              </span>
+              <span class="chip ss-count ss-count--skipped">
+                Skipped <strong id="ss-n-skipped">0</strong>
+              </span>
+              <span class="chip ss-count ss-count--failed">
+                Failed <strong id="ss-n-failed">0</strong>
+              </span>
+            </div>
+
+            <div class="ss-body">
+              <table class="ss-table">
+                <caption class="visually-hidden">
+                  Sync results: project, target file, status and reason
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col" class="ss-col-proj">Project</th>
+                    <th scope="col">Target file</th>
+                    <th scope="col" class="ss-col-status">Status</th>
+                    <th scope="col">Reason</th>
+                  </tr>
+                </thead>
+                <tbody id="ss-rows"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Pending mode: projects with unsynced changes (MAIN-026) -->
+          <div id="ss-pending" hidden>
+            <p class="modal-text">Projects whose current assignments differ from the last sync.</p>
+            <div id="ss-pending-list" class="ss-body">
+              <table class="ss-table">
+                <caption class="visually-hidden">
+                  Projects with unsynced changes and their target files
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col" class="ss-col-proj">Project</th>
+                    <th scope="col">Target file</th>
+                  </tr>
+                </thead>
+                <tbody id="ss-pending-rows"></tbody>
+              </table>
+            </div>
+            <p id="ss-pending-empty" class="hist-empty" hidden>Everything is synced.</p>
+            <p class="ps-hint">
+              Files change only on the explicit “Run sync” command (G5) — nothing is written
+              meanwhile.
+            </p>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+            <button type="button" id="ss-run-btn" class="btn btn-primary" hidden>Run sync</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- App settings (DEF-001…004, DEF-005; §6.5 keys and ranges): five
+         vertical sections in one scrollable body — no tabs, unlike the
+         project settings modal. There is no Save button: every control
+         writes into the demo SETTINGS object right away (DEF-001 AC:
+         applies without a restart); a number outside its §6.5 range shows
+         an inline error and keeps the previous value until fixed. Scheme
+         A extra files follow the base name and hide for schemes B/C like
+         in project settings. "About…" / "Check for updates" open the
+         generic placeholder dialog for now (UPD-001, UPD-005). Entry
+         points: the toolbar ghost button and Ctrl/Cmd + , (§11.3). -->
+      <dialog id="settings-dialog" class="modal modal-lg" aria-labelledby="set-title">
+        <form id="set-form" method="dialog" novalidate>
+          <h2 id="set-title">Settings</h2>
+
+          <div class="ps-body set-body">
+            <section class="ps-section" aria-labelledby="set-defaults-title">
+              <h3 class="ps-section-title" id="set-defaults-title">
+                Defaults for new projects
+              </h3>
+
+              <fieldset class="ps-field ps-scheme-set">
+                <legend class="field-label">Scheme</legend>
+                <div id="set-schemes" class="ps-schemes">
+                  <label class="ps-scheme">
+                    <input type="radio" name="set-scheme" value="A" />
+                    <span><strong>A</strong> — full overwrite of the main file</span>
+                  </label>
+                  <label class="ps-scheme">
+                    <input type="radio" name="set-scheme" value="B" />
+                    <span
+                      ><strong>B</strong> — write into a marked area &lt;!-- EUNOMIASYNC:BEGIN
+                      --&gt;…&lt;!-- EUNOMIASYNC:END --&gt;</span
+                    >
+                  </label>
+                  <label class="ps-scheme">
+                    <input type="radio" name="set-scheme" value="C" />
+                    <span
+                      ><strong>C</strong> — separate <code>&lt;STEM&gt;.project.md</code> file;
+                      the app never edits the main file</span
+                    >
+                  </label>
+                </div>
+              </fieldset>
+
+              <div class="ps-field">
+                <label class="field-label" for="set-base-file">Base file name</label>
+                <select id="set-base-file" class="ps-input ps-select">
+                  <option>AGENTS.md</option>
+                  <option>CLAUDE.md</option>
+                </select>
+              </div>
+
+              <div id="set-extra-files" class="ps-field">
+                <span class="field-label">Extra files (scheme A)</span>
+                <div class="ps-extra-row">
+                  <label class="ps-check-row">
+                    <input id="set-extra-local" type="checkbox" />
+                    Include <code id="set-extra-local-name">AGENTS.local.md</code>
+                  </label>
+                  <select
+                    id="set-extra-local-pos"
+                    class="ps-input ps-select ps-pos-select"
+                    aria-label="Position of the local.md line"
+                  >
+                    <option value="start">Start</option>
+                    <option value="end">End</option>
+                  </select>
+                </div>
+                <div class="ps-extra-row">
+                  <label class="ps-check-row">
+                    <input id="set-extra-project" type="checkbox" />
+                    Include <code id="set-extra-project-name">AGENTS.project.md</code>
+                  </label>
+                  <select
+                    id="set-extra-project-pos"
+                    class="ps-input ps-select ps-pos-select"
+                    aria-label="Position of the project.md line"
+                  >
+                    <option value="start">Start</option>
+                    <option value="end">End</option>
+                  </select>
+                </div>
+              </div>
+
+              <p class="ps-hint">
+                Changing the defaults does not affect existing projects (DEF-005).
+              </p>
+            </section>
+
+            <section class="ps-section" aria-labelledby="set-backups-title">
+              <h3 class="ps-section-title" id="set-backups-title">Backups</h3>
+
+              <div class="ps-field">
+                <label class="field-label" for="set-backup-retention">Backups kept per file</label>
+                <input
+                  id="set-backup-retention"
+                  class="ps-input set-number"
+                  type="number"
+                  min="1"
+                  max="200"
+                  step="1"
+                  value="10"
+                  aria-describedby="set-backup-retention-hint set-backup-retention-error"
+                />
+                <p id="set-backup-retention-hint" class="ps-hint">
+                  1–200. Zero is not allowed: writing without a backup is forbidden (BKP-005).
+                  Default 10 per file (D-17).
+                </p>
+                <p id="set-backup-retention-error" class="ps-error" hidden></p>
+              </div>
+            </section>
+
+            <section class="ps-section" aria-labelledby="set-scan-title">
+              <h3 class="ps-section-title" id="set-scan-title">Scanning</h3>
+
+              <div class="ps-field">
+                <label class="field-label" for="set-scan-depth">Maximum folder depth</label>
+                <input
+                  id="set-scan-depth"
+                  class="ps-input set-number"
+                  type="number"
+                  min="1"
+                  max="20"
+                  step="1"
+                  value="6"
+                  aria-describedby="set-scan-depth-hint set-scan-depth-error"
+                />
+                <p id="set-scan-depth-hint" class="ps-hint">1–20 (D-04).</p>
+                <p id="set-scan-depth-error" class="ps-error" hidden></p>
+              </div>
+
+              <div class="ps-field">
+                <span class="field-label" id="set-excl-label">Excluded folder names</span>
+                <div
+                  id="set-excl-list"
+                  class="set-excl-list"
+                  role="group"
+                  aria-labelledby="set-excl-label"
+                ></div>
+                <div class="set-excl-add">
+                  <label class="visually-hidden" for="set-excl-input">
+                    Add a folder name to the exclusion list
+                  </label>
+                  <input
+                    id="set-excl-input"
+                    class="ps-input"
+                    type="text"
+                    autocomplete="off"
+                    maxlength="100"
+                    placeholder="Add folder name…"
+                    aria-describedby="set-excl-error"
+                  />
+                  <button type="button" id="set-excl-add-btn" class="btn btn-ghost">Add</button>
+                </div>
+                <p id="set-excl-error" class="ps-error" hidden></p>
+                <p class="ps-hint">Folders with these names are skipped at any depth (D-05).</p>
+              </div>
+            </section>
+
+            <section class="ps-section" aria-labelledby="set-logs-title">
+              <h3 class="ps-section-title" id="set-logs-title">History and logs</h3>
+
+              <div class="ps-grid ps-grid-3">
+                <div class="ps-field">
+                  <label class="field-label" for="set-hist-revisions">Versions per entity</label>
+                  <input
+                    id="set-hist-revisions"
+                    class="ps-input set-number"
+                    type="number"
+                    min="10"
+                    max="1000"
+                    step="1"
+                    value="200"
+                    aria-describedby="set-hist-revisions-hint set-hist-revisions-error"
+                  />
+                  <p id="set-hist-revisions-hint" class="ps-hint">10–1000.</p>
+                  <p id="set-hist-revisions-error" class="ps-error" hidden></p>
+                </div>
+                <div class="ps-field">
+                  <label class="field-label" for="set-log-entries">Log entries kept</label>
+                  <input
+                    id="set-log-entries"
+                    class="ps-input set-number"
+                    type="number"
+                    min="1000"
+                    max="100000"
+                    step="1"
+                    value="10000"
+                    aria-describedby="set-log-entries-hint set-log-entries-error"
+                  />
+                  <p id="set-log-entries-hint" class="ps-hint">1000–100000.</p>
+                  <p id="set-log-entries-error" class="ps-error" hidden></p>
+                </div>
+                <div class="ps-field">
+                  <label class="field-label" for="set-log-days">Days kept in the log</label>
+                  <input
+                    id="set-log-days"
+                    class="ps-input set-number"
+                    type="number"
+                    min="7"
+                    max="3650"
+                    step="1"
+                    value="180"
+                    aria-describedby="set-log-days-hint set-log-days-error"
+                  />
+                  <p id="set-log-days-hint" class="ps-hint">7–3650.</p>
+                  <p id="set-log-days-error" class="ps-error" hidden></p>
+                </div>
+              </div>
+            </section>
+
+            <section class="ps-section" aria-labelledby="set-updates-title">
+              <h3 class="ps-section-title" id="set-updates-title">Updates and About</h3>
+
+              <div class="ps-field">
+                <label class="ps-check-row">
+                  <input id="set-update-check" type="checkbox" />
+                  Check for updates at startup
+                </label>
+                <p class="ps-hint">
+                  Updates come from GitHub Releases through the signed Tauri updater (UPD-002,
+                  D-27).
+                </p>
+                <!-- D-10 screens as link-buttons: "Archived projects…"
+                     opens the archived list, "Excluded paths…" opens the
+                     exclusions list. "About…" opens the About window
+                     (UPD-005); "Check for updates" opens the same window
+                     and runs the simulated check at once (UPD-001) -->
+                <div class="set-buttons">
+                  <button type="button" id="archived-open-btn" class="btn btn-ghost">
+                    Archived projects…
+                  </button>
+                  <button type="button" id="exclusions-open-btn" class="btn btn-ghost">
+                    Excluded paths…
+                  </button>
+                  <button type="button" id="about-open-btn" class="btn btn-ghost">
+                    About…
+                  </button>
+                  <button type="button" id="about-check-open-btn" class="btn btn-ghost">
+                    Check for updates
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <p class="ps-hint set-status">
+            Settings are applied immediately — there is no Save button.
+          </p>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Archived projects (D-10, PRJ-013…018): opened from the settings
+         footer — one row per archived project with a Restore action, in
+         the scan-results row idiom. Archived projects keep their
+         assignments, do not take part in syncs and their folders are not
+         touched (DB-014); adding the folder of an archived project again
+         offers to restore it (DB-015). Rows are rendered by app.js from
+         the demo list; restoring removes the row in memory and never
+         touches the matrix. -->
+      <dialog id="archived-dialog" class="modal modal-lg" aria-labelledby="ar-title">
+        <form method="dialog">
+          <h2 id="ar-title">Archived projects</h2>
+          <p class="modal-text">
+            Archived projects keep their assignments, do not take part in syncs, and their folders
+            are not touched (DB-014).
+          </p>
+
+          <div class="ar-body">
+            <ul id="ar-rows" class="ar-list"></ul>
+            <p id="ar-empty" class="hist-empty" hidden>No archived projects.</p>
+            <p class="ps-hint">
+              If you add the folder of an archived project again, the app offers to restore it
+              (DB-015).
+            </p>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Restore-archived-project confirmation (PRJ-018, D-10): a dedicated
+         dialog — the shared #confirm-dialog is hard-labeled "Delete".
+         Confirming brings the project back active with its assignments and
+         removes its path from the exclusions so a scan finds it again; the
+         demo only removes the row from the in-memory list. -->
+      <dialog id="restore-project-dialog" class="modal" aria-labelledby="ar-restore-title">
+        <form method="dialog">
+          <h2 id="ar-restore-title">Restore project</h2>
+          <p id="ar-restore-text" class="modal-text">Placeholder.</p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="restore" class="btn btn-primary">Restore</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Excluded paths (D-10, §6.2 project_exclusions): opened from the
+         settings footer — one row per excluded path with a Remove action,
+         in the scan-results row idiom. reason mirrors the DDL enum
+         (removed_scanned | manual): a scanned project that was archived
+         leaves its path here (PRJ-017) and the scan shows such paths in
+         its "Skipped" group (PRJ-002). Rows are rendered by app.js from
+         the demo list; removing (§6.4) deletes the entry so the path is
+         found by a scan again — the demo only splices the in-memory list. -->
+      <dialog id="exclusions-dialog" class="modal modal-lg" aria-labelledby="ex-title">
+        <form method="dialog">
+          <h2 id="ex-title">Excluded paths</h2>
+          <p class="modal-text">
+            Paths in this list are skipped by the repository scan. Removing an entry makes the
+            path findable again (D-10).
+          </p>
+
+          <div class="ar-body">
+            <ul id="ex-rows" class="ar-list"></ul>
+            <p id="ex-empty" class="hist-empty" hidden>No excluded paths.</p>
+            <p class="ps-hint">
+              New exclusions appear here when a scanned project is archived (PRJ-017) or when a path
+              is excluded manually.
+            </p>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Remove-excluded-path confirmation (D-10, §6.4): a dedicated
+         dialog — the shared #confirm-dialog is hard-labeled "Delete".
+         Confirming deletes the exclusion, so the path is found by a scan
+         again and its projects can be added as usual. -->
+      <dialog id="remove-exclusion-dialog" class="modal" aria-labelledby="ex-remove-title">
+        <form method="dialog">
+          <h2 id="ex-remove-title">Remove excluded path</h2>
+          <p id="ex-remove-text" class="modal-text">Placeholder.</p>
+          <div class="modal-actions">
+            <button value="cancel" class="btn btn-ghost">Cancel</button>
+            <button value="remove" class="btn btn-primary">Remove</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Activity (§7.7 LOG-001…006, UI row): the action-log window.
+         User entries only (LOG-005 — diagnostic records go to the tracing
+         file log), newest first, with live filters by date, project, type
+         and result; an empty filtered result shows the UI-012 message.
+         Rows are rendered by app.js from the demo ACTIVITY array: each
+         entry carries time, operation type, object and result, the change
+         count for a bulk assignment op (LOG-004) and, for file writes,
+         the target path under the project. The LOG-006 limits are quoted
+         in the hint above the table. -->
+      <dialog id="activity-dialog" class="modal modal-lg" aria-labelledby="act-title">
+        <form method="dialog">
+          <h2 id="act-title">Activity</h2>
+          <p class="modal-text act-subtitle">
+            User-visible actions; diagnostic entries go only to the file log (LOG-005).
+          </p>
+
+          <div class="act-filters">
+            <label class="visually-hidden" for="act-filter-date">Filter activity by date</label>
+            <select id="act-filter-date">
+              <option selected value="all">All time</option>
+              <option value="7d">Last 7 days</option>
+              <option value="today">Today</option>
+            </select>
+
+            <label class="visually-hidden" for="act-filter-project">Filter activity by project</label>
+            <select id="act-filter-project">
+              <option selected value="all">All projects</option>
+            </select>
+
+            <label class="visually-hidden" for="act-filter-type">Filter activity by type</label>
+            <select id="act-filter-type">
+              <option selected value="all">All types</option>
+              <option value="projects">Projects</option>
+              <option value="library">Library</option>
+              <option value="assignments">Assignments</option>
+              <option value="sync">Sync</option>
+              <option value="backups">Backups</option>
+            </select>
+
+            <label class="visually-hidden" for="act-filter-result">Filter activity by result</label>
+            <select id="act-filter-result">
+              <option selected value="all">All results</option>
+              <option value="ok">ok</option>
+              <option value="skipped">skipped</option>
+              <option value="error">error</option>
+            </select>
+          </div>
+
+          <p class="ps-hint act-limits">
+            Limits: 10,000 entries or 180 days, cleaned at startup and once a day (LOG-006).
+          </p>
+
+          <div class="act-body">
+            <table class="hist-table act-table">
+              <caption class="visually-hidden">
+                Activity log: time, action, project or path, result
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col" class="act-col-when">Time</th>
+                  <th scope="col">Action</th>
+                  <th scope="col">Project / path</th>
+                  <th scope="col" class="act-col-res">Result</th>
+                </tr>
+              </thead>
+              <tbody id="act-rows"></tbody>
+            </table>
+            <p id="act-empty" class="hist-empty" hidden>Nothing matches the current filters.</p>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Help (HLP-001…005, §11.3 F1): the FAQ window. Two-pane modal-xl
+           in the instruction-editor idiom: the article list and the
+           client-side search on the left (HLP-001 — text search runs on
+           the client, matches are highlighted in the list and in the
+           text with <mark>), the selected article on the right, rendered
+           from Markdown by app.js with the same escape-first mini
+           renderer as the editor preview (HLP-005 — the FAQ is Markdown).
+           Non-matching articles hide and the list shows the UI-012 empty
+           state. Demo article bodies are derived from the spec. -->
+      <dialog id="help-dialog" class="modal modal-xl" aria-labelledby="help-title">
+        <form id="help-form" method="dialog">
+          <h2 id="help-title">Help</h2>
+
+          <div class="help-body">
+            <!-- Left pane: article list + search, rendered by app.js -->
+            <aside class="help-nav" aria-label="Help articles">
+              <span class="field-label" id="help-list-label">Articles</span>
+              <div id="help-list" class="help-list" aria-labelledby="help-list-label"></div>
+              <p id="help-empty" class="hist-empty" hidden>
+                No articles match the current search.
+              </p>
+              <div class="help-search">
+                <label class="field-label" for="help-search">Search</label>
+                <input
+                  id="help-search"
+                  type="search"
+                  placeholder="Search articles…"
+                  autocomplete="off"
+                />
+                <p id="help-search-hint" class="help-hint" aria-live="polite"></p>
+              </div>
+            </aside>
+
+            <!-- Right pane: selected article, title + rendered Markdown.
+                 The title is an <h3> under the dialog's <h2>; article
+                 sections start at #### in the source so the body headings
+                 (<h4>) stay nested under it. -->
+            <div class="help-article-pane">
+              <h3 id="help-article-title"></h3>
+              <div id="help-article" class="help-article"></div>
+            </div>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- About (UPD-005, REL-004): the last UI-002 modal. Product info
+           as definition rows — version, identifier, author, dual license
+           (both license texts link out), repository, stable channel
+           (D-27 one-liner); dependency licenses are a compact demo
+           expander (the real list is generated at build time, REL-004).
+           The update block simulates UPD-001…003: the first check of a
+           session "finds" 0.2.0 with a changes list and a
+           Download-and-install button (install starts only after the
+           confirmation click and is not available during a sync —
+           UPD-003); every later check answers "latest version". The
+           initial muted line is reproduced by app.js's renderer so the
+           static text and the state-driven output cannot drift. -->
+      <dialog id="about-dialog" class="modal" aria-labelledby="about-title">
+        <form method="dialog">
+          <h2 id="about-title">About</h2>
+
+          <div class="about-brand">
+            <span class="brand-mark about-brand-mark" aria-hidden="true"></span>
+            <span>EunomiaSync</span>
+            <span class="chip">0.1.0-demo</span>
+          </div>
+
+          <dl class="about-info">
+            <div class="about-row">
+              <dt>Version</dt>
+              <dd>0.1.0-demo</dd>
+            </div>
+            <div class="about-row">
+              <dt>App identifier</dt>
+              <dd><code>pro.yepbro.eunomiasync</code></dd>
+            </div>
+            <div class="about-row">
+              <dt>Author</dt>
+              <dd>Den Brooks — denis@yepbro.pro</dd>
+            </div>
+            <div class="about-row">
+              <dt>License</dt>
+              <dd>
+                Dual license:
+                <a
+                  href="https://opensource.org/license/mit"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="MIT License — opens in a new tab"
+                  >MIT License</a
+                >
+                and
+                <a
+                  href="https://www.apache.org/licenses/LICENSE-2.0"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Apache License, Version 2.0 — opens in a new tab"
+                  >Apache License, Version 2.0</a
+                >
+              </dd>
+            </div>
+            <div class="about-row">
+              <dt>Repository</dt>
+              <dd>
+                <a
+                  href="https://github.com/yepbro/EunomiaSync"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="GitHub repository — opens in a new tab"
+                  >github.com/yepbro/EunomiaSync</a
+                >
+              </dd>
+            </div>
+            <div class="about-row">
+              <dt>Update channel</dt>
+              <dd>stable — signed updates via the Tauri updater from GitHub Releases (D-27)</dd>
+            </div>
+          </dl>
+
+          <details class="about-licenses">
+            <summary>Dependency licenses</summary>
+            <ul class="about-license-list">
+              <li>rusqlite 0.32 — MIT/Apache-2.0</li>
+              <li>tauri 2.x — MIT/Apache-2.0</li>
+              <li>vue 3.x — MIT</li>
+              <li>sha2 0.10 — MIT/Apache-2.0</li>
+              <li>jiff 0.1 — MIT/Apache-2.0</li>
+              <li>pulldown-cmark 0.12 — MIT</li>
+            </ul>
+            <p class="ps-hint">Demo data — the full list is generated at build time (REL-004).</p>
+          </details>
+
+          <div class="about-update">
+            <button type="button" id="about-check-btn" class="btn btn-primary">
+              Check for updates
+            </button>
+            <div id="about-check-result" class="about-check-result" aria-live="polite">
+              <p class="ps-hint">
+                Last check: never — checks run at startup if enabled in Settings (UPD-002).
+              </p>
+            </div>
+          </div>
+
+          <div class="modal-actions">
+            <button value="close" class="btn btn-ghost">Close</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Instruction text tooltip (MAIN-006): one reusable element for
+           every row. app.js fills it with the first 600 characters of the
+           row's data-text and positions it near the cell after a 400 ms
+           delay; hidden on mouseleave/blur/scroll/Escape. -->
+      <div id="text-tooltip" role="tooltip" hidden></div>
+
+      <script src="app.js"></script>
+    </div>
+  </body>
+</html>

@@ -25247,6 +25247,81 @@ own two, unchanged; no new verified argument against any disposition.
 No tree change from this round — the amend that follows folds only
 this addendum into the one commit.
 
+### D-206 — owner commission: the main-window mock-up joins main as the frozen visual reference `docs/prototype/` — the 2026-11-25 rulings on the frontend skeleton, the porting split, and the board↔spec audit — 2026-11-25
+
+Problem: the approved mock-up (branch `html-pages`, 53 commits over the
+merge-base `24e745b`, head `cc24a86`) lived only on its branch and on the
+Netlify demo (https://es-demo-634.netlify.app), which keeps following the
+branch — while D-125 (41 gaps, spec 1.2) and D-203 (ten features) cite its
+commits as evidence, and executors work in fresh worktrees that need the
+reference locally. Three files, no dependencies, no build step:
+`pages/index.html` (3,945 lines), `pages/app.js` (5,143), `pages/styles.css`
+(3,136) — 12,224 lines. The owner's commission of 2026-11-25: bring it into
+`main` as a frozen visual reference and record the rulings below. The copies
+landed as `docs/prototype/{index.html,app.js,styles.css}`, byte-identical to
+`cc24a86:pages/*` — verified per file by blob id (`git rev-parse
+cc24a86:pages/<file>` equals `git hash-object docs/prototype/<file>`:
+`index.html` `30007dda6548e14ea905e44df676e9003f653349`, `app.js`
+`4cc26ed4cf9b5bf4e128d23436b39954f6854268`, `styles.css`
+`80dd735a527711a1a4e9594227c019ad85abcea7`) — and are never edited
+afterwards.
+
+The owner's rulings of 2026-11-25:
+
+1. **The mock-up is a frozen visual reference, excluded from every
+   check.** `.prettierignore` excludes `docs/prototype` (this record);
+   `eslint.config.js` lists it in the config-level `ignores`; vue-tsc
+   never sees it (`tsconfig.json`'s `include` lists only `src/**`); CI's
+   `lint` job runs `pnpm run lint`, `pnpm run format:check`,
+   `pnpm run typecheck` — none of them walks `docs/`. It is not code to
+   check, and nothing is compiled or emitted from it: the one build-side
+   reader is Tailwind's automatic content scan (`src/assets/main.css`
+   imports `tailwindcss` without an `@source` limit), which reads the
+   folder read-only for candidate class names, as it reads every other
+   unignored source, and cannot fail. The spec (`docs/spec.md`) stays
+   the behavioral truth, the mock-up the visual one — where they
+   disagree, the spec wins (the demo deviations are listed in D-125 and
+   D-203). AGENTS.md now names the reference and this rule.
+2. **The porting split: the JS stays unported; markup and CSS are ported
+   as material; UI texts go to the i18n catalog.** Behavior is written
+   from the spec, never from `app.js` (126 functions over
+   `getElementById`/`querySelector`, demo data tables; 6 ESLint errors
+   under the project's config — the demo JS is neither linted nor
+   fixed). The texts go to the i18n catalog in temporary per-feature
+   files (T-363), where the owner refines them.
+3. **The frontend gets a skeleton layer before the feature cards.**
+   T-362 theme tokens, T-363 main-window shell on seed data (absorbs
+   T-148), T-364 matrix, T-365 library dialogs (absorbs T-186), T-366
+   project dialogs, T-367 service dialogs — all in TODO with the labels
+   `html` and `flash`. Afterwards the feature cards refine the existing
+   components instead of building screens from scratch.
+4. **NFR-001's supported floor rises to macOS 12.3.** The spec edit is
+   T-361 (DRAFT, `flash`): three Markdown-only edits — the LIB-024 hint
+   exception for single-variant instructions, the floor itself, and a
+   note on UI-020's per-feature catalog files. The two code comments
+   naming the old floor are updated by T-362.
+5. **The i18n catalog is split per feature temporarily and merged
+   later.**
+6. **The palette is the executor's discretion within `theme.spec.ts`**
+   (starting values in T-362).
+
+The board↔spec audit of 2026-11-25 (read-only, run by the main session;
+its report is the main session's record at
+`.opencode/audits/board-vs-spec-2026-11-25/report.md`): 112 spec rows
+against 154 open cards. The backend "gaps" are landed code whose closed
+cards were deleted from the board (backups, retention, config, single
+instance, file watch, availability, dirty recalculation,
+`project_add_manual` with D-29) — no DONE stubs created; dependencies
+naming landed work stay; the six business cards in INBOX stay; P1 rows
+stay uncarded. 28 cards were brought to the current spec (T-158, T-159,
+T-160, T-165, T-166, T-167, T-172, T-176, T-180, T-181, T-183, T-184,
+T-185, T-188, T-193, T-194, T-196, T-198, T-199, T-200, T-203, T-206,
+T-209, T-212, T-213, T-214, T-215, T-352): T-172, T-188 and T-194
+rewritten (the last two retitled — the fork-variant flow and the
+per-project replacement dialog were removed by D-125), LIB-036 folded
+into T-193, LIB-037 into T-196, UI-023 into T-176 and T-160, the one
+prototype reference on the board (T-352) removed; T-361 created.
+
 ### D-208 — T-110: the `project_relink` command's contract — the Locate flow's gate order (the add flow's mirror with the probe before the transaction), the subfolder resolved to the repository root, and the DB-015 archived collision carrying the restore offer's id — 2026-11-25
 
 The card's spec text (D-09, DB-015, SYS-005, §7.10; the DoD "the

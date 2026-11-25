@@ -14,3 +14,6 @@ pnpm-lock.yaml
 # `cargo test`, see src-tauri/src/lib.rs) — formatting it manually would be
 # overwritten on the next regeneration.
 src/bindings.ts
+
+# Frozen visual reference (D-206): never edited, excluded from every check
+docs/prototype

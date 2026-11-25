@@ -34,6 +34,9 @@ export default tseslint.config(
       'src/bindings.ts',
       // Cargo workspace target directory (root-level, holds build scripts output)
       'target',
+      // Frozen visual reference (docs/prototype): byte-identical mock-up,
+      // never edited, its demo JS is not ported — never linted.
+      'docs/prototype',
     ],
   },
   js.configs.recommended,
