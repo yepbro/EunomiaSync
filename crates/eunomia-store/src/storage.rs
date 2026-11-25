@@ -7,7 +7,9 @@
 //! migration file. Schema version 1 — the eleven tables of spec §6.2 — is
 //! defined by `migrations/0001_init.sql`; version 2
 //! (`migrations/0002_backup_records_pair_index.sql`) adds the
-//! `backup_records` per-pair lookup index.
+//! `backup_records` per-pair lookup index; version 3
+//! (`migrations/0003_assignment_custom_text.sql`) rebuilds
+//! `project_instructions` for MAIN-007's variant-or-custom-text target.
 //!
 //! Before every migration applied to an existing database,
 //! [`run_migrations`] writes a safety copy of the current state into a
@@ -66,10 +68,17 @@ use crate::settings::SettingsError;
 /// table scan per project per sync run). After it runs,
 /// `PRAGMA user_version` is 2.
 ///
+/// Version 3 (`migrations/0003_assignment_custom_text.sql`) rebuilds
+/// `project_instructions` with the direct instruction FK, nullable
+/// `variant_id`, nullable `custom_text`, and the exactly-one-target CHECK
+/// (DB-012/MAIN-007). Existing variant-backed rows copy verbatim. After it
+/// runs, `PRAGMA user_version` is 3.
+///
 /// [`last_checked`]: crate::backup_records::last_checked
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_backup_records_pair_index.sql"),
+    include_str!("../migrations/0003_assignment_custom_text.sql"),
 ];
 
 /// Builds the [`Migrations`] set from the embedded SQL files.
@@ -525,13 +534,14 @@ pub fn open_db(path: &Path) -> Result<Connection, StorageError> {
 /// set is rejected (the app layer turns this into the "update the app"
 /// message, spec DB-004/NFR-010).
 ///
-/// The connection's pragmas are left as-is. With `open_db`'s
-/// `foreign_keys=ON` this is safe for migrations that only create
-/// objects, but a future rebuild-style migration (SQLite's twelve-step
-/// `ALTER TABLE` procedure) cannot switch foreign keys off inside
-/// `rusqlite_migration`'s per-migration transactions — that migration
-/// needs its own foreign-keys policy decision before it lands (see
-/// DECISIONS.md D-030).
+/// The connection's pragmas are left as-is. Migration 0003 is the
+/// rebuild-style case (SQLite's twelve-step `ALTER TABLE` procedure): it
+/// keeps `foreign_keys=ON` throughout, renames only the child
+/// `project_instructions` table (nothing references it), copies the rows and
+/// drops the old table inside the one migration transaction. The populated
+/// v2→v3 test (`tests/schema_v3.rs`) verifies the copy plus
+/// `PRAGMA foreign_key_check`; this is D-030's foreign-keys policy for v3,
+/// recorded in DECISIONS.md D-192.
 ///
 /// # Returns
 ///
@@ -559,9 +569,9 @@ pub fn run_migrations(
 ///
 /// Split out from [`run_migrations`] so the backup and per-step semantics
 /// can be tested against synthetic multi-step migration sets — the
-/// embedded set's one real upgrade hop (v1→v2) is covered through the
-/// public API by `tests/schema_v2.rs`, but the multi-step and
-/// broken-step paths these tests need still cannot go through it.
+/// embedded set's real v1→v3 upgrade hops are covered through the public
+/// API by `tests/schema_v2.rs` and `tests/schema_v3.rs`; synthetic sets keep
+/// the broken-step cases independent of the shipped SQL.
 ///
 /// Migration runs are expected to be serialized by the caller (the app
 /// opens one connection behind a mutex, spec SYS-002); the backup naming
@@ -1084,9 +1094,9 @@ mod tests {
 
     /// Builds a synthetic migration set (real SQL, applied to real
     /// databases) — these tests need multi-step hops and broken steps,
-    /// which the two-step embedded set cannot provide (its one real
-    /// upgrade path, v1→v2, is covered through the public API by
-    /// `tests/schema_v2.rs`).
+    /// independent of the three-step embedded set (its real v1→v3 path is
+    /// covered through the public API by `tests/schema_v2.rs` and
+    /// `tests/schema_v3.rs`).
     fn set_of(sqls: &[&'static str]) -> Migrations<'static> {
         Migrations::new(sqls.iter().map(|sql| M::up(sql)).collect())
     }

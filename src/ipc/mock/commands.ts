@@ -29,6 +29,8 @@
 import type {
   ActivityPageWire,
   ActivityEntryWire,
+  AssignmentTargetWire,
+  BulkAssignmentResultWire,
   AppInfo,
   ExclusionEntry,
   ExistingProject,
@@ -39,6 +41,7 @@ import type {
   MoveTarget,
   ProjectAddResultWire,
   ProjectLabelEntry,
+  RevisionRecordWire,
   ScanCommitEntryWire,
   ScanRunOutcomeWire,
   ScannedRepository,
@@ -57,8 +60,10 @@ import {
   freshRowId,
   mockState,
   toAddedProject,
+  toAssignmentRecord,
   toColumnEntry,
   toVariantRecord,
+  type MockAssignmentRow,
   type MockLibraryRow,
   type MockProjectRow,
   type MockState,
@@ -313,6 +318,93 @@ function nameTaken(
 /** §6.9's save-time CRLF→LF fold (the store's own clause, D-076). */
 function foldCrlf(text: string): string {
   return text.replace(/\r\n/g, '\n')
+}
+
+/** The custom-text field's §6.9 verdict, with no text echo. */
+function customTextRejection(text: string): Promise<never> | null {
+  const verdict = variantTextRejection(text)
+  if (!verdict) return null
+  if (verdict.kind === 'marker') {
+    return rejectWith('E_CONTENT_RESERVED', 'errors.content_reserved', {
+      field: 'custom_text',
+      line: String(verdict.line),
+      marker: verdict.marker,
+    })
+  }
+  const characters = Array.from(text)
+  return rejectWith('E_VALIDATION', 'errors.validation', {
+    field: 'custom_text',
+    reason:
+      verdict.kind === 'length'
+        ? `custom text is at most ${VARIANT_TEXT_LIMIT} characters`
+        : 'custom text must not contain NUL',
+    ...(verdict.kind === 'length'
+      ? { length: String(characters.length) }
+      : { index: String(characters.indexOf('\0')) }),
+  })
+}
+
+/** SHA-256 of the canonical snapshot, through the platform Web Crypto API. */
+async function mockSnapshotHash(snapshot: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(snapshot),
+  )
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+/** Records one real library change and applies the per-entity history limit. */
+async function recordMockRevision(
+  entityType: 'instruction' | 'variant',
+  entityId: string,
+  op: RevisionRecordWire['op'],
+  snapshot: string,
+): Promise<void> {
+  const state = mockState()
+  const revisions = state.revisions.filter(
+    (row) => row.entity_type === entityType && row.entity_id === entityId,
+  )
+  const revNo = Math.max(0, ...revisions.map((row) => Number(row.rev_no))) + 1
+  state.revisions.push({
+    id: freshRowId(),
+    entity_type: entityType,
+    entity_id: entityId,
+    rev_no: String(revNo),
+    op,
+    snapshot,
+    snapshot_hash: await mockSnapshotHash(snapshot),
+    reverted_from: null,
+    created_at: new Date().toISOString(),
+  })
+  const configured = state.settings.find((row) => row.key === 'history.max_revisions')?.value
+  const limit = Math.max(1, Number(JSON.parse(configured ?? '200')))
+  const kept = state.revisions
+    .filter((row) => row.entity_type === entityType && row.entity_id === entityId)
+    .sort((left, right) => Number(right.rev_no) - Number(left.rev_no))
+    .slice(0, limit)
+    .map((row) => row.id)
+  state.revisions = state.revisions.filter(
+    (row) => row.entity_type !== entityType || row.entity_id !== entityId || kept.includes(row.id),
+  )
+}
+
+function assignmentOf(state: MockState, projectId: string, instructionId: string) {
+  return state.assignments.find(
+    (row) => row.projectId === projectId && row.instructionId === instructionId,
+  )
+}
+
+function journalAssignment(
+  projectId: string | null,
+  instructionId: string | null,
+  changed: number,
+): void {
+  journal('assignment.changed', {
+    entityType: 'assignment',
+    entityId: projectId === null || instructionId === null ? null : `${projectId}/${instructionId}`,
+    projectId,
+    details: JSON.stringify({ changed }),
+  })
 }
 
 /** The first reserved marker line (DB-016) in the text as the build
@@ -898,7 +990,7 @@ export const mockCommands: IpcCommands = {
           name: project.name,
           label: project.label,
           color: project.color,
-          variant_id: assignment.variantId,
+          variant_id: assignment.target.kind === 'variant' ? assignment.target.value : null,
         })
         labelsByInstruction.set(assignment.instructionId, labels)
       }
@@ -1529,8 +1621,8 @@ export const mockCommands: IpcCommands = {
    * §10 row), the NOCASE-twin refusal among VISIBLE instructions, the
    * section placement (the end of the picked heading's range; `null`
    * is the root prefix end), the `Main` pair, and the one
-   * `instruction.created` journal entry. No version rows exist in the
-   * mock store (the documented limit above).
+   * `instruction.created` journal entry and the instruction/Main create
+   * versions (T-331's history read surface).
    */
   async instructionCreate(name, text, section) {
     const state = mockState()
@@ -1618,6 +1710,21 @@ export const mockCommands: IpcCommands = {
     })
     state.library = ordered
     journal('instruction.created', { entityType: 'instruction', entityId: row.id })
+    await recordMockRevision(
+      'instruction',
+      row.id,
+      'create',
+      JSON.stringify({ name: row.title, state: row.state }),
+    )
+    const main = row.kind === 'instruction' ? row.variants[0] : undefined
+    if (main) {
+      await recordMockRevision(
+        'variant',
+        main.id,
+        'create',
+        JSON.stringify({ name: main.name, text: main.content }),
+      )
+    }
     return {
       instruction_id: row.id,
       variant_id: row.variants[0]?.id as string,
@@ -1656,6 +1763,12 @@ export const mockCommands: IpcCommands = {
     }
     row.title = validated.trimmed
     journal('instruction.changed', { entityType: 'instruction', entityId: row.id })
+    await recordMockRevision(
+      'instruction',
+      row.id,
+      'update',
+      JSON.stringify({ name: row.title, state: row.state }),
+    )
     return null
   },
 
@@ -1674,6 +1787,12 @@ export const mockCommands: IpcCommands = {
     if (row.state === 'hidden') return null
     row.state = 'hidden'
     journal('instruction.hidden', { entityType: 'instruction', entityId: row.id })
+    await recordMockRevision(
+      'instruction',
+      row.id,
+      'hide',
+      JSON.stringify({ name: row.title, state: row.state }),
+    )
     return null
   },
 
@@ -1699,6 +1818,12 @@ export const mockCommands: IpcCommands = {
     }
     row.state = 'active'
     journal('instruction.restored', { entityType: 'instruction', entityId: row.id })
+    await recordMockRevision(
+      'instruction',
+      row.id,
+      'restore',
+      JSON.stringify({ name: row.title, state: row.state }),
+    )
     return null
   },
 
@@ -1926,13 +2051,291 @@ export const mockCommands: IpcCommands = {
   },
 
   // -------------------------------------------------------------------------
+  // The three assignment commands and two history reads (T-331).
+  // -------------------------------------------------------------------------
+
+  /** `assignment_set`: toggle one cell, defaulting to the active main. */
+  async assignmentSet(projectId, instructionId, enabled, variantId) {
+    if (!enabled && variantId !== null) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'variant_id',
+        reason: 'a variant is only meaningful when enabling an assignment',
+      })
+    }
+    const state = mockState()
+    if (!state.projects.some((row) => row.id === projectId)) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'project_id',
+        reason: 'no project has this id',
+      })
+    }
+    const instruction = variantInstructionOf(state, instructionId)
+    if (!instruction) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'instruction_id',
+        reason: 'no instruction has this id',
+      })
+    }
+    const current = assignmentOf(state, projectId, instructionId)
+    if (!enabled) {
+      if (!current) return null
+      state.assignments = state.assignments.filter((row) => row !== current)
+      journalAssignment(projectId, instructionId, 1)
+      return null
+    }
+    if (current?.target.kind === 'custom' && variantId === null) {
+      return toAssignmentRecord(current)
+    }
+    const targetVariant =
+      variantId === null
+        ? activeMainOf(instruction.variants)
+        : instruction.variants.find((row) => row.id === variantId && row.state === 'active')
+    if (!targetVariant) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: variantId === null ? 'instruction_id' : 'variant_id',
+        reason:
+          variantId === null
+            ? 'the instruction has no active main variant (DB-010)'
+            : 'the variant must be active and belong to the same instruction (DB-012)',
+      })
+    }
+    const target: AssignmentTargetWire = { kind: 'variant', value: targetVariant.id }
+    if (current?.target.kind === 'variant' && current.target.value === targetVariant.id) {
+      return toAssignmentRecord(current)
+    }
+    const now = new Date().toISOString()
+    if (current) {
+      current.target = target
+      current.updatedAt = now
+      journalAssignment(projectId, instructionId, 1)
+      return toAssignmentRecord(current)
+    }
+    const row: MockAssignmentRow = {
+      projectId,
+      instructionId,
+      target,
+      createdAt: now,
+      updatedAt: now,
+    }
+    state.assignments.push(row)
+    journalAssignment(projectId, instructionId, 1)
+    return toAssignmentRecord(row)
+  },
+
+  /** `assignment_set_custom`: per-project text, never a cloned variant. */
+  async assignmentSetCustom(projectId, instructionId, content) {
+    if (content !== null) {
+      const rejection = customTextRejection(content)
+      if (rejection) return rejection
+    }
+    const state = mockState()
+    if (!state.projects.some((row) => row.id === projectId)) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'project_id',
+        reason: 'no project has this id',
+      })
+    }
+    const instruction = variantInstructionOf(state, instructionId)
+    if (!instruction) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'instruction_id',
+        reason: 'no instruction has this id',
+      })
+    }
+    const current = assignmentOf(state, projectId, instructionId)
+    if (content === null) {
+      if (!current) return null
+      if (current.target.kind === 'variant') return toAssignmentRecord(current)
+      const main = activeMainOf(instruction.variants)
+      if (!main) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'instruction_id',
+          reason: 'the instruction has no active main variant (DB-010)',
+        })
+      }
+      current.target = { kind: 'variant', value: main.id }
+      current.updatedAt = new Date().toISOString()
+      journalAssignment(projectId, instructionId, 1)
+      return toAssignmentRecord(current)
+    }
+    const folded = foldCrlf(content)
+    if (current?.target.kind === 'custom' && current.target.value === folded) {
+      return toAssignmentRecord(current)
+    }
+    const now = new Date().toISOString()
+    if (current) {
+      current.target = { kind: 'custom', value: folded }
+      current.updatedAt = now
+      journalAssignment(projectId, instructionId, 1)
+      return toAssignmentRecord(current)
+    }
+    const row: MockAssignmentRow = {
+      projectId,
+      instructionId,
+      target: { kind: 'custom', value: folded },
+      createdAt: now,
+      updatedAt: now,
+    }
+    state.assignments.push(row)
+    journalAssignment(projectId, instructionId, 1)
+    return toAssignmentRecord(row)
+  },
+
+  /** `assignments_bulk`: one row/column product, one journal entry. */
+  async assignmentsBulk(instructionIds, projectIds, enabled, variantId) {
+    const instructions = [...new Set(instructionIds)]
+    const projects = [...new Set(projectIds)]
+    if (variantId !== null && (!enabled || instructions.length !== 1)) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'variant_id',
+        reason: 'a variant is only meaningful when enabling exactly one instruction row',
+      })
+    }
+    const state = mockState()
+    for (const projectId of projects) {
+      if (!state.projects.some((row) => row.id === projectId)) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'project_id',
+          reason: 'no project has this id',
+        })
+      }
+    }
+    const rows: (MockLibraryRow & { kind: 'instruction' })[] = []
+    for (const instructionId of instructions) {
+      const instruction = variantInstructionOf(state, instructionId)
+      if (!instruction) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'instruction_id',
+          reason: 'no instruction has this id',
+        })
+      }
+      rows.push(instruction)
+    }
+    const mains = new Map<string, string>()
+    if (enabled) {
+      if (variantId !== null) {
+        const instruction = rows[0]
+        if (!instruction) {
+          return rejectWith('E_VALIDATION', 'errors.validation', {
+            field: 'instruction_id',
+            reason: 'no instruction has this id',
+          })
+        }
+        const variant = instruction.variants.find(
+          (row) => row.id === variantId && row.state === 'active',
+        )
+        if (!variant) {
+          return rejectWith('E_VALIDATION', 'errors.validation', {
+            field: 'variant_id',
+            reason: 'the variant must be active and belong to the same instruction (DB-012)',
+          })
+        }
+        mains.set(instruction.id, variant.id)
+      } else {
+        for (const instruction of rows) {
+          const main = activeMainOf(instruction.variants)
+          if (!main) {
+            return rejectWith('E_VALIDATION', 'errors.validation', {
+              field: 'instruction_id',
+              reason: 'the instruction has no active main variant (DB-010)',
+            })
+          }
+          mains.set(instruction.id, main.id)
+        }
+      }
+    }
+    let changed = 0
+    const already: { project_id: string; instruction_id: string }[] = []
+    for (const instructionId of instructions) {
+      for (const projectId of projects) {
+        const current = assignmentOf(state, projectId, instructionId)
+        if (enabled) {
+          if (current) {
+            already.push({ project_id: projectId, instruction_id: instructionId })
+            continue
+          }
+          const now = new Date().toISOString()
+          state.assignments.push({
+            projectId,
+            instructionId,
+            target: { kind: 'variant', value: mains.get(instructionId) ?? '' },
+            createdAt: now,
+            updatedAt: now,
+          })
+          changed++
+        } else if (current) {
+          if (current.target.kind === 'custom') {
+            already.push({ project_id: projectId, instruction_id: instructionId })
+            continue
+          }
+          state.assignments = state.assignments.filter((row) => row !== current)
+          changed++
+        }
+      }
+    }
+    if (changed > 0) journalAssignment(null, null, changed)
+    const result: BulkAssignmentResultWire = { changed, already_assigned: already }
+    return result
+  },
+
+  /** `revisions_list`: instruction plus all variants, newest first. */
+  async revisionsList(instructionId) {
+    const state = mockState()
+    const instruction = variantInstructionOf(state, instructionId)
+    if (!instruction) {
+      const row = state.library.find((candidate) => candidate.id === instructionId)
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'instruction_id',
+        reason:
+          row?.kind === 'heading'
+            ? 'a heading has no version history (LIB-026/6.2)'
+            : 'no instruction has this id',
+      })
+    }
+    const variantIds = new Set(instruction.variants.map((row) => row.id))
+    return state.revisions
+      .filter(
+        (row) =>
+          (row.entity_type === 'instruction' && row.entity_id === instructionId) ||
+          (row.entity_type === 'variant' && variantIds.has(row.entity_id)),
+      )
+      .sort(
+        (left, right) =>
+          right.created_at.localeCompare(left.created_at) ||
+          Number(right.rev_no) - Number(left.rev_no) ||
+          right.id.localeCompare(left.id),
+      )
+      .map((row) => ({
+        id: row.id,
+        entity_type: row.entity_type,
+        entity_id: row.entity_id,
+        rev_no: row.rev_no,
+        op: row.op,
+        snapshot_hash: row.snapshot_hash,
+        reverted_from: row.reverted_from,
+        created_at: row.created_at,
+      }))
+  },
+
+  /** `revision_get`: one full history row by revision id. */
+  async revisionGet(id) {
+    const row = mockState().revisions.find((revision) => revision.id === id)
+    if (!row) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        reason: 'no revision has this id',
+      })
+    }
+    return { ...row }
+  },
+
+  // -------------------------------------------------------------------------
   // The five variant commands (§7.10 Library module, T-329): mock twins of
   // the Rust commands over the wired library rows (D-189 reading 8) — the
   // same contracts (NOCASE uniqueness, the exactly-one-main invariant, the
-  // delete/restore flow, the E_* envelopes), all synchronous over the
-  // in-memory store. The version table is NOT modelled: the real commands'
-  // answer is the row, and the history panel is the future revisions_list
-  // task's surface; the no-op detection compares the stored outcome, the
+  // delete/restore flow, the E_* envelopes) over the in-memory store.
+  // Real changes also append history rows for T-331's `revisions_list` /
+  // `revision_get`; the no-op detection compares the stored outcome, the
   // ALG-070 hash gate's mock twin.
   // -------------------------------------------------------------------------
 
@@ -1983,6 +2386,12 @@ export const mockCommands: IpcCommands = {
     }
     instruction.variants.push(row)
     journal('variant.created', { entityType: 'variant', entityId: row.id })
+    await recordMockRevision(
+      'variant',
+      row.id,
+      'create',
+      JSON.stringify({ name: row.name, text: row.content }),
+    )
     return toVariantRecord(instruction, row)
   },
 
@@ -2065,6 +2474,12 @@ export const mockCommands: IpcCommands = {
     row.content = newContent
     row.updatedAt = new Date().toISOString()
     journal('variant.changed', { entityType: 'variant', entityId: row.id })
+    await recordMockRevision(
+      'variant',
+      row.id,
+      'update',
+      JSON.stringify({ name: row.name, text: row.content }),
+    )
     return toVariantRecord(instruction, row)
   },
 
@@ -2158,9 +2573,14 @@ export const mockCommands: IpcCommands = {
       }
       successor = candidate
     }
-    const moved = state.assignments.filter((assignment) => assignment.variantId === row.id).length
+    const moved = state.assignments.filter(
+      (assignment) => assignment.target.kind === 'variant' && assignment.target.value === row.id,
+    ).length
     for (const assignment of state.assignments) {
-      if (assignment.variantId === row.id) assignment.variantId = successor.id
+      if (assignment.target.kind === 'variant' && assignment.target.value === row.id) {
+        assignment.target = { kind: 'variant', value: successor.id }
+        assignment.updatedAt = new Date().toISOString()
+      }
     }
     const now = new Date().toISOString()
     const wasMain = row.isMain
@@ -2169,6 +2589,12 @@ export const mockCommands: IpcCommands = {
     row.deletedAt = now
     row.updatedAt = now
     if (wasMain) successor.isMain = true
+    await recordMockRevision(
+      'variant',
+      row.id,
+      'delete',
+      JSON.stringify({ name: row.name, text: row.content }),
+    )
     journal('variant.deleted', {
       entityType: 'variant',
       entityId: row.id,
@@ -2202,6 +2628,12 @@ export const mockCommands: IpcCommands = {
     row.state = 'active'
     row.deletedAt = null
     row.updatedAt = new Date().toISOString()
+    await recordMockRevision(
+      'variant',
+      row.id,
+      'restore',
+      JSON.stringify({ name: row.name, text: row.content }),
+    )
     journal('variant.restored', { entityType: 'variant', entityId: row.id })
     return toVariantRecord(instruction, row)
   },

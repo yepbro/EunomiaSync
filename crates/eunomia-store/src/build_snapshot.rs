@@ -76,7 +76,7 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 
-use eunomia_core::assignment::Assignment as CoreAssignment;
+use eunomia_core::assignment::{Assignment as CoreAssignment, AssignmentTarget as CoreTarget};
 use eunomia_core::library::Heading as CoreHeading;
 use eunomia_core::library::HeadingLevel;
 use eunomia_core::library::Instruction as CoreInstruction;
@@ -121,7 +121,8 @@ pub enum BuildSnapshotError {
     /// The assembled graph failed [`BuildSnapshot::new`]'s
     /// validation: an active instruction without active variants
     /// (DB-010), an assignment that does not resolve to a snapshot
-    /// project, instruction and active variant (DB-012), a second
+    /// project/instruction or whose variant target is not active and local
+    /// (DB-012; custom targets deliberately have no variant), a second
     /// assignment of one instruction for one project (D-02), or a
     /// duplicate id. Surfaced at sync start with a named cause
     /// instead of a mysterious write later in the pipeline.
@@ -213,7 +214,12 @@ pub fn read(conn: &Connection) -> Result<BuildSnapshot, BuildSnapshotError> {
         .map(|assignment| CoreAssignment {
             project_id: ProjectId::new(assignment.project_id),
             instruction_id: ItemId::new(assignment.instruction_id),
-            variant_id: VariantId::new(assignment.variant_id),
+            target: match assignment.target {
+                library::AssignmentTarget::Variant(variant_id) => {
+                    CoreTarget::Variant(VariantId::new(variant_id))
+                }
+                library::AssignmentTarget::Custom(custom_text) => CoreTarget::Custom(custom_text),
+            },
         })
         .collect::<Vec<_>>();
 

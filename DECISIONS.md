@@ -22981,3 +22981,185 @@ paragraph beside the T-253 pass, and its module table the new file.
 No spec change: §5.5/§7.6 pin the layout and the copies, not a
 housekeeping report, and the requirement set has no row for it —
 this is the owner's ruling, recorded here.
+
+### D-192 — T-331: current custom-text ruling wins over the absorbed fork card; history and assignment contracts — 2026-11-24
+
+Problem: T-331 repeats T-099's historical `variant_fork_for_project`
+command and fork-a-variant acceptance criterion, but the current owner
+ruling explicitly removed that command. D-125 A1 and its T-327 addendum
+(`DECISIONS.md:10817-10834`, `:10922-10975`) replace it with
+`assignment_set_custom`; the shipped schema still has only a non-null
+`variant_id` (`crates/eunomia-store/migrations/0001_init.sql:125-134`),
+and the current spec requires custom text in the assignment and in the
+built body (`docs/spec.md:354-358`, `:476`, `:579-587`, `:601`, `:636`).
+The card also leaves the history list's scope/order and the bulk wire
+shape open.
+
+Question: does T-331 implement the card's removed fork API, or the current
+MAIN-007/LIB-018/S5 contract? Chosen reading: the later explicit owner
+ruling and current spec win. T-331 lands `assignment_set_custom`, not the
+removed `variant_fork_for_project`; it still adds exactly five commands.
+T-099's observable goals are preserved without cloning variants: editing
+one project never changes shared variant text, and a repeated edit updates
+the same assignment instead of creating variants.
+
+Solution — contracts and work plan chosen before implementation:
+
+1. **Schema/store/core first.** Add forward-only migration 0003: direct
+   instruction FK, nullable `variant_id`, nullable `custom_text`, and the
+   exactly-one-target CHECK from spec §6.2. Existing rows copy verbatim.
+   Store and core assignment targets are enums (`Variant` or `Custom`), so
+   "both" and "neither" cannot be constructed in Rust; the database CHECK
+   remains the independent floor. The rebuild keeps `foreign_keys=ON`: no
+   table references `project_instructions`, so rename/copy/drop is safe in
+   the one migration transaction, verified on populated v2 data by
+   `schema_v3.rs` and `PRAGMA foreign_key_check` (D-030's v3 policy). The
+   snapshot carries custom text and the body uses it (ALG-002/§9.2); deleting
+   a variant moves only variant-backed assignments and never touches custom
+   cells.
+2. **History reads.** `revisions_list(instruction_id)` returns summary rows
+   for the instruction's versions plus every variant's versions, including
+   soft-deleted variants, newest first (`created_at DESC`, `rev_no DESC`,
+   `id DESC` as a deterministic tie-break). The list carries id, entity
+   type/id, rev_no, op, snapshot hash, reverted_from and created_at — time,
+   operation and entity — but deliberately does not read or serialize the
+   potentially large snapshot. `revision_get(id)` returns the one full row,
+   including the canonical snapshot. Unknown instruction/heading ids and
+   unknown/malformed revision rows are typed refusals/corruption, never
+   guessed.
+3. **Single assignment.** `assignment_set(project_id, instruction_id,
+enabled, variant_id)` assigns an active same-instruction variant or the
+   active main when `variant_id` is null on an unassigned cell; on an
+   already-enabled custom cell, null is a no-op and only an explicit variant
+   id converts it. Disabling removes the row. A same-target re-send writes
+   and journals nothing. A real change writes
+   one `assignment.changed` entry with `Details::Bulk { changed: 1 }` in
+   the same transaction. No project file is opened or written.
+4. **Bulk assignment.** `assignments_bulk(instruction_ids, project_ids,
+enabled, variant_id)` forms the requested row/column product. A variant
+   is legal only for one instruction; null selects each instruction's
+   main. Duplicate input ids collapse before work. Every already-present
+   pair (including a custom cell) is left untouched and returned in
+   `already_assigned`; other pairs are applied in ONE transaction and one
+   `assignment.changed` entry carries the changed count. A bulk entry has no
+   synthetic single-entity id; its count is the object summary. Any refusal
+   rolls back the whole product. Processing is linear in the number of
+   unique requested pairs plus the active-variant scan (when no variant is
+   supplied) and validated text length, with indexed per-pair store
+   reads/writes; the 100-assignment test is the scale pin.
+5. **Per-project custom text.** `assignment_set_custom(project_id,
+instruction_id, content)` validates §6.9 text before DB resolution.
+   `Some(text)` upserts a custom-target assignment (empty text is legal);
+   `None` replaces an existing custom target with the instruction's active
+   main and is a no-op for an absent or variant-backed cell. Same-text
+   re-sends write/journal nothing. No revision is created because the
+   assignment is not a versioned library entity.
+6. **Tests lead each layer.** Red-first migration/store/core tests, then
+   mock-IPC command tests for all four absorbed DoDs, rollback, validation,
+   idempotence, file non-modification and the 100-pair batch; finally mock
+   frontend twins and binding regeneration. Every new test gets a
+   behavior-changing mutation check. Documentation, the 38-command count,
+   `mode.spec`, manual smoke, full checks and two model reviews follow.
+
+Baseline before edits: `cargo nextest run --workspace --test-threads=4`
+1787/1787 and `pnpm test` 345/345, both exit 0. No dependency or unsafe
+addition is needed.
+
+**Landing addendum (same task, 2026-11-24).** The chosen contracts are
+implemented: migration 0003 and the store/core assignment-target enums;
+`src-tauri/src/assignments.rs` and `revisions.rs` with five registered
+commands, DTOs, error mappers and logging edges; regenerated bindings; and
+frontend mock twins over mutable assignment/history rows. The history wire
+uses decimal strings for SQLite's i64 `rev_no`/`reverted_from`: tauri-specta
+forbids BigInt-style Rust integers, and narrowing them to JavaScript numbers
+would lose precision. `ProjectLabelEntry.variant_id` is nullable so a custom
+cell still labels its project without inventing a variant id.
+
+Thirty-six new tests lead the behavior: 28 Rust (2 core custom-text tests plus
+one strengthened target-serialization test, 2 schema v3, 4 store assignment, 2
+store history, 13 assignment mock-IPC, 4 revision mock-IPC, and 1 custom-label
+`library_get` test) and 8 frontend mock tests. The 100-pair DoD is one call from
+an empty world, not two calls whose totals add to 100. History list assertions
+include a raw-wire check that no `snapshot` field is serialized.
+
+Mutation battery: 39 behavior-changing mutants, 39 killed in one retained run;
+every source file was restored byte-for-byte and SHA-256 checked after each
+mutant. The battery covers target tagging, custom text and empty-custom builds,
+migration copy and CHECK floors, store no-op/clear/delete/reassign/decode scope,
+history order/corruption, main default, bulk count/dedupe/error rollback/
+custom-cell skip/journal entity, custom validation/content/journal/enable
+semantics, single no-op/journal, sync and no-database gates, registration,
+custom labels and the frontend twins. The final evidence is
+`.opencode/reviews/t331_mutations-20261124T183031905440.jsonl`; invocation logs
+are timestamp-suffixed rather than truncated, so reruns cannot erase prior
+evidence.
+
+**Round-1 review addendum (same task; report
+`.opencode/reviews/t331-round1.md`, deepseek-v4.1-flash, exit 0): REQUEST
+CHANGES — no P0/P1, 3 P2 and 4 P3.** Every finding was re-verified and taken;
+none was declined:
+
+- P2-1: store/core/test docs now describe the variant-or-custom target,
+  `set_custom`, clear-to-main and custom-cell isolation; the snapshot error
+  contract distinguishes custom targets; schema v1 docs say version 3.
+- P2-2: the mutation runner now retains timestamp-suffixed logs, and the full
+  39/39 battery above is the evidence.
+- P2-3: `revisions_list` returns summary rows and its SQL does not select
+  `snapshot`; `revision_get` remains the full-row read. Rust raw-wire and
+  frontend mock tests pin the omission.
+- P3-1: added bypassed-CHECK assignment decode tests (both/neither), corrupt
+  revision-op coverage, and Rust/mock custom-label `variant_id: null` tests.
+- P3-2: a bulk journal entry now has no synthetic entity id; count-only details
+  are its summary, pinned in Rust and mock tests.
+- P3-3: `assignment_set(enabled=true, variant_id=null)` on a custom cell is a
+  no-op; only an explicit variant id converts it. Rust and mock tests pin both.
+- P3-4: heading history refusals now say a heading has no version history in
+  Rust and mock, with exact-reason tests.
+
+Checks after the round-1 fixes: `cargo fmt --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo nextest run --workspace
+--test-threads=4` (1815/1815), `pnpm run format:check`, `pnpm run lint`,
+`pnpm run typecheck`, and `pnpm test` (353/353) — all exit 0. The generated
+bindings retain specta's own trailing whitespace; they are not hand-formatted
+(the T-330 precedent).
+
+**Round-2 review addendum (same task; report
+`.opencode/reviews/t331-round2.md`, hy4-flash-free, exit 0): APPROVE — no
+P0/P1/P2, 4 P3.** All four were re-verified and taken; none was declined:
+three remaining variant-only doc phrases now say variant/custom-text target;
+`run_migrations` documents v3's FK-ON rebuild and D-192 records that policy;
+the bulk complexity wording includes the active-variant scan; the rollback
+test says 45th pair; and the mock bulk journal passes nulls instead of building
+a discarded synthetic id. The review phase is complete after these fixes (no
+third round). Final checks repeated after the P3 fixes: fmt/clippy/nextest
+1815/1815 and frontend format/lint/typecheck/353 tests, all exit 0. One
+intermediate workspace run hit the pre-existing watcher recreate-event timeout;
+the exact mandated rerun passed 1815/1815, and no watcher code was changed.
+
+**Landing addendum (same task, 2026-11-24; rebase onto `c4ab05e`).** The
+flash-batch union is mechanical and was already covered by the two review
+rounds, so no new review round is needed. `DECISIONS.md` was the only explicit
+conflict: main's D-190 and every flash addendum remain, and D-192 is the clean
+tail. `lib.rs` keeps main's `backup_orphans` module and plain
+`sync_pipeline_tests` registration beside the phase suites, plus T-331's two
+modules, five commands and two plain test-module registrations.
+`logging.rs` keeps the orphan report and main's mirror-policy funnel wording
+beside T-331's five failure edges. `ARCHITECTURE.md` keeps the orphan paragraph
+and alphabetical module table (`assignments` after `availability`,
+`backup_orphans` before `commands`, `revisions` before `retention`), with the
+38-command count. `storage.rs` and the schema v1/v2 tests retain main's index
+pins while adding migration 0003/v3 expectations; `schema_v3.rs` is additive.
+`file_watch.rs` keeps T-342's `FileWatchState::shutdown` / `Command::Shutdown`
+stop seam; T-331's only change there is the assignment-target fixture.
+`assignments_tests.rs` and `revisions_tests.rs` use direct mock builders and do
+not call `file_watch::spawn_service`, so they introduce no service task and no
+new stop site or leak. `src/bindings.ts` was reset to main's side and then
+regenerated through the export pin (red on the stale main-side file, green on
+the regenerated union); `mode.spec.ts` still pins all 38 names.
+`pnpm install --frozen-lockfile` applied main's ESLint 10 dependency update.
+
+Rebased checks, all exit 0: `cargo fmt --check`; `cargo clippy --workspace
+--all-targets -- -D warnings`; `cargo nextest run --workspace
+--test-threads=4` (**1831/1831**); `pnpm test` (**353/353**);
+`pnpm run format:check`; `pnpm run lint`; `pnpm run typecheck`. Everything is
+folded into the single T-331 commit; no push, merge or board operation.

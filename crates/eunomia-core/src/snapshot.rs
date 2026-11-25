@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::assignment::Assignment;
+use crate::assignment::{Assignment, AssignmentTarget};
 use crate::library::{ItemId, LibraryItem, VariantId};
 use crate::project::{ProjectId, ProjectWriteSettings};
 
@@ -138,7 +138,7 @@ pub enum SnapshotError {
         variant_id: VariantId,
     },
     /// A project already has an assignment for the instruction
-    /// (D-02: one instruction, at most one variant per project).
+    /// (D-02: one instruction, at most one variant/custom-text target per project).
     #[error("project {project_id} already has an assignment for instruction {item_id}")]
     DuplicateAssignment {
         /// The project with the duplicate.
@@ -229,7 +229,7 @@ pub enum SnapshotError {
 /// let assignment = Assignment {
 ///     project_id: project.id.clone(),
 ///     instruction_id: ItemId::new("i1".to_owned()),
-///     variant_id: VariantId::new("v1".to_owned()),
+///     target: AssignmentTarget::Variant(VariantId::new("v1".to_owned())),
 /// };
 ///
 /// let snapshot = BuildSnapshot::new(
@@ -348,14 +348,12 @@ impl BuildSnapshot {
                     item_id: assignment.instruction_id.clone(),
                 });
             }
-            if !instruction
-                .variants
-                .iter()
-                .any(|v| v.id == assignment.variant_id)
+            if let AssignmentTarget::Variant(variant_id) = &assignment.target
+                && !instruction.variants.iter().any(|v| v.id == *variant_id)
             {
                 return Err(SnapshotError::VariantMismatch {
                     item_id: assignment.instruction_id.clone(),
-                    variant_id: assignment.variant_id.clone(),
+                    variant_id: variant_id.clone(),
                 });
             }
         }
@@ -430,7 +428,7 @@ mod tests {
                 assignment: Assignment {
                     project_id: ProjectId::new("p1".to_owned()),
                     instruction_id: ItemId::new("i1".to_owned()),
-                    variant_id: VariantId::new("v1".to_owned()),
+                    target: AssignmentTarget::Variant(VariantId::new("v1".to_owned())),
                 },
             }
         }
@@ -466,7 +464,7 @@ mod tests {
         let second_assignment = Assignment {
             project_id: second_project.id.clone(),
             instruction_id: ItemId::new("i1".to_owned()),
-            variant_id: VariantId::new("v1".to_owned()),
+            target: AssignmentTarget::Variant(VariantId::new("v1".to_owned())),
         };
 
         let snapshot = BuildSnapshot::new(
@@ -564,7 +562,7 @@ mod tests {
             }],
         });
         let mut assignment = fixture.assignment.clone();
-        assignment.variant_id = VariantId::new("v2".to_owned());
+        assignment.target = AssignmentTarget::Variant(VariantId::new("v2".to_owned()));
         let error = BuildSnapshot::new(
             vec![fixture.project],
             vec![fixture.style, fixture.concise, other],
@@ -603,7 +601,7 @@ mod tests {
             ],
         });
         let mut duplicate = fixture.assignment.clone();
-        duplicate.variant_id = VariantId::new("v2".to_owned());
+        duplicate.target = AssignmentTarget::Variant(VariantId::new("v2".to_owned()));
         let error = BuildSnapshot::new(
             vec![fixture.project],
             vec![fixture.style, concise_two_variants],
@@ -650,7 +648,7 @@ mod tests {
         let second_assignment = Assignment {
             project_id: second_project.id.clone(),
             instruction_id: ItemId::new("i1".to_owned()),
-            variant_id: VariantId::new("v2".to_owned()),
+            target: AssignmentTarget::Variant(VariantId::new("v2".to_owned())),
         };
         let snapshot = BuildSnapshot::new(
             vec![fixture.project, second_project],

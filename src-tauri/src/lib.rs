@@ -183,6 +183,15 @@ pub(crate) mod variants;
 // real operation, with no heading revisions and no SYS-005 gate.
 pub(crate) mod headings;
 
+// The three Assignments-module commands (spec §7.10, T-331): variant
+// toggles, one-transaction bulk row/column writes, and D-125's per-project
+// custom-text editor target. No command touches project files.
+pub(crate) mod assignments;
+
+// The History module's revision reads (spec §7.10, T-331):
+// `revisions_list` and `revision_get` over the store's version repository.
+pub(crate) mod revisions;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -210,7 +219,10 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // (T-329, the batch absorbing T-087…T-091, D-189), the
         // Library-structure commands `heading_create`/
         // `heading_update`/`heading_delete`/`items_move` (T-330,
-        // the batch absorbing T-092…T-095, D-191), the
+        // the batch absorbing T-092…T-095, D-191), the Assignments
+        // module's `assignment_set`/`assignment_set_custom`/
+        // `assignments_bulk` and the History module's
+        // `revisions_list`/`revision_get` (T-331, D-192), the
         // Projects module's `projects_list` (T-072), the System
         // module's `dialog_pick_folder` (T-073), the Projects
         // module's `project_add_manual` (T-074), the Projects
@@ -218,8 +230,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // Projects module's `projects_reorder` (T-080), the
         // Projects module's `scan_start`/`scan_cancel`/`scan_commit`
         // (T-076/T-077) and the Sync module's `sync_run` (T-118,
-        // D-138). Every later command task (assignments, headings, …)
-        // lists its own §7.10 names here.
+        // D-138). Every later command task lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
         // commands that take an `AppHandle`), so the registration pins
         // the concrete runtime of the shipped app; `markdown_preview`
@@ -258,6 +269,11 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             headings::heading_delete::<tauri::Wry>,
             headings::heading_update::<tauri::Wry>,
             headings::items_move::<tauri::Wry>,
+            assignments::assignment_set::<tauri::Wry>,
+            assignments::assignment_set_custom::<tauri::Wry>,
+            assignments::assignments_bulk::<tauri::Wry>,
+            revisions::revision_get::<tauri::Wry>,
+            revisions::revisions_list::<tauri::Wry>,
         ])
         // The registered §7.10 events: `state://project-availability`
         // (T-079, D-09/DB-032), `state://dirty` (T-101,
@@ -946,6 +962,12 @@ mod variants_tests;
 
 #[cfg(test)]
 mod headings_tests;
+
+#[cfg(test)]
+mod assignments_tests;
+
+#[cfg(test)]
+mod revisions_tests;
 
 #[cfg(test)]
 mod tests {

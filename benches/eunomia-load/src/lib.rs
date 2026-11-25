@@ -205,7 +205,7 @@ use eunomia_fs::temp_repos::TempRepos;
 use eunomia_fs::write_access::{WriteAccessError, check_write_access};
 use eunomia_store::build_snapshot::{self, BuildSnapshotError};
 use eunomia_store::data_sets::{self, DataSetError, DataSetSpec, GeneratedDataSet, ProjectRoot};
-use eunomia_store::library::{self, Assignment, LibraryError};
+use eunomia_store::library::{self, Assignment, AssignmentTarget, LibraryError};
 use eunomia_store::projects::{self, ProjectsError};
 use eunomia_store::settings::{SettingKey, SettingValue};
 use eunomia_store::storage::{self, StorageError};
@@ -545,10 +545,14 @@ impl AssignmentToggle {
                 held: String::new(),
                 expected: pair.2.clone(),
             })?;
-        if current.variant_id != pair.2 {
+        let held = match current.target {
+            AssignmentTarget::Variant(variant_id) => variant_id,
+            AssignmentTarget::Custom(_) => String::new(),
+        };
+        if held != pair.2 {
             return Err(LoadError::TogglePremise {
                 half: PremiseHalf::VariantMismatch,
-                held: current.variant_id,
+                held,
                 expected: pair.2,
             });
         }
@@ -890,10 +894,14 @@ impl SyncFixture {
                 held: String::new(),
                 expected: toggle.variant_a.clone(),
             })?;
-            if current.variant_id != toggle.variant_a {
+            let held = match current.target {
+                AssignmentTarget::Variant(variant_id) => variant_id,
+                AssignmentTarget::Custom(_) => String::new(),
+            };
+            if held != toggle.variant_a {
                 return Err(LoadError::TogglePremise {
                     half: PremiseHalf::VariantMismatch,
-                    held: current.variant_id,
+                    held,
                     expected: toggle.variant_a.clone(),
                 });
             }

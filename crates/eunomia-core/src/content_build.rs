@@ -52,7 +52,7 @@
 //! # Examples
 //!
 //! ```
-//! use eunomia_core::assignment::Assignment;
+//! use eunomia_core::assignment::{Assignment, AssignmentTarget};
 //! use eunomia_core::content_build::{BuiltProject, build_projects};
 //! use eunomia_core::library::{
 //!     Instruction, InstructionState, ItemId, LibraryItem, Variant, VariantId,
@@ -90,7 +90,7 @@
 //!     vec![Assignment {
 //!         project_id: ProjectId::new("p1".to_owned()),
 //!         instruction_id: ItemId::new("a".to_owned()),
-//!         variant_id: VariantId::new("v-a".to_owned()),
+//!         target: AssignmentTarget::Variant(VariantId::new("v-a".to_owned())),
 //!     }],
 //! )
 //! .expect("the example is a valid snapshot");
@@ -431,6 +431,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::assignment::AssignmentTarget;
     use crate::library::{Instruction, InstructionState, ItemId, LibraryItem, Variant, VariantId};
     use crate::project::{
         BaseName, ExtraFile, ExtraFilePosition, ProjectId, ProjectWriteSettings, Scheme,
@@ -481,7 +482,7 @@ mod tests {
         Assignment {
             project_id: ProjectId::new(project_id.to_owned()),
             instruction_id: ItemId::new(instruction_id.to_owned()),
-            variant_id: VariantId::new(format!("v-{instruction_id}")),
+            target: AssignmentTarget::Variant(VariantId::new(format!("v-{instruction_id}"))),
         }
     }
 
@@ -578,11 +579,11 @@ mod tests {
             .map(|index| Assignment {
                 project_id: ProjectId::new(ids[index].clone()),
                 instruction_id: ItemId::new("shared".to_owned()),
-                variant_id: VariantId::new(if index % 2 == 0 {
+                target: AssignmentTarget::Variant(VariantId::new(if index % 2 == 0 {
                     "v-compact".to_owned()
                 } else {
                     "v-main".to_owned()
-                }),
+                })),
             })
             .collect();
         let full = snapshot(projects, vec![shared], assignments);
@@ -667,11 +668,11 @@ mod tests {
             .map(|index| Assignment {
                 project_id: ProjectId::new(ids[index].clone()),
                 instruction_id: ItemId::new("shared".to_owned()),
-                variant_id: VariantId::new(if index % 2 == 0 {
+                target: AssignmentTarget::Variant(VariantId::new(if index % 2 == 0 {
                     "v-compact".to_owned()
                 } else {
                     "v-main".to_owned()
-                }),
+                })),
             })
             .collect();
         let full = snapshot(projects, vec![shared], assignments);
@@ -898,12 +899,12 @@ mod tests {
                 Assignment {
                     project_id: ProjectId::new("p1".to_owned()),
                     instruction_id: ItemId::new("shared".to_owned()),
-                    variant_id: VariantId::new("v-main".to_owned()),
+                    target: AssignmentTarget::Variant(VariantId::new("v-main".to_owned())),
                 },
                 Assignment {
                     project_id: ProjectId::new("p2".to_owned()),
                     instruction_id: ItemId::new("shared".to_owned()),
-                    variant_id: VariantId::new("v-compact".to_owned()),
+                    target: AssignmentTarget::Variant(VariantId::new("v-compact".to_owned())),
                 },
             ],
             &[

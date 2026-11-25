@@ -5,9 +5,9 @@
 //!
 //! One module serves the three library tables because they share one
 //! feature boundary — the instruction library of §7.3 (items and
-//! their variants) and the assignment matrix of §7.4 (one variant of
-//! one instruction per project) — and one error shape: the conflicts
-//! below are runtime outcomes between individually legal rows, typed
+//! their variants) and the assignment matrix of §7.4 (one variant or
+//! custom-text target per instruction/project pair) — and one error shape:
+//! the conflicts below are runtime outcomes between individually legal rows, typed
 //! here instead of string-matched.
 //!
 //! # Positions: one dense sequence over the whole item table
@@ -82,19 +82,19 @@
 //!
 //! # Assignments
 //!
-//! One variant of one instruction per project (D-02, the composite
-//! PRIMARY KEY): [`assign`] rejects a second assignment of the same
-//! instruction to the same project with
-//! [`LibraryError::AlreadyAssigned`]; changing the variant is
-//! [`reassign`] (MAIN-005: other projects keep theirs); removing it
-//! is [`unassign`] (LIB-020: without deleting the variant). The
-//! variant must be an *active* variant of *this* instruction (DB-012;
-//! [`LibraryError::VariantNotAssignable`]) — the composite FOREIGN
-//! KEY is the schema's floor, the typed pre-check is this module's
-//! contract. A hidden instruction keeps and gains assignments
-//! (DB-013: it is excluded from the build, not from the matrix data);
-//! headings have no cells (MAIN-001) and assigning one is
-//! [`LibraryError::NotAnInstruction`].
+//! One content target per instruction/project pair (D-02, the composite
+//! PRIMARY KEY): an active variant of this instruction, or per-project
+//! custom text instead of a variant (DB-012/MAIN-007). [`assign`] rejects a
+//! second assignment with [`LibraryError::AlreadyAssigned`]; changing the
+//! variant is [`reassign`] (MAIN-005: other projects keep theirs);
+//! [`set_custom`] upserts custom text and clears it back to the active main;
+//! removing the row is [`unassign`] (LIB-020). A variant must be active and
+//! belong to this instruction ([`LibraryError::VariantNotAssignable`]) —
+//! the foreign keys are the schema floor, the typed pre-check is this
+//! module's contract. Variant deletion and reassignment touch only
+//! variant-backed rows, never custom cells. A hidden instruction keeps and
+//! gains assignments (DB-013); headings have no cells (MAIN-001) and
+//! assigning one is [`LibraryError::NotAnInstruction`].
 //!
 //! # What this module does not do
 //!
@@ -532,6 +532,19 @@ impl VariantRow {
     }
 }
 
+/// The single content target of a stored assignment (DB-012/MAIN-007).
+///
+/// The enum mirrors the database's exactly-one-target CHECK in Rust, so a
+/// decoded assignment cannot carry both a variant and custom text or
+/// neither. A custom target bypasses the variant model entirely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignmentTarget {
+    /// An active variant of the assignment's instruction.
+    Variant(String),
+    /// Per-project text stored on the assignment itself.
+    Custom(String),
+}
+
 /// The input of [`assign`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAssignment<'a> {
@@ -546,17 +559,17 @@ pub struct NewAssignment<'a> {
     pub variant_id: &'a str,
 }
 
-/// A stored assignment row (§6.2 `project_instructions`, §7.4): one
-/// variant of one instruction per project (D-02).
+/// A stored assignment row (§6.2 `project_instructions`, §7.4): one variant
+/// or custom-text target per instruction/project pair (D-02/DB-012).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assignment {
     /// The assigned project.
     pub project_id: String,
     /// The assigned instruction.
     pub instruction_id: String,
-    /// The assigned variant (DB-012: an active variant of
-    /// `instruction_id`).
-    pub variant_id: String,
+    /// The assignment's one content target (DB-012): an active variant
+    /// of `instruction_id`, or per-project custom text.
+    pub target: AssignmentTarget,
     /// Creation time, DB-002 UTC.
     pub created_at: String,
     /// Last write of this row (a [`reassign`] or a
@@ -884,8 +897,60 @@ fn query_optional_variant(
         .transpose()
 }
 
-/// Runs a single-row assignment query. The row has no vocabulary
-/// columns, so the decode is infallible.
+/// The raw nullable target columns of one assignment row.
+struct AssignmentRow {
+    project_id: String,
+    instruction_id: String,
+    variant_id: Option<String>,
+    custom_text: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl AssignmentRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            project_id: row.get(0)?,
+            instruction_id: row.get(1)?,
+            variant_id: row.get(2)?,
+            custom_text: row.get(3)?,
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
+        })
+    }
+
+    /// Decodes the database's nullable target columns into the Rust enum.
+    /// The CHECK makes both/neither unreachable in a healthy database; a
+    /// row written with checks bypassed is corruption, surfaced without
+    /// echoing custom text.
+    fn into_assignment(self) -> Result<Assignment, LibraryError> {
+        let target = match (self.variant_id, self.custom_text) {
+            (Some(variant_id), None) => AssignmentTarget::Variant(variant_id),
+            (None, Some(custom_text)) => AssignmentTarget::Custom(custom_text),
+            (None, None) => {
+                return Err(LibraryError::Member {
+                    column: "assignment_target",
+                    found: "neither".to_owned(),
+                });
+            }
+            (Some(_), Some(_)) => {
+                return Err(LibraryError::Member {
+                    column: "assignment_target",
+                    found: "both".to_owned(),
+                });
+            }
+        };
+        Ok(Assignment {
+            project_id: self.project_id,
+            instruction_id: self.instruction_id,
+            target,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+/// Runs a single-row assignment query and decodes its exactly-one target.
 fn query_optional_assignment(
     conn: &Connection,
     sql: &str,
@@ -893,17 +958,26 @@ fn query_optional_assignment(
 ) -> Result<Option<Assignment>, LibraryError> {
     let mut statement = conn.prepare(sql)?;
     statement
-        .query_row(params, |row| {
-            Ok(Assignment {
-                project_id: row.get(0)?,
-                instruction_id: row.get(1)?,
-                variant_id: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-            })
-        })
-        .optional()
-        .map_err(LibraryError::Sql)
+        .query_row(params, AssignmentRow::from_row)
+        .optional()?
+        .map(AssignmentRow::into_assignment)
+        .transpose()
+}
+
+/// Runs an assignment-list query and decodes every exactly-one target.
+fn query_assignments(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<Assignment>, LibraryError> {
+    let mut statement = conn.prepare(sql)?;
+    let rows = statement
+        .query_map(params, AssignmentRow::from_row)?
+        .map(|raw| raw.map_err(LibraryError::Sql))
+        .collect::<Result<Vec<_>, LibraryError>>()?;
+    rows.into_iter()
+        .map(AssignmentRow::into_assignment)
+        .collect()
 }
 
 /// Reads the row for a conditional writer whose `UPDATE` matched
@@ -2024,6 +2098,34 @@ fn ensure_assignable_variant(
     Ok(())
 }
 
+/// Verifies the project/instruction pair shared by variant and custom
+/// assignment writers, preserving the project-first refusal order.
+fn ensure_assignment_pair(
+    conn: &Connection,
+    project_id: &str,
+    instruction_id: &str,
+) -> Result<LibraryItem, LibraryError> {
+    let project_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    if !project_exists {
+        return Err(LibraryError::NotFound {
+            id: project_id.to_owned(),
+        });
+    }
+    let item = get_item(conn, instruction_id)?.ok_or_else(|| LibraryError::NotFound {
+        id: instruction_id.to_owned(),
+    })?;
+    if item.kind != ItemKind::Instruction {
+        return Err(LibraryError::NotAnInstruction {
+            id: instruction_id.to_owned(),
+        });
+    }
+    Ok(item)
+}
+
 /// Inserts an assignment and returns the stored row: the project gets
 /// this variant of this instruction (D-02).
 ///
@@ -2045,28 +2147,10 @@ fn ensure_assignable_variant(
 /// statement fails.
 pub fn assign(conn: &Connection, new: &NewAssignment<'_>) -> Result<Assignment, LibraryError> {
     // A raw EXISTS rather than `crate::projects::get`: the projects
-    // error type is its own, and this module's contract only needs
-    // the existence fact (the FOREIGN KEY stays the floor for
-    // anything racing a delete — impossible under the one connection,
-    // D-037).
-    let project_exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
-        [new.project_id],
-        |row| row.get(0),
-    )?;
-    if !project_exists {
-        return Err(LibraryError::NotFound {
-            id: new.project_id.to_owned(),
-        });
-    }
-    let item = get_item(conn, new.instruction_id)?.ok_or_else(|| LibraryError::NotFound {
-        id: new.instruction_id.to_owned(),
-    })?;
-    if item.kind != ItemKind::Instruction {
-        return Err(LibraryError::NotAnInstruction {
-            id: new.instruction_id.to_owned(),
-        });
-    }
+    // error type is its own, and this module's contract only needs the
+    // existence fact (the FOREIGN KEY stays the floor for anything
+    // racing a delete — impossible under the one connection, D-037).
+    ensure_assignment_pair(conn, new.project_id, new.instruction_id)?;
     if get_assignment(conn, new.project_id, new.instruction_id)?.is_some() {
         return Err(LibraryError::AlreadyAssigned {
             project_id: new.project_id.to_owned(),
@@ -2105,7 +2189,7 @@ pub fn get_assignment(
 ) -> Result<Option<Assignment>, LibraryError> {
     query_optional_assignment(
         conn,
-        "SELECT project_id, instruction_id, variant_id, created_at, updated_at
+        "SELECT project_id, instruction_id, variant_id, custom_text, created_at, updated_at
          FROM project_instructions WHERE project_id = ?1 AND instruction_id = ?2",
         rusqlite::params![project_id, instruction_id],
     )
@@ -2125,26 +2209,16 @@ pub fn list_assignments_for_project(
     conn: &Connection,
     project_id: &str,
 ) -> Result<Vec<Assignment>, LibraryError> {
-    let mut statement = conn.prepare(
-        "SELECT a.project_id, a.instruction_id, a.variant_id, a.created_at, a.updated_at
+    query_assignments(
+        conn,
+        "SELECT a.project_id, a.instruction_id, a.variant_id, a.custom_text,
+                a.created_at, a.updated_at
          FROM project_instructions a
          JOIN library_items i ON i.id = a.instruction_id
          WHERE a.project_id = ?1
          ORDER BY i.position",
-    )?;
-    let rows = statement
-        .query_map([project_id], |row| {
-            Ok(Assignment {
-                project_id: row.get(0)?,
-                instruction_id: row.get(1)?,
-                variant_id: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-            })
-        })?
-        .map(|raw| raw.map_err(LibraryError::Sql))
-        .collect::<Result<Vec<_>, LibraryError>>()?;
-    Ok(rows)
+        [project_id],
+    )
 }
 
 /// Lists the assignments of **every active project** — the ALG-001
@@ -2167,27 +2241,17 @@ pub fn list_assignments_for_project(
 pub fn list_assignments_for_active_projects(
     conn: &Connection,
 ) -> Result<Vec<Assignment>, LibraryError> {
-    let mut statement = conn.prepare(
-        "SELECT a.project_id, a.instruction_id, a.variant_id, a.created_at, a.updated_at
+    query_assignments(
+        conn,
+        "SELECT a.project_id, a.instruction_id, a.variant_id, a.custom_text,
+                a.created_at, a.updated_at
          FROM project_instructions a
          JOIN projects p ON p.id = a.project_id
          JOIN library_items i ON i.id = a.instruction_id
          WHERE p.state = 'active'
          ORDER BY p.sort_order, i.position",
-    )?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok(Assignment {
-                project_id: row.get(0)?,
-                instruction_id: row.get(1)?,
-                variant_id: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-            })
-        })?
-        .map(|raw| raw.map_err(LibraryError::Sql))
-        .collect::<Result<Vec<_>, LibraryError>>()?;
-    Ok(rows)
+        [],
+    )
 }
 
 /// Lists every assignment of the variant, in creation order
@@ -2201,24 +2265,13 @@ pub fn list_assignments_for_variant(
     conn: &Connection,
     variant_id: &str,
 ) -> Result<Vec<Assignment>, LibraryError> {
-    let mut statement = conn.prepare(
-        "SELECT project_id, instruction_id, variant_id, created_at, updated_at
+    query_assignments(
+        conn,
+        "SELECT project_id, instruction_id, variant_id, custom_text, created_at, updated_at
          FROM project_instructions WHERE variant_id = ?1
          ORDER BY created_at, project_id",
-    )?;
-    let rows = statement
-        .query_map([variant_id], |row| {
-            Ok(Assignment {
-                project_id: row.get(0)?,
-                instruction_id: row.get(1)?,
-                variant_id: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-            })
-        })?
-        .map(|raw| raw.map_err(LibraryError::Sql))
-        .collect::<Result<Vec<_>, LibraryError>>()?;
-    Ok(rows)
+        [variant_id],
+    )
 }
 
 /// Changes the assigned variant of one assignment (MAIN-005: changing
@@ -2254,14 +2307,16 @@ pub fn reassign(
             id: format!("{project_id}/{instruction_id}"),
         }
     })?;
-    if current.variant_id == variant_id {
+    if let AssignmentTarget::Variant(current_variant) = &current.target
+        && current_variant == variant_id
+    {
         // Already on this variant: a no-op must not churn `updated_at`.
         return Ok(current);
     }
     ensure_assignable_variant(conn, instruction_id, variant_id)?;
     let changed = conn.execute(
         "UPDATE project_instructions
-         SET variant_id = ?1, updated_at = ?2
+         SET variant_id = ?1, custom_text = NULL, updated_at = ?2
          WHERE project_id = ?3 AND instruction_id = ?4",
         rusqlite::params![variant_id, now_utc(), project_id, instruction_id],
     )?;
@@ -2274,6 +2329,75 @@ pub fn reassign(
     // D-037 — no concurrent delete exists).
     Ok(get_assignment(conn, project_id, instruction_id)?
         .expect("the row just updated must be readable"))
+}
+
+/// Upserts per-project custom text, or clears a custom target back to the
+/// instruction's active main variant (MAIN-007/D-125).
+///
+/// `Some(text)` creates or updates the one assignment row; the text is
+/// stored verbatim and folded from CRLF to LF like variant text. Empty text
+/// is a legal assigned target. `None` replaces an existing custom target
+/// with the active main; an absent or variant-backed cell is a verified
+/// no-op. No variant row is created, edited or deleted.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::NotFound`] for an unknown project/instruction,
+/// [`LibraryError::NotAnInstruction`] for a heading,
+/// [`LibraryError::NoActiveMain`] when a custom cell cannot be cleared
+/// because DB-010 is already broken, and [`LibraryError::Sql`] when a
+/// statement or the DB-006 length CHECK fails.
+pub fn set_custom(
+    conn: &Connection,
+    project_id: &str,
+    instruction_id: &str,
+    content: Option<&str>,
+) -> Result<Option<Assignment>, LibraryError> {
+    ensure_assignment_pair(conn, project_id, instruction_id)?;
+    let current = get_assignment(conn, project_id, instruction_id)?;
+    let Some(content) = content else {
+        let Some(current) = current else {
+            return Ok(None);
+        };
+        let AssignmentTarget::Custom(_) = current.target else {
+            return Ok(Some(current));
+        };
+        let main_id =
+            active_main_id(conn, instruction_id)?.ok_or_else(|| LibraryError::NoActiveMain {
+                instruction_id: instruction_id.to_owned(),
+            })?;
+        conn.execute(
+            "UPDATE project_instructions
+             SET variant_id = ?1, custom_text = NULL, updated_at = ?2
+             WHERE project_id = ?3 AND instruction_id = ?4",
+            rusqlite::params![main_id, now_utc(), project_id, instruction_id],
+        )?;
+        return Ok(Some(
+            get_assignment(conn, project_id, instruction_id)?
+                .expect("the custom row just updated must be readable"),
+        ));
+    };
+
+    let content = fold_crlf(content);
+    if let Some(current) = &current
+        && current.target == AssignmentTarget::Custom(content.clone())
+    {
+        return Ok(Some(current.clone()));
+    }
+    conn.execute(
+        "INSERT INTO project_instructions (
+             project_id, instruction_id, variant_id, custom_text, created_at, updated_at
+         ) VALUES (?1, ?2, NULL, ?3, ?4, ?4)
+         ON CONFLICT(project_id, instruction_id) DO UPDATE SET
+             variant_id = NULL,
+             custom_text = excluded.custom_text,
+             updated_at = excluded.updated_at",
+        rusqlite::params![project_id, instruction_id, content, now_utc()],
+    )?;
+    Ok(Some(
+        get_assignment(conn, project_id, instruction_id)?
+            .expect("the custom row just upserted must be readable"),
+    ))
 }
 
 /// Removes the assignment (LIB-020: an assignment can be removed

@@ -1535,6 +1535,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use eunomia_core::assignment::AssignmentTarget;
     use eunomia_core::extra_files::ExtraFileLines;
     use eunomia_core::library::{
         Instruction, InstructionState, ItemId, LibraryItem, Variant, VariantId,
@@ -2674,7 +2675,7 @@ mod tests {
         let assigned = |project: &str| Assignment {
             project_id: ProjectId::new(project.to_owned()),
             instruction_id: ItemId::new("i1".to_owned()),
-            variant_id: VariantId::new("v1".to_owned()),
+            target: AssignmentTarget::Variant(VariantId::new("v1".to_owned())),
         };
         let snapshot = BuildSnapshot::new(
             vec![p1, p2],

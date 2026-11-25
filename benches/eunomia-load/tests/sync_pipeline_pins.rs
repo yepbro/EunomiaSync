@@ -30,7 +30,7 @@ use eunomia_core::project::Scheme;
 use eunomia_core::target_file::build_content;
 use eunomia_load::{LoadError, PassStats, SYNC_100_PROJECTS_10KB, SyncFixture, read_snapshot};
 use eunomia_store::data_sets::DataSetSpec;
-use eunomia_store::library::get_assignment;
+use eunomia_store::library::{AssignmentTarget, get_assignment};
 
 /// The scheme-B seed the bench's fixture plants, spelled here
 /// independently (the oracle the B pins compare the preserved
@@ -120,7 +120,8 @@ fn every_k0_pair_holds_the_closed_forms_variant() -> Result<(), LoadError> {
                 panic!("project {ordinal}: the k = 0 assignment exists");
             });
         assert_eq!(
-            row.variant_id, expected,
+            row.target,
+            AssignmentTarget::Variant(expected),
             "project {ordinal}: D-109's closed form at k = 0"
         );
     }

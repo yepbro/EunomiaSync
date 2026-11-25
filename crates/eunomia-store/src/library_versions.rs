@@ -127,11 +127,12 @@
 //! producer's to write at its own `Db::run` boundary, the
 //! [`crate::settings::set`] and [`crate::library`] precedent.
 //!
-//! # What this module does not do
+//! # Scope boundaries
 //!
-//! * It does not read versions back: the History panel's list
-//!   (LIB-026) and the P1 diff/revert views (LIB-028/029) are later
-//!   tasks with their own ordering and limit needs.
+//! * It reads versions back for the History panel through [`get_revision`]
+//!   and [`list_revision_summaries`] (LIB-026/027); the list omits snapshots
+//!   so opening History does not materialize hundreds of MB, while the P1
+//!   diff/revert views still have their own comparison and restore needs.
 //! * It does not derive `op` from the row: which user action a save
 //!   represents is the command layer's knowledge; the service trusts
 //!   the typed `op` and the snapshot's hash.
@@ -586,6 +587,271 @@ pub fn record_variant(
         },
         max_revisions,
     )
+}
+
+// ---- History reads -------------------------------------------------------------------
+
+/// The library entity a revision versions (§6.2's closed vocabulary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RevisionEntityType {
+    /// An instruction row.
+    Instruction,
+    /// A variant row, active or soft-deleted.
+    Variant,
+}
+
+impl RevisionEntityType {
+    /// The stored §6.2 CHECK literal.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Instruction => "instruction",
+            Self::Variant => "variant",
+        }
+    }
+
+    /// Parses the stored vocabulary without guessing on corruption.
+    fn from_member(value: &str) -> Result<Self, RevisionError> {
+        match value {
+            "instruction" => Ok(Self::Instruction),
+            "variant" => Ok(Self::Variant),
+            _ => Err(RevisionError::Member {
+                column: "entity_type",
+                found: value.to_owned(),
+            }),
+        }
+    }
+}
+
+/// The operation a revision records (§6.2/ALG-071). `Revert` is present in
+/// stored history even though the P1 writer is not implemented yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RevisionOp {
+    /// The entity was created.
+    Create,
+    /// Snapshot-visible fields changed.
+    Update,
+    /// The instruction was hidden.
+    Hide,
+    /// The instruction or variant was restored.
+    Restore,
+    /// The variant was soft-deleted.
+    Delete,
+    /// A prior version was restored (P1 writer).
+    Revert,
+}
+
+impl RevisionOp {
+    /// The stored §6.2 CHECK literal.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Hide => "hide",
+            Self::Restore => "restore",
+            Self::Delete => "delete",
+            Self::Revert => "revert",
+        }
+    }
+
+    /// Parses the stored vocabulary without guessing on corruption.
+    fn from_member(value: &str) -> Result<Self, RevisionError> {
+        match value {
+            "create" => Ok(Self::Create),
+            "update" => Ok(Self::Update),
+            "hide" => Ok(Self::Hide),
+            "restore" => Ok(Self::Restore),
+            "delete" => Ok(Self::Delete),
+            "revert" => Ok(Self::Revert),
+            _ => Err(RevisionError::Member {
+                column: "op",
+                found: value.to_owned(),
+            }),
+        }
+    }
+}
+
+/// One full `revisions` row on the History read boundary (LIB-026/027).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revision {
+    /// The revision row's UUIDv7 TEXT id.
+    pub id: String,
+    /// Whether the entity is an instruction or variant.
+    pub entity_type: RevisionEntityType,
+    /// The versioned entity's id.
+    pub entity_id: String,
+    /// The per-entity monotonically increasing number (ALG-071).
+    pub rev_no: i64,
+    /// The operation that produced this version.
+    pub op: RevisionOp,
+    /// Canonical snapshot JSON, stored verbatim.
+    pub snapshot: String,
+    /// The snapshot's SHA-256, stored verbatim.
+    pub snapshot_hash: String,
+    /// The source revision of a P1 revert, when present.
+    pub reverted_from: Option<i64>,
+    /// Creation time in DB-002 UTC form.
+    pub created_at: String,
+}
+
+/// One History-list row: identity, time, operation and entity, without the
+/// potentially large snapshot. `revision_get` loads the full row on demand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionSummary {
+    /// The revision row's UUIDv7 TEXT id.
+    pub id: String,
+    /// Whether the entity is an instruction or variant.
+    pub entity_type: RevisionEntityType,
+    /// The versioned entity's id.
+    pub entity_id: String,
+    /// The per-entity monotonically increasing number (ALG-071).
+    pub rev_no: i64,
+    /// The operation that produced this version.
+    pub op: RevisionOp,
+    /// The snapshot's SHA-256, stored verbatim.
+    pub snapshot_hash: String,
+    /// The source revision of a P1 revert, when present.
+    pub reverted_from: Option<i64>,
+    /// Creation time in DB-002 UTC form.
+    pub created_at: String,
+}
+
+/// Raw full revision cells; vocabulary parsing happens after rusqlite's row
+/// boundary so typed corruption remains a `RevisionError`, not a stringly
+/// SQLite conversion error.
+struct RevisionRow {
+    id: String,
+    entity_type: String,
+    entity_id: String,
+    rev_no: i64,
+    op: String,
+    snapshot: String,
+    snapshot_hash: String,
+    reverted_from: Option<i64>,
+    created_at: String,
+}
+
+impl RevisionRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            entity_type: row.get(1)?,
+            entity_id: row.get(2)?,
+            rev_no: row.get(3)?,
+            op: row.get(4)?,
+            snapshot: row.get(5)?,
+            snapshot_hash: row.get(6)?,
+            reverted_from: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    }
+
+    fn into_revision(self) -> Result<Revision, RevisionError> {
+        Ok(Revision {
+            id: self.id,
+            entity_type: RevisionEntityType::from_member(&self.entity_type)?,
+            entity_id: self.entity_id,
+            rev_no: self.rev_no,
+            op: RevisionOp::from_member(&self.op)?,
+            snapshot: self.snapshot,
+            snapshot_hash: self.snapshot_hash,
+            reverted_from: self.reverted_from,
+            created_at: self.created_at,
+        })
+    }
+}
+
+/// Raw summary cells, deliberately excluding `snapshot`.
+struct RevisionSummaryRow {
+    id: String,
+    entity_type: String,
+    entity_id: String,
+    rev_no: i64,
+    op: String,
+    snapshot_hash: String,
+    reverted_from: Option<i64>,
+    created_at: String,
+}
+
+impl RevisionSummaryRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            entity_type: row.get(1)?,
+            entity_id: row.get(2)?,
+            rev_no: row.get(3)?,
+            op: row.get(4)?,
+            snapshot_hash: row.get(5)?,
+            reverted_from: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    }
+
+    fn into_summary(self) -> Result<RevisionSummary, RevisionError> {
+        Ok(RevisionSummary {
+            id: self.id,
+            entity_type: RevisionEntityType::from_member(&self.entity_type)?,
+            entity_id: self.entity_id,
+            rev_no: self.rev_no,
+            op: RevisionOp::from_member(&self.op)?,
+            snapshot_hash: self.snapshot_hash,
+            reverted_from: self.reverted_from,
+            created_at: self.created_at,
+        })
+    }
+}
+
+/// Reads one revision by its row id; `None` when no such revision exists.
+///
+/// # Errors
+///
+/// Returns [`RevisionError::Sql`] when the query fails and
+/// [`RevisionError::Member`] when a stored vocabulary cell is corrupt.
+pub fn get_revision(conn: &Connection, id: &str) -> Result<Option<Revision>, RevisionError> {
+    let mut statement = conn.prepare(
+        "SELECT id, entity_type, entity_id, rev_no, op, snapshot,
+                snapshot_hash, reverted_from, created_at
+           FROM revisions WHERE id = ?1",
+    )?;
+    statement
+        .query_row([id], RevisionRow::from_row)
+        .optional()?
+        .map(RevisionRow::into_revision)
+        .transpose()
+}
+
+/// Lists summary rows for an instruction's versions and every variant's
+/// versions, including soft-deleted variants, newest first (`created_at
+/// DESC`, `rev_no DESC`, `id DESC`). Snapshots are not read or materialized;
+/// the History view fetches the selected full row with [`get_revision`].
+///
+/// # Errors
+///
+/// Returns [`RevisionError::NotFound`] for an unknown instruction,
+/// [`RevisionError::NotAnInstruction`] for a heading,
+/// [`RevisionError::Member`] for a corrupt entity/operation cell, and
+/// [`RevisionError::Sql`] when the query fails.
+pub fn list_revision_summaries(
+    conn: &Connection,
+    instruction_id: &str,
+) -> Result<Vec<RevisionSummary>, RevisionError> {
+    ensure_instruction(conn, instruction_id)?;
+    let mut statement = conn.prepare(
+        "SELECT id, entity_type, entity_id, rev_no, op,
+                snapshot_hash, reverted_from, created_at
+           FROM revisions
+          WHERE (entity_type = 'instruction' AND entity_id = ?1)
+             OR (entity_type = 'variant' AND entity_id IN (
+                    SELECT id FROM instruction_variants WHERE instruction_id = ?1
+                ))
+          ORDER BY created_at DESC, rev_no DESC, id DESC",
+    )?;
+    let rows = statement
+        .query_map([instruction_id], RevisionSummaryRow::from_row)?
+        .map(|raw| raw.map_err(RevisionError::from))
+        .collect::<Result<Vec<_>, RevisionError>>()?;
+    rows.into_iter()
+        .map(RevisionSummaryRow::into_summary)
+        .collect()
 }
 
 #[cfg(test)]

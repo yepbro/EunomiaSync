@@ -203,7 +203,7 @@ export const commands = {
 	 *  the whole table (D-14's "Show hidden"). Headings are always active
 	 *  (§6.2), so the flag only ever adds instruction rows.
 	 */
-	libraryGet: (includeHidden: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<LibraryTreeItem[]>("library_get", { includeHidden }, options),
+	libraryGet: (includeHidden: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<LibraryTreeItem_Serialize[]>("library_get", { includeHidden }, options),
 	/**
 	 *  The `instruction_create` command (§7.10 Library module, LIB-002,
 	 *  §8 S3): the create dialog's save — one instruction, its main
@@ -848,6 +848,35 @@ export const commands = {
 	 *  move writes and journals nothing.
 	 */
 	itemsMove: (id: string, target: MoveTarget, options?: InvokeOptions) => __TAURI_INVOKE<null>("items_move", { id, target }, options),
+	/**
+	 *  Enables/disables one project's assignment and optionally selects its
+	 *  variant. On an unassigned cell, `variant_id = null` selects the active
+	 *  main; on an already-enabled custom cell it is a no-op, while an explicit
+	 *  variant id converts the cell. Disabling removes the row. A same-target
+	 *  re-send writes/journals nothing.
+	 */
+	assignmentSet: (projectId: string, instructionId: string, enabled: boolean, variantId: string | null, options?: InvokeOptions) => __TAURI_INVOKE<AssignmentRecord | null>("assignment_set", { projectId, instructionId, enabled, variantId }, options),
+	/**
+	 *  Sets per-project custom text on one assignment. `Some("")` is a legal
+	 *  custom target; `None` replaces an existing custom target with the active
+	 *  main and is a no-op for an absent or variant-backed cell.
+	 */
+	assignmentSetCustom: (projectId: string, instructionId: string, content: string | null, options?: InvokeOptions) => __TAURI_INVOKE<AssignmentRecord | null>("assignment_set_custom", { projectId, instructionId, content }, options),
+	/**
+	 *  Applies a row/column product in one transaction. A variant is legal
+	 *  only when one unique instruction row is selected; null selects each
+	 *  instruction's active main. Existing pairs (including custom cells) are
+	 *  left untouched and returned in `already_assigned`.
+	 */
+	assignmentsBulk: (instructionIds: string[], projectIds: string[], enabled: boolean, variantId: string | null, options?: InvokeOptions) => __TAURI_INVOKE<BulkAssignmentResult>("assignments_bulk", { instructionIds, projectIds, enabled, variantId }, options),
+	/**  Reads one full revision by its row id. */
+	revisionGet: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<RevisionRecord_Serialize>("revision_get", { id }, options),
+	/**
+	 *  Lists the instruction's versions and every variant's versions,
+	 *  including soft-deleted variants, newest first (`created_at DESC`,
+	 *  `rev_no DESC`, `id DESC`).
+	 */
+	revisionsList: (instructionId: string, options?: InvokeOptions) => __TAURI_INVOKE<RevisionSummaryRecord_Serialize[]>("revisions_list", { instructionId }, options),
 };
 
 /** Events */
@@ -1451,6 +1480,49 @@ export type AppInfo = {
 	running_as_root: boolean,
 };
 
+/**  One project/instruction pair returned by a bulk operation. */
+export type AssignmentPair = {
+	/**  The project that already carried the instruction. */
+	project_id: string,
+	/**  The instruction already assigned to that project. */
+	instruction_id: string,
+};
+
+/**  One assignment row as it stands after the command. */
+export type AssignmentRecord = {
+	/**  The assigned project. */
+	project_id: string,
+	/**  The assigned instruction. */
+	instruction_id: string,
+	/**  The single content target (DB-012). */
+	target: AssignmentTargetRecord,
+	/**  Creation time, DB-002 UTC. */
+	created_at: string,
+	/**  Last real write of this row, DB-002 UTC. */
+	updated_at: string,
+};
+
+/**
+ *  The assignment's one content target on the wire. The tagged enum keeps
+ *  "variant and custom" and "neither" unrepresentable (DB-012).
+ */
+export type AssignmentTargetRecord = 
+/**  An active variant of the assignment's instruction. */
+{ kind: "variant"; value: string } | 
+/**  Per-project custom text stored on the assignment itself. */
+{ kind: "custom"; value: string };
+
+/**  The measured result of one bulk operation. */
+export type BulkAssignmentResult = {
+	/**  How many assignment rows were inserted, changed or removed. */
+	changed: number,
+	/**
+	 *  Existing pairs left untouched, in request order (including custom
+	 *  cells, which bulk operations never rewrite).
+	 */
+	already_assigned: AssignmentPair[],
+};
+
 /**
  *  One row of `db_backups_list` — a copy in `db-backups/` as the §10
  *  recovery screen renders it: the file's base name (what
@@ -1811,7 +1883,13 @@ export type LibraryHeadingEntry = {
  *  An instruction's tree row — the LIB-001/008 field set plus the
  *  inline variant list and the assignment labels.
  */
-export type LibraryInstructionEntry = {
+export type LibraryInstructionEntry = LibraryInstructionEntry_Serialize | LibraryInstructionEntry_Deserialize;
+
+/**
+ *  An instruction's tree row — the LIB-001/008 field set plus the
+ *  inline variant list and the assignment labels.
+ */
+export type LibraryInstructionEntry_Deserialize = {
 	/**  The row id (UUIDv7 TEXT, DB-002). */
 	id: string,
 	/**  The instruction's main name (§6.9, 1–200 after trimming). */
@@ -1854,7 +1932,57 @@ export type LibraryInstructionEntry = {
 	 *  labels sit on rows of a matrix whose columns are the active
 	 *  projects (MAIN-001, D-187).
 	 */
-	project_labels: ProjectLabelEntry[],
+	project_labels: ProjectLabelEntry_Deserialize[],
+};
+
+/**
+ *  An instruction's tree row — the LIB-001/008 field set plus the
+ *  inline variant list and the assignment labels.
+ */
+export type LibraryInstructionEntry_Serialize = {
+	/**  The row id (UUIDv7 TEXT, DB-002). */
+	id: string,
+	/**  The instruction's main name (§6.9, 1–200 after trimming). */
+	title: string,
+	/**
+	 *  `"active"` or `"hidden"` — the §6.4 state the "Show hidden"
+	 *  filter (D-14) and the dashed chip (MAIN-013) read.
+	 */
+	state: string,
+	/**
+	 *  The number of ACTIVE variants (DB-010's own scope; a
+	 *  soft-deleted variant is not counted) — the card's LIB-001
+	 *  field, derived in the same pass that builds
+	 *  [`Self::variants`].
+	 */
+	variant_count: number,
+	/**  Creation time, DB-002 UTC — the row's own value. */
+	created_at: string,
+	/**
+	 *  Last snapshot-visible write of the INSTRUCTION row, DB-002 UTC
+	 *  — a title rename or a hide/restore restamps it. A variant's
+	 *  own edits restamp the variant's row, not this one; a pure
+	 *  position move and a main-flag promotion restamp nothing (the
+	 *  store's §9.8/D-16 rule, `library.rs`'s module docs).
+	 */
+	updated_at: string,
+	/**
+	 *  The instruction's ACTIVE variants, in the store's creation
+	 *  order (`created_at, id`). The main variant is identified by
+	 *  its `is_main` flag, not by its place: a `variant_set_main`
+	 *  promotion moves the flag without reordering the list (LIB-002's
+	 *  "main first" is the editor's own display rule).
+	 */
+	variants: LibraryVariantEntry[],
+	/**
+	 *  The colored labels (LIB-001): exactly the ACTIVE projects with
+	 *  an assignment on this instruction, in the projects' own
+	 *  `sort_order`, each naming the assigned variant. An archived
+	 *  project's kept assignment rows (DB-014) never label — the
+	 *  labels sit on rows of a matrix whose columns are the active
+	 *  projects (MAIN-001, D-187).
+	 */
+	project_labels: ProjectLabelEntry_Serialize[],
 };
 
 /**
@@ -1868,11 +1996,45 @@ export type LibraryInstructionEntry = {
  *  position NUMBER is deliberately not repeated on the wire — the
  *  core `library` precedent: one fact, one place, nothing to drift.
  */
-export type LibraryTreeItem = 
+export type LibraryTreeItem = LibraryTreeItem_Serialize | LibraryTreeItem_Deserialize;
+
+/**
+ *  One row of the `library_get` tree: an instruction or a section
+ *  heading, tagged `kind` with the §6.2 literals (`"instruction"`,
+ *  `"heading"` — the spellings the core domain type serializes to).
+ * 
+ *  The tree is ONE flat vector in `position` order (§7.3: one
+ *  structure for all projects; OUT-001: the file order equals the
+ *  library order). The order is expressed as collection order and the
+ *  position NUMBER is deliberately not repeated on the wire — the
+ *  core `library` precedent: one fact, one place, nothing to drift.
+ */
+export type LibraryTreeItem_Deserialize = 
 /**  An instruction row (§2 "Instruction"). */
 {
 	kind: "instruction",
-} & LibraryInstructionEntry | 
+} & LibraryInstructionEntry_Deserialize | 
+/**  A section heading row (§2 "Section heading"). */
+{
+	kind: "heading",
+} & LibraryHeadingEntry;
+
+/**
+ *  One row of the `library_get` tree: an instruction or a section
+ *  heading, tagged `kind` with the §6.2 literals (`"instruction"`,
+ *  `"heading"` — the spellings the core domain type serializes to).
+ * 
+ *  The tree is ONE flat vector in `position` order (§7.3: one
+ *  structure for all projects; OUT-001: the file order equals the
+ *  library order). The order is expressed as collection order and the
+ *  position NUMBER is deliberately not repeated on the wire — the
+ *  core `library` precedent: one fact, one place, nothing to drift.
+ */
+export type LibraryTreeItem_Serialize = 
+/**  An instruction row (§2 "Instruction"). */
+{
+	kind: "instruction",
+} & LibraryInstructionEntry_Serialize | 
 /**  A section heading row (§2 "Section heading"). */
 {
 	kind: "heading",
@@ -2436,10 +2598,19 @@ export type ProjectFileChange = {
 
 /**
  *  One project label of an instruction row (LIB-001): the chip's own
- *  facts plus which variant the assignment names — the acceptance
- *  criterion's pair (labels match assignments).
+ *  facts plus which variant the assignment names, or `None` for a
+ *  custom-text cell — the acceptance criterion's pair (labels match
+ *  assignments).
  */
-export type ProjectLabelEntry = {
+export type ProjectLabelEntry = ProjectLabelEntry_Serialize | ProjectLabelEntry_Deserialize;
+
+/**
+ *  One project label of an instruction row (LIB-001): the chip's own
+ *  facts plus which variant the assignment names, or `None` for a
+ *  custom-text cell — the acceptance criterion's pair (labels match
+ *  assignments).
+ */
+export type ProjectLabelEntry_Deserialize = {
 	/**
 	 *  The project's id — the identity the matrix column and the
 	 *  assignment commands share.
@@ -2455,10 +2626,156 @@ export type ProjectLabelEntry = {
 	/**  The palette member (DB-040) the chip renders. */
 	color: string,
 	/**
-	 *  The assigned variant's id (D-02: one variant of one
-	 *  instruction per project) — the matrix cell's own value.
+	 *  The assigned variant's id, or `None` when this project carries
+	 *  per-project custom text (MAIN-007). D-02 still allows only one
+	 *  assignment target per project/instruction pair.
 	 */
-	variant_id: string,
+	variant_id?: string | null,
+};
+
+/**
+ *  One project label of an instruction row (LIB-001): the chip's own
+ *  facts plus which variant the assignment names, or `None` for a
+ *  custom-text cell — the acceptance criterion's pair (labels match
+ *  assignments).
+ */
+export type ProjectLabelEntry_Serialize = {
+	/**
+	 *  The project's id — the identity the matrix column and the
+	 *  assignment commands share.
+	 */
+	project_id: string,
+	/**
+	 *  The project's display name (the chip's tooltip text, the
+	 *  MAIN-28 pattern).
+	 */
+	name: string,
+	/**  The color-badge label, 1–6 characters (DB-042). */
+	label: string,
+	/**  The palette member (DB-040) the chip renders. */
+	color: string,
+	/**
+	 *  The assigned variant's id, or `None` when this project carries
+	 *  per-project custom text (MAIN-007). D-02 still allows only one
+	 *  assignment target per project/instruction pair.
+	 */
+	variant_id: string | null,
+};
+
+/**
+ *  One full revision row on the History wire: the canonical snapshot is
+ *  available to the version view and P1 diff/restore work.
+ */
+export type RevisionRecord = RevisionRecord_Serialize | RevisionRecord_Deserialize;
+
+/**
+ *  One full revision row on the History wire: the canonical snapshot is
+ *  available to the version view and P1 diff/restore work.
+ */
+export type RevisionRecord_Deserialize = {
+	/**  The revision row's UUIDv7 TEXT id. */
+	id: string,
+	/**  `instruction` or `variant` (§6.2's closed vocabulary). */
+	entity_type: string,
+	/**  The versioned instruction/variant id. */
+	entity_id: string,
+	/**
+	 *  The per-entity monotonically increasing number (ALG-071), as a
+	 *  decimal string so tauri-specta never narrows SQLite's i64 to an
+	 *  imprecise JavaScript number.
+	 */
+	rev_no: string,
+	/**  `create`, `update`, `hide`, `restore`, `delete` or `revert`. */
+	op: string,
+	/**  Canonical snapshot JSON, stored verbatim. */
+	snapshot: string,
+	/**  The snapshot's SHA-256, stored verbatim. */
+	snapshot_hash: string,
+	/**  The source revision of a P1 revert, when present. */
+	reverted_from?: string | null,
+	/**  Creation time, DB-002 UTC ISO-8601. */
+	created_at: string,
+};
+
+/**
+ *  One full revision row on the History wire: the canonical snapshot is
+ *  available to the version view and P1 diff/restore work.
+ */
+export type RevisionRecord_Serialize = {
+	/**  The revision row's UUIDv7 TEXT id. */
+	id: string,
+	/**  `instruction` or `variant` (§6.2's closed vocabulary). */
+	entity_type: string,
+	/**  The versioned instruction/variant id. */
+	entity_id: string,
+	/**
+	 *  The per-entity monotonically increasing number (ALG-071), as a
+	 *  decimal string so tauri-specta never narrows SQLite's i64 to an
+	 *  imprecise JavaScript number.
+	 */
+	rev_no: string,
+	/**  `create`, `update`, `hide`, `restore`, `delete` or `revert`. */
+	op: string,
+	/**  Canonical snapshot JSON, stored verbatim. */
+	snapshot: string,
+	/**  The snapshot's SHA-256, stored verbatim. */
+	snapshot_hash: string,
+	/**  The source revision of a P1 revert, when present. */
+	reverted_from: string | null,
+	/**  Creation time, DB-002 UTC ISO-8601. */
+	created_at: string,
+};
+
+/**
+ *  One History-list row: time, operation and entity are explicit, while the
+ *  potentially large snapshot is fetched only by `revision_get`.
+ */
+export type RevisionSummaryRecord = RevisionSummaryRecord_Serialize | RevisionSummaryRecord_Deserialize;
+
+/**
+ *  One History-list row: time, operation and entity are explicit, while the
+ *  potentially large snapshot is fetched only by `revision_get`.
+ */
+export type RevisionSummaryRecord_Deserialize = {
+	/**  The revision row's UUIDv7 TEXT id. */
+	id: string,
+	/**  `instruction` or `variant` (§6.2's closed vocabulary). */
+	entity_type: string,
+	/**  The versioned instruction/variant id. */
+	entity_id: string,
+	/**  The per-entity revision number as a lossless decimal string. */
+	rev_no: string,
+	/**  `create`, `update`, `hide`, `restore`, `delete` or `revert`. */
+	op: string,
+	/**  The snapshot's SHA-256, stored verbatim. */
+	snapshot_hash: string,
+	/**  The source revision of a P1 revert, when present. */
+	reverted_from?: string | null,
+	/**  Creation time, DB-002 UTC ISO-8601. */
+	created_at: string,
+};
+
+/**
+ *  One History-list row: time, operation and entity are explicit, while the
+ *  potentially large snapshot is fetched only by `revision_get`.
+ */
+export type RevisionSummaryRecord_Serialize = {
+	/**  The revision row's UUIDv7 TEXT id. */
+	id: string,
+	/**  `instruction` or `variant` (§6.2's closed vocabulary). */
+	entity_type: string,
+	/**  The versioned instruction/variant id. */
+	entity_id: string,
+	/**  The per-entity revision number as a lossless decimal string. */
+	rev_no: string,
+	/**  `create`, `update`, `hide`, `restore`, `delete` or `revert`. */
+	op: string,
+	/**  The snapshot's SHA-256, stored verbatim. */
+	snapshot_hash: string,
+	/**  The source revision of a P1 revert, when present. */
+	reverted_from: string | null,
+	/**  Creation time, DB-002 UTC ISO-8601. */
+	created_at: string,
 };
 
 /**

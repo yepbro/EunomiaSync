@@ -11,9 +11,10 @@
 //!
 //! Pinned behavior:
 //!
-//! * a version-1 database with rows upgrades cleanly to version 2 and
-//!   keeps every row verbatim — the migration only adds an index;
-//! * a fresh database reaches `PRAGMA user_version = 2` with the index
+//! * a version-1 database with rows upgrades through version 2 to the
+//!   current version 3 and keeps every seeded row verbatim — v2 adds the
+//!   index and v3 rebuilds only assignment rows;
+//! * a fresh database reaches `PRAGMA user_version = 3` with the v2 index
 //!   present, and `PRAGMA index_info` pins its columns to exactly the
 //!   approved set, in order (an independent oracle: the task card's
 //!   decision, not whatever the SQL happens to say). The same shape is
@@ -25,9 +26,9 @@
 //!   searches through the index — no `SCAN backup_records` (this is
 //!   the test that fails without the index; see the mirror note on
 //!   [`LAST_CHECKED_SQL`]);
-//! * the upgrade run writes the D-038 pre-migration copy
-//!   `pre-migration-v1-<UTC>.sqlite3` of the v1 state — a valid,
-//!   openable database still at version 1 with the rows intact.
+//! * the upgrade run writes D-038 pre-migration copies of both source
+//!   states — `pre-migration-v1-<UTC>.sqlite3` and
+//!   `pre-migration-v2-<UTC>.sqlite3` — each valid and intact.
 //!
 //! The version-1 fixture ([`seed_v1_schema`]) is the real thing: it
 //! executes the actual `migrations/0001_init.sql` and sets
@@ -227,7 +228,7 @@ fn pair_index_exists(conn: &Connection) -> bool {
 }
 
 #[test]
-fn a_v1_database_with_rows_upgrades_to_v2_and_preserves_them() {
+fn a_v1_database_with_rows_upgrades_to_v3_and_preserves_them() {
     let (db, backup_dir, _guard) = temp_data_dir("upgrade");
     let db_path = db.join("eunomiasync.sqlite3");
     seed_v1_schema(&db_path);
@@ -239,16 +240,16 @@ fn a_v1_database_with_rows_upgrades_to_v2_and_preserves_them() {
     // The production upgrade shape: `open_db` (the DB-001 pragma set),
     // then `run_migrations` on the same connection (DB-004).
     let mut conn = open_db(&db_path).expect("the v1 database should open");
-    run_migrations(&mut conn, &backup_dir).expect("the v1→v2 upgrade should apply cleanly");
+    run_migrations(&mut conn, &backup_dir).expect("the v1→v3 upgrade should apply cleanly");
 
-    assert_eq!(user_version(&conn), 2, "the upgraded database is at v2");
+    assert_eq!(user_version(&conn), 3, "the upgraded database is at v3");
     assert!(
         pair_index_exists(&conn),
         "the upgraded database has the pair index"
     );
 
-    // Every v1 row survives verbatim — the migration adds an index and
-    // touches nothing else. The record comparison covers every column
+    // Every seeded v1 row survives verbatim — v2 adds the index and v3
+    // rebuilds only the assignment table. The record comparison covers every column
     // of every row (all nine of the DDL: `sync_run_id` is NULL in
     // every seed row and compared as that literal via COALESCE), not a
     // key subset: a migration that rewrote a digest, a path, a size,
@@ -374,7 +375,7 @@ fn a_v1_database_with_rows_upgrades_to_v2_and_preserves_them() {
 }
 
 #[test]
-fn a_fresh_database_reaches_user_version_two_with_the_pair_index() {
+fn a_fresh_database_reaches_user_version_three_with_the_pair_index() {
     let (db, _backup_dir, _guard) = temp_data_dir("fresh");
     let db_path = db.join("eunomiasync.sqlite3");
     let mut conn = open_db(&db_path).expect("a fresh database should open");
@@ -383,8 +384,8 @@ fn a_fresh_database_reaches_user_version_two_with_the_pair_index() {
 
     assert_eq!(
         user_version(&conn),
-        2,
-        "a fully migrated database is at version 2"
+        3,
+        "a fully migrated database is at version 3"
     );
     assert!(
         pair_index_exists(&conn),
@@ -467,12 +468,12 @@ fn upgrading_from_v1_writes_a_valid_pre_migration_copy_of_the_v1_state() {
     let backups = {
         let mut conn = open_db(&db_path).expect("the v1 database should open");
         run_migrations(&mut conn, &backup_dir)
-            .expect("the v1→v2 upgrade with its safety copy should succeed")
+            .expect("the v1→v3 upgrade with its safety copies should succeed")
     };
 
-    // One pending step, one copy, named for the state it preserves
-    // (D-038: `pre-migration-v1-<UTC>.sqlite3`, the v1 state).
-    assert_eq!(backups.len(), 1, "one upgrade step, one copy");
+    // Two pending steps, two copies, each named for the state it preserves
+    // (D-038: `pre-migration-v1-…`, then `pre-migration-v2-…`).
+    assert_eq!(backups.len(), 2, "two upgrade steps, two copies");
     let backup = &backups[0];
     let name = backup
         .file_name()
@@ -501,13 +502,47 @@ fn upgrading_from_v1_writes_a_valid_pre_migration_copy_of_the_v1_state() {
         .unwrap();
     assert_eq!(records, 5, "the copy preserves the v1 rows");
 
+    let v2_name = backups[1]
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("the v2 copy name should be UTF-8");
+    assert!(
+        v2_name.starts_with("pre-migration-v2-"),
+        "copy name: {v2_name}"
+    );
+    let v2_copy = Connection::open(&backups[1]).expect("the v2 copy should open");
+    assert_eq!(
+        user_version(&v2_copy),
+        2,
+        "the second copy is the version-2 state"
+    );
+    assert!(
+        pair_index_exists(&v2_copy),
+        "the v2 copy already has the pair index"
+    );
+    let custom_columns: i64 = v2_copy
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('project_instructions') WHERE name = 'custom_text'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("v2 table info reads");
+    assert_eq!(
+        custom_columns, 0,
+        "the v2 copy predates the custom-target column"
+    );
+
     // No staging debris survives the run.
     let mut names: Vec<String> = std::fs::read_dir(&backup_dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_owned())
         .collect();
     names.sort();
-    assert_eq!(names, vec![name.to_owned()], "exactly the one copy");
+    assert_eq!(
+        names,
+        vec![name.to_owned(), v2_name.to_owned()],
+        "exactly the two pre-migration copies, no staging debris"
+    );
 }
 
 /// Asserts the D-038 stamp shape of a backup file name:

@@ -871,13 +871,20 @@ pub fn stabilized(
         if let (Some(&project), Some(&instruction)) = (
             project_ordinal.get(assignment.project_id.as_str()),
             instruction_ordinal.get(assignment.instruction_id.as_str()),
-        ) && let Some(&(_, variant)) = variant_ordinal.get(assignment.variant_id.as_str())
-        {
-            stabilized_assignments.push(StabilizedAssignment {
-                project_ordinal: project,
-                instruction_ordinal: instruction,
-                variant_ordinal: variant,
-            });
+        ) {
+            let variant_id = match &assignment.target {
+                crate::library::AssignmentTarget::Variant(variant_id) => variant_id,
+                // The deterministic generator creates variant-backed
+                // assignments only; a custom row is outside its shape.
+                crate::library::AssignmentTarget::Custom(_) => continue,
+            };
+            if let Some(&(_, variant)) = variant_ordinal.get(variant_id.as_str()) {
+                stabilized_assignments.push(StabilizedAssignment {
+                    project_ordinal: project,
+                    instruction_ordinal: instruction,
+                    variant_ordinal: variant,
+                });
+            }
         }
     }
     stabilized_assignments.sort_unstable();

@@ -268,10 +268,12 @@ instruction lifecycle
 `instruction_create`/`instruction_update`/`instruction_hide`/
 `instruction_restore`, the variant commands
 `variant_create`/`variant_update`/`variant_set_main`/
-`variant_delete`/`variant_restore`, and the structure commands
-`heading_create`/`heading_update`/`heading_delete`/`items_move`)
-are registered (`src-tauri/src/lib.rs`); the assignment commands are
-not. No entry below is executable until its surfaces
+`variant_delete`/`variant_restore`, the structure commands
+`heading_create`/`heading_update`/`heading_delete`/`items_move`, the
+assignment commands `assignment_set`/`assignment_set_custom`/
+`assignments_bulk` (T-331), and the history reads
+`revisions_list`/`revision_get` (T-331)) are registered
+(`src-tauri/src/lib.rs`). No entry below is executable until its surfaces
 land; each entry's Pending line names them, with the spec §16
 milestone that owns them (the milestone table maps S1/S2 → M1,
 S3/S5 → M2, S4–S6 → M3, S9 → M4, S7/S10 → M5). An entry may name a
@@ -414,9 +416,9 @@ in place — the registered
 `instruction_create`/`instruction_update`/`instruction_hide`/
 `instruction_restore` (T-328) — so the dialog's rejections below
 (the case duplicate, the marker line, the §6.9 field rules) answer
-with the commands' own typed envelopes once the editor lands; the
-assignment step's backend (`assignment_set`) is still pending, and
-with it the dirty flip the entry ends on.
+with the commands' own typed envelopes once the editor lands;
+`assignment_set` (T-331) is registered, so the assignment step and its
+DB-022 dirty flip have their backend in place.
 
 **Prepare.** One project added, never synced. A project with no
 assignments that has never been synced is not dirty (DB-021) — note
@@ -502,13 +504,41 @@ should not exist yet).
   heading/instruction journal entries; heading history contains no
   revisions. No project file changed before "Run sync".
 
+### S3b. Instruction and variant history reads
+
+Source: spec §7.3 LIB-026/027; §7.10 `revisions_list` / `revision_get`.
+
+Pending: the instruction "History" panel and version view — spec §16 M2.
+The two backend reads are registered (T-331); automated mock-IPC tests pin
+their order and full-row content.
+
+**Prepare.** One instruction with Main and a second variant. Rename the
+instruction, edit Main, then soft-delete and restore the second variant so
+its history contains create/delete/restore operations.
+
+**Do.**
+
+1. Open the instruction's History panel.
+2. Read the version list, then open one instruction version and one
+   variant version.
+
+**Pass when.**
+
+- The list names time, operation and entity for the instruction and every
+  variant, including the soft-deleted variant; newest versions come first.
+- Each real change has its own version and a no-change save adds none
+  (LIB-026/D-16).
+- The version view shows the selected revision's complete snapshot; merely
+  listing or opening versions adds no Activity entry and changes no file.
+
 ### S4. Choosing a variant
 
 Source: spec §8 S4; §7.3 LIB-017…025; §7.4 MAIN-001…005; D-02; D-13;
 §11.2 cell states.
 
 Pending: the matrix cell selects and the editor's variant list —
-spec §16 M2/M3.
+spec §16 M2/M3. The variant commands and `assignment_set` backend are
+registered (T-329/T-331).
 
 **Prepare.** One instruction, two projects, assigned to both (Main).
 Add a second variant (a copy) and an empty one ("Add variant" →
@@ -549,7 +579,9 @@ Source: spec §8 S5; §7.3 MAIN-007/LIB-018; §9.2 (the custom text is
 the cell's text); §11.2.
 
 Pending: the matrix "+" affordance, the per-project custom editor and
-the library editor — spec §16 M2/M3.
+the library editor — spec §16 M2/M3. `assignment_set_custom` (T-331) is
+registered; clearing custom text restores the active main, and bulk clear
+leaves custom cells untouched.
 
 **Prepare.** One instruction, two projects, both assigned (Main); one
 sync done (a clean baseline) — or fold the file half into S7.
@@ -590,7 +622,8 @@ Source: spec §8 S6; §7.4 the bulk-operations row; UI-010; MAIN-007;
 LOG-001.
 
 Pending: the row checkboxes, the "N rows selected" chip and the
-"Assign to projects…" dialog — spec §16 M3.
+"Assign to projects…" dialog — spec §16 M3. `assignments_bulk` (T-331) is
+registered and applies the whole row/column product in one transaction.
 
 **Prepare.** Three projects: project 1 assigned (Main); project 2
 carrying a different variant of the same instruction (S4's setup

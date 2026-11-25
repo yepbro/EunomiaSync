@@ -66,7 +66,7 @@ crates/
     src/build_snapshot.rs      #   ALG-001 snapshot read: one read transaction (SYS-005) (working)
     src/data_sets.rs           #   Deterministic benchmark data sets M and L (working)
     src/library.rs             #   Library repository: items, variants, assignments (working)
-    src/library_versions.rs    #   Revisions bookkeeping: ALG-070…072 + prune (working)
+    src/library_versions.rs    #   Revisions bookkeeping: ALG-070…072 + prune + history reads (working)
     src/projects.rs            #   Projects + exclusions repository (working)
     src/settings.rs            #   Typed settings repository, §6.5 keys (working)
     src/storage.rs             #   SQLite storage + migrations   (working)
@@ -79,6 +79,7 @@ benches/
     benches/              #   project_build, dirty_recalc, assignment_toggle, sync_pipeline, scan_walk (the five §12.2 budget rows)
 src-tauri/
   src/availability.rs      # Availability service: re-probes + state://project-availability (working)
+  src/assignments.rs       # assignment_set / assignments_bulk / assignment_set_custom (working)
   src/backup_orphans.rs    # Orphaned .bak report at Db::open (read-only, T-332) (working)
   src/commands.rs          # IPC commands, the §7.10 registered set (working)
   src/config.rs            # config.toml load-or-create; broken file falls back to defaults (working)
@@ -90,6 +91,7 @@ src-tauri/
   src/logging.rs           # File log: daily + 10 MB rotation, 5-file cap (working)
   src/markdown.rs          # Markdown preview renderer (pulldown-cmark; preview only) (working)
   src/recovery.rs          # Recovery-screen file mechanics       (working)
+  src/revisions.rs         # revisions_list / revision_get: History reads (working)
   src/retention.rs         # LOG-006 retention task: journal/runs prune daily (working)
   src/scan.rs              # scan_start/scan_cancel/scan_commit commands, scan://progress (working)
   src/session_paths.rs     # SEC-003 session allowlist + UI path check (working)
@@ -163,10 +165,8 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is thirty-three commands — the §7.10 names that
-   are implemented so far (the base's own "eighteen" claim was
-   already one short of the nineteen it registered; this count is
-   the pin the mode.spec surface list matches). It comprises the
+   The registered set is thirty-eight commands — the §7.10 names that
+   are implemented so far, matching the `mode.spec` surface list. It comprises the
    recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
    `db_backups_list`, `db_restore_backup`, `db_recreate` — plus the
@@ -289,7 +289,19 @@ Rust commands are registered through `tauri-specta`:
    instruction journals `instruction.changed`, and no heading writes a
    revision. Automatic drop alignment validates every new level before
    any order or level write; self/descendant drops and levels outside
-   2–6 are `E_VALIDATION`. Every further command name is fixed by §7.10
+   2–6 are `E_VALIDATION` — and the Assignments module's
+   `assignment_set`/`assignments_bulk`/`assignment_set_custom` (T-331,
+   `src-tauri/src/assignments.rs`): a single toggle/select, one-transaction
+   row/column products, and D-125's per-project custom-text target. A real
+   write carries one `assignment.changed` entry with its changed count;
+   existing pairs (including custom cells) are returned as already assigned
+   and never replaced by bulk work. Custom text is validated by §6.9, lives
+   on the assignment rather than a forked variant, and clearing it restores
+   the active main. No assignment command touches a project file. The
+   History module's `revisions_list`/`revision_get` (T-331,
+   `src-tauri/src/revisions.rs`) read instruction+variant summaries
+   newest-first without materializing snapshots, or one full revision by id,
+   through the store's typed history repository. Every further command name is fixed by §7.10
    and belongs to its own task.
 3. On debug builds the specta `Builder` exports `src/bindings.ts`
    (`specta_typescript::Typescript`). The file is **committed** so the
@@ -466,12 +478,16 @@ index-only `ix_backup_records_pair_lookup` over `backup_records
 (project_id, source_path, status, created_at)` — the owner-approved
 column set serving the per-pair `last_checked` dedup lookup (§9.4
 phase 2), which previously scanned the table once per project per
-sync run (D-132's follow-up). Tests run against in-memory SQLite and
-file-backed databases through the public API, including the real
-v1→v2 upgrade path (`tests/schema_v2.rs` builds a v1 database from
-the real 0001 SQL); the multi-step and broken-step paths beyond it go
-through a private seam with synthetic migration sets
-(D-038).
+sync run (D-132's follow-up); version 3
+(`migrations/0003_assignment_custom_text.sql`, T-331) rebuilds
+`project_instructions` with the direct instruction FK, nullable variant,
+nullable custom text and the exactly-one-target CHECK (DB-012/MAIN-007),
+copying existing variant-backed rows verbatim. Tests run against in-memory
+SQLite and file-backed databases through the public API, including the real
+v1→v3 upgrade path and both pre-migration copies (`tests/schema_v2.rs` and
+`tests/schema_v3.rs` build their source databases from the real 0001/0002
+SQL); broken-step paths go through a private seam with synthetic migration
+sets (D-038).
 
 The app side of that storage is `src-tauri/src/db.rs` (DECISIONS.md
 D-037): `Db` — the managed state — holds the **one** connection

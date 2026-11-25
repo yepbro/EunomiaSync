@@ -23,10 +23,10 @@
 //! * `delete_variant` moves assignments to the replacement before the
 //!   soft delete (DB-012) — no assignment disappears silently
 //!   (LIB-023) — defaulting to the main variant when none is named;
-//! * assignments are one variant of one instruction per project
-//!   (D-02, the composite PK), point only at an active variant of the
-//!   same instruction (DB-012), survive a hidden instruction (DB-013)
-//!   and change per project only (MAIN-005);
+//! * assignments carry one variant or custom-text target per project
+//!   (D-02/DB-012), variant targets must be active and local, custom cells
+//!   survive variant deletion/reassignment, assignments survive a hidden
+//!   instruction (DB-013) and change per project only (MAIN-005);
 //! * `updated_at` follows the snapshot notion of a real change (D-16):
 //!   renames, edits and state transitions restamp, position moves and
 //!   main-flag promotions do not;
@@ -43,11 +43,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use eunomia_store::library::{
-    ItemKind, ItemScope, ItemState, ItemUpdate, LibraryError, LibraryItem, NewAssignment,
-    NewLibraryItem, NewVariant, Variant, VariantState, VariantUpdate, assign, create_item,
-    create_variant, delete_heading, delete_variant, get_assignment, get_item, get_variant,
-    hide_item, list_assignments_for_project, list_assignments_for_variant, list_items,
-    list_variants, move_item, reassign, restore_item, restore_variant, set_item_order,
+    AssignmentTarget, ItemKind, ItemScope, ItemState, ItemUpdate, LibraryError, LibraryItem,
+    NewAssignment, NewLibraryItem, NewVariant, Variant, VariantState, VariantUpdate, assign,
+    create_item, create_variant, delete_heading, delete_variant, get_assignment, get_item,
+    get_variant, hide_item, list_assignments_for_project, list_assignments_for_variant, list_items,
+    list_variants, move_item, reassign, restore_item, restore_variant, set_custom, set_item_order,
     set_main_variant, unassign, update_item, update_variant,
 };
 use eunomia_store::projects as project_repo;
@@ -1157,7 +1157,7 @@ fn deleting_the_main_variant_promotes_the_replacement_and_moves_assignments() {
     let moved = get_assignment(&conn, &project.id, &item.id)
         .expect("get_assignment should succeed")
         .expect("the assignment should survive");
-    assert_eq!(moved.variant_id, alt.id);
+    assert_eq!(moved.target, AssignmentTarget::Variant(alt.id));
     assert!(
         moved.updated_at.as_str() > assignment.created_at.as_str(),
         "the move restamps the assignment row"
@@ -1203,7 +1203,8 @@ fn deleting_an_assigned_variant_defaults_the_replacement_to_the_main() {
         .expect("get_assignment should succeed")
         .expect("the assignment should survive");
     assert_eq!(
-        moved.variant_id, main.id,
+        moved.target,
+        AssignmentTarget::Variant(main.id.clone()),
         "the default replacement is the main"
     );
     let main_reread = get_variant(&conn, &main.id)
@@ -1394,11 +1395,19 @@ fn per_project_replacements_compose_reassign_after_the_delete() {
     let p1_assignment = get_assignment(&conn, &p1.id, &item.id)
         .expect("get_assignment should succeed")
         .expect("p1 keeps its assignment");
-    assert_eq!(p1_assignment.variant_id, main.id, "p1 took the default");
+    assert_eq!(
+        p1_assignment.target,
+        AssignmentTarget::Variant(main.id),
+        "p1 took the default"
+    );
     let p2_assignment = get_assignment(&conn, &p2.id, &item.id)
         .expect("get_assignment should succeed")
         .expect("p2 keeps its assignment");
-    assert_eq!(p2_assignment.variant_id, third.id, "p2 took its own choice");
+    assert_eq!(
+        p2_assignment.target,
+        AssignmentTarget::Variant(third.id),
+        "p2 took its own choice"
+    );
 }
 
 // ---- Items: hide/restore (§6.4, DB-013) -------------------------------------------
@@ -1879,7 +1888,7 @@ fn assign_pins_every_column_and_round_trips() {
     .expect("assign should succeed");
     assert_eq!(created.project_id, project.id);
     assert_eq!(created.instruction_id, item.id);
-    assert_eq!(created.variant_id, main.id);
+    assert_eq!(created.target, AssignmentTarget::Variant(main.id));
     assert_db002_shape(&created.created_at);
     assert_eq!(created.created_at, created.updated_at);
 
@@ -1945,7 +1954,7 @@ fn assigning_the_same_instruction_twice_is_a_typed_error() {
     let survivor = get_assignment(&conn, &project.id, &item.id)
         .expect("get_assignment should succeed")
         .expect("the assignment should exist");
-    assert_eq!(survivor.variant_id, alt.id);
+    assert_eq!(survivor.target, AssignmentTarget::Variant(alt.id));
 }
 
 #[test]
@@ -2103,7 +2112,7 @@ fn reassign_changes_only_the_calling_projects_variant() {
 
     std::thread::sleep(std::time::Duration::from_millis(2));
     let changed = reassign(&conn, &p1.id, &item.id, &alt.id).expect("reassign should succeed");
-    assert_eq!(changed.variant_id, alt.id);
+    assert_eq!(changed.target, AssignmentTarget::Variant(alt.id.clone()));
     assert!(
         changed.updated_at.as_str() > changed.created_at.as_str(),
         "the change restamps"
@@ -2248,7 +2257,9 @@ fn list_assignments_for_variant_lists_the_affected_projects() {
     let project_ids: Vec<&String> = listed.iter().map(|a| &a.project_id).collect();
     assert_eq!(project_ids, vec![&p1.id, &p2.id]);
     assert!(
-        listed.iter().all(|a| a.variant_id == main.id),
+        listed
+            .iter()
+            .all(|a| a.target == AssignmentTarget::Variant(main.id.clone())),
         "only this variant's assignments"
     );
 }
@@ -2454,8 +2465,8 @@ fn delete_variant_inside_a_transaction_rolls_back_everything() {
             get_assignment(&tx, &project.id, &item.id)
                 .expect("get_assignment should succeed")
                 .expect("moved inside the tx")
-                .variant_id,
-            main.id
+                .target,
+            AssignmentTarget::Variant(main.id.clone())
         );
     }
 
@@ -2476,4 +2487,237 @@ fn delete_variant_inside_a_transaction_rolls_back_everything() {
         .expect("get_variant should succeed")
         .expect("the main should exist");
     assert!(main_after.is_main, "the rollback undid the promotion");
+}
+
+#[test]
+fn assignment_decode_surfaces_bypassed_exactly_one_checks_without_echoing_text() {
+    let (conn, _dir) = library_db("custom-target-corrupt");
+    let (item, main) = seed_instruction(&conn, 1);
+    let project = seed_project(&conn, 1);
+    assign(
+        &conn,
+        &NewAssignment {
+            project_id: &project.id,
+            instruction_id: &item.id,
+            variant_id: &main.id,
+        },
+    )
+    .expect("variant assignment creates");
+
+    conn.execute_batch("PRAGMA ignore_check_constraints = 1;")
+        .expect("CHECK bypass enables");
+    conn.execute(
+        "UPDATE project_instructions SET custom_text = 'PRIVATE-BOTH' WHERE project_id = ?1",
+        [&project.id],
+    )
+    .expect("both-target corruption applies");
+    assert!(matches!(
+        get_assignment(&conn, &project.id, &item.id),
+        Err(LibraryError::Member { column: "assignment_target", found }) if found == "both"
+    ));
+
+    conn.execute(
+        "UPDATE project_instructions SET variant_id = NULL, custom_text = NULL WHERE project_id = ?1",
+        [&project.id],
+    )
+    .expect("neither-target corruption applies");
+    conn.execute_batch("PRAGMA ignore_check_constraints = 0;")
+        .expect("CHECK bypass disables");
+    assert!(matches!(
+        get_assignment(&conn, &project.id, &item.id),
+        Err(LibraryError::Member { column: "assignment_target", found }) if found == "neither"
+    ));
+}
+
+// ---- MAIN-007: per-project custom assignment targets -------------------------------
+
+#[test]
+fn custom_text_upserts_idempotently_and_clearing_restores_only_that_projects_main() {
+    let (conn, _dir) = library_db("custom-target");
+    let (item, main) = seed_instruction(&conn, 1);
+    let alt = create_variant(
+        &conn,
+        &NewVariant {
+            instruction_id: &item.id,
+            name: "Alt",
+            content: "alternative shared text",
+            is_main: false,
+        },
+    )
+    .expect("alternate variant creates");
+    let p1 = seed_project(&conn, 1);
+    let p2 = seed_project(&conn, 2);
+    let p2_before = assign(
+        &conn,
+        &NewAssignment {
+            project_id: &p2.id,
+            instruction_id: &item.id,
+            variant_id: &alt.id,
+        },
+    )
+    .expect("project two assignment creates");
+
+    let custom = set_custom(&conn, &p1.id, &item.id, Some("project one\r\n"))
+        .expect("custom target upserts")
+        .expect("a custom target is present");
+    assert_eq!(
+        custom.target,
+        AssignmentTarget::Custom("project one\n".to_owned())
+    );
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM project_instructions", [], |row| {
+            row.get(0)
+        })
+        .expect("assignment count reads");
+    assert_eq!(count, 2, "the custom cell adds one row, never a variant");
+
+    let same = set_custom(&conn, &p1.id, &item.id, Some("project one\n"))
+        .expect("same custom text is a no-op")
+        .expect("the assignment remains");
+    assert_eq!(same, custom, "same text does not restamp the row");
+    let changed = set_custom(&conn, &p1.id, &item.id, Some("project two"))
+        .expect("custom text updates")
+        .expect("the assignment remains");
+    assert_eq!(
+        changed.target,
+        AssignmentTarget::Custom("project two".to_owned())
+    );
+    assert_eq!(
+        changed.created_at, custom.created_at,
+        "the same assignment row is updated"
+    );
+
+    let cleared = set_custom(&conn, &p1.id, &item.id, None)
+        .expect("clearing custom text restores main")
+        .expect("the assignment remains");
+    assert_eq!(cleared.target, AssignmentTarget::Variant(main.id.clone()));
+    let cleared_again = set_custom(&conn, &p1.id, &item.id, None)
+        .expect("clearing a variant-backed cell is a no-op")
+        .expect("the assignment remains");
+    assert_eq!(cleared_again, cleared);
+    assert_eq!(
+        get_assignment(&conn, &p2.id, &item.id)
+            .expect("read succeeds")
+            .expect("row exists"),
+        p2_before,
+        "the other project's variant is untouched (MAIN-005)"
+    );
+    assert_eq!(
+        get_variant(&conn, &main.id)
+            .expect("read succeeds")
+            .expect("main exists")
+            .content,
+        "content 1"
+    );
+    assert_eq!(
+        get_variant(&conn, &alt.id)
+            .expect("read succeeds")
+            .expect("alt exists")
+            .content,
+        "alternative shared text"
+    );
+}
+
+#[test]
+fn custom_text_allows_empty_and_refuses_unknown_or_heading_targets() {
+    let (conn, _dir) = library_db("custom-target-validation");
+    let (item, main) = seed_instruction(&conn, 1);
+    let heading = seed_heading(&conn, 1, 2);
+    let project = seed_project(&conn, 1);
+
+    let empty = set_custom(&conn, &project.id, &item.id, Some(""))
+        .expect("empty custom text is legal")
+        .expect("custom row exists");
+    assert_eq!(empty.target, AssignmentTarget::Custom(String::new()));
+
+    assert!(matches!(
+        set_custom(&conn, "missing", &item.id, Some("x")),
+        Err(LibraryError::NotFound { id }) if id == "missing"
+    ));
+    assert!(matches!(
+        set_custom(&conn, &project.id, "missing", Some("x")),
+        Err(LibraryError::NotFound { id }) if id == "missing"
+    ));
+    assert!(matches!(
+        set_custom(&conn, &project.id, &heading.id, Some("x")),
+        Err(LibraryError::NotAnInstruction { id }) if id == heading.id
+    ));
+    assert_eq!(
+        get_assignment(&conn, &project.id, &item.id)
+            .expect("read succeeds")
+            .expect("row exists"),
+        empty,
+        "every refusal leaves the custom row untouched"
+    );
+    assert_eq!(
+        set_custom(&conn, &project.id, &item.id, None)
+            .expect("clear succeeds")
+            .expect("row exists")
+            .target,
+        AssignmentTarget::Variant(main.id.clone()),
+        "clearing a valid custom cell selects its main"
+    );
+}
+
+#[test]
+fn deleting_or_reassigning_a_variant_never_rewrites_custom_cells() {
+    let (conn, _dir) = library_db("custom-target-isolation");
+    let (item, main) = seed_instruction(&conn, 1);
+    let alt = create_variant(
+        &conn,
+        &NewVariant {
+            instruction_id: &item.id,
+            name: "Alt",
+            content: "alt",
+            is_main: false,
+        },
+    )
+    .expect("alternate variant creates");
+    let p1 = seed_project(&conn, 1);
+    let p2 = seed_project(&conn, 2);
+    assign(
+        &conn,
+        &NewAssignment {
+            project_id: &p1.id,
+            instruction_id: &item.id,
+            variant_id: &alt.id,
+        },
+    )
+    .expect("variant assignment creates");
+    let custom = set_custom(&conn, &p2.id, &item.id, Some("only project two"))
+        .expect("custom assignment creates")
+        .expect("custom row exists");
+
+    delete_variant(&conn, &alt.id, None).expect("non-main variant deletes");
+    assert_eq!(
+        get_assignment(&conn, &p1.id, &item.id)
+            .expect("read succeeds")
+            .expect("row exists")
+            .target,
+        AssignmentTarget::Variant(main.id.clone())
+    );
+    assert_eq!(
+        get_assignment(&conn, &p2.id, &item.id)
+            .expect("read succeeds")
+            .expect("row exists"),
+        custom,
+        "variant deletion cannot touch a custom target"
+    );
+
+    let p3 = seed_project(&conn, 3);
+    set_custom(&conn, &p3.id, &item.id, Some("project three")).expect("custom assignment creates");
+    reassign(&conn, &p3.id, &item.id, &main.id).expect("custom cell can return to a variant");
+    assert_eq!(
+        get_assignment(&conn, &p3.id, &item.id)
+            .expect("read succeeds")
+            .expect("row exists")
+            .target,
+        AssignmentTarget::Variant(main.id)
+    );
+    assert_eq!(
+        get_assignment(&conn, &p2.id, &item.id)
+            .expect("read succeeds")
+            .expect("row exists"),
+        custom
+    );
 }

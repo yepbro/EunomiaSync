@@ -200,7 +200,7 @@ fn open_db_then_run_migrations_on_the_same_connection() {
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("user_version should be readable");
-        assert_eq!(user_version, 2, "schema version must be exactly 2");
+        assert_eq!(user_version, 3, "schema version must be exactly 3");
         assert_db001_pragmas(&read_pragmas(&conn));
     }
 

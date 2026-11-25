@@ -43,7 +43,7 @@
 //! `### Tests` and C's text, and no `## Release`:
 //!
 //! ```
-//! use eunomia_core::assignment::Assignment;
+//! use eunomia_core::assignment::{Assignment, AssignmentTarget};
 //! use eunomia_core::body::build_body;
 //! use eunomia_core::library::{
 //!     Heading, HeadingLevel, Instruction, InstructionState, ItemId, LibraryItem, Variant, VariantId,
@@ -101,7 +101,7 @@
 //!     vec![Assignment {
 //!         project_id: project.id.clone(),
 //!         instruction_id: ItemId::new("c".to_owned()),
-//!         variant_id: VariantId::new("v-c".to_owned()),
+//!         target: AssignmentTarget::Variant(VariantId::new("v-c".to_owned())),
 //!     }],
 //! )
 //! .expect("the example library is a valid snapshot");
@@ -116,7 +116,8 @@
 
 use std::collections::HashMap;
 
-use crate::library::{ItemId, LibraryItem, Variant, VariantId};
+use crate::assignment::AssignmentTarget;
+use crate::library::{ItemId, LibraryItem};
 use crate::normalize;
 use crate::project::ProjectId;
 use crate::snapshot::BuildSnapshot;
@@ -161,7 +162,7 @@ const BLANK_LINE: &str = "\n\n";
 /// # Examples
 ///
 /// ```
-/// # use eunomia_core::assignment::Assignment;
+/// # use eunomia_core::assignment::{Assignment, AssignmentTarget};
 /// # use eunomia_core::body::build_body;
 /// # use eunomia_core::library::{
 /// #     Heading, HeadingLevel, Instruction, InstructionState, ItemId, LibraryItem, Variant,
@@ -201,7 +202,7 @@ const BLANK_LINE: &str = "\n\n";
 ///     vec![Assignment {
 ///         project_id: project.id.clone(),
 ///         instruction_id: ItemId::new("b".to_owned()),
-///         variant_id: VariantId::new("v-b".to_owned()),
+///         target: AssignmentTarget::Variant(VariantId::new("v-b".to_owned())),
 ///     }],
 /// )
 /// .expect("valid");
@@ -219,7 +220,7 @@ pub fn build_body(snapshot: &BuildSnapshot, project: &ProjectId) -> Option<Strin
         return None;
     }
 
-    let selected = selected_variants(snapshot, project);
+    let selected = selected_targets(snapshot, project);
     let items = snapshot.items();
     let mut blocks: Vec<String> = Vec::new();
 
@@ -239,11 +240,23 @@ pub fn build_body(snapshot: &BuildSnapshot, project: &ProjectId) -> Option<Strin
                 }
             }
             LibraryItem::Instruction(instruction) => {
-                if let Some(variant) = selected.get(&instruction.id) {
-                    let text = normalize::variant_text(&variant.content);
-                    if !text.is_empty() {
-                        blocks.push(text);
+                let text = selected.get(&instruction.id).map(|target| match target {
+                    AssignmentTarget::Variant(variant_id) => {
+                        let variant = instruction
+                            .variants
+                            .iter()
+                            .find(|variant| variant.id == *variant_id)
+                            .expect(
+                                "snapshot validation guarantees the assigned variant belongs to its instruction",
+                            );
+                        normalize::variant_text(&variant.content)
                     }
+                    AssignmentTarget::Custom(custom) => normalize::variant_text(custom),
+                });
+                if let Some(text) = text
+                    && !text.is_empty()
+                {
+                    blocks.push(text);
                 }
             }
         }
@@ -253,47 +266,34 @@ pub fn build_body(snapshot: &BuildSnapshot, project: &ProjectId) -> Option<Strin
 }
 
 /// Resolves the project's build set: the `included` set of §9.2 plus
-/// each included instruction's assigned variant.
+/// each included instruction's single assignment target.
 ///
 /// This is the per-project resolution D-042 keeps out of the snapshot
-/// state: the assignments scoped to one project, joined with the
-/// active instructions (a hidden instruction is never selected —
-/// D-11/DB-013), each mapped to its assigned variant. D-02 and the
-/// snapshot's assembly guarantee the join is unique per instruction
-/// and that every variant resolves (DB-012).
-fn selected_variants<'a>(
+/// state: assignments scoped to one project, joined with active
+/// instructions (a hidden instruction is never selected — D-11/DB-013).
+/// D-02 and snapshot assembly guarantee one target per instruction;
+/// DB-012 validation guarantees every variant target resolves.
+fn selected_targets<'a>(
     snapshot: &'a BuildSnapshot,
     project: &ProjectId,
-) -> HashMap<&'a ItemId, &'a Variant> {
-    let mut assigned_variant: HashMap<&ItemId, &VariantId> = HashMap::new();
+) -> HashMap<&'a ItemId, &'a AssignmentTarget> {
+    let mut assigned: HashMap<&ItemId, &AssignmentTarget> = HashMap::new();
     for assignment in snapshot.assignments() {
         if assignment.project_id == *project {
-            assigned_variant.insert(&assignment.instruction_id, &assignment.variant_id);
+            assigned.insert(&assignment.instruction_id, &assignment.target);
         }
     }
 
-    let mut selected = HashMap::with_capacity(assigned_variant.len());
+    let mut selected = HashMap::with_capacity(assigned.len());
     for item in snapshot.items() {
         let LibraryItem::Instruction(instruction) = item else {
             continue;
         };
-        if !instruction.is_active() {
-            continue;
+        if instruction.is_active()
+            && let Some(&target) = assigned.get(&instruction.id)
+        {
+            selected.insert(&instruction.id, target);
         }
-        let Some(&variant_id) = assigned_variant.get(&instruction.id) else {
-            continue;
-        };
-        // BuildSnapshot::new rejects a variant outside its instruction
-        // (SnapshotError::VariantMismatch, DB-012), so this cannot miss
-        // for a snapshot built through the constructor.
-        let variant = instruction
-            .variants
-            .iter()
-            .find(|variant| variant.id == *variant_id)
-            .expect(
-                "snapshot validation guarantees the assigned variant belongs to its instruction",
-            );
-        selected.insert(&instruction.id, variant);
     }
     selected
 }
@@ -330,9 +330,9 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::assignment::Assignment;
+    use crate::assignment::{Assignment, AssignmentTarget};
     use crate::library::{
-        Heading, HeadingLevel, Instruction, InstructionState, LibraryItem, Variant,
+        Heading, HeadingLevel, Instruction, InstructionState, LibraryItem, Variant, VariantId,
     };
     use crate::project::{BaseName, ExtraFile, ExtraFilePosition, ProjectWriteSettings, Scheme};
     use crate::snapshot::SnapshotProject;
@@ -419,7 +419,7 @@ mod tests {
         Assignment {
             project_id: ProjectId::new(project_id.to_owned()),
             instruction_id: ItemId::new(instruction_id.to_owned()),
-            variant_id: VariantId::new(variant_id.to_owned()),
+            target: AssignmentTarget::Variant(VariantId::new(variant_id.to_owned())),
         }
     }
 
@@ -470,6 +470,48 @@ mod tests {
             body_of(&snapshot, "p1"),
             "## Style\n\n### Tests\n\nRun the test suite before every commit."
         );
+    }
+
+    #[test]
+    fn custom_text_is_normalized_for_one_project_without_changing_the_shared_variant() {
+        let custom = Assignment {
+            project_id: ProjectId::new("p1".to_owned()),
+            instruction_id: ItemId::new("a".to_owned()),
+            target: AssignmentTarget::Custom("\u{feff}Project one.\r\nProject two.\r\n".to_owned()),
+        };
+        let snapshot = snapshot(
+            vec![project("p1"), project("p2")],
+            vec![
+                heading("h-style", 2, "Style"),
+                instruction("a", "Shared text."),
+            ],
+            vec![custom, assignment("p2", "a", "v-a")],
+        );
+
+        assert_eq!(
+            body_of(&snapshot, "p1"),
+            "## Style\n\nProject one.\nProject two."
+        );
+        assert_eq!(body_of(&snapshot, "p2"), "## Style\n\nShared text.");
+    }
+
+    #[test]
+    fn an_empty_custom_target_still_counts_as_assigned_for_heading_inclusion() {
+        let custom = Assignment {
+            project_id: ProjectId::new("p1".to_owned()),
+            instruction_id: ItemId::new("a".to_owned()),
+            target: AssignmentTarget::Custom(String::new()),
+        };
+        let snapshot = snapshot(
+            vec![project("p1")],
+            vec![
+                heading("h-style", 2, "Style"),
+                instruction("a", "Shared text."),
+            ],
+            vec![custom],
+        );
+
+        assert_eq!(body_of(&snapshot, "p1"), "## Style");
     }
 
     // ---- ALG-020: heading inclusion by section --------------------------
@@ -951,8 +993,10 @@ mod property_tests {
     use proptest::test_runner::{Config as ProptestConfig, RngSeed};
 
     use super::*;
-    use crate::assignment::Assignment;
-    use crate::library::{Heading, HeadingLevel, Instruction, InstructionState, Variant};
+    use crate::assignment::{Assignment, AssignmentTarget};
+    use crate::library::{
+        Heading, HeadingLevel, Instruction, InstructionState, Variant, VariantId,
+    };
     use crate::project::{BaseName, ExtraFile, ExtraFilePosition, ProjectWriteSettings, Scheme};
     use crate::snapshot::SnapshotProject;
 
@@ -1170,7 +1214,9 @@ mod property_tests {
                                 assignments.push(Assignment {
                                     project_id: ProjectId::new(format!("p-{project}")),
                                     instruction_id: ItemId::new(format!("i-{index}")),
-                                    variant_id: VariantId::new(format!("v-{index}-{variant}")),
+                                    target: AssignmentTarget::Variant(VariantId::new(format!(
+                                        "v-{index}-{variant}"
+                                    ))),
                                 });
                                 Some(variant)
                             }

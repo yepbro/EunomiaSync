@@ -30,6 +30,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use eunomia_core::assignment::AssignmentTarget as CoreTarget;
 use eunomia_core::library::{Instruction as CoreInstruction, LibraryItem as CoreLibraryItem};
 use eunomia_core::project::{
     BaseName as CoreBaseName, ExtraFile as CoreExtraFile, ExtraFilePosition as CorePosition,
@@ -496,8 +497,8 @@ fn assignments_are_scoped_to_active_projects() {
     // The variant ids ride along — the build resolves the text through
     // them.
     assert_eq!(
-        snapshot.assignments()[1].variant_id.as_str(),
-        a_main.id.as_str()
+        snapshot.assignments()[1].target,
+        CoreTarget::Variant(eunomia_core::library::VariantId::new(a_main.id.clone()))
     );
 }
 

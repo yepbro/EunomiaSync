@@ -10,10 +10,13 @@
 import type {
   ActivityEntryWire,
   AddedProjectWire,
+  AssignmentRecordWire,
+  AssignmentTargetWire,
   DbBackupInfo,
   ExclusionEntry,
   ProjectAvailabilityEventWire,
   ProjectColumnEntryWire,
+  RevisionRecordWire,
   SettingItem,
   VariantRecordWire,
 } from '../contract'
@@ -95,6 +98,8 @@ export type MockState = {
    * readonly fixture shape: the seeding spreads the fixtures in.
    */
   assignments: MockAssignmentRow[]
+  /** LIB-026/027 history rows written by the mock library commands. */
+  revisions: MockRevisionRow[]
   /** The journal's next autoincrement id (§6.2 `action_log.id`). */
   nextActivityId: number
   /**
@@ -161,14 +166,32 @@ export type MockVariantRow = {
   deletedAt: string | null
 }
 
-/** One `project_instructions` row in the mock store (§6.2, D-02: one
- * variant of one instruction per project) — the fixture shape made
- * mutable, so the variant commands' delete flow can move rows the way
- * the store's own move does. */
+/** One `project_instructions` row in the mock store (§6.2, D-02/DB-012):
+ * one variant or custom-text target per project/instruction pair. The
+ * union makes "both" and "neither" unrepresentable in TypeScript too. */
 export type MockAssignmentRow = {
   projectId: string
   instructionId: string
-  variantId: string
+  target: AssignmentTargetWire
+  createdAt: string
+  updatedAt: string
+}
+
+/** One stored history row; the wire shape is already the table's shape. */
+export type MockRevisionRow = RevisionRecordWire
+
+/** Maps a mock assignment row to the generated command DTO. */
+export function toAssignmentRecord(row: MockAssignmentRow): AssignmentRecordWire {
+  return {
+    project_id: row.projectId,
+    instruction_id: row.instructionId,
+    target:
+      row.target.kind === 'variant'
+        ? { kind: 'variant', value: row.target.value }
+        : { kind: 'custom', value: row.target.value },
+    created_at: row.createdAt,
+    updated_at: row.updatedAt,
+  }
 }
 
 /** Maps a store row to the `projects_list` wire shape (MAIN-028 fields). */
@@ -445,7 +468,7 @@ export function mockState(): MockState {
 export function resetMockState(profile: FixtureProfile): MockState {
   const bundle = generateFixtures(profile)
   const settings = DEFAULT_SETTINGS.map((s) => ({ ...s }))
-  state = {
+  const next: MockState = {
     projects: rowsFromFixtures(bundle, settings),
     settings,
     activity: generateActivityEntries(bundle.projects, profile),
@@ -485,7 +508,17 @@ export function resetMockState(profile: FixtureProfile): MockState {
             updatedAt: isoUtc(BASE_TS_MS + item.position * 1000),
           },
     ),
-    assignments: bundle.assignments.map((assignment) => ({ ...assignment })),
+    assignments: bundle.assignments.map((assignment, index) => {
+      const stamp = isoUtc(BASE_TS_MS + index * 1000)
+      return {
+        projectId: assignment.projectId,
+        instructionId: assignment.instructionId,
+        target: { kind: 'variant' as const, value: assignment.variantId },
+        createdAt: stamp,
+        updatedAt: stamp,
+      }
+    }),
+    revisions: [],
     nextActivityId: 1_000_000,
     scanning: false,
     scanCancelled: false,
@@ -495,8 +528,9 @@ export function resetMockState(profile: FixtureProfile): MockState {
   }
   // A fresh world is a fresh session: no project has been probed yet, so
   // the availability cache restarts from the D-112 baseline.
+  state = next
   availabilityCache = new Map()
-  return state
+  return next
 }
 
 // Runtime-added rows need ids the fixtures never generated. UUIDv7-shaped

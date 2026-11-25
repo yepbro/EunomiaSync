@@ -1894,6 +1894,71 @@ pub(crate) fn variant_restore_failed(error: &AppError) {
     );
 }
 
+/// The `assignment_set` command failed (T-331, §10's every-error rule).
+pub(crate) fn assignment_set_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::assignments",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "changing an assignment failed"
+    );
+}
+
+/// The `assignment_set_custom` command failed (T-331, §10's every-error rule).
+pub(crate) fn assignment_set_custom_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::assignments",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "changing per-project custom text failed"
+    );
+}
+
+/// The `assignments_bulk` command failed (T-331, §10's every-error rule).
+pub(crate) fn assignments_bulk_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::assignments",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "changing a bulk assignment set failed"
+    );
+}
+
+/// The `revisions_list` command failed (T-331, §10's every-error rule).
+pub(crate) fn revisions_list_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::history",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "listing instruction history failed"
+    );
+}
+
+/// The `revision_get` command failed (T-331, §10's every-error rule).
+pub(crate) fn revision_get_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::history",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "reading a revision failed"
+    );
+}
+
 /// The availability recheck failed (T-079, D-09/DB-032, §10's
 /// every-error rule): the payload is the error's own §7.10 vocabulary,
 /// in the `activity_list_failed` shape. Logged by the fire-and-forget

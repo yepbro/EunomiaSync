@@ -231,7 +231,7 @@ fn seed_assignment(
                 variant_id: &variant_id,
             },
         )
-        .map(|assignment| assignment.variant_id)
+        .map(|_| ())
         .map_err(crate::commands::library_store_to_app_error)
     }))
     .expect("seeding an assignment through the repository must work");
@@ -493,7 +493,7 @@ fn library_get_labels_match_the_assignments() {
             name: "Alpha".to_owned(),
             label: "ALP".to_owned(),
             color: "red".to_owned(),
-            variant_id: terse_empty,
+            variant_id: Some(terse_empty),
         }],
         "labels are exactly the active projects with an assignment, naming the assigned variant"
     );
@@ -532,6 +532,43 @@ fn library_get_labels_match_the_assignments() {
 
     drop(app);
     drop(temp);
+}
+
+#[test]
+fn library_get_labels_a_custom_assignment_without_inventing_a_variant_id() {
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    let root = temp.path().join("repo").display().to_string();
+    let project = seed_project(
+        &database,
+        format!("{root}/custom"),
+        "/custom",
+        "Custom project",
+        "CUSTOM",
+        "blue",
+    );
+    let instruction = seed_instruction(&database, "Custom target");
+    let database_for_custom = database.clone();
+    let project_for_custom = project.clone();
+    let instruction_for_custom = instruction.clone();
+    tauri::async_runtime::block_on(database_for_custom.run(move |tx| {
+        eunomia_store::library::set_custom(
+            tx,
+            &project_for_custom,
+            &instruction_for_custom,
+            Some("per-project text"),
+        )
+        .map(|_| ())
+        .map_err(crate::commands::library_store_to_app_error)
+    }))
+    .expect("custom assignment seed succeeds");
+
+    let tree = invoke_library_get(&main_webview(&app), serde_json::Value::Null)
+        .expect("library read succeeds");
+    let entry = instruction_by_title(&tree, "Custom target");
+    assert_eq!(entry.project_labels.len(), 1);
+    assert_eq!(entry.project_labels[0].project_id, project);
+    assert_eq!(entry.project_labels[0].variant_id, None);
 }
 
 #[test]

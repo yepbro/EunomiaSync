@@ -17,7 +17,7 @@
 
 use eunomia_load::{AssignmentToggle, LoadError, LoadFixture, PremiseHalf};
 use eunomia_store::data_sets::DataSetSpec;
-use eunomia_store::library::{get_assignment, reassign, unassign};
+use eunomia_store::library::{AssignmentTarget, get_assignment, reassign, unassign};
 
 /// A small profile with the shape the toggle needs: several
 /// instructions, three variants each (a sibling to flip to),
@@ -66,7 +66,8 @@ fn the_first_pair_holds_the_promised_variant() -> Result<(), LoadError> {
         .map_err(LoadError::Library)?
         .expect("the generator's k = 0 assignment of project 0 exists");
     assert_eq!(
-        held.variant_id, main,
+        held.target,
+        AssignmentTarget::Variant(main),
         "D-109's closed form at p = 0, k = 0: variant ordinal (0 + 0) mod V = 0"
     );
 
@@ -170,11 +171,13 @@ fn every_save_is_a_real_write_and_alternates() -> Result<(), LoadError> {
             .map_err(LoadError::Library)?
             .expect("the toggled pair keeps its assignment");
         assert_eq!(
-            &returned.variant_id, expected,
+            &returned.target,
+            &AssignmentTarget::Variant(expected.clone()),
             "save {ordinal}: the returned row names the target"
         );
         assert_eq!(
-            &stored.variant_id, expected,
+            &stored.target,
+            &AssignmentTarget::Variant(expected.clone()),
             "save {ordinal}: the database row carries the real write"
         );
     }
@@ -197,7 +200,8 @@ fn the_noop_targets_the_held_variant() -> Result<(), LoadError> {
         .map_err(LoadError::Library)?
         .expect("the toggled pair keeps its assignment");
     assert_eq!(
-        before.variant_id, sibling,
+        before.target,
+        AssignmentTarget::Variant(sibling),
         "one save leaves the sibling held"
     );
     let unchanged = toggle.noop_save(fixture.connection())?;

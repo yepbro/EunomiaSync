@@ -3,7 +3,7 @@ import { mockCommands } from './commands'
 import { mockState, resetMockState, type MockLibraryRow } from './state'
 import { mockEvents } from './events'
 import { PALETTE, type FixtureProfile } from '../fixtures/generator'
-import type { LibraryTreeItem } from '../contract'
+import type { LibraryTreeItemWire } from '../contract'
 
 /** A small pinned world: 4 projects (last one archived), 3 instructions. */
 const PROFILE: FixtureProfile = {
@@ -150,13 +150,13 @@ describe('projectsList', () => {
 describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
   /** Narrows the wire union to its instruction arm. */
   const isInstruction = (
-    entry: LibraryTreeItem,
-  ): entry is Extract<LibraryTreeItem, { kind: 'instruction' }> => entry.kind === 'instruction'
+    entry: LibraryTreeItemWire,
+  ): entry is Extract<LibraryTreeItemWire, { kind: 'instruction' }> => entry.kind === 'instruction'
 
   /** Narrows the wire union to its heading arm. */
   const isHeading = (
-    entry: LibraryTreeItem,
-  ): entry is Extract<LibraryTreeItem, { kind: 'heading' }> => entry.kind === 'heading'
+    entry: LibraryTreeItemWire,
+  ): entry is Extract<LibraryTreeItemWire, { kind: 'heading' }> => entry.kind === 'heading'
 
   /** One hand-built heading row (positions and ids chosen by the test). */
   function headingRow(id: string, position: number, level: 2 | 3 | 4 | 5 | 6, title: string) {
@@ -254,13 +254,16 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
     // (projects in sort_order × their assignment rows) — the wire must
     // agree with that join, per instruction.
     const state = mockState()
-    const expected = new Map<string, { project_id: string; variant_id: string }[]>()
+    const expected = new Map<string, { project_id: string; variant_id: string | null }[]>()
     for (const project of [...state.projects]
       .sort((a, b) => a.sortOrder - b.sortOrder)
       .filter((p) => p.state === 'active')) {
       for (const assignment of state.assignments.filter((a) => a.projectId === project.id)) {
         const list = expected.get(assignment.instructionId) ?? []
-        list.push({ project_id: project.id, variant_id: assignment.variantId })
+        list.push({
+          project_id: project.id,
+          variant_id: assignment.target.kind === 'variant' ? assignment.target.value : null,
+        })
         expected.set(assignment.instructionId, list)
       }
     }
@@ -411,7 +414,13 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
       ]),
     ]
     mockState().assignments = [
-      { projectId: active!.id, instructionId: 'i-keeper', variantId: 'v-keeper' },
+      {
+        projectId: active!.id,
+        instructionId: 'i-keeper',
+        target: { kind: 'variant', value: 'v-keeper' },
+        createdAt: '2026-11-20T00:00:00.000Z',
+        updatedAt: '2026-11-20T00:00:00.000Z',
+      },
     ]
     const visible = await commands.libraryGet(null)
     expect(visible.map((entry) => entry.title)).toEqual(['Dropper'])
@@ -2366,7 +2375,9 @@ describe('variantDelete', () => {
       state.assignments.push({
         projectId: project.id,
         instructionId: instruction.id,
-        variantId: created.id,
+        target: { kind: 'variant', value: created.id },
+        createdAt: '2026-11-20T00:00:00.000Z',
+        updatedAt: '2026-11-20T00:00:00.000Z',
       })
     }
     const before = state.assignments.filter((row) => row.instructionId === instruction.id).length
@@ -2377,7 +2388,11 @@ describe('variantDelete', () => {
     expect(deleted.is_main).toBe(false)
     const after = state.assignments.filter((row) => row.instructionId === instruction.id)
     expect(after).toHaveLength(before)
-    if (main) expect(after.every((row) => row.variantId === main.id)).toBe(true)
+    if (main) {
+      expect(
+        after.every((row) => row.target.kind === 'variant' && row.target.value === main.id),
+      ).toBe(true)
+    }
     expect(state.activity[state.activity.length - 1]).toMatchObject({
       action: 'variant.deleted',
       entity_id: created.id,
@@ -2482,6 +2497,287 @@ describe('variantRestore', () => {
 
     expect(answer.state).toBe('active')
     expect(state.activity).toHaveLength(journalBefore)
+  })
+})
+
+describe('assignmentSet (T-331)', () => {
+  it('changes one project only, defaults to Main, and journals only real changes', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    const alt = await commands.variantCreate(instruction.id, 'Alt', 'empty')
+    const projects = state.projects.filter((row) => row.state === 'active').slice(0, 2)
+    const [p1, p2] = projects
+    if (!p1 || !p2) throw new Error('two active projects must exist')
+    await commands.assignmentSet(p1.id, instruction.id, true, null)
+    await commands.assignmentSet(p2.id, instruction.id, true, null)
+    const p2Before = state.assignments.find(
+      (row) => row.projectId === p2.id && row.instructionId === instruction.id,
+    )
+    const journalBefore = state.activity.length
+
+    const changed = await commands.assignmentSet(p1.id, instruction.id, true, alt.id)
+
+    expect(changed?.target).toEqual({ kind: 'variant', value: alt.id })
+    expect(
+      state.assignments.find(
+        (row) => row.projectId === p2.id && row.instructionId === instruction.id,
+      ),
+    ).toEqual(p2Before)
+    expect(state.activity).toHaveLength(journalBefore + 1)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      action: 'assignment.changed',
+      project_id: p1.id,
+      details: JSON.stringify({ changed: 1 }),
+    })
+
+    const same = await commands.assignmentSet(p1.id, instruction.id, true, alt.id)
+    expect(same).toEqual(changed)
+    expect(state.activity).toHaveLength(journalBefore + 1)
+    expect(await commands.assignmentSet(p1.id, instruction.id, false, null)).toBeNull()
+    expect(state.activity).toHaveLength(journalBefore + 2)
+    expect(await commands.assignmentSet(p1.id, instruction.id, false, null)).toBeNull()
+    expect(state.activity).toHaveLength(journalBefore + 2)
+    expect(main.state).toBe('active')
+  })
+
+  it('preserves an already-enabled custom cell on a null-variant re-send', async () => {
+    const state = mockState()
+    state.assignments = []
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    const project = state.projects.find((row) => row.state === 'active')
+    if (!project) throw new Error('an active project must exist')
+    await commands.assignmentSetCustom(project.id, instruction.id, 'keep custom')
+    const journalBefore = state.activity.length
+
+    const unchanged = await commands.assignmentSet(project.id, instruction.id, true, null)
+
+    expect(unchanged?.target).toEqual({ kind: 'custom', value: 'keep custom' })
+    expect(state.activity).toHaveLength(journalBefore)
+    const converted = await commands.assignmentSet(project.id, instruction.id, true, main.id)
+    expect(converted?.target).toEqual({ kind: 'variant', value: main.id })
+    expect(state.activity).toHaveLength(journalBefore + 1)
+  })
+
+  it('refuses a variant on disable and unknown project/instruction ids', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    const project = state.projects.find((row) => row.state === 'active')
+    if (!project) throw new Error('an active project must exist')
+    await expect(
+      commands.assignmentSet(project.id, instruction.id, false, main.id),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'variant_id' },
+    })
+    await expect(
+      commands.assignmentSet('missing', instruction.id, true, null),
+    ).rejects.toMatchObject({
+      params: { field: 'project_id' },
+    })
+    await expect(commands.assignmentSet(project.id, 'missing', true, null)).rejects.toMatchObject({
+      params: { field: 'instruction_id' },
+    })
+  })
+})
+
+describe('assignmentSetCustom (T-331)', () => {
+  it('updates one assignment without forking or changing the shared variant', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    const projects = state.projects.filter((row) => row.state === 'active').slice(0, 2)
+    const [p1, p2] = projects
+    if (!p1 || !p2) throw new Error('two active projects must exist')
+    await commands.assignmentSet(p2.id, instruction.id, true, null)
+    const p2Before = state.assignments.find((row) => row.projectId === p2.id)
+    const variantCount = instruction.variants.length
+    const sharedBefore = { ...main }
+    const journalBefore = state.activity.length
+
+    const first = await commands.assignmentSetCustom(p1.id, instruction.id, 'project one\r\n')
+
+    expect(first?.target).toEqual({ kind: 'custom', value: 'project one\n' })
+    expect(instruction.variants).toHaveLength(variantCount)
+    expect(main).toEqual(sharedBefore)
+    expect(state.assignments.find((row) => row.projectId === p2.id)).toEqual(p2Before)
+    expect(state.activity).toHaveLength(journalBefore + 1)
+    expect(await commands.assignmentSetCustom(p1.id, instruction.id, 'project one\n')).toEqual(
+      first,
+    )
+    expect(state.activity).toHaveLength(journalBefore + 1)
+
+    const second = await commands.assignmentSetCustom(p1.id, instruction.id, 'project one updated')
+    expect(second?.created_at).toBe(first?.created_at)
+    expect(second?.target).toEqual({ kind: 'custom', value: 'project one updated' })
+    expect(instruction.variants).toHaveLength(variantCount)
+    const customLabels = await commands.libraryGet(null)
+    const customLabel = customLabels.find(
+      (entry) => entry.kind === 'instruction' && entry.id === instruction.id,
+    )
+    expect(
+      customLabel?.kind === 'instruction'
+        ? customLabel.project_labels.find((label) => label.project_id === p1.id)?.variant_id
+        : undefined,
+    ).toBeNull()
+
+    const cleared = await commands.assignmentSetCustom(p1.id, instruction.id, null)
+    expect(cleared?.target).toEqual({ kind: 'variant', value: main.id })
+    expect(state.activity).toHaveLength(journalBefore + 3)
+
+    const labels = await commands.libraryGet(null)
+    const labeled = labels.find(
+      (entry) => entry.kind === 'instruction' && entry.id === instruction.id,
+    )
+    expect(
+      labeled?.kind === 'instruction'
+        ? labeled.project_labels.find((label) => label.project_id === p2.id)?.variant_id
+        : undefined,
+    ).toBe(main.id)
+  })
+
+  it('validates custom text before writing and never echoes it', async () => {
+    const state = mockState()
+    state.assignments = []
+    const instruction = firstInstructionOf(state)
+    const project = state.projects.find((row) => row.state === 'active')
+    if (!project) throw new Error('an active project must exist')
+    const journalBefore = state.activity.length
+    for (const content of ['bad\0text', 'x'.repeat(262_145)]) {
+      await expect(
+        commands.assignmentSetCustom(project.id, instruction.id, content),
+      ).rejects.toMatchObject({ code: 'E_VALIDATION', params: { field: 'custom_text' } })
+    }
+    await expect(
+      commands.assignmentSetCustom(project.id, instruction.id, 'text\n<!-- EUNOMIASYNC:BEGIN -->'),
+    ).rejects.toMatchObject({
+      code: 'E_CONTENT_RESERVED',
+      params: { field: 'custom_text', line: '2' },
+    })
+    expect(state.activity).toHaveLength(journalBefore)
+    expect(
+      state.assignments.some(
+        (row) => row.projectId === project.id && row.instructionId === instruction.id,
+      ),
+    ).toBe(false)
+    expect((await commands.assignmentSetCustom(project.id, instruction.id, ''))?.target).toEqual({
+      kind: 'custom',
+      value: '',
+    })
+  })
+})
+
+describe('assignmentsBulk (T-331)', () => {
+  it('deduplicates the product, preserves existing/custom cells, and clears only variant cells', async () => {
+    const state = mockState()
+    state.assignments = []
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    const alt = await commands.variantCreate(instruction.id, 'Alt', 'empty')
+    const projects = state.projects.filter((row) => row.state === 'active').slice(0, 3)
+    const [p1, p2, p3] = projects
+    if (!p1 || !p2 || !p3) throw new Error('three active projects must exist')
+    await commands.assignmentSet(p1.id, instruction.id, true, alt.id)
+    await commands.assignmentSetCustom(p2.id, instruction.id, 'keep custom')
+    const p1Before = state.assignments.find((row) => row.projectId === p1.id)
+    const p2Before = state.assignments.find((row) => row.projectId === p2.id)
+    const journalBefore = state.activity.length
+
+    const assigned = await commands.assignmentsBulk(
+      [instruction.id, instruction.id],
+      [p1.id, p2.id, p3.id, p3.id],
+      true,
+      main.id,
+    )
+
+    expect(assigned.changed).toBe(1)
+    expect(assigned.already_assigned).toEqual([
+      { project_id: p1.id, instruction_id: instruction.id },
+      { project_id: p2.id, instruction_id: instruction.id },
+    ])
+    expect(state.assignments.find((row) => row.projectId === p1.id)).toEqual(p1Before)
+    expect(state.assignments.find((row) => row.projectId === p2.id)).toEqual(p2Before)
+    expect(state.activity).toHaveLength(journalBefore + 1)
+    expect(state.activity[state.activity.length - 1]).toMatchObject({
+      entity_type: 'assignment',
+      entity_id: null,
+      project_id: null,
+      details: JSON.stringify({ changed: 1 }),
+    })
+
+    const cleared = await commands.assignmentsBulk(
+      [instruction.id],
+      [p1.id, p2.id, p3.id],
+      false,
+      null,
+    )
+    expect(cleared.changed).toBe(2)
+    expect(cleared.already_assigned).toEqual([
+      { project_id: p2.id, instruction_id: instruction.id },
+    ])
+    expect(state.assignments.find((row) => row.projectId === p2.id)).toEqual(p2Before)
+    expect(state.assignments.some((row) => row.projectId === p1.id)).toBe(false)
+    expect(state.assignments.some((row) => row.projectId === p3.id)).toBe(false)
+  })
+
+  it('refuses a variant for multiple rows or a clear operation', async () => {
+    const state = mockState()
+    const [first, second] = state.library.filter((row) => row.kind === 'instruction')
+    const project = state.projects.find((row) => row.state === 'active')
+    if (!first || !second || !project) throw new Error('fixture rows must exist')
+    await expect(
+      commands.assignmentsBulk([first.id, 'missing'], [project.id], true, null),
+    ).rejects.toMatchObject({ params: { field: 'instruction_id' } })
+    // The shape guard runs before the database when a variant is supplied.
+    await expect(
+      commands.assignmentsBulk([first.id, second.id], [project.id], true, 'v'),
+    ).rejects.toMatchObject({ params: { field: 'variant_id' } })
+    await expect(
+      commands.assignmentsBulk([first.id], [project.id], false, 'v'),
+    ).rejects.toMatchObject({ params: { field: 'variant_id' } })
+  })
+})
+
+describe('revisionsList / revisionGet (T-331)', () => {
+  it('serves instruction and variant history newest-first and reads one full row', async () => {
+    const state = mockState()
+    const created = await commands.instructionCreate('History instruction', 'shared', null)
+    await commands.variantUpdate(created.variant_id, null, 'updated')
+    await commands.instructionHide(created.instruction_id)
+    state.revisions.forEach((row, index) => {
+      row.created_at = `2026-11-24T12:00:0${index + 1}.000Z`
+    })
+    const journalBefore = state.activity.length
+
+    const history = await commands.revisionsList(created.instruction_id)
+
+    expect(history.map((row) => row.op)).toEqual(['hide', 'update', 'create', 'create'])
+    expect(history.map((row) => row.entity_type)).toEqual([
+      'instruction',
+      'variant',
+      'variant',
+      'instruction',
+    ])
+    expect(history.every((row) => /^[0-9a-f]{64}$/.test(row.snapshot_hash))).toBe(true)
+    expect(history[0]).not.toHaveProperty('snapshot')
+    const full = await commands.revisionGet(history[0]?.id ?? '')
+    expect(full).toEqual(state.revisions.find((row) => row.id === history[0]?.id))
+    expect(full.snapshot).toBe('{"name":"History instruction","state":"hidden"}')
+    expect(state.activity).toHaveLength(journalBefore)
+    await expect(commands.revisionGet('missing')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'id' },
+    })
+    const heading = state.library.find((row) => row.kind === 'heading')
+    if (!heading) throw new Error('a heading must exist')
+    await expect(commands.revisionsList(heading.id)).rejects.toMatchObject({
+      params: {
+        field: 'instruction_id',
+        reason: 'a heading has no version history (LIB-026/6.2)',
+      },
+    })
   })
 })
 

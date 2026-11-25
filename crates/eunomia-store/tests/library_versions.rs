@@ -44,7 +44,8 @@ use eunomia_store::library::{
     restore_variant, set_main_variant, update_item, update_variant,
 };
 use eunomia_store::library_versions::{
-    InstructionOp, Recorded, RevisionError, VariantOp, record_instruction, record_variant,
+    InstructionOp, Recorded, RevisionError, VariantOp, get_revision, list_revision_summaries,
+    record_instruction, record_variant,
 };
 use eunomia_store::storage::{open_db, run_migrations};
 use rusqlite::Connection;
@@ -1174,4 +1175,207 @@ fn a_corrupt_kind_cell_surfaces_as_member() {
         }) => assert_eq!(found, "chapter"),
         other => panic!("expected Member, got {other:?}"),
     }
+}
+
+// ---- History reads (LIB-026/027, T-331) ---------------------------------------------
+
+#[test]
+fn history_lists_the_instruction_and_every_variant_newest_first_and_gets_one_row() {
+    let (conn, _dir) = versions_db("history-read");
+    let (item, main) = seed_instruction(&conn, 1);
+    let alt = create_variant(
+        &conn,
+        &NewVariant {
+            instruction_id: &item.id,
+            name: "Alt",
+            content: "alternative",
+            is_main: false,
+        },
+    )
+    .expect("alternate variant creates");
+    let (unrelated, unrelated_main) = seed_instruction(&conn, 2);
+
+    let instruction_create = record_instruction(
+        &conn,
+        &item.id,
+        InstructionOp::Create,
+        "{\"name\":\"Instruction 1\",\"state\":\"active\"}",
+        "instruction-create",
+        200,
+    )
+    .expect("instruction create records");
+    let main_create = record_variant(
+        &conn,
+        &main.id,
+        VariantOp::Create,
+        "{\"name\":\"Main\",\"text\":\"content 1\"}",
+        "main-create",
+        200,
+    )
+    .expect("main create records");
+    let main_update = record_variant(
+        &conn,
+        &main.id,
+        VariantOp::Update,
+        "{\"name\":\"Main\",\"text\":\"updated\"}",
+        "main-update",
+        200,
+    )
+    .expect("main update records");
+    let alt_create = record_variant(
+        &conn,
+        &alt.id,
+        VariantOp::Create,
+        "{\"name\":\"Alt\",\"text\":\"alternative\"}",
+        "alt-create",
+        200,
+    )
+    .expect("alternate create records");
+    delete_variant(&conn, &alt.id, None).expect("alternate variant deletes");
+    let alt_delete = record_variant(
+        &conn,
+        &alt.id,
+        VariantOp::Delete,
+        "{\"name\":\"Alt\",\"text\":\"alternative\"}",
+        "alt-delete",
+        200,
+    )
+    .expect("alternate delete records");
+    record_instruction(
+        &conn,
+        &unrelated.id,
+        InstructionOp::Create,
+        "{\"name\":\"Instruction 2\",\"state\":\"active\"}",
+        "unrelated-create",
+        200,
+    )
+    .expect("unrelated instruction records");
+    record_variant(
+        &conn,
+        &unrelated_main.id,
+        VariantOp::Create,
+        "{\"name\":\"Main\",\"text\":\"content 2\"}",
+        "unrelated-main-create",
+        200,
+    )
+    .expect("unrelated variant records");
+
+    for (entity_type, entity_id, rev_no, stamp) in [
+        (
+            "instruction",
+            item.id.as_str(),
+            1,
+            "2026-11-24T12:00:01.000Z",
+        ),
+        ("variant", main.id.as_str(), 1, "2026-11-24T12:00:02.000Z"),
+        ("variant", main.id.as_str(), 2, "2026-11-24T12:00:03.000Z"),
+        ("variant", alt.id.as_str(), 1, "2026-11-24T12:00:04.000Z"),
+        ("variant", alt.id.as_str(), 2, "2026-11-24T12:00:05.000Z"),
+    ] {
+        conn.execute(
+            "UPDATE revisions SET created_at = ?1
+              WHERE entity_type = ?2 AND entity_id = ?3 AND rev_no = ?4",
+            rusqlite::params![stamp, entity_type, entity_id, rev_no],
+        )
+        .expect("history timestamp sets");
+    }
+
+    let history = list_revision_summaries(&conn, &item.id).expect("instruction history reads");
+    assert_eq!(
+        history
+            .iter()
+            .map(|row| (
+                row.entity_type.as_str(),
+                row.entity_id.as_str(),
+                row.rev_no,
+                row.op.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("variant", alt.id.as_str(), 2, "delete"),
+            ("variant", alt.id.as_str(), 1, "create"),
+            ("variant", main.id.as_str(), 2, "update"),
+            ("variant", main.id.as_str(), 1, "create"),
+            ("instruction", item.id.as_str(), 1, "create"),
+        ],
+        "the deleted variant stays in its instruction's history; unrelated entities do not"
+    );
+    assert_eq!(history[0].snapshot_hash, "alt-delete");
+    assert_eq!(history[0].reverted_from, None);
+    assert_eq!(history[0].created_at, "2026-11-24T12:00:05.000Z");
+    let newest = get_revision(&conn, &history[0].id)
+        .expect("revision lookup reads")
+        .expect("newest revision exists");
+    assert_eq!(
+        newest.snapshot,
+        "{\"name\":\"Alt\",\"text\":\"alternative\"}"
+    );
+    for summary in &history {
+        let full = get_revision(&conn, &summary.id)
+            .expect("revision lookup reads")
+            .expect("summarized revision exists");
+        assert_eq!(full.id, summary.id);
+        assert_eq!(full.entity_type, summary.entity_type);
+        assert_eq!(full.entity_id, summary.entity_id);
+        assert_eq!(full.rev_no, summary.rev_no);
+        assert_eq!(full.op, summary.op);
+    }
+    assert_eq!(instruction_create, Recorded::Inserted { rev_no: 1 });
+    assert_eq!(main_create, Recorded::Inserted { rev_no: 1 });
+    assert_eq!(main_update, Recorded::Inserted { rev_no: 2 });
+    assert_eq!(alt_create, Recorded::Inserted { rev_no: 1 });
+    assert_eq!(alt_delete, Recorded::Inserted { rev_no: 2 });
+}
+
+#[test]
+fn history_reads_refuse_unknown_or_heading_instructions_and_surface_corrupt_rows() {
+    let (conn, _dir) = versions_db("history-read-errors");
+    let (item, main) = seed_instruction(&conn, 1);
+    let heading = seed_heading(&conn, 1);
+    record_variant(
+        &conn,
+        &main.id,
+        VariantOp::Create,
+        "{\"name\":\"Main\",\"text\":\"content 1\"}",
+        "main-create",
+        200,
+    )
+    .expect("variant records");
+    let revision = list_revision_summaries(&conn, &item.id).expect("history reads")[0].clone();
+
+    assert!(
+        matches!(list_revision_summaries(&conn, "missing"), Err(RevisionError::NotFound { id }) if id == "missing")
+    );
+    assert!(
+        matches!(list_revision_summaries(&conn, &heading.id), Err(RevisionError::NotAnInstruction { id }) if id == heading.id)
+    );
+    assert_eq!(get_revision(&conn, "missing").expect("lookup reads"), None);
+
+    conn.execute_batch("PRAGMA ignore_check_constraints = 1;")
+        .expect("CHECK bypass enables");
+    conn.execute(
+        "UPDATE revisions SET entity_type = 'chapter' WHERE id = ?1",
+        [&revision.id],
+    )
+    .expect("corruption applies");
+    conn.execute_batch("PRAGMA ignore_check_constraints = 0;")
+        .expect("CHECK bypass disables");
+    assert!(matches!(
+        get_revision(&conn, &revision.id),
+        Err(RevisionError::Member { column: "entity_type", found }) if found == "chapter"
+    ));
+
+    conn.execute_batch("PRAGMA ignore_check_constraints = 1;")
+        .expect("CHECK bypass enables");
+    conn.execute(
+        "UPDATE revisions SET entity_type = 'variant', op = 'chapter' WHERE id = ?1",
+        [&revision.id],
+    )
+    .expect("operation corruption applies");
+    conn.execute_batch("PRAGMA ignore_check_constraints = 0;")
+        .expect("CHECK bypass disables");
+    assert!(matches!(
+        get_revision(&conn, &revision.id),
+        Err(RevisionError::Member { column: "op", found }) if found == "chapter"
+    ));
 }

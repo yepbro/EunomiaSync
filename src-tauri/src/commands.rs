@@ -4238,8 +4238,9 @@ pub(crate) struct LibraryVariantEntry {
 }
 
 /// One project label of an instruction row (LIB-001): the chip's own
-/// facts plus which variant the assignment names — the acceptance
-/// criterion's pair (labels match assignments).
+/// facts plus which variant the assignment names, or `None` for a
+/// custom-text cell — the acceptance criterion's pair (labels match
+/// assignments).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub(crate) struct ProjectLabelEntry {
     /// The project's id — the identity the matrix column and the
@@ -4252,9 +4253,10 @@ pub(crate) struct ProjectLabelEntry {
     pub(crate) label: String,
     /// The palette member (DB-040) the chip renders.
     pub(crate) color: String,
-    /// The assigned variant's id (D-02: one variant of one
-    /// instruction per project) — the matrix cell's own value.
-    pub(crate) variant_id: String,
+    /// The assigned variant's id, or `None` when this project carries
+    /// per-project custom text (MAIN-007). D-02 still allows only one
+    /// assignment target per project/instruction pair.
+    pub(crate) variant_id: Option<String>,
 }
 
 /// A heading's tree row (§2 "Section heading", LIB-030).
@@ -4417,7 +4419,12 @@ fn assemble_library_tree(read: LibraryRead) -> Vec<LibraryTreeItem> {
                 name: project.name.clone(),
                 label: project.label.clone(),
                 color: project.color.clone(),
-                variant_id: assignment.variant_id.clone(),
+                variant_id: match &assignment.target {
+                    eunomia_store::library::AssignmentTarget::Variant(variant_id) => {
+                        Some(variant_id.clone())
+                    }
+                    eunomia_store::library::AssignmentTarget::Custom(_) => None,
+                },
             });
     }
     // The LIB-032 skip walk over the SERVED items: the store rows
