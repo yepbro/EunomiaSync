@@ -23657,3 +23657,13 @@ format:check` (after prettier restored the one blank line between
 D-193's tail and this entry that the conflict resolution had joined);
 `pnpm run lint`; `pnpm run typecheck`. Everything folds into the
 single T-108 commit; no push, merge or board operation.
+
+Addendum (2026-11-25, post-merge): the task's follow-ups are routed —
+the mock's unavailable-verdict divergence is carded on the board (one
+INBOX card, no T-number until the owner's triage), and the
+manual-exclusion deletion choice for the restore is pinned as a
+comment on T-109's own card, where the future task's decision record
+must own it (the round-2 P3-6 note). The cards are the tracking unit;
+this line is the D-record duplicate the board rule asks for. Written
+as a service commit in main after the merge — md-only, no suites
+under the md-only regime; prettier and the pre-commit hook gate it.
