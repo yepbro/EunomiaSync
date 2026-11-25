@@ -678,7 +678,10 @@ body {
 }
 
 .proj-line .col-menu-btn {
-  margin-inline-start: 3px;
+  /* The "⋮" hugs the right edge of the header cell, away from the
+     color/label/edit cluster (margin-inline-start: auto consumes the
+     free width of the flex line) */
+  margin-inline-start: auto;
 }
 
 /* ----- Matrix cells (MAIN-001…005: four states, shape-based, NFR-020) --- */
