@@ -23220,3 +23220,14 @@ Solution (the CI-fix service commit, referencing T-331):
    The scheme's residual exposure (a future same-label pair plus one
    clock tick) stays open as a board follow-up: a shared helper or a
    per-process counter would close the class, not the instance.
+
+Addendum (2026-11-25, post-merge): both follow-ups are carded on the
+board — two INBOX cards, no T-numbers until the owner's triage: the
+doc-test ruling's encoding into the standing local check lists (the
+executor may not edit AGENTS.local.md, so the ruling lives here until
+the owner writes it into the discipline) and the temp-dir label
+collision class (the shared helper or per-process counter that would
+close it structurally). The cards are the tracking unit; this line is
+the D-record duplicate the board rule asks for. Written as a service
+commit in main after the merge — md-only, no suites under the md-only
+regime; prettier and the pre-commit hook gate it.
