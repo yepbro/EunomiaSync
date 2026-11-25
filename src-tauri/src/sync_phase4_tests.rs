@@ -4,8 +4,9 @@
 //! The suite drives the phase the way production reaches it —
 //! [`sync_phase4::run`] over a real phase-3 outcome produced by the
 //! full [`sync_phase0::run`] + [`sync_phase1::run`] +
-//! [`sync_phase2::run`] + [`sync_phase3::run`] chain (§9.4's own
-//! order) — against REAL project folders in a temp data root, so the
+//! [`sync_phase2::run_with_abort_clock`] + [`sync_phase3::run`] chain
+//! (§9.4's own order) — against REAL project folders in a temp data
+//! root, so the
 //! retention sweep answers over real `.bak` files phase 2 itself
 //! copied. The `state://dirty` seam is injected as a counting
 //! closure (the phase-2/3 injector pattern over an async seam); the
@@ -275,12 +276,13 @@ fn chain_through_phase3(
         SystemTime::now(),
     ))
     .expect("phase 1 must pass");
-    tauri::async_runtime::block_on(sync_phase2::run(
+    tauri::async_runtime::block_on(sync_phase2::run_with_abort_clock(
         app.handle(),
         &phase1,
         data_dir,
         eunomia_fs::backup::backup_target_file,
         fixed_now(),
+        jiff::Timestamp::now,
     ))
     .expect("phase 2 must succeed over the healthy fixtures");
     let phase3 = tauri::async_runtime::block_on(sync_phase3::run(
@@ -969,12 +971,13 @@ fn a_run_where_nobody_was_written_or_unchanged_fails() {
         SystemTime::now(),
     ))
     .expect("phase 1 must pass");
-    tauri::async_runtime::block_on(sync_phase2::run(
+    tauri::async_runtime::block_on(sync_phase2::run_with_abort_clock(
         app.handle(),
         &phase1,
         temp.path(),
         eunomia_fs::backup::backup_target_file,
         fixed_now(),
+        jiff::Timestamp::now,
     ))
     .expect("phase 2 must succeed");
     let refusing_write = |_target: &Path, _contents: &[u8]| {

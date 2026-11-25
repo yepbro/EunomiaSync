@@ -315,6 +315,39 @@ where
     R: Runtime,
     S: FnOnce() -> Result<u64, FreeSpaceError> + Send + 'static,
 {
+    run_with_abort_clock(app, phase0, free_space, now, eunomia_store::values::now_utc).await
+}
+
+/// [`run`] with the abort's clock injected — the seam T-346 added,
+/// the [`sync_phase2::run_with_abort_clock`] shape over phase 1's own
+/// stamp type.
+///
+/// `abort_clock` answers the ABORT's instant, in the DB-002 spelling
+/// (phase 1's abort writes `values::now_utc()` directly — the string
+/// is the phase's native stamp type, no jiff conversion anywhere in
+/// it). It is consulted at most once, on the free-space abort path
+/// only, right before the verdict transaction — the moment the row
+/// goes terminal (the phase-2 abort's and the command's `stop_run`'s
+/// posture, D-185's semantics). The read point is documented, not
+/// pinned: the abort has no side effect before the stamp for a
+/// second clock observation to discriminate (phase 2's read-point pin
+/// uses the swept copy — phase 1 has no sweep), and a `FnOnce` clock
+/// answers once.
+///
+/// # Errors
+///
+/// [`run`]'s.
+pub(crate) async fn run_with_abort_clock<R, S>(
+    app: &AppHandle<R>,
+    phase0: &Phase0Outcome,
+    free_space: S,
+    now: SystemTime,
+    abort_clock: impl FnOnce() -> String,
+) -> Result<Phase1Outcome, AppError>
+where
+    R: Runtime,
+    S: FnOnce() -> Result<u64, FreeSpaceError> + Send + 'static,
+{
     let database = managed_db(app)?;
 
     // Step A — one read transaction: `sync.skip_identical` and each
@@ -434,9 +467,11 @@ where
         // verdict with class-only numbers, then the caller hears the
         // typed envelope. A failed probe (`ProbeFailed`, Windows'
         // `ProbeUnavailable`) is deliberately NOT this arm — the
-        // module docs' proceed ruling.
+        // module docs' proceed ruling. The stamp is the ABORT's own
+        // instant (D-185's semantics, T-346's seam): read right
+        // before the verdict transaction, never derived from `now`.
         let numbers = format!("free {free} bytes, required {required} bytes");
-        let finished_at = eunomia_store::values::now_utc();
+        let finished_at = abort_clock();
         let abort_details = numbers.clone();
         let abort_run_id = phase0.run.id.clone();
         database

@@ -21617,6 +21617,14 @@ exit codes were taken on the brief's word, not re-executed — so the
 four checks were run once more on the final amended tree after this
 addendum (a docs-only amend; all exit 0).
 
+Supersession addendum (dated, the D-132 shape): the reading "`run` …
+becomes the production entry" is superseded by D-197 (T-346,
+2026-11-24) — the command now supplies its `SyncRunSeams.abort_clock`
+to `run_with_abort_clock` directly, the wrapping `run` is deleted,
+and the three follow-ups above (the command-level clock seam, the
+executable MAIN-027 characterization pin, the phase-1 abort oracle)
+are delivered by the same entry; D-197 records the readings.
+
 ### D-186 — T-322: the database session tail is one shared function (`start_database_session`) run by the `setup` hook and by the recovery commands, the two service buses parked in a managed `StateServices` slot until a database is published, and the start spent exactly once per session — 2026-11-23
 
 Problem: P1-1 of the 2026-11-23 project review
@@ -23764,4 +23772,76 @@ cargo clippy -p eunomia-sync --all-targets -- -D warnings`; targeted
 eslint + targeted vitest over the mock chain; the full suite runs once
 after the flash batch (owner instruction). One review round.
 
-> > > > > > > 933de44 (feat(scan): scan_commit answers a typed partial success and lifts exclusions (T-344))
+### D-197 — T-346: the abort's clock becomes a command-level seam (`SyncRunSeams.abort_clock`), an interrupted run's non-movement of MAIN-027 is an executable pin, and the phase-1 abort gets a real oracle — 2026-11-24
+
+Problem: T-325's follow-up (the card, triaged 2026-11-24, owner
+ruling variant 1 — all three points closed in one task): (1) a
+pipeline-level abort test with a measurable pause needed a clock seam
+on the COMMAND (`sync_run_with`), the zone T-325 froze then being
+merged; (2) "an interrupted run does not move MAIN-027" was pinned
+only by grep-verification, never executed; (3) phase 1's abort reads
+its clock correctly but its test asserted only
+`finished_at.is_some()` — no oracle for the value.
+
+Readings chosen (Rule 1, recorded before implementation):
+
+- **The seam sits in `SyncRunSeams`, typed like its siblings.**
+  `abort_clock: AbortClock`,
+  `Arc<dyn Fn() -> jiff::Timestamp + Send + Sync>`, production
+  `jiff::Timestamp::now` — the same instant family phase 2's own
+  abort parameter uses, so one type answers for both consumers. The
+  command feeds it to the abort paths it drives ITSELF: the D-25
+  gate's stop, the cancel checkpoint's stop (both through
+  `stop_run`, whose signature gains the caller-supplied
+  `finished_at` stamp), and phase 2's abort (`run_with_abort_clock`
+  instead of the wrapping `run`). The post-phase-0 `Err` wrapper
+  (`pipeline_refusal`/`stop_run_if_running`) keeps the real clock:
+  it is the best-effort corpse cleanup on a path whose FIRST error
+  is the answer — no test measures that instant, and its semantics
+  (the abort's own instant, D-185) stay true with the real clock.
+  The conversion for `stop_run`'s stamp reuses phase 2's
+  `db002_stamp`, now `pub(crate)` — the fourth private copy the
+  command would otherwise have grown.
+- **The characterization pin is pipeline-level through the cancel
+  checkpoint.** Run 1 succeeds (production seams); run 2 enters with
+  a PRE-LATCHED cancel token — steps 1–3 consult nothing, step 4 is
+  the one check point, so the pre-latch is the deterministic way to
+  reach it — and `abort_clock` answering a FIXED later instant. The
+  assertions: the run row is `aborted` with `finished_at` equal to
+  the seam's instant in the DB-002 spelling (the measurable pause,
+  deterministic — the abort's own instant, D-185's semantics now
+  observable through the command), `last_success_finished_at`
+  (MAIN-027's derived read, §9.4 phase 4 step 4) is UNMOVED at run
+  1's stamp, and the project's `last_synced_at` is unmoved (OUT-020's
+  aborted half).
+- **Phase 1's oracle is a clock parameter, the phase-2 shape.**
+  `sync_phase1::run_with_abort_clock(app, phase0, free_probe, now,
+abort_clock)` with `abort_clock: impl FnOnce() -> String` — the
+  DB-002 spelling, phase 1's native stamp type (its abort writes
+  `values::now_utc()` directly, no jiff conversion anywhere in the
+  phase); `run` wraps it with the real clock. The upgraded shortage
+  battery drives the twin with a FIXED stamp and asserts
+  `finished_at ==` that stamp exactly — the oracle the `is_some()`
+  assertion lacked. The read POINT (after the probe, before the
+  verdict transaction) stays documented, not pinned: phase 1's abort
+  has no side effect before the stamp for a two-instant clock to
+  discriminate (phase 2's read-point pin uses the swept copy — phase
+  1 has no sweep), and a `FnOnce` clock answers once.
+
+Honest boundaries: the D-25 gate and the cancel checkpoint are the
+only command-driven aborts the seam reaches in this task's tests; the
+phase-2 abort through the command inherits the seam by construction
+(the same `Arc`), but no pipeline-level test injects a failing copy
+AND a fixed clock together — phase 2's own suite pins that abort's
+clock semantics. The seam's construction sites: the pipeline suite's
+struct literal and SIX struct literals in `ipc_tests.rs` (all taking
+the production clock beside their injected backup/write arms) — the
+compiler found the six after a wrong "grep-checked, no sibling
+sites" draft claim, and grep then confirmed the census.
+
+Checks: `CARGO_BUILD_JOBS=2 cargo fmt --check`; clippy
+`-p eunomia-sync --all-targets -- -D warnings`; targeted nextest
+`sync_pipeline_tests sync_phase1_tests`; mutation checks recorded in
+the task report. One review round.
+
+> > > > > > > bd29d7a (test(sync): the abort's clock becomes a command-level seam; MAIN-027's immovability under abort pinned; phase 1's abort gets an oracle (T-346))

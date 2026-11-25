@@ -98,6 +98,8 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, Manager, Runtime};
 
+use jiff::Timestamp;
+
 use crate::availability;
 use crate::data_dirs;
 use crate::db::{self, Db};
@@ -292,13 +294,12 @@ async fn run_recovery<R: Runtime>(app: &AppHandle<R>, operation: Recovery) -> Re
         // database go?" trail in the log (the facade is usable from a
         // blocking thread; tracing is global).
         let preserved = match &operation {
-            Recovery::Recreate => recovery::recreate_files(&data_dir, jiff::Timestamp::now())?,
-            Recovery::Restore { backup_name } => recovery::restore_files(
-                &data_dir,
-                backup_name,
-                jiff::Timestamp::now(),
-                |preserved| logging::recovery_preserved(&preserved.from, &preserved.to),
-            )?,
+            Recovery::Recreate => recovery::recreate_files(&data_dir, Timestamp::now())?,
+            Recovery::Restore { backup_name } => {
+                recovery::restore_files(&data_dir, backup_name, Timestamp::now(), |preserved| {
+                    logging::recovery_preserved(&preserved.from, &preserved.to)
+                })?
+            }
         };
         if let Recovery::Recreate = &operation
             && let Some(preserved) = &preserved
@@ -1008,6 +1009,18 @@ pub(crate) struct SyncRunSeams {
     /// Phase 3's §9.5 write operation — production
     /// [`sync_phase3::production_write`].
     pub(crate) write: WriteOp,
+    /// The ABORT's clock (D-197, the command-level shape of D-185's
+    /// semantics): consulted at most once per run, on the abort paths
+    /// the command drives ITSELF — the D-25 gate's stop and the cancel
+    /// checkpoint's stop (both through [`stop_run`]) and phase 2's
+    /// abort ([`sync_phase2::run_with_abort_clock`]) — answering the
+    /// instant the run row goes terminal. Production is the real
+    /// clock; the tests answer a fixed instant, which makes the
+    /// abort's stamp an oracle instead of a presence check. The
+    /// post-phase-0 `Err` wrapper (`pipeline_refusal`) keeps the real
+    /// clock: it is the best-effort corpse cleanup on a path whose
+    /// FIRST error is the answer.
+    pub(crate) abort_clock: AbortClock,
 }
 
 /// Phase 2's injected copy operation (the `SyncRunSeams::backup` arm).
@@ -1018,12 +1031,19 @@ type BackupOp = Arc<dyn Fn(&BackupTarget<'_>) -> Result<BackupOutcome, BackupErr
 /// per-project blocking closures.
 type WriteOp = Arc<dyn Fn(&Path, &[u8]) -> Result<WrittenFile, AtomicWriteError> + Send + Sync>;
 
+/// The abort clock (the `SyncRunSeams::abort_clock` arm) — `Sync` for
+/// the same structural reason as the other two arms: the seam struct
+/// crosses the command's await points whole.
+type AbortClock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
+
 impl SyncRunSeams {
-    /// The production seams over the real `eunomia-fs` operations.
+    /// The production seams: the real `eunomia-fs` operations and the
+    /// real clock for the abort's instant.
     pub(crate) fn production() -> Self {
         Self {
             backup: Arc::new(eunomia_fs::backup::backup_target_file),
             write: Arc::new(crate::sync_phase3::production_write),
+            abort_clock: Arc::new(Timestamp::now),
         }
     }
 }
@@ -1223,6 +1243,7 @@ pub(crate) async fn sync_run_with<R: Runtime>(
                 "awaiting the empty-build confirmation for {} project(s) (D-25)",
                 confirmation.len()
             ),
+            crate::sync_phase2::db002_stamp((seams.abort_clock)()),
         )
         .await?;
         logging::sync_run_aborted("awaiting the empty-build confirmation");
@@ -1242,6 +1263,7 @@ pub(crate) async fn sync_run_with<R: Runtime>(
             &run_id,
             "",
             "cancelled by the user before the backups",
+            crate::sync_phase2::db002_stamp((seams.abort_clock)()),
         )
         .await?;
         logging::sync_run_aborted("cancelled by the user before the backups");
@@ -1250,13 +1272,21 @@ pub(crate) async fn sync_run_with<R: Runtime>(
     }
 
     // Step 5 — phases 2 → 3 → 4, each refusing through the wrapper.
+    // Phase 2 gets the SAME abort clock as the command's own stops
+    // (D-197): the D-25 gate's stop, this cancel checkpoint and the
+    // backup abort — the three abort paths the command drives itself —
+    // all answer the one seam, so an interrupted run's stamp is one
+    // injectable fact at any of them. The backup instant stays the
+    // real clock — it is the run's own instant, not the seam's.
     let backup = Arc::clone(&seams.backup);
-    if let Err(error) = sync_phase2::run(
+    let abort_clock = Arc::clone(&seams.abort_clock);
+    if let Err(error) = sync_phase2::run_with_abort_clock(
         &app,
         &phase1,
         &data_dir,
         move |target| backup(target),
-        jiff::Timestamp::now(),
+        Timestamp::now(),
+        move || abort_clock(),
     )
     .await
     {
@@ -1269,7 +1299,7 @@ pub(crate) async fn sync_run_with<R: Runtime>(
         &phase1,
         move |target, contents| write(target, contents),
         eunomia_core::marker_clock::now_marker_clock,
-        jiff::Timestamp::now(),
+        Timestamp::now(),
     )
     .await
     {
@@ -1308,20 +1338,13 @@ pub(crate) async fn sync_run_with<R: Runtime>(
         let app = app.clone();
         async move { crate::sync_phase4::production_dirty(&app).await }
     };
-    let phase4 = match sync_phase4::run(
-        &app,
-        &phase3,
-        &data_dir,
-        jiff::Timestamp::now(),
-        dirty_seam,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            return Err(pipeline_refusal(&app, &run_id, "the finish", error).await);
-        }
-    };
+    let phase4 =
+        match sync_phase4::run(&app, &phase3, &data_dir, Timestamp::now(), dirty_seam).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Err(pipeline_refusal(&app, &run_id, "the finish", error).await);
+            }
+        };
 
     // §9.4 phase 4 step 5's reset happens HERE, at the run's own end:
     // the guard leaves the pipeline before the never-fatal aftermath
@@ -1412,8 +1435,10 @@ fn wire_count(count: i64) -> i32 {
     i32::try_from(count).expect("a run's project count fits the wire's i32")
 }
 
-/// Writes a user-shaped stop's terminal row: `aborted` with the DB-002
-/// now and a class-only details line. The `code` is the §10 literal of
+/// Writes a user-shaped stop's terminal row: `aborted` with the
+/// caller-supplied `finished_at` — the abort clock's answer in the
+/// DB-002 spelling (D-197) — and a class-only details line. The `code`
+/// is the §10 literal of
 /// what stopped the run where one exists (the P3-4 wrapper passes the
 /// error's own code); the two user-shaped stops — the D-25 gate, the
 /// cancel point — are decisions, not §10 situations, and pass the
@@ -1426,11 +1451,11 @@ async fn stop_run<R: Runtime>(
     run_id: &str,
     code: &str,
     details: &str,
+    finished_at: String,
 ) -> Result<(), AppError> {
     let run_id = run_id.to_owned();
     let code = code.to_owned();
     let details = details.to_owned();
-    let finished_at = eunomia_store::values::now_utc();
     managed_db(app)?
         .run(move |tx| {
             abort_run(tx, &run_id, &finished_at, &code, &details)

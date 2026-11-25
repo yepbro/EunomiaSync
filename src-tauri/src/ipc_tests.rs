@@ -10618,8 +10618,16 @@ fn sync_run_without_confirm_returns_needs_confirmation_and_changes_nothing() {
     std::fs::write(&second_target, b"other old bytes").expect("the fixture must be writable");
     let webview = main_webview(&app);
 
+    // The abort clock's PRODUCTION default is pinned here (T-346's
+    // round-1 P2-3): this run aborts through the gate stop over the
+    // production seams, so its `finished_at` is the seam's answer —
+    // the real clock, read between this test's own two readings. A
+    // production default that stopped being the real clock (or a stop
+    // that stopped consulting the seam) fails the window.
+    let before = eunomia_store::values::now_utc();
     let outcome = invoke_sync_run(&webview, serde_json::json!(null))
         .expect("the unconfirmed call must answer, not fail");
+    let after = eunomia_store::values::now_utc();
 
     // The answer IS the list, in `sort_order`.
     let crate::commands::SyncRunOutcome::NeedsConfirmation { projects } = &outcome else {
@@ -10662,6 +10670,11 @@ fn sync_run_without_confirm_returns_needs_confirmation_and_changes_nothing() {
     assert_eq!(runs[0].1, "aborted", "the asking run is terminal");
     let row = sync_run_row(&app, &runs[0].0);
     assert_eq!(row.error_code.as_deref(), Some(""));
+    let finished = row.finished_at.as_deref().expect("the stop row is stamped");
+    assert!(
+        before.as_str() <= finished && finished <= after.as_str(),
+        "the abort stamp is the real clock's answer inside this test's window          (the production default of the seam), got {finished:?} outside [{before:?}, {after:?}]"
+    );
     assert!(
         row.details
             .as_deref()
@@ -10777,6 +10790,7 @@ fn a_second_sync_run_while_one_runs_is_refused_with_e_sync_running() {
     let release_rx = std::sync::Mutex::new(release_rx);
     let seams = crate::commands::SyncRunSeams {
         backup: crate::commands::SyncRunSeams::production().backup,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
         write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
             entered_tx
                 .send(target.to_path_buf())
@@ -10862,6 +10876,7 @@ fn the_published_token_reaches_the_live_run_and_no_other() {
     let release_rx = std::sync::Mutex::new(release_rx);
     let seams = crate::commands::SyncRunSeams {
         backup: crate::commands::SyncRunSeams::production().backup,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
         write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
             entered_tx
                 .send(target.to_path_buf())
@@ -11018,6 +11033,7 @@ fn the_slot_clears_and_the_census_stays_zero_on_an_error_abort() {
             })
         }),
         write: crate::commands::SyncRunSeams::production().write,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
     };
 
     let error = run_sync_with(&app, None, crate::commands::CancelToken::new(), seams)
@@ -11308,6 +11324,7 @@ fn a_failing_backup_aborts_the_run_with_the_typed_envelope() {
             })
         }),
         write: crate::commands::SyncRunSeams::production().write,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
     };
 
     let error = run_sync_with(&app, None, crate::commands::CancelToken::new(), seams)
@@ -11388,6 +11405,7 @@ fn a_phase_three_store_failure_aborts_the_run_and_a_retry_converges() {
     let release_rx = std::sync::Mutex::new(release_rx);
     let seams = crate::commands::SyncRunSeams {
         backup: crate::commands::SyncRunSeams::production().backup,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
         write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
             entered_tx
                 .send(target.to_path_buf())
@@ -11587,6 +11605,7 @@ fn the_summary_carries_the_skip_and_failure_codes_by_name() {
     std::fs::write(&alpha_target, b"old bytes").expect("the fixture must be writable");
     let seams = crate::commands::SyncRunSeams {
         backup: crate::commands::SyncRunSeams::production().backup,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
         write: std::sync::Arc::new(|target: &std::path::Path, _contents: &[u8]| {
             Err::<eunomia_fs::atomic::WrittenFile, _>(
                 eunomia_fs::atomic::AtomicWriteError::FileLocked(

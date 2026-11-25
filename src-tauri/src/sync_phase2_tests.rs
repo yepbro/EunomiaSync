@@ -1,11 +1,12 @@
 //! Behavior tests of the sync pipeline's phase 2 (T-115, §9.4 phase
 //! 2, §7.6, §10's `E_BACKUP_FAILED` row, OUT-006/OUT-019).
 //!
-//! The suite drives the phase the way production reaches it —
-//! [`sync_phase2::run`] over a real phase-1 outcome produced by
-//! [`sync_phase0::run`] + [`sync_phase1::run`], and, where a test
-//! fixes the abort's stamp, that entry's clock seam
-//! [`sync_phase2::run_with_abort_clock`] (T-325) — against REAL
+//! The suite drives the phase through its ONE entry —
+//! [`sync_phase2::run_with_abort_clock`] (since T-346 the command
+//! supplies its `SyncRunSeams.abort_clock` to it; the tests pass the
+//! real clock where production spells its own) — over a real phase-1
+//! outcome produced by [`sync_phase0::run`] + [`sync_phase1::run`] —
+//! against REAL
 //! project folders and REAL §5.5 backup trees in a temp root, so
 //! every copy on the success path is `eunomia-fs`'s own verified
 //! operation answering over a real fixture. The failure points of
@@ -39,8 +40,9 @@
 //!   cause, recommendation);
 //! * the aborted run's `finished_at` is the ABORT's own instant — the
 //!   clock seam's answer after the sweep, later than the records'
-//!   `created_at`, never the run's backup instant (T-325); the
-//!   production entry [`sync_phase2::run`] reads the real clock;
+//!   `created_at`, never the run's backup instant (T-325); production
+//!   supplies the real clock through the command's
+//!   `SyncRunSeams.abort_clock` (D-197);
 //! * a deletion the filesystem refuses on the abort path keeps that
 //!   copy's record `ok` over the live file — the never-lying-mark
 //!   rule (D-122's prune posture, applied to `discarded`);
@@ -355,12 +357,13 @@ fn run_phase2(
     phase1: &Phase1Outcome,
     data_dir: &Path,
 ) -> Result<Phase2Outcome, AppError> {
-    tauri::async_runtime::block_on(sync_phase2::run(
+    tauri::async_runtime::block_on(sync_phase2::run_with_abort_clock(
         app.handle(),
         phase1,
         data_dir,
         backup_target_file,
         fixed_now(),
+        jiff::Timestamp::now,
     ))
 }
 
@@ -1109,15 +1112,16 @@ fn an_abort_after_a_measurable_pause_stamps_finished_at_after_created_at() {
 }
 
 #[test]
-fn the_production_entry_stamps_the_abort_with_the_real_clock() {
-    // T-325, the production path: [`sync_phase2::run`] is what the
-    // `sync_run` command calls, and its abort clock is the real one —
-    // the seam behind it is the tests' door, never production's. The
-    // row must therefore carry an instant read between this test's own
-    // two readings of the clock (compared at the DB-002 millisecond,
-    // since the stamp truncates — no sleep is involved), and NOT the
-    // injected backup instant, which is deliberately set far in the
-    // past so the ordering cannot depend on the day the suite runs.
+fn the_seam_is_consulted_and_its_answer_stored_even_over_the_real_clock() {
+    // T-325's surviving half, reworded for the T-346 shape: the entry
+    // takes the abort clock as a parameter, and production passes the
+    // command's own seam (D-197) — this test drives the entry with the
+    // real clock the way the command's default does, and the row must
+    // carry an instant read between this test's own two readings of
+    // the clock (compared at the DB-002 millisecond, since the stamp
+    // truncates — no sleep is involved), and NOT the injected backup
+    // instant, which is deliberately set far in the past so the
+    // ordering cannot depend on the day the suite runs.
     let (temp, app, repos) = phase2_app();
     let (project, repo) = seed_repo_project(
         &app,
@@ -1144,12 +1148,13 @@ fn the_production_entry_stamps_the_abort_with_the_real_clock() {
         .expect("the fixed instant must parse");
 
     let before = jiff::Timestamp::now();
-    let refusal = tauri::async_runtime::block_on(sync_phase2::run(
+    let refusal = tauri::async_runtime::block_on(sync_phase2::run_with_abort_clock(
         app.handle(),
         &phase1,
         temp.path(),
         injection,
         backup_instant,
+        jiff::Timestamp::now,
     ))
     .expect_err("the copy error must abort the run");
     let after = jiff::Timestamp::now();
@@ -1223,12 +1228,13 @@ fn a_size_or_digest_mismatch_aborts_the_run_the_same_way() {
             }),
             None,
         );
-        let refusal = tauri::async_runtime::block_on(sync_phase2::run(
+        let refusal = tauri::async_runtime::block_on(sync_phase2::run_with_abort_clock(
             app.handle(),
             &phase1,
             temp.path(),
             injection,
             fixed_now(),
+            jiff::Timestamp::now,
         ))
         .expect_err(&format!("the {label} mismatch must abort the run"));
 
@@ -1323,12 +1329,13 @@ fn a_deletion_the_filesystem_refuses_keeps_the_records_honest() {
                 .expect("loosening the folder must work");
         })),
     );
-    let refusal = tauri::async_runtime::block_on(sync_phase2::run(
+    let refusal = tauri::async_runtime::block_on(sync_phase2::run_with_abort_clock(
         app.handle(),
         &phase1,
         temp.path(),
         injection,
         fixed_now(),
+        jiff::Timestamp::now,
     ))
     .expect_err("the failure must abort the run");
     assert_eq!(refusal.code, ErrorCode::BackupFailed);
@@ -1548,12 +1555,13 @@ fn the_failed_copies_leftover_bytes_are_swept_with_the_run() {
         },
         None,
     );
-    let refusal = tauri::async_runtime::block_on(sync_phase2::run(
+    let refusal = tauri::async_runtime::block_on(sync_phase2::run_with_abort_clock(
         app.handle(),
         &phase1,
         temp.path(),
         injection,
         fixed_now(),
+        jiff::Timestamp::now,
     ))
     .expect_err("the copy error must abort the run");
     assert_eq!(refusal.code, ErrorCode::BackupFailed);
@@ -1728,12 +1736,13 @@ fn a_copy_vanishing_inside_the_hash_window_is_made_fresh() {
     };
 
     let phase1 = preflight_ok(&app);
-    let outcome = tauri::async_runtime::block_on(sync_phase2::run(
+    let outcome = tauri::async_runtime::block_on(sync_phase2::run_with_abort_clock(
         app.handle(),
         &phase1,
         temp.path(),
         injection,
         fixed_now(),
+        jiff::Timestamp::now,
     ))
     .expect("the vanished copy must not fail the run");
 

@@ -466,11 +466,18 @@ fn a_free_space_shortage_aborts_the_run_with_e_disk_full() {
 
     let phase0 =
         tauri::async_runtime::block_on(sync_phase0::run(app.handle())).expect("phase 0 must run");
-    let refusal = tauri::async_runtime::block_on(sync_phase1::run(
+    // The abort's clock is INJECTED (T-346's seam, the phase-2 shape):
+    // the fixed instant makes the stamp an ORACLE — the aborted row's
+    // `finished_at` must equal it exactly, which both the old
+    // `is_some()` presence check and any derivation from `now` or the
+    // real clock fail.
+    const ABORT_STAMP: &str = "2026-05-01T12:00:00.123Z";
+    let refusal = tauri::async_runtime::block_on(sync_phase1::run_with_abort_clock(
         app.handle(),
         &phase0,
         || Ok(119u64),
         SystemTime::now(),
+        || ABORT_STAMP.to_owned(),
     ))
     .expect_err("the shortage must abort the run");
 
@@ -482,13 +489,17 @@ fn a_free_space_shortage_aborts_the_run_with_e_disk_full() {
         Some("free 119 bytes, required 120 bytes")
     );
 
-    // The run row: aborted with the §10 literal and a finish stamp;
-    // the project row keeps its `not_started` (nothing claims a
-    // write that did not happen); the target is untouched.
+    // The run row: aborted with the §10 literal and THE abort's own
+    // finish stamp; the project row keeps its `not_started` (nothing
+    // claims a write that did not happen); the target is untouched.
     let run = run_row_of(&app, &phase0.run.id);
     assert_eq!(run.status, eunomia_store::sync_runs::SyncRunStatus::Aborted);
     assert_eq!(run.error_code.as_deref(), Some("E_DISK_FULL"));
-    assert!(run.finished_at.is_some(), "the aborted run is finished");
+    assert_eq!(
+        run.finished_at.as_deref(),
+        Some(ABORT_STAMP),
+        "the aborted row is stamped with the abort clock's OWN instant, verbatim"
+    );
     assert!(run.details.as_deref().is_some_and(|d| d.contains("119")));
     let rows = run_rows_of(&app, &phase0.run.id);
     assert_eq!(

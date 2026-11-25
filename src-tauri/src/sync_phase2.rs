@@ -260,34 +260,12 @@ struct NewRecordInput {
     copy_path: Option<PathBuf>,
 }
 
-/// Runs §9.4 phase 2 end to end over phase 1's outcome — the
-/// production entry: [`run_with_abort_clock`] over the real clock.
-///
-/// The five parameters are the `sync_run` command's wiring and they
-/// do not change: the abort's clock is not the command's to hand over
-/// (production's is the real clock and nothing else), so the seam
-/// sits BEHIND this signature and the tests drive
-/// [`run_with_abort_clock`] directly — the command layer's own
-/// `sync_run` / `sync_run_with` shape.
-///
-/// # Errors
-///
-/// [`run_with_abort_clock`]'s.
-pub(crate) async fn run<R, B>(
-    app: &AppHandle<R>,
-    phase1: &Phase1Outcome,
-    data_dir: &Path,
-    backup: B,
-    now: Timestamp,
-) -> Result<Phase2Outcome, AppError>
-where
-    R: Runtime,
-    B: Fn(&BackupTarget<'_>) -> Result<BackupOutcome, BackupError> + Send + 'static,
-{
-    run_with_abort_clock(app, phase1, data_dir, backup, now, Timestamp::now).await
-}
-
-/// [`run`] with the abort's clock injected — the seam T-325 added.
+/// Runs §9.4 phase 2 end to end over phase 1's outcome, with the
+/// abort's clock injected — the seam T-325 added, and since T-346 the
+/// ONE entry: the command hands the run its own `SyncRunSeams.
+/// abort_clock` (D-197), so there is no wrapping production entry
+/// anymore; the tests pass the real clock (`Timestamp::now`) where
+/// production used to spell it.
 ///
 /// One read transaction (project facts + dedup digests), the copy
 /// loop on the blocking pool through the injected `backup`
@@ -809,8 +787,12 @@ fn size_bytes(size: u64) -> i64 {
 /// `values::now_utc` spelling (`%Y-%m-%dT%H:%M:%S%.3fZ`, truncating),
 /// mirrored here because the store helper reads the real clock and
 /// this module's contract is the injected instant (D-061). Pinned by
-/// the phase tests against a fixed timestamp.
-fn db002_stamp(now: Timestamp) -> String {
+/// the phase tests against a fixed timestamp. `pub(crate)` since
+/// D-197: the command's `stop_run` stamps the seam's instant through
+/// it, so the command reuses this spelling instead of growing a
+/// fourth private copy (phases 3 and 4 keep their own — not the
+/// family's shared one, only the command's reuse).
+pub(crate) fn db002_stamp(now: Timestamp) -> String {
     now.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 

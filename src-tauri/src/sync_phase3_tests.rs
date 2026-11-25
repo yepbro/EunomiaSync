@@ -261,12 +261,13 @@ fn preflight_ok(app: &tauri::App<tauri::test::MockRuntime>) -> Phase1Outcome {
 /// Runs phase 2 for real (§9.4's own order before the write) with the
 /// suite's fixed instant.
 fn run_phase2(app: &tauri::App<tauri::test::MockRuntime>, phase1: &Phase1Outcome, data_dir: &Path) {
-    tauri::async_runtime::block_on(sync_phase2::run(
+    tauri::async_runtime::block_on(sync_phase2::run_with_abort_clock(
         app.handle(),
         phase1,
         data_dir,
         eunomia_fs::backup::backup_target_file,
         fixed_now(),
+        jiff::Timestamp::now,
     ))
     .expect("phase 2 must succeed over the healthy fixtures");
 }

@@ -10,7 +10,11 @@
 //! from [`TempRepos`], and the real `state://file-changed` watch
 //! service live — and judges what the spec makes observable: the
 //! target files on disk, the `backups/` tree, the run summary and the
-//! projects' `last_synced_*` cells.
+//! projects' `last_synced_*` cells. The one exception is the abort
+//! characterization test: it drives
+//! [`crate::commands::sync_run_with`] directly, because its subject
+//! (the abort clock's answer, D-197) is exactly the half the
+//! production seams spell as the real clock.
 //!
 //! # The oracles are the spec's literals
 //!
@@ -38,6 +42,7 @@
 //! | `library_operations_change_no_file_until_the_next_sync` | OUT-011, OUT-012, DoD 7, MAIN-011, OUT-010, ALG-020, D-11 |
 //! | `a_second_sync_with_no_changes_leaves_every_file_untouched_and_makes_no_backup` | T-F9, D-24, §9.4 phase 4 step 1, OUT-020 |
 //! | `last_sync_times_follow_only_the_written_and_unchanged_statuses` | DoD 17, OUT-020, DB-024, MAIN-024, MAIN-027 |
+//! | `an_aborted_run_stamps_the_abort_clock_and_never_moves_the_last_success` | §9.4 phase 4 step 4 (MAIN-027), OUT-020, D-131, D-185, D-197 |
 //!
 //! # The "no file observer" clause
 //!
@@ -2092,6 +2097,7 @@ fn last_sync_times_follow_only_the_written_and_unchanged_statuses() {
     let seams = SyncRunSeams {
         backup: Arc::new(eunomia_fs::backup::backup_target_file),
         write: refusing_c,
+        abort_clock: SyncRunSeams::production().abort_clock,
     };
     let second = completed(
         tauri::async_runtime::block_on(crate::commands::sync_run_with(
@@ -2192,4 +2198,103 @@ fn last_sync_times_follow_only_the_written_and_unchanged_statuses() {
         third.finished_at,
         "MAIN-027: the `partial` run does not move the overall time"
     );
+}
+
+#[test]
+fn an_aborted_run_stamps_the_abort_clock_and_never_moves_the_last_success() {
+    // T-346's characterization pin, executable for the first time
+    // (D-197): an interrupted run — the cancel checkpoint's stop, the
+    // D-131 tail shape — stamps its row with the ABORT's OWN instant
+    // (D-185's semantics, now observable through the command), and
+    // MAIN-027's derived read (§9.4 phase 4 step 4: the last `success`
+    // run's `finished_at`) is UNMOVED, as is the project's OUT-020
+    // stamp: nothing about an aborted run claims a sync.
+    //
+    // The seam makes the pause MEASURABLE without a sleep: the abort
+    // clock answers a fixed instant far from the first run's, so a
+    // stamp derived from the run's own clock, from the real clock, or
+    // absent entirely all fail the equality.
+    let (world, _library, _events) = three_scheme_world(
+        BaseName::AgentsMd,
+        BaseName::ClaudeMd,
+        BaseName::AgentsMd,
+        Some(B_OLD_BLOCK),
+    );
+
+    // Run 1 — success: MAIN-027's baseline is this run's own stamp.
+    // (The scheme-B target is fenced in by hand — `Some(B_OLD_BLOCK)` —
+    // so nothing skips and the first run IS a success.)
+    let first = run_sync(&world, None);
+    assert_eq!(first.verdict, "success");
+    let baseline = last_success(&world);
+    assert_eq!(
+        baseline, first.finished_at,
+        "the success run IS the overall time (§9.4 phase 4 step 4)"
+    );
+    // A WRITTEN project is stamped by phase 3 with its own instant —
+    // the run stamp is phase 4's — so the house window helper, not an
+    // equality. Every project's pair is captured per index: the build
+    // hashes differ per project, so no single snapshot can stand for
+    // all three.
+    let stamped: Vec<Stamps> = (0..3).map(|index| stamps(&world, index)).collect();
+    assert_stamped_in_run(
+        stamped[0].0.as_deref(),
+        &first,
+        "the written scheme-A project",
+    );
+
+    // Run 2 — the PRE-LATCHED token: steps 1–3 consult nothing, step 4
+    // is the one check point, so the stop lands deterministically
+    // before the backups; no timing, no sleep. The injected instant is
+    // run 1's stamp plus one second: distinct from everything the run
+    // could otherwise produce, and AFTER its own started_at, a state
+    // production could hold.
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let abort_instant = Timestamp::from_str(first.finished_at.as_deref().expect("run 1 finished"))
+        .expect("run 1's stamp parses")
+        + std::time::Duration::from_secs(1);
+    let expected_stamp = abort_instant.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let seams = SyncRunSeams {
+        backup: Arc::new(eunomia_fs::backup::backup_target_file),
+        write: Arc::new(crate::sync_phase3::production_write),
+        abort_clock: Arc::new(move || abort_instant),
+    };
+    let second = completed(
+        tauri::async_runtime::block_on(crate::commands::sync_run_with(
+            world.app.handle().clone(),
+            None,
+            cancel,
+            seams,
+        ))
+        .expect("the aborted run answers Ok: the user asked for this"),
+    );
+
+    assert_eq!(
+        second.verdict, "aborted",
+        "the cancel checkpoint's stop is the row's own verdict"
+    );
+    assert_eq!(
+        second.finished_at.as_deref(),
+        Some(expected_stamp.as_str()),
+        "the aborted row is stamped with the SEAM's instant, verbatim"
+    );
+    assert_eq!(
+        statuses(&second),
+        ["unchanged"; 3],
+        "the D-131 tail: phase 1's verdict rows stay as phase 1 wrote them — nothing \
+         was backed up or written (the backups never started)"
+    );
+    assert_eq!(
+        last_success(&world),
+        baseline,
+        "MAIN-027: an aborted run does not move the overall time"
+    );
+    for (index, before_run) in stamped.iter().enumerate() {
+        assert_eq!(
+            stamps(&world, index),
+            *before_run,
+            "OUT-020: an aborted run leaves project {index}'s sync state alone"
+        );
+    }
 }
