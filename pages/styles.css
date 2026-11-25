@@ -359,6 +359,12 @@ body {
   border-inline-end: 1px solid var(--border);
 }
 
+/* Visible divider between adjacent project column headers: the header
+   clusters (color + label + edit/menu icons) otherwise blend together */
+.matrix thead .c-proj + .c-proj {
+  border-inline-start: 1px solid var(--border-strong);
+}
+
 /* Row hover (sticky cells need a solid background to cover scrolled text) */
 .matrix tbody tr:hover .c-check,
 .matrix tbody tr:hover .c-name,
