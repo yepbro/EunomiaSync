@@ -1542,6 +1542,37 @@ pub(crate) fn project_archive_failed(error: &AppError) {
     );
 }
 
+/// The `project_restore` command failed (T-109, §10's every-error
+/// rule): the `project_archive_failed` shape — the reachable §10
+/// answers are the `E_SYNC_RUNNING` SYS-005 refusal while a sync
+/// holds the global flag (the gate runs first, so the refusal is the
+/// answer whatever the input is), the typed `E_VALIDATION` refusal of
+/// an id no row matches (a stale screen's row), the shared base
+/// classifier's SQL classes (`ProjectsError::Sql` through the row
+/// read, the restore transition and the exclusion deletion,
+/// `StorageError::Sql` through the journal insert — busy exhaustion,
+/// a corrupt database, a constraint abort), the store fallback of a
+/// corrupt projects/exclusions cell (`ProjectsCorrupt`), the honest
+/// no-database fallback, and the never-fatal watch-refresh refusal
+/// (a degraded pass warns through
+/// [`file_watch_mutation_refresh_degraded`], never this line — the
+/// restore stands). A successful restore is the journal's own
+/// `project.restored` entry, written inside the operation's
+/// transaction (D-051/D-205) — never duplicated into the file log
+/// (the info+user+ok unmirrored shape); the verified convergence (a
+/// re-send on an already-active row) writes nothing and logs nothing.
+pub(crate) fn project_restore_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::projects",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "restoring a project failed"
+    );
+}
+
 /// The `project_update` command failed (T-106, §10's every-error
 /// rule): the `project_archive_failed` shape — the reachable §10
 /// answers are the `E_SYNC_RUNNING` SYS-005 refusal while a sync
@@ -4385,6 +4416,60 @@ mod tests {
                 && log
                     .contains("os_message=Some(\"a stored state cell is outside its vocabulary\")"),
             "the corrupt-cell line carries the corrupt-cell diagnostic, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_project_restore_failure_line_carries_the_code_and_payload() {
+        // The restore command's §10 edge (T-109), in the reorder pin
+        // shape (round 1's P3-5 — the facet gets its own pin, the
+        // shape was never in doubt): the reachable classes are the
+        // typed refusal of a stale screen's id (E_VALIDATION with the
+        // field/value/reason params) and the honest no-database
+        // fallback (E_DB_LOCKED with the `NoDatabase` diagnostic). A
+        // successful restore is the journal entry itself and the
+        // converging re-send writes nothing — both halves structural
+        // (no tracing call exists on those paths), and the
+        // never-fatal watch-refresh refusal warns through
+        // `file_watch_mutation_refresh_degraded`, never this line.
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut stale_id = AppError::new(crate::errors::ErrorCode::Validation);
+        stale_id
+            .params
+            .insert("field".to_owned(), "project_id".to_owned());
+        stale_id
+            .params
+            .insert("value".to_owned(), "no-such-row".to_owned());
+        stale_id
+            .params
+            .insert("reason".to_owned(), "no project has this id".to_owned());
+        let mut no_database = AppError::new(crate::errors::ErrorCode::DbLocked);
+        no_database.details = Some(crate::errors::ErrorDetails {
+            os_code: None,
+            os_kind: Some("NoDatabase".to_owned()),
+            os_message: Some("no database is running (recovery mode?)".to_owned()),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            project_restore_failed(&stale_id);
+            project_restore_failed(&no_database);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("restoring a project failed")
+                && log.contains("code=\"E_VALIDATION\"")
+                && log.contains("project_id")
+                && log.contains("no project has this id"),
+            "the refusal line carries its code literal and the field, got: {log}"
+        );
+        assert!(
+            log.contains("code=\"E_DB_LOCKED\"") && log.contains("os_kind=Some(\"NoDatabase\")"),
+            "the recovery-mode line carries the fallback code and diagnostic, got: {log}"
         );
         drop(temp);
     }

@@ -196,6 +196,20 @@ pub(crate) mod assignments;
 // no file I/O at all, and the SYS-005 gate first.
 pub(crate) mod project_archive;
 
+// The Projects module's `project_restore` command (spec §7.10, T-109;
+// PRJ-013…018, §6.4, D-10, DB-015, SYS-005, SYS-007; the contract is
+// D-205 — the D-194 mirror): one id-addressed transaction that
+// restores the row, deletes the exclusion row keyed by the row's
+// `path_key` (reason-agnostic — a pre-existing manual exclusion the
+// archive left in place goes too) and the single `project.restored`
+// journal entry; the assignments and the stored sync hash stay where
+// the archive kept them, no target file is written (the dirty
+// verdict is the recalculation service's row-decidable answer), and
+// after the committed transition ONE awaited watch pass through the
+// bounded mutation seam (never-fatal aftermath) returns the row to
+// the watched set. The SYS-005 gate first.
+pub(crate) mod project_restore;
+
 // The Projects module's `project_update` command (spec §7.10, T-106
 // and T-107; PRJ-008/009/011/021, PRJ-012, §6.9, §7.5, SYS-005,
 // SYS-007, LOG-001…004; the contracts are D-201 and D-204): one
@@ -257,6 +271,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // module's `dialog_pick_folder` (T-073), the Projects
         // module's `project_add_manual` (T-074), the Projects
         // module's `project_archive` (T-108, D-194), the Projects
+        // module's `project_restore` (T-109, D-205), the Projects
         // module's `project_update` (T-106, D-201), the Projects
         // module's `exclusions_list`/`exclusion_remove` (T-078), the
         // Projects module's `projects_reorder` (T-080), the
@@ -287,6 +302,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::markdown_preview,
             commands::project_add_manual::<tauri::Wry>,
             project_archive::project_archive::<tauri::Wry>,
+            project_restore::project_restore::<tauri::Wry>,
             project_update::project_update::<tauri::Wry>,
             commands::projects_list::<tauri::Wry>,
             commands::projects_reorder::<tauri::Wry>,
@@ -1008,6 +1024,9 @@ mod assignments_tests;
 
 #[cfg(test)]
 mod project_archive_tests;
+
+#[cfg(test)]
+mod project_restore_tests;
 
 #[cfg(test)]
 mod project_update_tests;

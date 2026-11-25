@@ -47,6 +47,7 @@ describe('the mock command surface', () => {
       'markdownPreview',
       'projectAddManual',
       'projectArchive',
+      'projectRestore',
       'projectUpdate',
       'projectsList',
       'projectsReorder',

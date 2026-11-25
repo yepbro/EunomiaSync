@@ -793,6 +793,125 @@ describe('projectArchive', () => {
   })
 })
 
+describe('projectRestore', () => {
+  it('restores an archived row, removes the exclusion, and journals it', async () => {
+    // T-109/D-205's happy path over the mock store: the row flips
+    // back (readable through the include flag), the archive-born
+    // exclusion row is gone (readable through the screen's own list),
+    // and the one journal entry lands where `activityList` reads it.
+    // The round trip is the user's own: archive first (the real
+    // command's twin), then restore.
+    const target = mockState().projects.find((row) => row.state === 'active')
+    expect(target, 'an active fixture row to archive').toBeDefined()
+    if (!target) return
+    await commands.projectArchive(target.id)
+    expect(
+      (await commands.exclusionsList()).some((row) => row.path_key === pathKeyOf(target.path)),
+      'the archive wrote the exclusion row',
+    ).toBe(true)
+
+    await expect(commands.projectRestore(target.id)).resolves.toBeNull()
+
+    const columns = await commands.projectsList(true)
+    expect(columns.find((column) => column.id === target.id)?.state).toBe('active')
+    expect(
+      (await commands.exclusionsList()).filter((row) => row.path_key === pathKeyOf(target.path)),
+    ).toHaveLength(0)
+    const page = await commands.activityList({ actions: ['project.restored'] })
+    const entry = page.entries.find((e) => e.entity_id === target.id)
+    expect(entry, 'one project.restored entry naming the row').toBeDefined()
+    expect(entry?.visibility).toBe('user')
+    expect(entry?.result).toBe('ok')
+    expect(entry?.project_id).toBe(target.id)
+  })
+
+  it('deletes a pre-existing manual exclusion the archive left in place', async () => {
+    // The pinned owner ruling (T-108's card comment, D-194 round-2
+    // P3-6, D-205 point 1): the archive converges over a manual
+    // exclusion of the same path key and leaves it; the restore
+    // deletes it — reason-agnostic.
+    const target = mockState().projects.find((row) => row.state === 'active')
+    expect(target, 'an active fixture row to archive').toBeDefined()
+    if (!target) return
+    const key = pathKeyOf(target.path)
+    mockState().exclusions.push({
+      id: 'pre-existing-manual-exclusion',
+      path: target.path,
+      path_key: key,
+      reason: 'manual',
+      created_at: '2026-01-01T00:00:00.000Z',
+    })
+    await commands.projectArchive(target.id)
+
+    await expect(commands.projectRestore(target.id)).resolves.toBeNull()
+
+    expect((await commands.exclusionsList()).filter((row) => row.path_key === key)).toHaveLength(0)
+  })
+
+  it('answers a re-send on an active row as a no-op, journaling nothing', async () => {
+    // D-205 point 3, the D-194 point-2 mirror: the converging re-send
+    // writes and journals nothing, and does not churn an exclusion
+    // that appeared after the first restore.
+    const target = mockState().projects.find((row) => row.state === 'archived')
+    expect(target, 'an archived fixture row to restore').toBeDefined()
+    if (!target) return
+    await expect(commands.projectRestore(target.id)).resolves.toBeNull()
+    const journalLength = mockState().activity.length
+    const key = pathKeyOf(target.path)
+    mockState().exclusions.push({
+      id: 'post-restore-exclusion',
+      path: target.path,
+      path_key: key,
+      reason: 'manual',
+      created_at: '2026-02-01T00:00:00.000Z',
+    })
+    const exclusionsAfterFirst = (await commands.exclusionsList()).length
+
+    await expect(commands.projectRestore(target.id)).resolves.toBeNull()
+
+    expect(mockState().activity).toHaveLength(journalLength)
+    expect(await commands.exclusionsList()).toHaveLength(exclusionsAfterFirst)
+    const columns = await commands.projectsList(true)
+    expect(columns.find((column) => column.id === target.id)?.state).toBe('active')
+  })
+
+  it('rejects an unknown id with E_VALIDATION, bounded echo included', async () => {
+    // The loaded fixture world, snapshotted before the act: the
+    // arrays are compared whole after the refusals, so any write the
+    // command wrongly made (not just a length change) reddens.
+    const journalBefore = mockState().activity.map((entry) => ({ ...entry }))
+    const exclusionsBefore = (await commands.exclusionsList()).map((row) => ({ ...row }))
+
+    await expect(commands.projectRestore('no-such-row')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'project_id',
+        value: 'no-such-row',
+        reason: 'no project has this id',
+      },
+    })
+
+    // D-115's cap, pinned at the boundary: an over-long id echoes
+    // truncated with the suffix, never whole (the mock mirrors the
+    // Rust `bounded_echo` the real refusal uses).
+    const longId = 'x'.repeat(70)
+    await expect(commands.projectRestore(longId)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'project_id',
+        value: `${'x'.repeat(64)} (+6 more code points)`,
+        reason: 'no project has this id',
+      },
+    })
+
+    // Nothing was written: the loaded fixture world stands as it was
+    // (the arrays themselves, not just their lengths — a swap would
+    // fail; round 1's P3-2, the mock twin of the Rust-side fix).
+    expect(mockState().activity).toEqual(journalBefore)
+    expect(await commands.exclusionsList()).toEqual(exclusionsBefore)
+  })
+})
+
 describe('projectUpdate', () => {
   /**
    * An active row to edit, straight from the store the command serves.

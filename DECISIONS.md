@@ -24985,3 +24985,264 @@ and the mock twin behind them.
 Re-checked after the wording fix: fmt, clippy `-D warnings`, the
 full nextest suite (1907/1907), doc tests, the export pin, and the
 frontend quartet — all green on real exit codes.
+
+### D-205 — T-109: the `project_restore` command's contract — the exclusion deletion is reason-agnostic (the pinned manual-exclusion ruling), the no-existence arm converges, and double-restore is D-194's converging no-op mirrored — 2026-11-25
+
+The card's spec text (PRJ-013…018, §6.4, D-10, DB-015, SYS-005,
+SYS-007) leaves six points open to more than one reading; the chosen
+readings were written here BEFORE the implementation (the rule-1
+discipline). The command is the D-194 mirror: id-addressed
+(`Result<(), AppError>`, the `project_archive` wire family — §7.10
+names no payload, and the D-10 "Archived projects" screen plus the two
+DB-015 offer carriers that already exist (`project_add_manual`'s
+`archived_duplicate` arm and `scan_commit`'s `"archived"` outcome,
+both naming the row through `existing`) re-read through the landed
+`projects_list` and `exclusions_list`. A new module
+`src-tauri/src/project_restore.rs` + `project_restore_tests.rs` (the
+T-108 shape); `reject_during_sync` first, `managed_db`'s honest
+`NoDatabase`, then ONE `Db::run` transaction (D-037) carrying the
+store's `projects::restore` transition, the exclusion deletion(s) and
+the in-transaction journal insert — commit or roll back together
+(D-051).
+
+1. **The exclusion deletion is keyed by `path_key` and is
+   reason-AGNOSTIC — the pinned owner ruling, recorded, not
+   re-opened.** PRJ-013…018's own words decide the composition:
+   "Restoring … removes its path from the exclusions" names the END
+   STATE, not a row class, so the restore deletes whatever exclusion
+   row holds the row's `path_key` (DB-030's identity, the same key the
+   archive wrote): the archive-born `removed_scanned` row AND a
+   pre-existing `manual` exclusion the archive deliberately left in
+   place (D-194 point 1's convergence — its round-2 P3-6 note: "T-109's
+   `project_restore` will delete that manual row too, silently undoing
+   the user's own exclusion of the path"; the pinned card comment
+   carries the same ruling). The manual row's own reason and date are
+   facts of their own, but the restore half owns this composition: the
+   restored project's path must come back to the scan's discovered
+   set, and a surviving manual row would keep hiding it (D-098's
+   classifier would answer `archived`/`excluded` over a row that is
+   active again). Pinned by a test where a manual exclusion predates
+   the archive and is gone after the restore.
+2. **No exclusion at all: converging, not a refusal.** A row whose
+   exclusion was hand-removed while it was archived (the §6.4
+   physical-delete arm — "the path is found by a scan again") or a
+   manual-born row that never had one restores fine: the removal's end
+   state is already true, the transition and the journal entry are the
+   act. This is D-196's `find_exclusion_by_path_key`-then-delete shape
+   (the lift answers nothing when the find answers `None`) and
+   D-194 point 2's own mirror sentence ("the removal is the user's
+   explicit §6.4 act") read from the restore side: the restore never
+   re-adds what the user removed, and its target state needs no
+   re-add. A refusal here would trap a hand-removed row out of the
+   restore forever — §6.4 assigns no such dead end.
+3. **Double-restore: a converging no-op (D-194 point 2 mirrored).** A
+   re-send on an already-active row answers `Ok(())` with NOTHING
+   written — no journal entry, `updated_at` not restamped (the store's
+   `restore` returns an active row unchanged, its own idempotence
+   rule), no exclusion churn even if an exclusion row with the same
+   `path_key` has since appeared (round 1's P3-6 corrected the
+   builder list: this command's own cycle cannot leave the pair — the
+   restore deletes the row, and the archive writes no exclusion when
+   one already exists — so the reachable builders are a hand-seeded
+   row, a `db_restore_backup` landing a mixed pair, or a manual add
+   over a still-excluded path (`project_add_manual` lifts no
+   exclusion, D-196's boundary); the churn would override a fact the
+   re-send did not own, D-194's own no-override posture). The
+   `assignment_set` precedent: a same-state re-send writes/journals
+   nothing. The stale screen the archived
+   screen becomes when the row was restored elsewhere (DB-015's offer
+   is one carrier) converges instead of erroring — the exact mirror
+   of the archive's already-archived arm, and the OPPOSITE family
+   member from `project_update`'s archived-id refusal (D-201 point 4),
+   which protects a PATCH from wiping a row that left the modal's
+   world: a restore re-send writes nothing the first send did not
+   already write, so there is nothing to protect.
+4. **Unknown id: the typed `E_VALIDATION` refusal naming
+   `project_id`** with the bounded echo (D-115's cap — the
+   `project_archive` arm, `bounded_echo`); nothing was written. This
+   arm is the stale-screen shape regardless of the point-3 reading.
+5. **The watch arm (SYS-007, T-279/D-204): the committed transition
+   awaits ONE full watch pass through the bounded mutation seam.**
+   SYS-007's own sentence — "removed when a project is archived" —
+   read in reverse is the restore's membership half: the row returns
+   to the watched set, the ADD arm's shape (D-144's list: the refresh
+   belongs to the mutation that moves a row INTO the set or moves its
+   verdict inputs), so the committed arm (the row actually transitioned
+   archived → active) awaits ONE full pass through
+   `file_watch::refresh_after_mutation` (D-156 — the same one-liner
+   `project_add_manual` and T-107's arm run; the bounded wait, the
+   never-fatal aftermath, `logging::
+file_watch_mutation_refresh_degraded` on refusal, the save standing)
+   strictly AFTER the transaction — the journal insert stays inside
+   it, the refresh never is. A converging no-op arm runs NO refresh (a
+   pass over a row that did not move is file reads with no observable
+   change, D-201 point 7's own boundary). **The recorded boundary: the
+   archive ran no refresh** (D-194: the leaver exits the set at the
+   next anchor's pass; the card asked for none) — the asymmetry is
+   deliberate and is the add/remove split D-144 itself drew: the ADD
+   side's verdict inputs are the user's fresh concern, the removal is
+   realized by every later pass's active-only re-derivation. The
+   restore is the add side.
+6. **The dirty flag: decided by the row and the service, never
+   written (D-194 point 3 / D-204 point 5 posture).** The command
+   writes NOTHING beyond the row (plus the exclusion deletion and the
+   journal): no `last_synced_hash` churn — the stored hash is the one
+   D-194 point 3 deliberately kept, covering the PRE-archive build
+   configuration, and it stays exactly where the archive left it. The
+   next `recalc_and_emit` pass (the DB-022 commit hook fires on the
+   row change; the tests drive the service directly, T-107's surface)
+   recomputes over the now-ACTIVE row (DB-021 over DB-020): the world
+   unchanged since the last sync answers clean, an assignment that
+   landed while the row was archived (the store's `assign` is
+   state-blind) answers dirty — the DoD pins both halves through the
+   real service and `projects_list`'s `dirty` column. The project is
+   back in the sync set by the store's read (`read_build_snapshot`
+   reads `ListScope::Active` — D-194 point 3's own construction,
+   reversed).
+7. **The journal: ONE `project.restored` entry, no exclusion member.**
+   LOG-001…004's own list puts "restoring projects" in the journal;
+   the closed vocabulary's member is `Action::ProjectRestored` →
+   `"project.restored"` (verified in
+   `crates/eunomia-store/src/action_log.rs`), info/user/ok, entity
+   columns naming the project, `project_id` set, NO details (the
+   `project.archived` shape — the row itself holds the path). The
+   exclusion deletion is NOT journaled separately: D-194 point 4's
+   mirror — this entry, unlike `exclusion_remove`'s, names its object,
+   and the D-10 "Excluded paths" screen re-reads the table through
+   `exclusions_list` (the row's disappearance IS the screen's data).
+   D-196's `scan_commit` journaled its `exclusion.removed` because the
+   lift was that batch's own typed outcome event with the D-119
+   deviation to record; the restore is one PRJ-013…018 act, and the
+   pinned ruling's own word for the manual-row deletion is
+   "silently". The DB-015 offer carriers need no journal of their own
+   either — the restore they invoke is the entry.
+8. **No file WRITES; the watch refresh is the one file-system
+   interaction (D-204 point 6's posture, mirrored).** §6.4's folder
+   guarantee holds through the restore exactly as through the archive:
+   the target file's bytes are the user's own until the next sync; the
+   one deliberate exception to the command's otherwise complete lack
+   of file-system interaction is the point-5 refresh pass, which only
+   READS target files (OUT-011). A dead folder restores fine — no
+   availability probe, no folder check (`projects_list`'s own docs
+   keep the restore path available on an unavailable column's row).
+   Complexity stays trivially stated: one transaction, indexed by-id
+   and by-key store reads/writes.
+
+SYS-005's gate runs as the first act (`reject_during_sync`, before the
+database is resolved — the `project_archive` ordering); recovery mode
+answers the honest `NoDatabase` fallback. The registration makes it
+command #42: `collect_commands!` gains one line, `src/bindings.ts` is
+regenerated through the export pin (`projectRestore: (projectId) =>
+Promise<null>`), the mock twin (`src/ipc/mock/commands.ts`) mirrors
+the command (row flip, the reason-agnostic exclusion deletion, the
+`project.restored` journal, the converging arms, the unknown-id
+refusal with the bounded echo; the `E_SYNC_RUNNING` gate is not
+modelled — the stand-in's own documented limit), `mode.spec` pins the
+42-name surface, `ARCHITECTURE.md`'s module table (alphabetical:
+between `project_archive.rs` and `project_update.rs`) and command
+count sentence ("forty-two") follow, `manual-smoke.md`'s
+registered-command list names it, spec §7.10's command-notes paragraph
+gains the `project_restore` sentence, and `logging.rs` gains
+`project_restore_failed` (the `project_archive_failed` shape) with its
+own facade pin, `the_project_restore_failure_line_carries_the_code_and_payload`
+(the reorder pin's shape; round 1's P3-5 — the facet is pinned, not
+just the family's representative shape, and the archive/update
+siblings remain unpinned as their own follow-ups).
+`commands.rs`'s SYS-005 gate doc and the watch-verdict
+doc's archived-neighborhood sentences gain the command's name where
+they enumerate the mutation commands that exist. The ipc_tests fixture
+comments that name T-109 as future (grep T-109: the add-flow restore
+offer, the scan-verdict trace, the two pre-T-108 "no archive command
+exists" stragglers, and the round-1-fixed "restore is still
+commandless" parenthetical) are made true — comment-only edits, the
+D-194 round-1 P3-2 pattern extended to this task's landing.
+
+**Round-1 review addendum (same task, 2026-11-25; model
+`opencode-go/deepseek-v4.1-flash`, report
+`.opencode/reviews/t109-round1-report.md`: APPROVE, 0×P0/P1/P2,
+6×P3 — all six taken in the first amend).** The round independently
+verified the one-transaction rollback proof, the identity oracle, the
+convergence arms, the watch-seam wiring (one awaited pass after
+commit, never-fatal, gated on the transaction's own bool), the
+row-decidable dirty posture with its clean-baseline control, the
+42-command census on both sides (collect_commands! and mode.spec,
+counted), the mutation groups against the test bodies, and the
+rule-4/5/6/8/9 spot checks. The six P3s and their dispositions:
+
+- _P3-1 (the stale "the future `project_restore`" doc)._ A sixth
+  stale-future claim this task's own sweep missed:
+  `commands.rs`'s `ExistingProject` doc (and its generated copy in
+  `bindings.ts`) still called the restore offer "the future
+  `project_restore`, T-109". Fixed — the sentence now names the
+  command as landed, and `bindings.ts` was regenerated through the
+  export pin (green).
+- _P3-2 (the unknown-id test's "nothing was written" half was
+  vacuous)._ The Rust test asserted empty vectors over a database
+  that never held anything. Fixed — the world now starts LOADED (an
+  archived neighbour with its exclusion row and its journal entry)
+  and the refusal's aftermath asserts the neighbour's row, exclusion
+  and journal entry byte-for-byte; the mock twin's shape assertions
+  compare the whole arrays (`toEqual` over deep-copied snapshots),
+  not just lengths.
+- _P3-3 (the "no separate `exclusion.removed` member" ruling was
+  unpinned)._ The journal counts filtered by `Action`, so an
+  implementation that also inserted an `exclusion.removed` entry
+  would stay green. Fixed — the happy path and the manual-exclusion
+  test also assert the TOTAL journal count (`journal_of(...).len()`)
+  beside the filtered one.
+- _P3-4 (the deletion's scoping was unpinned)._ No world carried a
+  neighbouring exclusion that must survive — a table-wiping or
+  broader-predicate deletion would pass the battery. Fixed — the
+  happy path seeds a `manual` exclusion for an unrelated path key
+  and asserts it survives (the target row alone is gone).
+- _P3-5 (D-205's facade-coverage sentence overstated)._ No test
+  exercised `project_restore_failed`'s own line. Fixed the substance,
+  not the wording: `logging.rs`'s test module gains
+  `the_project_restore_failure_line_carries_the_code_and_payload`
+  (the reorder pin's shape: the stale-id E_VALIDATION refusal and the
+  `NoDatabase` fallback through a real subscriber, the code literal
+  and the message asserted from the read-back log file), and the
+  record's sentence now states the facet is pinned — the archive and
+  update siblings remain unpinned, their own follow-ups.
+- _P3-6 (point 3's builder parenthetical was wrong)._ The
+  "archive-then-restore cycle" cannot build an active-row-with-
+  exclusion pair (the restore deletes the row; the archive writes no
+  exclusion when one exists). Corrected to the reachable builders: a
+  hand-seeded row, a `db_restore_backup` landing a mixed pair, or a
+  manual add over a still-excluded path (`project_add_manual` lifts
+  no exclusion, D-196's boundary).
+
+Two record-only notes from the round's "Questions" section, no
+action: the watch test's oracle cannot distinguish "after commit"
+from "before commit" positionally (the ordering is structural — the
+refresh is gated on the transaction's own `bool` and the closure is
+synchronous, so a pre-commit placement is not expressible), and the
+mock derives the exclusion key with `pathKeyOf(row.path)` because
+`MockProjectRow` carries no stored `path_key` — the twin's
+documented stand-in limit, precedent-consistent.
+
+**Round-2 review addendum (same task, 2026-11-25; model
+`opencode-go/hy4-flash-free`, report
+`.opencode/reviews/t109-round2-report.md`: APPROVE, 0×P0/P1/P2/P3 —
+nothing to fix, the review phase closes after the round-1 amend).**
+The round verified all six round-1 dispositions in place (the stale
+doc gone repo-wide except DECISIONS' own historical records where
+"future task" is accurate, the loaded-world unknown-id test with
+whole-vector assertions, the total journal counts beside the filtered
+ones, the surviving neighbour exclusion, the facade pin over a real
+subscriber with the read-back file, the corrected builder list), then
+independently re-audited the special-focus halves: the twelve-test
+battery mapped one-to-one to the card's criteria with state-changing
+oracles (and the non-wiring tests' 20 ms no-service budget noted as
+implicitly exercising the never-fatal degraded-send path), the
+deletion key derived from the restored row's `path_key` with the
+schema's `path_key UNIQUE` on `project_exclusions` checked
+(migrations/0001_init.sql) so exactly one row can match, the
+watch-refresh boundary (strictly after `Db::run`'s await, gated on
+the transaction's own `committed` bool, warn-only), the one-transaction
+rollback proof, the pinned ruling's record-and-pin agreement, and the
+42-command census on both sides with the five stale fixture comments
+true. Its two carried "Questions" notes are the round-1 addendum's
+own two, unchanged; no new verified argument against any disposition.
+No tree change from this round — the amend that follows folds only
+this addendum into the one commit.

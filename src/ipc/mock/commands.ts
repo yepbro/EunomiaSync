@@ -1590,6 +1590,53 @@ export const mockCommands: IpcCommands = {
   },
 
   /**
+   * `project_restore` (§7.10 Projects module, T-109/D-205): id-addressed —
+   * a stale id is the typed `E_VALIDATION` refusal naming the field, with
+   * nothing changed; a hit flips the row back to `active` (readable
+   * through `projectsList`, the D-10 "Archived projects" screen's own
+   * re-read) and deletes the exclusion row keyed by the row's path key —
+   * REASON-AGNOSTIC (the pinned owner ruling: the archive-born
+   * `removed_scanned` row and a pre-existing `manual` exclusion the
+   * archive left in place both go; the manual twin's deletion is pinned
+   * below), a row whose exclusion was since hand-removed restores fine
+   * (the converging no-existence arm), and the one `project.restored`
+   * journal entry lands where `activityList` reads it. A re-send on an
+   * active row is the real command's converging no-op: nothing changes,
+   * nothing is journaled, no exclusion is churned. The `E_SYNC_RUNNING`
+   * gate is not modelled (the `projectArchive` stand-in's own documented
+   * limit: no flag state exists here), and neither is the watch pass the
+   * committed restore awaits in production (no watcher exists here — the
+   * restore is the mock's whole truth).
+   */
+  async projectRestore(projectId) {
+    const state = mockState()
+    const row = state.projects.find((row) => row.id === projectId)
+    if (!row) {
+      // D-115's cap, the mock twin of the Rust `bounded_echo` the real
+      // refusal uses (commands.rs documents "the mock layer mirrors
+      // the same cap"): an id from the webview is unbounded by
+      // definition, and it must not ride the envelope whole.
+      return rejectWith('E_VALIDATION', 'validation.invalid_value', {
+        field: 'project_id',
+        value: boundedEcho(projectId),
+        reason: 'no project has this id',
+      })
+    }
+    if (row.state === 'active') {
+      return null
+    }
+    row.state = 'active'
+    const key = pathKeyOf(row.path)
+    state.exclusions = state.exclusions.filter((exclusion) => exclusion.path_key !== key)
+    journal('project.restored', {
+      entityType: 'project',
+      entityId: row.id,
+      projectId: row.id,
+    })
+    return null
+  },
+
+  /**
    * `project_update` (§7.10 Projects module, T-106/D-201, extended by
    * T-107/D-204): the PRJ-008/PRJ-012 settings save — a PATCH (absent
    * fields unchanged), §6.9 validation all-or-nothing in the spec's

@@ -678,7 +678,8 @@ pub(crate) fn begin_sync<R: Runtime>(
 /// [`project_add_manual`], [`exclusion_remove`],
 /// [`projects_reorder`], — since T-077, it creates project rows —
 /// `scan_commit` (`scan.rs`), — since T-108 —
-/// [`crate::project_archive::project_archive`], and — since T-106 —
+/// [`crate::project_archive::project_archive`], — since T-109 —
+/// [`crate::project_restore::project_restore`], and — since T-106 —
 /// [`crate::project_update::project_update`]: the mutation commands
 /// that exist; the
 /// spec's `project_remove`/`project_relink` and P1
@@ -3111,9 +3112,9 @@ impl AddedProject {
 
 /// The already-registered project of the two duplicate arms (PRJ-001,
 /// DB-015): what the message names, and the id the archived arm's
-/// restore offer (the future `project_restore`, T-109) calls back
-/// with. The scan commit's `"already_added"`/`"archived"` entries
-/// carry the same view (T-077).
+/// restore offer (`project_restore`, T-109) calls back with. The scan
+/// commit's `"already_added"`/`"archived"` entries carry the same
+/// view (T-077).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub(crate) struct ExistingProject {
     /// The existing row's id.
@@ -5691,10 +5692,10 @@ async fn instruction_restore_impl<R: Runtime>(
 /// text, a gigabyte "name"), and it must ride neither the wire
 /// envelope nor the §10 log line. The mock layer mirrors the same cap.
 /// `pub(crate)`: the id-addressed project commands outside this file
-/// (`project_archive.rs`, T-108) refuse an unknown row id with the
-/// same bounded echo — one shape for a caller-supplied id on the
-/// rule-8 surfaces (the `exclusion_remove` spelling stays as the
-/// older, short-id form).
+/// (`project_archive.rs`, T-108; `project_restore.rs`, T-109) refuse
+/// an unknown row id with the same bounded echo — one shape for a
+/// caller-supplied id on the rule-8 surfaces (the `exclusion_remove`
+/// spelling stays as the older, short-id form).
 pub(crate) fn bounded_echo(value: &str) -> String {
     const ECHO_CODE_POINTS: usize = 64;
     let total = value.chars().count();

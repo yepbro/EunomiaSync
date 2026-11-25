@@ -92,6 +92,7 @@ src-tauri/
   src/logging.rs           # File log: daily + 10 MB rotation, 5-file cap (working)
   src/markdown.rs          # Markdown preview renderer (pulldown-cmark; preview only) (working)
   src/project_archive.rs   # project_archive command: §6.4 row transition + PRJ-017 exclusion (working)
+  src/project_restore.rs   # project_restore command: §6.4 row transition back + reason-agnostic exclusion removal + mutation-seam watch refresh (working)
   src/project_update.rs    # project_update command: PRJ-008/PRJ-012 patch + project.changed journal + mutation-seam watch refresh (working)
   src/recovery.rs          # Recovery-screen file mechanics       (working)
   src/revisions.rs         # revisions_list / revision_get: History reads (working)
@@ -168,7 +169,7 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is forty-one commands — the §7.10 names that
+   The registered set is forty-two commands — the §7.10 names that
    are implemented so far, matching the `mode.spec` surface list. It comprises the
    recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
@@ -212,6 +213,22 @@ Rust commands are registered through `tauri-specta`:
    assignments, the stored sync hash and the folder are untouched
    (DB-014), and the SYS-005 gate answers `E_SYNC_RUNNING` while a
    sync holds the flag — the Projects module's
+   `project_restore` (T-109, `src-tauri/src/project_restore.rs`,
+   DECISIONS.md D-205): the §6.4 restore — one id-addressed
+   `Db::run` transaction returning the row to `active` (its
+   assignments, position and stored sync hash exactly where the
+   archive kept them — no hash of its own is written; the dirty
+   verdict is the recalculation service's row-decidable answer),
+   deleting the exclusion row keyed by the row's `path_key`
+   (reason-agnostic: a pre-existing manual exclusion the archive
+   left in place goes too, while a hand-removed exclusion simply
+   stays removed) and journaling the single `project.restored`
+   entry; a re-send on an active row converges with nothing
+   written, an unknown id is the stale-screen `E_VALIDATION`
+   refusal, and the SYS-005 gate answers `E_SYNC_RUNNING` while a
+   sync holds the flag; once committed, one full watch pass through
+   the bounded mutation seam returns the row to the watched set
+   (SYS-007, never-fatal) — the Projects module's
    `project_update` (T-106, `src-tauri/src/project_update.rs`,
    DECISIONS.md D-201; the PRJ-012 half added by T-107, D-204): the
    settings save — an id-addressed patch over the §6.9-validated

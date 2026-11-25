@@ -320,7 +320,8 @@ surfaces (§7, §8, §11), because the main-window UI has not landed:
 as of 2026-11-24, `src/App.vue` renders the shell only — no toolbar
 buttons, library, matrix, scan modal or sync panel. The
 scenario-relevant backend commands (`project_add_manual`,
-`project_archive` (T-108), `project_update` (T-106),
+`project_archive` (T-108), `project_restore` (T-109),
+`project_update` (T-106),
 `scan_start`/`scan_cancel`/`scan_commit`, `sync_run`,
 `settings_get`/`settings_set`, the library read `library_get`, the
 instruction lifecycle

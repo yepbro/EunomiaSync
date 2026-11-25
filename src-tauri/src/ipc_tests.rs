@@ -4544,8 +4544,8 @@ fn project_add_manual_answers_the_duplicate_message_and_the_archive_offer() {
     assert_eq!(stored_projects(&database).len(), rows_after_add);
     assert_eq!(journal_entries(&database).len(), journal_after_add);
 
-    // The archived duplicate: the restore offer (the future
-    // `project_restore`, T-109, takes the carried id).
+    // The archived duplicate: the restore offer (`project_restore`,
+    // T-109, takes the carried id).
     archive_project(&database, first.clone());
     let archived = invoke_project_add_manual(&webview, &picked, serde_json::json!(null))
         .expect("an archived duplicate is a typed offer, not an error");
@@ -5256,7 +5256,7 @@ fn removing_an_exclusion_of_an_archived_project_keeps_the_scan_verdict_archived(
     let key = eunomia_fs::paths::path_key(&canonical).expect("the canonical text is valid UTF-8");
     // The archived project row (§6.4): created and archived through
     // the repository — the archive flow's own composition, the seam
-    // T-109's `project_archive` will own. `seed_project` takes a
+    // T-108's `project_archive` owns. `seed_project` takes a
     // `'static` key, so the row is seeded inline with the runtime
     // key (the `column_project` shape, owned values into the `'static`
     // closure).
@@ -7908,8 +7908,9 @@ fn an_archived_row_never_carries_watch_flags_even_from_a_stale_cache_entry() {
     // that recorded it externally modified and the next full pass's
     // prune still sits in the cache — the archived column must not
     // leak that stale marking. The archive goes through the store
-    // directly: no archive command exists yet (T-109's card), and
-    // the store call is exactly what that command will run.
+    // directly: the command exists (T-108), but this fixture seeds
+    // the store path — the archive is the world's PRE-state, not the
+    // behavior under test here.
     let (temp, app, commands) = file_watch_app();
     let database = watch_database_of(&app);
     let root = repo_dir(temp.path(), "delta");
@@ -8249,7 +8250,8 @@ fn the_lost_watch_notice_serves_the_class_and_respects_the_row_rules() {
     // probe's .git shape), one row archives — the command exists
     // (T-108), but this fixture seeds the store path directly: the
     // archive is the world's PRE-state, not the behavior under test
-    // here (T-109's restore is still commandless).
+    // here (the restore command exists too, T-109 — it is this
+    // command's own battery that covers it).
     std::fs::remove_dir_all(dying_root.join(".git")).expect("removing the .git entry must work");
     archive_project(&database, archived_id.clone());
 
@@ -9873,9 +9875,9 @@ fn an_archived_projects_edits_no_longer_reach_the_wire_while_its_active_sibling_
     // full pass (the active-only snapshot prunes it, its routing entry
     // goes), so later edits to ITS file never reach the wire — while
     // its ACTIVE sibling's edit in the same window still reports. The
-    // archive goes through the store directly (no archive command
-    // exists yet, T-109's card) — the exact call that command will run
-    // (the archived-row test's precedent); the full pass is driven by
+    // archive goes through the store directly (the command exists,
+    // T-108, but the archive is the world's PRE-state here — the
+    // archived-row test's precedent); the full pass is driven by
     // the after-sync seam, the same Refresh every full pass runs.
     let (temp, app, commands) = file_watch_app();
     let database = watch_database_of(&app);

@@ -411,6 +411,61 @@ export const commands = {
 	 */
 	projectArchive: (projectId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("project_archive", { projectId }, options),
 	/**
+	 *  Restores the archived project with this id (§6.4 / PRJ-013…018:
+	 *  `state` returns to `active`): the project comes back with its
+	 *  assignments (DB-014) and its old `sort_order` position, and its
+	 *  path is removed from the exclusions — all in one transaction that
+	 *  also journals the single `project.restored` entry (LOG-001…004,
+	 *  D-051).
+	 * 
+	 *  Id-addressed like `project_archive` (the id comes from
+	 *  `projects_list`'s widened read, the D-10 "Archived projects"
+	 *  screen's own rows; the two DB-015 offer carriers — the manual
+	 *  add's `archived_duplicate` arm and `scan_commit`'s `"archived"`
+	 *  outcome — name the same row through their `existing` answer), and
+	 *  the answer is `()` — the screens re-read through the already-landed
+	 *  `projects_list` and `exclusions_list`. An id no row matches is the
+	 *  typed `E_VALIDATION` refusal naming `project_id` (a stale screen's
+	 *  re-send); nothing was written.
+	 * 
+	 *  The exclusion deletion is keyed by the row's `path_key` and is
+	 *  reason-agnostic: the archive-born row AND a pre-existing manual
+	 *  exclusion the archive deliberately left in place are both deleted
+	 *  (the pinned owner ruling, D-205 point 1) — PRJ-013…018's end state
+	 *  names the path, not a row class. A row whose exclusion was since
+	 *  hand-removed restores fine (the converging no-existence arm): the
+	 *  command never re-adds what the user removed.
+	 * 
+	 *  Idempotent (the make-operations-idempotent rule, D-205 point 3 —
+	 *  the D-194 point-2 mirror): a re-send on an already-active row
+	 *  converges with `Ok(())` — no journal entry, no `updated_at`
+	 *  restamp (the store's own rule), no exclusion churn even if an
+	 *  exclusion row with the same `path_key` has since appeared: the
+	 *  re-send overrides no fact it did not own.
+	 * 
+	 *  While a sync holds the global `sync_running` flag, the command
+	 *  answers the typed `E_SYNC_RUNNING` envelope instead (SYS-005,
+	 *  [`reject_during_sync`] — a check, never an acquire), and the
+	 *  screen's retry after the run ends converges. Recovery mode
+	 *  answers the honest `NoDatabase` fallback: the flag is down there
+	 *  by construction, so the answer comes from [`managed_db`].
+	 * 
+	 *  The committed restore awaits ONE full watch pass through the
+	 *  bounded mutation seam after the transaction (SYS-007's reverse
+	 *  membership arm — the row returns to the watched set;
+	 *  [`file_watch::refresh_after_mutation`], never-fatal aftermath: a
+	 *  refused send, a failed pass or an expired budget degrades with the
+	 *  class-only warn and the restore stands, the next watch anchor
+	 *  re-derives the set without loss). The converging re-send runs no
+	 *  refresh.
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::project_restore_failed`]); a successful restore is the
+	 *  journal entry itself (the D-051 mirror policy — info+user+ok is
+	 *  not mirrored to the file log).
+	 */
+	projectRestore: (projectId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("project_restore", { projectId }, options),
+	/**
 	 *  Updates the editable fields of the project with this id (PRJ-008:
 	 *  name, label, color, description; PRJ-012: the scheme, the file
 	 *  name and the two extra-file options) with §6.9 validation, in one
@@ -1999,9 +2054,9 @@ export type ExclusionEntry = {
 /**
  *  The already-registered project of the two duplicate arms (PRJ-001,
  *  DB-015): what the message names, and the id the archived arm's
- *  restore offer (the future `project_restore`, T-109) calls back
- *  with. The scan commit's `"already_added"`/`"archived"` entries
- *  carry the same view (T-077).
+ *  restore offer (`project_restore`, T-109) calls back with. The scan
+ *  commit's `"already_added"`/`"archived"` entries carry the same
+ *  view (T-077).
  */
 export type ExistingProject = {
 	/**  The existing row's id. */
