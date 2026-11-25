@@ -23484,3 +23484,176 @@ unit; this line is the D-record duplicate the board rule asks for.
 Written as a service commit in main after the merge — md-only, no
 suites under the md-only regime; prettier and the pre-commit hook
 gate it.
+
+### D-194 — T-108: the `project_archive` command's contract — the exclusion row's moment and key, double-archive convergence, and DB-014's dirty flag decided by the row, never written — 2026-11-24
+
+The card's spec text (PRJ-013…018, §6.4, DB-014, D-10, SYS-005) leaves five
+points open to more than one reading; the chosen readings were written here
+BEFORE the implementation (the rule-1 discipline). The command is
+id-addressed (`Result<(), AppError>`, the `exclusion_remove` shape — §7.10
+names no payload, and the D-10 screens re-read through the already-landed
+widened `projects_list` and `exclusions_list`); an id no row matches is the
+typed `E_VALIDATION` refusal naming `project_id` (a stale screen's re-send;
+nothing was written).
+
+1. **The `project_exclusions` row (PRJ-017).** Written in the SAME
+   `Db::run` transaction as the row update, only when the row's
+   `added_via = scan` — §6.4's "if the project was found by a scan" is the
+   row's own origin column, not a filesystem fact — keyed by the row's
+   `path_key` (the DB-030 identity), storing the row's `path` verbatim with
+   reason `removed_scanned`. A manual-born project writes NO exclusion row
+   (PRJ-001's picker is its way back). **Convergence, not conflict:** the
+   store lets a project and an exclusion share one `path_key`, so an
+   exclusion may already exist (a manual exclusion of the same path, or a
+   prior archive's row that a later restore leaves behind — T-109's
+   restore, not this command, removes it). The archive leaves the existing
+   row untouched: its own reason and date are facts of their own, and
+   PRJ-017's end state ("its path goes to `project_exclusions`") is already
+   true. The `DuplicatePathKey` arm is therefore unreachable at this
+   boundary by construction, and the pre-read makes the whole write
+   idempotent.
+2. **Double archive.** A second `project_archive` on an already-archived
+   row is a converging no-op: `Ok(())`, no journal entry, `archived_at`
+   not restamped (the store's own idempotence rule), no exclusion churn
+   even if the exclusion row was since removed by hand — the removal is
+   the user's explicit §6.4 act ("the path is found by a scan again") and
+   a re-send of the archive does not override it. The `assignment_set`
+   precedent: a same-state re-send writes/journals nothing.
+3. **The dirty flag (DB-014, the card's "не dirty" DoD).** The command
+   writes NOTHING beyond the row (plus the exclusion and the journal):
+   no clearing of `last_synced_hash`, no assignment churn — both stay for
+   T-109's restore ("Restoring brings the project back with its
+   assignments"). "Not counted as dirty" is decided where it is counted:
+   `projects_list`'s `dirty_verdict` returns `false` for an archived row
+   BEFORE consulting the cache (D-128's row-decidable arm — a stale cache
+   `true` cannot leak onto an archived column), and the `state://dirty`
+   service's next pass computes over ACTIVE projects only and prunes the
+   leaver silently (the landed prune rule, `dirty_recalc.rs`'s own
+   "archived project has no column to mark anymore"). The DB-022 commit
+   hook fires on the archive's row change automatically; the command adds
+   no recalculation of its own. The same construction keeps the project
+   out of the sync set: `read_build_snapshot` (ALG-001) reads
+   `ListScope::Active` — the DoD's "does not take part in syncs" holds by
+   the store's read, not by any sync-side special case.
+4. **The journal.** ONE `project.archived` entry (info/user/ok) whose
+   entity columns name the project and whose `project_id` is set — no
+   details (the `register_project` shape: the row itself holds the path).
+   No separate exclusion-add member: the closed LOG-001…004 vocabulary has
+   none (only D-106's `exclusion.removed` exists, added for the removal
+   because that command's entry had NO entity to attribute), and the
+   archive's entry is attributable — the exclusion row is a DB fact the
+   D-10 screen reads through `exclusions_list`, not an event of its own.
+5. **No file I/O at all.** §6.4's "the project folder is not touched" is
+   total: no availability probe, no folder check — `projects_list`'s own
+   docs keep "Archive" an available action on an unavailable column, so
+   archiving a project whose folder died must succeed, and the command's
+   complexity stays trivially stated (one transaction, indexed by-id and
+   by-key store reads/writes).
+
+SYS-005's gate runs as the first act (`reject_during_sync`, before the
+database is resolved — the `exclusion_remove` ordering); recovery mode
+answers the honest `NoDatabase` fallback, the flag being down there by
+construction. The T-109 restore is NOT implemented here (not in flight);
+this entry's restore-compatibility choices (kept assignments, kept
+`last_synced_hash`, the exclusion row left for the restore to remove) are
+its foundation. T-279's `refresh_after_sync` retrofit is likewise out of
+scope: the card does not ask for it, and a file-watch refresh would be
+file I/O this reading deliberately has none of.
+
+**Round-1 review addendum (same task, 2026-11-24; model
+`opencode-go/deepseek-v4.1-flash`, report
+`.opencode/reviews/t108-round1-report.md`: REQUEST CHANGES, 0×P0/P1,
+2×P2, 7×P3 — all taken in the amend).** The two P2s: the rollback
+claim now has its falsifiable proof
+(`a_failed_journal_insert_rolls_back_the_row_and_the_exclusion_together`,
+the `reject_every_journal_entry` trigger shape), and the SYS-005 gate
+doc's "the mutation commands that exist" list names `project_archive`.
+The P3s: the kept-hash oracle seeds a real `record_last_synced` value
+(was `None` to `None`); three stale doc claims ("no command exists
+yet") were corrected; the unknown-id refusal's `value` echo is bounded
+(`bounded_echo`, D-115's cap — now `pub(crate)`); the mock's
+`toColumnEntry` serves the row-decidable DB-014 arm (`dirty: false`
+for an archived row whatever its own flag) with a spec pin. Three
+record-only notes:
+
+- _The count sentence is a landing-rebase trap (P3-5)._ T-125
+  (`backups_list`, same base) rewrites the same `ARCHITECTURE.md`
+  "thirty-eight commands" line to its own "thirty-nine"; both edits
+  are textually identical, so the three-way merge resolves SILENTLY
+  and the merged prose undercounts a `collect_commands!` of 40. No
+  test pins the prose. The landing rebase — only when the orchestrator
+  calls it — must set the sentence to the merged truth (forty once
+  both siblings land) by hand.
+- _T-109's restore will delete a row this command did not create
+  (P3-6)._ The convergence arm deliberately leaves a pre-existing
+  `manual` exclusion with the archived row's `path_key` untouched; the
+  D-10/PRJ-013…018 restore "removes the path from the exclusions", so
+  T-109's `project_restore` will delete that manual row too, silently
+  undoing the user's own exclusion of the path. The reading is
+  consistent (the restore half owns the composition); T-109's own
+  decision record must name the choice. Follow-up card material.
+- _SYS-005-as-a-check leaves a one-run window (P3-7)._ The gate is
+  deliberately a check, not an acquire, so an archive that commits
+  just after a run's phase-0 snapshot read (the one connection
+  serializes them, but in either order) can still have its project's
+  file written and its `last_synced_*` stamped by that one
+  already-snapshotted run — one run in which DB-014's "does not take
+  part in syncs" is not literally true. The same window exists for
+  every gated command (e.g. `exclusion_remove`); it is inherent to
+  SYS-005's one-directional rule, recorded here so it is not
+  rediscovered. No action in this task.
+
+**Round-2 review addendum (same task, 2026-11-25; model
+`opencode-go/hy4-flash-free`, report
+`.opencode/reviews/t108-round2-report.md`: REQUEST CHANGES, 0×P0/P1,
+2×P2, 1×P3 — all three taken in the second amend, after the round-1
+fixes were verified landed).** P2-1 (the mock still served stale §5.7
+watch flags and the SYS-010 notice on a just-archived column):
+`toColumnEntry` now serves the archived arm for all four markings —
+`dirty`, `external_changed`, `file_deleted`, `unwatched_reason` —
+leaving the row's own flags intact, with a spec pin that loads an
+active row with every marking and asserts the read's clean halves.
+The UNAVAILABLE half of production's `(state, available)` pair is
+deliberately NOT mirrored: `syncRun`'s skipped-row pin documents the
+mock's stand-in as serving the row's flags verbatim for unavailable
+rows — a pre-existing divergence this command did not cause, its own
+follow-up, not silently widened here. P2-2 (the mock's unknown-id
+echo dropped D-115's cap while the Rust half bounded it): the refusal
+now echoes through the mock's own `boundedEcho` (the twin
+`commands.rs` documents), pinned with a 70-code-point id asserting
+the `(+6 more code points)` suffix. P3-1 (no oracle separated `path`
+from `path_key`): the happy path seeds the scan-born project with a
+key deliberately different from its path, so a regression keying the
+exclusion by the stored path instead of the identity key reddens the
+exclusion assertions.
+
+**Landing addendum (same task, 2026-11-25; rebase onto `f017046`).**
+The flash-batch union is mechanical and both review rounds had already
+covered their sides, so no new review round ran (the established
+landing posture). Conflicts were two: `DECISIONS.md` (both tails
+append — main's D-195 and D-193 stay, D-194 with its two review
+addenda becomes the clean tail) and `commands.spec.ts`'s import block
+(the union of T-125's `BASE_TS_MS`/`isoUtc` and this task's
+`pathKeyOf`). Everything else auto-merged; the one HAND correction is
+the trap this entry's round-1 addendum recorded: both siblings rewrote
+`ARCHITECTURE.md`'s count line to their own "thirty-nine", identical
+text that merges silently — the merged `collect_commands!` (40
+entries: 38 base + `backups_list` + `project_archive`) is now served
+by **"forty"**, and `mode.spec`'s pinned surface (40 names) agrees.
+`src/bindings.ts` was NOT hand-merged on trust: the auto-merged union
+was verified through the export pin (`export_bindings_are_up_to_date`
+green on the first run — the file is byte-identical to what the
+exporter produces over the union registration, proven rather than
+assumed). Both module rows (`backups.rs`, `project_archive.rs`), both
+command-list entries and both manual-smoke lines survive.
+
+Rebased checks, all exit 0: `cargo fmt --check`; `cargo clippy
+--workspace --all-targets -- -D warnings`; `cargo nextest run
+--workspace --test-threads=4` (**1851/1851**); `cargo test --doc
+--workspace` (**86+12 doctests, 0 failures** — D-195's snapshot.rs fix
+is under this tree now, the base red recorded in the commit message's
+first-flight half is gone); `pnpm test` (**360/360**); `pnpm run
+format:check` (after prettier restored the one blank line between
+D-193's tail and this entry that the conflict resolution had joined);
+`pnpm run lint`; `pnpm run typecheck`. Everything folds into the
+single T-108 commit; no push, merge or board operation.

@@ -215,8 +215,22 @@ export function toAssignmentRecord(row: MockAssignmentRow): AssignmentRecordWire
   }
 }
 
-/** Maps a store row to the `projects_list` wire shape (MAIN-028 fields). */
+/**
+ * Maps a store row to the `projects_list` wire shape (MAIN-028 fields).
+ * The verdict halves are row-decidable like the real read's functions
+ * (one truth with the backend): `dirty` is DB-014's archived arm
+ * (D-128), and the §5.7 watch pair + the SYS-010 notice read `false/
+ * false/null` for an ARCHIVED row (SYS-007's watch set — round 2's
+ * P2-1) whatever its own flags still say, so a UI test that archives
+ * a flagged row sees exactly what production serves. The UNAVAILABLE
+ * half of production's pair is deliberately NOT mirrored here: the
+ * mock's stand-in rows carry their flags verbatim for the unavailable
+ * case (a documented pre-existing approximation, syncRun's own
+ * skipped-row pin) — aligning it is its own follow-up, not this
+ * command's change.
+ */
 export function toColumnEntry(row: MockProjectRow): ProjectColumnEntryWire {
+  const archived = row.state === 'archived'
   return {
     id: row.id,
     name: row.name,
@@ -225,10 +239,10 @@ export function toColumnEntry(row: MockProjectRow): ProjectColumnEntryWire {
     state: row.state,
     available: row.available,
     unavailable_reason: row.unavailableReason,
-    dirty: row.dirty,
-    external_changed: row.externalChanged,
-    file_deleted: row.fileDeleted,
-    unwatched_reason: row.unwatchedReason,
+    dirty: archived ? false : row.dirty,
+    external_changed: archived ? false : row.externalChanged,
+    file_deleted: archived ? false : row.fileDeleted,
+    unwatched_reason: archived ? null : row.unwatchedReason,
     last_synced_at: row.lastSyncedAt,
   }
 }

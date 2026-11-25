@@ -1369,6 +1369,58 @@ export const mockCommands: IpcCommands = {
     return { outcome: 'added', project: toAddedProject(row), offered_root: null, existing: null }
   },
 
+  /**
+   * `project_archive` (§7.10 Projects module, T-108/D-194): id-addressed —
+   * a stale id is the typed `E_VALIDATION` refusal naming the field, with
+   * nothing changed; a hit flips the row to `archived` (readable back
+   * through `projectsList` behind the include flag), a scan-born row's
+   * path joins the exclusions (readable back through `exclusionsList`,
+   * the write-then-read fidelity rule) — converging over an existing row
+   * of the same path key — and the one `project.archived` journal entry
+   * lands where `activityList` reads it. A re-send on an archived row is
+   * the real command's converging no-op: nothing changes, nothing is
+   * journaled. The `E_SYNC_RUNNING` gate is not modelled (the `syncRun`
+   * stand-in's own documented limit: no flag state exists here).
+   */
+  async projectArchive(projectId) {
+    const state = mockState()
+    const row = state.projects.find((row) => row.id === projectId)
+    if (!row) {
+      // D-115's cap, the mock twin of the Rust `bounded_echo` the real
+      // refusal uses (commands.rs documents "the mock layer mirrors
+      // the same cap"): an id from the webview is unbounded by
+      // definition, and it must not ride the envelope whole.
+      return rejectWith('E_VALIDATION', 'validation.invalid_value', {
+        field: 'project_id',
+        value: boundedEcho(projectId),
+        reason: 'no project has this id',
+      })
+    }
+    if (row.state === 'archived') {
+      return null
+    }
+    row.state = 'archived'
+    if (row.addedVia === 'scan') {
+      const key = pathKeyOf(row.path)
+      const existing = state.exclusions.find((exclusion) => exclusion.path_key === key)
+      if (!existing) {
+        state.exclusions.push({
+          id: freshRowId(),
+          path: row.path,
+          path_key: key,
+          reason: 'removed_scanned',
+          created_at: new Date().toISOString(),
+        })
+      }
+    }
+    journal('project.archived', {
+      entityType: 'project',
+      entityId: row.id,
+      projectId: row.id,
+    })
+    return null
+  },
+
   /** `settings_get` (§7.10): the current map in §6.5 table order. */
   async settingsGet() {
     return mockState().settings.map((s) => ({ ...s }))

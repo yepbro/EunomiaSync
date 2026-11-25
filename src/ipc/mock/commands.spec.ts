@@ -4,6 +4,7 @@ import { mockState, resetMockState, type MockLibraryRow } from './state'
 import { mockEvents } from './events'
 import { BASE_TS_MS, PALETTE, type FixtureProfile } from '../fixtures/generator'
 import { isoUtc } from '../fixtures/rng'
+import { pathKeyOf } from '../fixtures/domain'
 import type { LibraryTreeItemWire } from '../contract'
 
 /** A small pinned world: 4 projects (last one archived), 3 instructions. */
@@ -638,6 +639,145 @@ describe('projectAddManual', () => {
     expect(row, `a fixture project named ${name}`).toBeDefined()
     return row?.path ?? ''
   }
+})
+
+describe('projectArchive', () => {
+  it('archives a scan-born row, serves the exclusion back, and journals it', async () => {
+    // T-108/D-194's happy path over the mock store: the row flips
+    // (readable behind the include flag), the scan-born path joins the
+    // exclusions (readable through the screen's own list), and the one
+    // journal entry lands where `activityList` reads it.
+    const [target] = mockState().projects.filter((row) => row.state === 'active')
+    expect(target).toBeDefined()
+    const exclusionsBefore = (await commands.exclusionsList()).length
+
+    await expect(commands.projectArchive(target?.id ?? '')).resolves.toBeNull()
+
+    const columns = await commands.projectsList(true)
+    const archived = columns.find((column) => column.id === target?.id)
+    expect(archived?.state).toBe('archived')
+    const exclusions = await commands.exclusionsList()
+    expect(exclusions).toHaveLength(exclusionsBefore + 1)
+    const written = exclusions.find((row) => row.path_key === pathKeyOf(target?.path ?? ''))
+    expect(written?.path).toBe(target?.path)
+    expect(written?.reason).toBe('removed_scanned')
+    const page = await commands.activityList({ actions: ['project.archived'] })
+    const entry = page.entries.find((e) => e.entity_id === target?.id)
+    expect(entry, 'one project.archived entry naming the row').toBeDefined()
+    expect(entry?.visibility).toBe('user')
+    expect(entry?.result).toBe('ok')
+    expect(entry?.project_id).toBe(target?.id)
+  })
+
+  it('archives a manual-born row without an exclusion row', async () => {
+    const added = await commands.projectAddManual('/home/dev/src/manual-born', null)
+    expect(added.outcome).toBe('added')
+    const exclusionsBefore = (await commands.exclusionsList()).length
+
+    await expect(commands.projectArchive(added.project?.id ?? '')).resolves.toBeNull()
+
+    expect(await commands.exclusionsList()).toHaveLength(exclusionsBefore)
+    const columns = await commands.projectsList(true)
+    expect(columns.find((column) => column.id === added.project?.id)?.state).toBe('archived')
+  })
+
+  it('answers a re-send on an archived row as a no-op, journaling nothing', async () => {
+    const [target] = mockState().projects.filter((row) => row.state === 'active')
+    await commands.projectArchive(target?.id ?? '')
+    const journalLength = mockState().activity.length
+    const exclusionsAfterFirst = (await commands.exclusionsList()).length
+
+    await expect(commands.projectArchive(target?.id ?? '')).resolves.toBeNull()
+
+    expect(mockState().activity).toHaveLength(journalLength)
+    expect(await commands.exclusionsList()).toHaveLength(exclusionsAfterFirst)
+    const columns = await commands.projectsList(true)
+    expect(columns.find((column) => column.id === target?.id)?.state).toBe('archived')
+  })
+
+  it('rejects an unknown id with E_VALIDATION, changing nothing', async () => {
+    const journalLength = mockState().activity.length
+    const exclusionsBefore = (await commands.exclusionsList()).length
+
+    await expect(commands.projectArchive('no-such-row')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'project_id',
+        value: 'no-such-row',
+        reason: 'no project has this id',
+      },
+    })
+
+    // D-115's cap, pinned at the boundary: an over-long id echoes
+    // truncated with the suffix, never whole (the mock mirrors the
+    // Rust `bounded_echo` the real refusal uses).
+    const longId = 'x'.repeat(70)
+    await expect(commands.projectArchive(longId)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'project_id',
+        value: `${'x'.repeat(64)} (+6 more code points)`,
+        reason: 'no project has this id',
+      },
+    })
+
+    expect(mockState().activity).toHaveLength(journalLength)
+    expect(await commands.exclusionsList()).toHaveLength(exclusionsBefore)
+  })
+
+  it('serves a just-archived row with the row-decidable clean halves, whatever its flags said', async () => {
+    // The mock's read mirrors production's verdict functions (round 2's
+    // P2-1 + round 1's P3-4): an archived column never shows the dirty
+    // dot (DB-014), the §5.7 watch markings or the SYS-010 notice. The
+    // row is deliberately loaded with every marking — including the
+    // mutually-exclusive pair, which only a hand-edited row can hold —
+    // precisely because the archived read must not trust any of them;
+    // the row's own flags stay untouched for the store-side assertions.
+    const target = mockState().projects.find((row) => row.state === 'active')
+    expect(target, 'an active fixture row to archive').toBeDefined()
+    if (!target) return
+    target.dirty = true
+    target.externalChanged = true
+    target.fileDeleted = true
+    target.unwatchedReason = 'gone'
+
+    await expect(commands.projectArchive(target.id)).resolves.toBeNull()
+
+    const columns = await commands.projectsList(true)
+    const archived = columns.find((column) => column.id === target.id)
+    expect(archived?.state).toBe('archived')
+    expect(archived?.dirty).toBe(false)
+    expect(archived?.external_changed).toBe(false)
+    expect(archived?.file_deleted).toBe(false)
+    expect(archived?.unwatched_reason).toBeNull()
+    const stored = mockState().projects.find((row) => row.id === target.id)
+    expect(stored?.dirty).toBe(true)
+    expect(stored?.externalChanged).toBe(true)
+    expect(stored?.fileDeleted).toBe(true)
+    expect(stored?.unwatchedReason).toBe('gone')
+  })
+
+  it('converges over an existing exclusion row of the same path key', async () => {
+    // D-194's convergence arm: an already-excluded path stays as it is
+    // — the existing row keeps its own reason, and no duplicate lands.
+    const [target] = mockState().projects.filter((row) => row.state === 'active')
+    const key = pathKeyOf(target?.path ?? '')
+    mockState().exclusions.push({
+      id: 'pre-seeded-exclusion',
+      path: target?.path ?? '',
+      path_key: key,
+      reason: 'manual',
+      created_at: '2026-01-01T00:00:00.000Z',
+    })
+
+    await expect(commands.projectArchive(target?.id ?? '')).resolves.toBeNull()
+
+    const exclusions = await commands.exclusionsList()
+    const forThePath = exclusions.filter((row) => row.path_key === key)
+    expect(forThePath).toHaveLength(1)
+    expect(forThePath[0]?.reason).toBe('manual')
+    expect(forThePath[0]?.id).toBe('pre-seeded-exclusion')
+  })
 })
 
 describe('settingsGet / settingsSet', () => {

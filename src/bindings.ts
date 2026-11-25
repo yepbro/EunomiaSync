@@ -371,6 +371,44 @@ export const commands = {
 	 */
 	projectAddManual: (path: string, acceptRepoRoot: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<ProjectAddResult_Serialize>("project_add_manual", { path, acceptRepoRoot }, options),
 	/**
+	 *  Archives the project with this id (§6.4: `state = archived`): the
+	 *  folder is not touched, the assignments are kept (DB-014), and a
+	 *  **scan-born** project's path goes to `project_exclusions`
+	 *  (PRJ-017) — all in one transaction that also journals the single
+	 *  `project.archived` entry (LOG-001…004, D-051).
+	 * 
+	 *  Id-addressed like `exclusion_remove` (the id comes from
+	 *  `projects_list`'s rows; no UI-typed path can become a store fact
+	 *  through this command), and the answer is `()` — the D-10 screens
+	 *  re-read through the widened `projects_list` and `exclusions_list`
+	 *  that already exist. An id no row matches is the typed
+	 *  `E_VALIDATION` refusal naming `project_id` (a stale screen's
+	 *  re-send); nothing was written.
+	 * 
+	 *  Idempotent (the make-operations-idempotent rule, D-194): a re-send
+	 *  on an already-archived row converges with `Ok(())` — no journal
+	 *  entry, `archived_at` not restamped (the store's own rule), no
+	 *  exclusion churn. A pre-existing exclusion row with the same
+	 *  `path_key` (whatever its reason — a manual exclusion, or a prior
+	 *  archive's row a later restore will remove) is left untouched:
+	 *  PRJ-017's end state is already true, and the existing row's own
+	 *  reason and date are facts of their own.
+	 * 
+	 *  While a sync holds the global `sync_running` flag, the command
+	 *  answers the typed `E_SYNC_RUNNING` envelope instead (SYS-005, the
+	 *  card's own line; [`reject_during_sync`] — a check, never an
+	 *  acquire), and the screen's retry after the run ends converges.
+	 *  Recovery mode answers the honest `NoDatabase` fallback: the flag
+	 *  is down there by construction, so the answer comes from
+	 *  [`managed_db`].
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::project_archive_failed`]); a successful archive is the
+	 *  journal entry itself (the D-051 mirror policy — info+user+ok is
+	 *  not mirrored to the file log).
+	 */
+	projectArchive: (projectId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("project_archive", { projectId }, options),
+	/**
 	 *  Lists the projects for the main window's columns and the "Archived
 	 *  projects" screen (§7.10 Projects module `projects_list`; §7.1; the
 	 *  §7.4 MAIN-028 column fields).

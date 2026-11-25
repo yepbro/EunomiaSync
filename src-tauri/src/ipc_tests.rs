@@ -7982,7 +7982,9 @@ fn an_archived_row_never_carries_watch_flags_even_from_a_stale_cache_entry() {
         "the first pass recorded the external modification"
     );
 
-    // The archive — no command exists (T-109), the store call is it.
+    // The archive — the command exists (T-108), but this fixture seeds
+    // the store path directly: the archive is the world's PRE-state,
+    // not the behavior under test here.
     archive_project(&database, project_id.clone());
     assert_eq!(
         app.state::<crate::file_watch::FileWatchState>()
@@ -8240,8 +8242,10 @@ fn the_lost_watch_notice_serves_the_class_and_respects_the_row_rules() {
     let _previous = state.note_unwatched(seeded);
 
     // The world moves on without a pass: one folder dies (the D-084
-    // probe's .git shape), one row archives (no command exists — the
-    // store call is it, T-109's seam).
+    // probe's .git shape), one row archives — the command exists
+    // (T-108), but this fixture seeds the store path directly: the
+    // archive is the world's PRE-state, not the behavior under test
+    // here (T-109's restore is still commandless).
     std::fs::remove_dir_all(dying_root.join(".git")).expect("removing the .git entry must work");
     archive_project(&database, archived_id.clone());
 

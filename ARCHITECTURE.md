@@ -91,6 +91,7 @@ src-tauri/
   src/file_watch.rs        # Target-file watch service, state://file-changed (working)
   src/logging.rs           # File log: daily + 10 MB rotation, 5-file cap (working)
   src/markdown.rs          # Markdown preview renderer (pulldown-cmark; preview only) (working)
+  src/project_archive.rs   # project_archive command: §6.4 row transition + PRJ-017 exclusion (working)
   src/recovery.rs          # Recovery-screen file mechanics       (working)
   src/revisions.rs         # revisions_list / revision_get: History reads (working)
   src/retention.rs         # LOG-006 retention task: journal/runs prune daily (working)
@@ -166,7 +167,7 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is thirty-nine commands — the §7.10 names that
+   The registered set is forty commands — the §7.10 names that
    are implemented so far, matching the `mode.spec` surface list. It comprises the
    recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
@@ -202,6 +203,14 @@ Rust commands are registered through `tauri-specta`:
    project nor onto a folder picked this session is refused before
    anything runs) whose post-add watch refresh is never-fatal
    aftermath — the Projects module's
+   `project_archive` (T-108, `src-tauri/src/project_archive.rs`,
+   DECISIONS.md D-194): the §6.4 archive — one id-addressed
+   `Db::run` transaction carrying the row transition, the PRJ-017
+   exclusion row for a scan-born project (converging over an
+   existing one) and the single `project.archived` journal entry;
+   assignments, the stored sync hash and the folder are untouched
+   (DB-014), and the SYS-005 gate answers `E_SYNC_RUNNING` while a
+   sync holds the flag — the Projects module's
    `exclusions_list`/`exclusion_remove` (T-078): the §6.4
    path-exclusion read in the repository's stable oldest-first order
    and the by-id removal journaled in its own transaction — the

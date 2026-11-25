@@ -674,8 +674,10 @@ pub(crate) fn begin_sync<R: Runtime>(
 /// refusal instead of mutating — "commands that change projects …
 /// return `E_SYNC_RUNNING` during a sync". Today that is
 /// [`project_add_manual`], [`exclusion_remove`],
-/// [`projects_reorder`] and — since T-077, it creates project rows —
-/// `scan_commit` (`scan.rs`): the mutation commands that exist; the
+/// [`projects_reorder`], — since T-077, it creates project rows —
+/// `scan_commit` (`scan.rs`), and — since T-108 —
+/// [`crate::project_archive::project_archive`]: the mutation commands
+/// that exist; the
 /// spec's `project_update`/`project_remove`/`project_relink` and P1
 /// `backup_restore` join this gate as they land. Reads are never
 /// gated (SYS-005 names the changing commands only).
@@ -2426,7 +2428,8 @@ fn dirty_verdict(cache: Option<&DirtyState>, project: &eunomia_store::projects::
 /// than the cache's last pass, so the row half is decided from the
 /// row's `state` AND this response's own `available` fact — BEFORE
 /// the cache — and the window between a folder dying (or a row being
-/// archived, no command exists yet) and the next full pass's prune
+/// archived — `project_archive`, since T-108) and the next full
+/// pass's prune
 /// cannot leak a stale marking onto a column that shows
 /// unavailable/archived. An active, available project the service
 /// has not observed (before its first pass, a service that never
@@ -5310,7 +5313,12 @@ async fn instruction_restore_impl<R: Runtime>(
 /// VIOLATING value is unbounded by definition (a 300 000-character
 /// text, a gigabyte "name"), and it must ride neither the wire
 /// envelope nor the §10 log line. The mock layer mirrors the same cap.
-fn bounded_echo(value: &str) -> String {
+/// `pub(crate)`: the id-addressed project commands outside this file
+/// (`project_archive.rs`, T-108) refuse an unknown row id with the
+/// same bounded echo — one shape for a caller-supplied id on the
+/// rule-8 surfaces (the `exclusion_remove` spelling stays as the
+/// older, short-id form).
+pub(crate) fn bounded_echo(value: &str) -> String {
     const ECHO_CODE_POINTS: usize = 64;
     let total = value.chars().count();
     if total <= ECHO_CODE_POINTS {

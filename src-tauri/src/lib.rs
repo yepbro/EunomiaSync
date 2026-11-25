@@ -188,6 +188,14 @@ pub(crate) mod headings;
 // custom-text editor target. No command touches project files.
 pub(crate) mod assignments;
 
+// The Projects module's `project_archive` command (spec §7.10, T-108;
+// PRJ-013…018, §6.4, DB-014, D-10, SYS-005; the contract is D-194):
+// one id-addressed transaction that archives the row, writes the
+// PRJ-017 exclusion row for a scan-born project (converging over an
+// existing one) and the single `project.archived` journal entry —
+// no file I/O at all, and the SYS-005 gate first.
+pub(crate) mod project_archive;
+
 // The History module's revision reads (spec §7.10, T-331):
 // `revisions_list` and `revision_get` over the store's version repository.
 pub(crate) mod revisions;
@@ -233,6 +241,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // Projects module's `projects_list` (T-072), the System
         // module's `dialog_pick_folder` (T-073), the Projects
         // module's `project_add_manual` (T-074), the Projects
+        // module's `project_archive` (T-108, D-194), the Projects
         // module's `exclusions_list`/`exclusion_remove` (T-078), the
         // Projects module's `projects_reorder` (T-080), the
         // Projects module's `scan_start`/`scan_cancel`/`scan_commit`
@@ -261,6 +270,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::instruction_update::<tauri::Wry>,
             commands::markdown_preview,
             commands::project_add_manual::<tauri::Wry>,
+            project_archive::project_archive::<tauri::Wry>,
             commands::projects_list::<tauri::Wry>,
             commands::projects_reorder::<tauri::Wry>,
             scan::scan_cancel::<tauri::Wry>,
@@ -975,6 +985,9 @@ mod headings_tests;
 
 #[cfg(test)]
 mod assignments_tests;
+
+#[cfg(test)]
+mod project_archive_tests;
 
 #[cfg(test)]
 mod revisions_tests;

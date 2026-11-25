@@ -1513,6 +1513,35 @@ pub(crate) fn projects_reorder_failed(error: &AppError) {
     );
 }
 
+/// The `project_archive` command failed (T-108, §10's every-error
+/// rule): the `exclusion_remove_failed` shape — the reachable §10
+/// answers are the `E_SYNC_RUNNING` SYS-005 refusal while a sync
+/// holds the global flag (the gate runs first, so the refusal is the
+/// answer whatever the input is), the typed `E_VALIDATION` refusal of
+/// an id no row matches (a stale screen's row), the shared base
+/// classifier's SQL classes (`ProjectsError::Sql` through the row
+/// read, the archive transition and the exclusion write,
+/// `StorageError::Sql` through the journal insert — busy exhaustion,
+/// a corrupt database, a constraint abort), the store fallback of a
+/// corrupt projects/exclusions cell (`ProjectsCorrupt`), and the
+/// honest no-database fallback. A successful archive is the journal's
+/// own `project.archived` entry, written inside the operation's
+/// transaction (D-051/D-194) — never duplicated into the file log
+/// (the info+user+ok unmirrored shape); the verified convergence (a
+/// re-send on an already-archived row) writes nothing and logs
+/// nothing.
+pub(crate) fn project_archive_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::projects",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "archiving a project failed"
+    );
+}
+
 /// The `projects_list` command failed (T-244, §10's every-error rule,
 /// closing the gap D-096 recorded for T-072): the
 /// `projects_reorder_failed` shape — the reachable §10 answers are the
