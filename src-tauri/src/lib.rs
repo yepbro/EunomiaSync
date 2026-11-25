@@ -196,6 +196,23 @@ pub(crate) mod assignments;
 // no file I/O at all, and the SYS-005 gate first.
 pub(crate) mod project_archive;
 
+// The Projects module's `project_relink` command (spec §7.10, T-110;
+// D-09, DB-015, SYS-005, SYS-007; the contract is D-208): the add
+// flow's gate order — SYS-005, the SEC-003 session gate, the `.git`
+// root probe on the blocking pool before any database work — over one
+// id-addressed transaction that moves the row's `path` and
+// `path_key` to the picked repository's canonical root together with
+// the single `project.changed` journal entry. The assignments,
+// position, origin, settings and sync cells stay verbatim (the dirty
+// verdict is the recalculation service's row-decidable answer over
+// the moved target path), no target file is written, a DB-015 key
+// collision refuses naming `path` (the archived arm carrying the
+// restore offer's id), and after the committed transition ONE
+// awaited watch pass through the bounded mutation seam
+// (never-fatal aftermath) moves the watch input with the row —
+// T-279's last member.
+pub(crate) mod project_relink;
+
 // The Projects module's `project_restore` command (spec §7.10, T-109;
 // PRJ-013…018, §6.4, D-10, DB-015, SYS-005, SYS-007; the contract is
 // D-205 — the D-194 mirror): one id-addressed transaction that
@@ -271,6 +288,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // module's `dialog_pick_folder` (T-073), the Projects
         // module's `project_add_manual` (T-074), the Projects
         // module's `project_archive` (T-108, D-194), the Projects
+        // module's `project_relink` (T-110, D-208), the Projects
         // module's `project_restore` (T-109, D-205), the Projects
         // module's `project_update` (T-106, D-201), the Projects
         // module's `exclusions_list`/`exclusion_remove` (T-078), the
@@ -302,6 +320,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::markdown_preview,
             commands::project_add_manual::<tauri::Wry>,
             project_archive::project_archive::<tauri::Wry>,
+            project_relink::project_relink::<tauri::Wry>,
             project_restore::project_restore::<tauri::Wry>,
             project_update::project_update::<tauri::Wry>,
             commands::projects_list::<tauri::Wry>,
@@ -1024,6 +1043,9 @@ mod assignments_tests;
 
 #[cfg(test)]
 mod project_archive_tests;
+
+#[cfg(test)]
+mod project_relink_tests;
 
 #[cfg(test)]
 mod project_restore_tests;

@@ -1637,6 +1637,103 @@ export const mockCommands: IpcCommands = {
   },
 
   /**
+   * `project_relink` (§7.10 Projects module, T-110/D-208 — D-09's
+   * "Locate…"): id-addressed over a picked path — a stale id is the
+   * typed `E_VALIDATION` refusal naming the field, with nothing
+   * changed; a hit moves the row's `path` to the trimmed path (the
+   * canonical repository root the real command resolves — no
+   * filesystem exists here, the pick is trusted), the assignments
+   * stay (they are keyed by the unmoved id), the row's availability
+   * marking clears (the D-09 DoD's modelled half: the freshly located
+   * folder is a live repository the real command's `.git` probe
+   * verified — production probes the new path fresh on every read,
+   * the mock's marking is fixture state), and the one
+   * `project.changed` journal entry lands where `activityList` reads
+   * it (the closed vocabulary's own member: "a project's row changed
+   * — update, relink, reorder"). A re-send of the row's own location
+   * is the real command's converging no-op: nothing changes, nothing
+   * is journaled. A `path_key` another row already holds (DB-015) is
+   * the typed refusal naming `path` — the active arm plain, the
+   * archived arm carrying `existing_project_id`, the restore offer's
+   * id (the `projectRestore` command consumes exactly that id).
+   * Known limits, deliberate (the stand-in's own): the `.git` root
+   * walk and the SEC-003 session gate are not modelled (the
+   * `projectAddManual` stand-in's own documented limits — paths are
+   * trusted strings here; the one modeled half is the empty path,
+   * which answers the real gate's own refusal shape), the
+   * `E_SYNC_RUNNING` gate is not modelled
+   * (no flag state exists here), and neither is the watch pass the
+   * committed relink awaits in production (no watcher exists here —
+   * the relink is the mock's whole truth).
+   */
+  async projectRelink(projectId, path) {
+    const trimmed = path.trim()
+    if (trimmed === '') {
+      // The real command's own answer for an empty path: the SEC-003
+      // gate refuses the unresolvable/never-picked string before any
+      // probe (the add twin's legacy `validation.path_required` arm
+      // was the mock's invention — this mirror matches the backend).
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'path',
+        value: boundedEcho(trimmed),
+        reason:
+          'must be a registered project or a folder picked in the dialog this session (SEC-003)',
+      })
+    }
+    const state = mockState()
+    // D-201 point 4's filter (the D-115 reorder precedent): the id
+    // must name an ACTIVE row — unknown or archived is the same
+    // stale screen.
+    const row = state.projects.find(
+      (candidate) => candidate.id === projectId && candidate.state === 'active',
+    )
+    if (!row) {
+      // The real `rejected_field` refusal's own key (the
+      // `projectUpdate` mirror), with D-115's cap: an id from the
+      // webview is unbounded by definition, and it must not ride the
+      // envelope whole.
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'project_id',
+        value: boundedEcho(projectId),
+        reason: 'no active project has this id',
+      })
+    }
+    const key = pathKeyOf(trimmed)
+    const occupier = state.projects.find(
+      (candidate) => pathKeyOf(candidate.path) === key && candidate.id !== row.id,
+    )
+    if (occupier) {
+      // DB-015 (D-208 point 5): the active arm is the plain refusal;
+      // the archived arm carries the restore offer's id — the
+      // `projectRestore` command's own input.
+      const params: Record<string, string> = {
+        field: 'path',
+        value: boundedEcho(trimmed),
+        reason: `${occupier.state === 'active' ? 'an active' : 'an archived'} project already has this path (DB-015)`,
+      }
+      if (occupier.state === 'archived') params.existing_project_id = occupier.id
+      return rejectWith('E_VALIDATION', 'errors.validation', params)
+    }
+    // The converging re-send (D-208 point 3): the row already holds
+    // this location — nothing changes, nothing is journaled.
+    if (pathKeyOf(row.path) === key) {
+      return null
+    }
+    row.path = trimmed
+    // The D-09 DoD's modelled half: the located folder is a live
+    // repository (the real command's `.git` probe verified it), so
+    // the moved-folder marking clears.
+    row.available = true
+    row.unavailableReason = null
+    journal('project.changed', {
+      entityType: 'project',
+      entityId: row.id,
+      projectId: row.id,
+    })
+    return null
+  },
+
+  /**
    * `project_update` (§7.10 Projects module, T-106/D-201, extended by
    * T-107/D-204): the PRJ-008/PRJ-012 settings save — a PATCH (absent
    * fields unchanged), §6.9 validation all-or-nothing in the spec's

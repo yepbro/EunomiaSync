@@ -334,8 +334,8 @@ export const commands = {
 	 *     first act above): during a sync the add answers
 	 *     `E_SYNC_RUNNING` and nothing is written; the spec's own
 	 *     project-*editing* list joins the same gate — `project_update`
-	 *     since T-106, `project_remove`, `project_relink` and P1
-	 *     `backup_restore` as they land.
+	 *     since T-106, `project_relink` since T-110, and
+	 *     `project_remove` and P1 `backup_restore` as they land.
 	 *  5. **Write-access warning** (§6.9, T-063/D-094): after the commit,
 	 *     [`eunomia_fs::write_access::check_write_access`] over the
 	 *     root's future target file, on the blocking pool (never inside
@@ -362,8 +362,11 @@ export const commands = {
 	 *     re-derives it from the project table. The other SYS-005-gated
 	 *     mutations change no watched file (`projects_reorder` moves
 	 *     sort_order, `exclusion_remove` touches no project row) and run
-	 *     no refresh; the spec's scheme/name/archive/restore/relink
-	 *     commands call the same seam as they land.
+	 *     no refresh; the spec's scheme/name/restore/relink commands call
+	 *     the same seam (`project_update`'s arm since T-107,
+	 *     `project_restore`'s since T-109, `project_relink`'s since
+	 *     T-110), and the archive (T-108) is the deliberate non-member:
+	 *     the leaver exits the set at the next anchor's pass.
 	 * 
 	 *  Failures reach the log with their §10 code
 	 *  ([`logging::project_add_failed`]); the three typed non-add
@@ -410,6 +413,80 @@ export const commands = {
 	 *  not mirrored to the file log).
 	 */
 	projectArchive: (projectId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("project_archive", { projectId }, options),
+	/**
+	 *  Re-points the project with this id at a newly picked folder (D-09's
+	 *  "Locate…": the action an unavailable column offers beside
+	 *  "Archive"): the picked folder must pass the SEC-003 session gate
+	 *  and the `.git` check — it resolves to its repository's CANONICAL
+	 *  root (nearest root wins, D-06; the card's own dependency sentence)
+	 *  — and the row's `path` and `path_key` move there TOGETHER in one
+	 *  transaction that also journals the single `project.changed` entry
+	 *  (LOG-001…004/D-051, D-208 point 3).
+	 * 
+	 *  Id-addressed like `project_update` (the id comes from
+	 *  `projects_list`'s active columns — the Locate action rides one,
+	 *  D-09/MAIN-028), and the answer is `()`: the screen re-reads
+	 *  through the already-landed `projects_list`. An id no ACTIVE row
+	 *  matches — unknown, or archived since the column rendered (the
+	 *  archived screen's own action is `project_restore`) — is the typed
+	 *  `E_VALIDATION` refusal naming `project_id` with the bounded echo
+	 *  (D-115's cap); nothing was written.
+	 * 
+	 *  The transition keeps everything it does not own (D-208 point 4):
+	 *  the assignments (DB-014, keyed by the unmoved id), the position,
+	 *  the origin, every settings field and the OUT-020 sync cells — the
+	 *  stored hash covers the PRE-relink target, and the dirty verdict is
+	 *  the recalculation service's row-decidable answer over the new one
+	 *  (DB-021 over DB-020).
+	 * 
+	 *  DB-015 (checked inside the transaction, the add flow's own
+	 *  serialization rule): a resolved key another project already holds
+	 *  refuses the whole operation with the typed `E_VALIDATION` envelope
+	 *  naming `path` (the caller's path echoed bounded, a class-only
+	 *  reason). The ACTIVE arm is the plain refusal; the ARCHIVED arm —
+	 *  the DB-015 offer shape adapted to this command's `Err`-only wire —
+	 *  additionally carries `params.existing_project_id`, the archived
+	 *  row's id, exactly what `project_restore` (T-109) consumes: the UI
+	 *  cannot find the row itself (`projects_list` serves no path
+	 *  column), so the offer's id is the refusal's own fact to carry.
+	 * 
+	 *  Idempotent (the make-operations-idempotent rule, D-208 point 3):
+	 *  a re-send whose resolved root equals the row's stored `path` AND
+	 *  `path_key` converges with `Ok(())` — nothing written, no
+	 *  `updated_at` restamp, no journal entry, no watch refresh (the
+	 *  `project_update` verified no-op). A screen's retry after any
+	 *  interruption converges.
+	 * 
+	 *  While a sync holds the global `sync_running` flag, the command
+	 *  answers the typed `E_SYNC_RUNNING` envelope instead (SYS-005,
+	 *  [`reject_during_sync`] — a check, never an acquire), and the
+	 *  screen's retry after the run ends converges. Recovery mode answers
+	 *  the honest `NoDatabase` fallback: the picked path passes the
+	 *  SEC-003 session half first (it needs no database), so the answer
+	 *  is the database's own.
+	 * 
+	 *  A folder outside any repository is §10's `E_NOT_A_REPO`
+	 *  ("pick the repository root"); an unresolvable or never-picked path
+	 *  is refused by the SEC-003 gate before any probe (D-100's recorded
+	 *  cost), and a probe the OS refused between the two canonicalizations
+	 *  is `E_PROJECT_UNAVAILABLE` with the OS facts ("could not check" is
+	 *  not "not a repo", D-090); a root whose canonical text is not valid
+	 *  UTF-8 is the D-086 addendum's encoding rejection.
+	 * 
+	 *  The committed relink awaits ONE full watch pass through the
+	 *  bounded mutation seam after the transaction (SYS-007 — the root is
+	 *  a watch input; [`file_watch::refresh_after_mutation`], never-fatal
+	 *  aftermath: a refused send, a failed pass or an expired budget
+	 *  degrades with the class-only warn and the relink stands, the next
+	 *  watch anchor re-derives the set without loss). The converging
+	 *  re-send runs no refresh.
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::project_relink_failed`]); a successful relink is the
+	 *  journal entry itself (the D-051 mirror policy — info+user+ok is
+	 *  not mirrored to the file log).
+	 */
+	projectRelink: (projectId: string, path: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("project_relink", { projectId, path }, options),
 	/**
 	 *  Restores the archived project with this id (§6.4 / PRJ-013…018:
 	 *  `state` returns to `active`): the project comes back with its

@@ -21,6 +21,10 @@
 //!   and a no-op update churns nothing;
 //! * archive/restore are idempotent and maintain the
 //!   `archived_at ⟺ archived` invariant;
+//! * relink moves `path` and `path_key` together (D-09's Locate),
+//!   restamps only `updated_at`, converges over the stored location
+//!   pair, types an unknown id `NotFound`, and maps the schema's
+//!   `path_key UNIQUE` to the typed `DuplicatePathKey` (DB-015);
 //! * by-id writers type a missing id as `NotFound`; a reorder set that
 //!   is not a permutation of the table is typed `ReorderMismatch` and
 //!   touches nothing; `reorder` inside an explicit transaction rolls
@@ -39,7 +43,7 @@ use eunomia_store::projects::{
     AddedVia, ExclusionReason, ListScope, NewExclusion, NewProject, Project, ProjectState,
     ProjectUpdate, ProjectsError, archive, create, create_exclusion, delete_exclusion,
     find_by_path_key, find_exclusion_by_path_key, get, list, list_exclusions, record_last_synced,
-    reorder, restore, update,
+    relink, reorder, restore, update,
 };
 use eunomia_store::settings::{BaseName, ExtraFile, Position, Scheme};
 use eunomia_store::storage::{open_db, run_migrations};
@@ -844,6 +848,145 @@ fn archiving_or_restoring_an_unknown_id_is_typed_not_found() {
             ProjectsError::NotFound { ref id } if id == "no-such-id"
         ));
     }
+}
+
+// ---- Relink (D-09's "Locate…", T-110/D-208) ----------------------------------------
+
+#[test]
+fn relink_moves_path_and_key_together_and_restamps_only_updated_at() {
+    // D-208 point 4's store half: `path` and `path_key` move TOGETHER
+    // (the key is derived from the canonical path, DB-030 — the
+    // command passes the pair the derivation produced) and
+    // `updated_at` is restamped; NOTHING else moves — the content
+    // columns, `added_via`, `state`, `sort_order`, `created_at` and
+    // the OUT-020 sync cells stay verbatim (the dirty verdict the
+    // moved target implies is the DB-022 service's, never a written
+    // cell).
+    let (conn, _dir) = projects_db("relink-move");
+    let original = seed(&conn, 1);
+    // The row carries REAL sync facts, so the "kept" assertion below
+    // is non-vacuous (the D-194 round-1 lesson: `None` to `None`
+    // proves nothing).
+    record_last_synced(
+        &conn,
+        &original.id,
+        "2026-11-25T10:00:00.000Z",
+        &"c".repeat(64),
+    )
+    .expect("seeding the sync facts should work");
+    let before = get(&conn, &original.id)
+        .expect("the row must read")
+        .expect("the seeded row exists");
+
+    // Sleeping past a millisecond boundary before the relink (the
+    // D-031 precedent) makes the stamp assertion below
+    // discriminating: create and relink cannot land on the same
+    // millisecond, so a relink that stopped restamping `updated_at`
+    // would keep it equal to `created_at` and fail it.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    let relinked = relink(
+        &conn,
+        &original.id,
+        "/repos/moved-repo",
+        "/repos/moved-repo",
+    )
+    .expect("relinking should succeed");
+    assert_eq!(relinked.path, "/repos/moved-repo");
+    assert_eq!(relinked.path_key, "/repos/moved-repo");
+    // Everything the move does not own is verbatim.
+    assert_eq!(relinked.name, before.name);
+    assert_eq!(relinked.label, before.label);
+    assert_eq!(relinked.color, before.color);
+    assert_eq!(relinked.description, before.description);
+    assert_eq!(relinked.scheme, before.scheme);
+    assert_eq!(relinked.base_name, before.base_name);
+    assert_eq!(relinked.extra_local, before.extra_local);
+    assert_eq!(relinked.extra_project, before.extra_project);
+    assert_eq!(relinked.added_via, before.added_via);
+    assert_eq!(relinked.state, ProjectState::Active);
+    assert_eq!(relinked.sort_order, before.sort_order);
+    assert_eq!(relinked.created_at, before.created_at);
+    assert_eq!(relinked.archived_at, before.archived_at);
+    assert_eq!(relinked.last_synced_at, before.last_synced_at);
+    assert_eq!(relinked.last_synced_hash, before.last_synced_hash);
+    // The read-back equals a plain get — the returned row is no
+    // second spelling.
+    assert_eq!(
+        get(&conn, &original.id).expect("the row must read"),
+        Some(relinked.clone())
+    );
+    // The stamp moved forward (DB-002 text order equals time order
+    // for the fixed-width shape; the sleep above guarantees the
+    // relink cannot legitimately reuse the creation millisecond).
+    assert!(
+        relinked.updated_at.as_str() > relinked.created_at.as_str(),
+        "updated_at {} must be strictly later than created_at {}",
+        relinked.updated_at,
+        relinked.created_at
+    );
+}
+
+#[test]
+fn a_relink_to_the_stored_location_pair_is_a_verified_noop() {
+    // D-208 point 3's idempotence rule, the store's own guard: a
+    // re-send whose `path` AND `path_key` equal the row's stored
+    // values writes nothing — no `updated_at` churn (the
+    // archive/restore rule) — and answers the row unchanged.
+    let (conn, _dir) = projects_db("relink-noop");
+    let project = seed(&conn, 1);
+
+    // Sleeping past a millisecond boundary before the call (the
+    // D-031 precedent) makes the no-op assertion discriminating: an
+    // implementation whose guard failed would restamp `updated_at`,
+    // and only the correct one keeps it equal to the creation stamp
+    // (create and relink cannot share a millisecond after the sleep).
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    let unchanged = relink(&conn, &project.id, &project.path, &project.path_key)
+        .expect("a same-location relink should succeed");
+    assert_eq!(unchanged, project, "identical row: no churn, no restamp");
+}
+
+#[test]
+fn relinking_an_unknown_id_is_typed_not_found() {
+    let (conn, _dir) = projects_db("relink-unknown");
+    let err = relink(&conn, "no-such-id", "/repos/x", "/repos/x")
+        .expect_err("an unknown id must be rejected");
+    assert!(matches!(
+        err,
+        ProjectsError::NotFound { ref id } if id == "no-such-id"
+    ));
+}
+
+#[test]
+fn relinking_onto_another_rows_key_is_the_typed_duplicate() {
+    // DB-015's belt (D-208 point 3): the command boundary pre-checks
+    // the key inside its own transaction, so this arm is unreachable
+    // past it on the one connection — but the schema's UNIQUE is the
+    // floor, and the honest mapping is the typed
+    // `DuplicatePathKey` (never a silent overwrite), with both rows
+    // surviving untouched.
+    let (conn, _dir) = projects_db("relink-duplicate");
+    let mover = seed(&conn, 1);
+    let occupier = seed(&conn, 2);
+
+    let err = relink(&conn, &mover.id, &occupier.path, &occupier.path_key)
+        .expect_err("a taken key must be rejected");
+    assert!(
+        matches!(err, ProjectsError::DuplicatePathKey { ref path_key } if *path_key == occupier.path_key),
+        "expected the typed duplicate, got {err:?}"
+    );
+    assert_eq!(
+        get(&conn, &mover.id).expect("the row must read"),
+        Some(mover.clone()),
+        "the refused relink left the mover verbatim"
+    );
+    assert_eq!(
+        get(&conn, &occupier.id).expect("the row must read"),
+        Some(occupier.clone()),
+        "the refused relink left the occupier verbatim"
+    );
 }
 
 /// The escaped SQL literal of an id (UUIDv7 TEXT: nothing to escape

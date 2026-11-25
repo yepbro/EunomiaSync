@@ -679,11 +679,12 @@ pub(crate) fn begin_sync<R: Runtime>(
 /// [`projects_reorder`], — since T-077, it creates project rows —
 /// `scan_commit` (`scan.rs`), — since T-108 —
 /// [`crate::project_archive::project_archive`], — since T-109 —
-/// [`crate::project_restore::project_restore`], and — since T-106 —
+/// [`crate::project_restore::project_restore`], — since T-110 —
+/// [`crate::project_relink::project_relink`], and — since T-106 —
 /// [`crate::project_update::project_update`]: the mutation commands
 /// that exist; the
-/// spec's `project_remove`/`project_relink` and P1
-/// `backup_restore` join this gate as they land. Reads are never
+/// spec's `project_remove` and P1 `backup_restore` join this gate as
+/// they land. Reads are never
 /// gated (SYS-005 names the changing commands only).
 ///
 /// A **check**, not an acquire: only the sync pipeline holds the
@@ -3209,8 +3210,8 @@ impl ExistingProject {
 ///    first act above): during a sync the add answers
 ///    `E_SYNC_RUNNING` and nothing is written; the spec's own
 ///    project-*editing* list joins the same gate — `project_update`
-///    since T-106, `project_remove`, `project_relink` and P1
-///    `backup_restore` as they land.
+///    since T-106, `project_relink` since T-110, and
+///    `project_remove` and P1 `backup_restore` as they land.
 /// 5. **Write-access warning** (§6.9, T-063/D-094): after the commit,
 ///    [`eunomia_fs::write_access::check_write_access`] over the
 ///    root's future target file, on the blocking pool (never inside
@@ -3237,8 +3238,11 @@ impl ExistingProject {
 ///    re-derives it from the project table. The other SYS-005-gated
 ///    mutations change no watched file (`projects_reorder` moves
 ///    sort_order, `exclusion_remove` touches no project row) and run
-///    no refresh; the spec's scheme/name/archive/restore/relink
-///    commands call the same seam as they land.
+///    no refresh; the spec's scheme/name/restore/relink commands call
+///    the same seam (`project_update`'s arm since T-107,
+///    `project_restore`'s since T-109, `project_relink`'s since
+///    T-110), and the archive (T-108) is the deliberate non-member:
+///    the leaver exits the set at the next anchor's pass.
 ///
 /// Failures reach the log with their §10 code
 /// ([`logging::project_add_failed`]); the three typed non-add

@@ -912,6 +912,186 @@ describe('projectRestore', () => {
   })
 })
 
+describe('projectRelink', () => {
+  /** An active row to relink, straight from the store the command serves. */
+  function activeRow(): MockProjectRow | undefined {
+    return mockState().projects.find((row) => row.state === 'active')
+  }
+
+  it('relinks the row, clears the marking, and journals it', async () => {
+    // T-110/D-208's happy path over the mock store: the row's path
+    // moves to the picked location, the D-09 marking clears (the
+    // freshly located folder is a live repository — the modelled
+    // half; production probes fresh on every read), the assignments
+    // stay keyed by the unmoved id (the DoD's second half), the
+    // position and name stay, and the one journal entry lands where
+    // `activityList` reads it.
+    const target = activeRow()
+    expect(target, 'an active fixture row to relink').toBeDefined()
+    if (!target) return
+    const assignmentsBefore = mockState()
+      .assignments.filter((assignment) => assignment.projectId === target.id)
+      .map((assignment) => ({ ...assignment }))
+    target.available = false
+    target.unavailableReason = 'missing'
+    const picked = '/moved/repo-one'
+
+    await expect(commands.projectRelink(target.id, picked)).resolves.toBeNull()
+
+    expect(target.path).toBe(picked)
+    expect(target.available, 'the D-09 DoD: available again').toBe(true)
+    expect(target.unavailableReason).toBeNull()
+    expect(target.sortOrder).toBeGreaterThan(0)
+    const columns = await commands.projectsList(true)
+    expect(columns.find((column) => column.id === target.id)?.available).toBe(true)
+    expect(
+      mockState().assignments.filter((assignment) => assignment.projectId === target.id),
+    ).toEqual(assignmentsBefore)
+    const page = await commands.activityList({ actions: ['project.changed'] })
+    const entry = page.entries.find((e) => e.entity_id === target.id)
+    expect(entry, 'one project.changed entry naming the row').toBeDefined()
+    expect(entry?.visibility).toBe('user')
+    expect(entry?.result).toBe('ok')
+    expect(entry?.project_id).toBe(target.id)
+  })
+
+  it("answers a re-send of the row's own location as a no-op", async () => {
+    // D-208 point 3, the mock twin of the Rust converging arm: a
+    // re-send of the location the row already holds writes and
+    // journals nothing.
+    const target = activeRow()
+    expect(target, 'an active fixture row to relink').toBeDefined()
+    if (!target) return
+    const picked = '/moved/repo-two'
+    await commands.projectRelink(target.id, picked)
+    const journalLength = mockState().activity.length
+    const rowSnapshot = { ...target }
+
+    await expect(commands.projectRelink(target.id, picked)).resolves.toBeNull()
+
+    expect(mockState().activity).toHaveLength(journalLength)
+    expect({ ...target }).toEqual(rowSnapshot)
+  })
+
+  it('refuses an unknown id with E_VALIDATION, bounded echo included', async () => {
+    // The loaded fixture world, snapshotted before the act: the
+    // arrays are compared whole after the refusals, so any write the
+    // command wrongly made (not just a length change) reddens.
+    const projectsBefore = mockState().projects.map((row) => ({ ...row }))
+    const journalBefore = mockState().activity.map((entry) => ({ ...entry }))
+    const exclusionsBefore = (await commands.exclusionsList()).map((row) => ({ ...row }))
+
+    await expect(commands.projectRelink('no-such-row', '/moved/repo')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'project_id',
+        value: 'no-such-row',
+        reason: 'no active project has this id',
+      },
+    })
+
+    // D-115's cap, pinned at the boundary: an over-long id echoes
+    // truncated with the suffix, never whole (the mock mirrors the
+    // Rust `bounded_echo` the real refusal uses).
+    const longId = 'x'.repeat(70)
+    await expect(commands.projectRelink(longId, '/moved/repo')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'project_id',
+        value: `${'x'.repeat(64)} (+6 more code points)`,
+        reason: 'no active project has this id',
+      },
+    })
+
+    // Nothing was written: the loaded fixture world stands as it was.
+    expect(mockState().projects).toEqual(projectsBefore)
+    expect(mockState().activity).toEqual(journalBefore)
+    expect(await commands.exclusionsList()).toEqual(exclusionsBefore)
+  })
+
+  it('refuses an archived id as the stale screen shape', async () => {
+    // D-208 point 3's id filter (the `projectUpdate` mirror): the
+    // Locate action rides an active column, so an archived id is the
+    // same stale-screen refusal.
+    const archived = mockState().projects.find((row) => row.state === 'archived')
+    expect(archived, 'an archived fixture row').toBeDefined()
+    if (!archived) return
+
+    await expect(commands.projectRelink(archived.id, '/moved/repo')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'project_id',
+        reason: 'no active project has this id',
+      },
+    })
+  })
+
+  it("refuses an empty path with the real gate's own refusal shape", async () => {
+    // The empty-path arm mirrors the real command's answer (the
+    // SEC-003 gate refuses the unresolvable/never-picked string
+    // before any probe — round 1's P3-3: the legacy
+    // `validation.path_required` key was the mock's invention, never
+    // a backend envelope).
+    const target = activeRow()
+    expect(target, 'an active fixture row to relink').toBeDefined()
+    if (!target) return
+
+    await expect(commands.projectRelink(target.id, '   ')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'path',
+        reason:
+          'must be a registered project or a folder picked in the dialog this session (SEC-003)',
+      },
+    })
+  })
+
+  it('refuses a path an active row holds, writing nothing', async () => {
+    // DB-015's active half (D-208 point 5): the resolved key belongs
+    // to another ACTIVE project — the typed refusal naming `path`,
+    // no offer id, and the world untouched.
+    const actives = mockState().projects.filter((row) => row.state === 'active')
+    expect(actives.length, 'two active fixture rows to collide').toBeGreaterThanOrEqual(2)
+    const [occupier, target] = actives
+    const projectsBefore = mockState().projects.map((row) => ({ ...row }))
+
+    await expect(commands.projectRelink(target.id, occupier.path)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'path',
+        reason: 'an active project already has this path (DB-015)',
+      },
+    })
+
+    expect(mockState().projects).toEqual(projectsBefore)
+  })
+
+  it('refuses a path an archived row holds, carrying the restore offer', async () => {
+    // DB-015's archived half (D-208 point 5, the pinned cross-link's
+    // territory): the refusal carries `existing_project_id` — the
+    // archived row's id, exactly what `projectRestore` consumes — and
+    // the world untouched.
+    const target = activeRow()
+    expect(target, 'an active fixture row to relink').toBeDefined()
+    if (!target) return
+    const archived = mockState().projects.find((row) => row.state === 'archived')
+    expect(archived, 'an archived fixture row as the occupier').toBeDefined()
+    if (!archived) return
+    const projectsBefore = mockState().projects.map((row) => ({ ...row }))
+
+    await expect(commands.projectRelink(target.id, archived.path)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'path',
+        reason: 'an archived project already has this path (DB-015)',
+        existing_project_id: archived.id,
+      },
+    })
+
+    expect(mockState().projects).toEqual(projectsBefore)
+  })
+})
+
 describe('projectUpdate', () => {
   /**
    * An active row to edit, straight from the store the command serves.

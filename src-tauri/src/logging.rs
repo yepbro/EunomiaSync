@@ -1573,6 +1573,40 @@ pub(crate) fn project_restore_failed(error: &AppError) {
     );
 }
 
+/// The `project_relink` command failed (T-110, §10's every-error
+/// rule): the `project_restore_failed` shape — the reachable §10
+/// answers are the `E_SYNC_RUNNING` SYS-005 refusal while a sync
+/// holds the global flag (the gate runs first, so the refusal is the
+/// answer whatever the input is), the typed `E_VALIDATION` refusals
+/// of an id no ACTIVE row matches (a stale screen's row) and of a
+/// `path_key` another project holds (DB-015, active or archived — the
+/// archived arm's params carry the offer's `existing_project_id`),
+/// the `E_NOT_A_REPO` and SEC-003 refusals of the picked path, the
+/// shared base classifier's SQL classes (`ProjectsError::Sql`
+/// through the row read and the path transition, `StorageError::Sql`
+/// through the journal insert — busy exhaustion, a corrupt database,
+/// a constraint abort), the store fallback of a corrupt projects cell
+/// (`ProjectsCorrupt`), the honest no-database fallback, and the
+/// never-fatal watch-refresh refusal (a degraded pass warns through
+/// [`file_watch_mutation_refresh_degraded`], never this line — the
+/// relink stands). A successful relink is the journal's own
+/// `project.changed` entry, written inside the operation's
+/// transaction (D-051/D-208) — never duplicated into the file log
+/// (the info+user+ok unmirrored shape); the verified convergence (a
+/// re-send of the row's own location) writes nothing and logs
+/// nothing.
+pub(crate) fn project_relink_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::projects",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "relinking a project failed"
+    );
+}
+
 /// The `project_update` command failed (T-106, §10's every-error
 /// rule): the `project_archive_failed` shape — the reachable §10
 /// answers are the `E_SYNC_RUNNING` SYS-005 refusal while a sync
@@ -4466,6 +4500,81 @@ mod tests {
                 && log.contains("project_id")
                 && log.contains("no project has this id"),
             "the refusal line carries its code literal and the field, got: {log}"
+        );
+        assert!(
+            log.contains("code=\"E_DB_LOCKED\"") && log.contains("os_kind=Some(\"NoDatabase\")"),
+            "the recovery-mode line carries the fallback code and diagnostic, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_project_relink_failure_line_carries_the_code_and_payload() {
+        // The relink command's §10 edge (T-110), in the restore pin's
+        // shape: the reachable classes are the typed refusals of a
+        // stale screen's id and of a DB-015 key collision (E_VALIDATION
+        // with the field/value/reason params; the archived collision
+        // arm carries `existing_project_id`) and the honest
+        // no-database fallback (E_DB_LOCKED with the `NoDatabase`
+        // diagnostic). A successful relink is the journal entry itself
+        // and the converging re-send writes nothing — both halves
+        // structural (no tracing call exists on those paths), and the
+        // never-fatal watch-refresh refusal warns through
+        // `file_watch_mutation_refresh_degraded`, never this line.
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut stale_id = AppError::new(crate::errors::ErrorCode::Validation);
+        stale_id
+            .params
+            .insert("field".to_owned(), "project_id".to_owned());
+        stale_id
+            .params
+            .insert("value".to_owned(), "no-such-row".to_owned());
+        stale_id.params.insert(
+            "reason".to_owned(),
+            "no active project has this id".to_owned(),
+        );
+        let mut collision = AppError::new(crate::errors::ErrorCode::Validation);
+        collision
+            .params
+            .insert("field".to_owned(), "path".to_owned());
+        collision
+            .params
+            .insert("value".to_owned(), "/repos/taken".to_owned());
+        collision.params.insert(
+            "reason".to_owned(),
+            "an archived project already has this path (DB-015)".to_owned(),
+        );
+        collision
+            .params
+            .insert("existing_project_id".to_owned(), "0192a".to_owned());
+        let mut no_database = AppError::new(crate::errors::ErrorCode::DbLocked);
+        no_database.details = Some(crate::errors::ErrorDetails {
+            os_code: None,
+            os_kind: Some("NoDatabase".to_owned()),
+            os_message: Some("no database is running (recovery mode?)".to_owned()),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            project_relink_failed(&stale_id);
+            project_relink_failed(&collision);
+            project_relink_failed(&no_database);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("relinking a project failed")
+                && log.contains("code=\"E_VALIDATION\"")
+                && log.contains("project_id")
+                && log.contains("no active project has this id"),
+            "the stale-id line carries its code literal and the field, got: {log}"
+        );
+        assert!(
+            log.contains("existing_project_id")
+                && log.contains("an archived project already has this path (DB-015)"),
+            "the archived-collision line carries the offer's id param, got: {log}"
         );
         assert!(
             log.contains("code=\"E_DB_LOCKED\"") && log.contains("os_kind=Some(\"NoDatabase\")"),

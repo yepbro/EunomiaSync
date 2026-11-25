@@ -25246,3 +25246,363 @@ true. Its two carried "Questions" notes are the round-1 addendum's
 own two, unchanged; no new verified argument against any disposition.
 No tree change from this round — the amend that follows folds only
 this addendum into the one commit.
+
+### D-208 — T-110: the `project_relink` command's contract — the Locate flow's gate order (the add flow's mirror with the probe before the transaction), the subfolder resolved to the repository root, and the DB-015 archived collision carrying the restore offer's id — 2026-11-25
+
+The card's spec text (D-09, DB-015, SYS-005, §7.10; the DoD "the
+project is available again after the path change, assignments
+preserved") leaves eight points open to more than one reading; the
+chosen readings were written here BEFORE the implementation (the
+rule-1 discipline). The card's pinned cross-link comment (from T-077,
+dated before T-109) is TRUE and consumed for this task's own
+territory: the restore command it asks for LANDED as T-109/D-205, so
+the DB-015 archived-collision refusal this command answers can carry
+the row's id for a restore offer with a real consumer already
+registered. The named dependencies were verified by grep before any
+reliance (Rule 2): the git-root finding
+`eunomia_fs::paths::find_git_root` (crates/eunomia-fs/src/paths.rs),
+the projects repository with the schema's `path_key UNIQUE`
+(crates/eunomia-store/src/projects.rs, migrations/0001_init.sql), and
+the `sync_running` flag with `reject_during_sync`
+(src-tauri/src/commands.rs) — all landed.
+
+1. **The wire: id-addressed with one path argument,
+   `Result<(), AppError>`** (§7.10 names no payload for any project
+   command; the D-205/D-194/D-201 family's `()` — the screens re-read
+   through `projects_list`). The gate order is the ADD flow's mirror
+   (the only family member that also receives a picked folder):
+   SYS-005 first (`reject_during_sync` — a check, never an acquire),
+   then SEC-003 (`session_paths::validate_ui_path` — the Locate path
+   is a UI-named path from `dialog_pick_folder`, so it must be a
+   registered project or a session pick; the session half passes
+   before any database read, so recovery mode stays consistent), then
+   the `.git` check, then `managed_db`, then ONE `Db::run` transaction
+   carrying the row transition and the in-transaction journal insert
+   (D-037/D-051 — commit or roll back together). The pinned
+   cross-link's consumer-facing half: `scan_commit`'s `"archived"`
+   outcome and `project_add_manual`'s `archived_duplicate` are the
+   ADD flows' own carriers and stay theirs; this command's refusal
+   vocabulary is below.
+2. **The `.git` check resolves the picked folder to its repository's
+   CANONICAL ROOT and relinks there — no `repo_root_offered` arm.**
+   D-09's own words ("a new path with a `.git` check") name a check,
+   never an offer; the offer is PRJ-003's add-specific reading ("the
+   app offers the root, it does not silently register a different
+   folder than the one the user picked") about CREATING a row from a
+   pick — a relink re-points an EXISTING row whose identity is the
+   row (name, label, color, description, origin, position all stay),
+   so there is nothing to silently register. The card's dependency
+   sentence — find the git repository ROOT for the selected folder —
+   is the ruling: `find_git_root` walks up (nearest root wins, D-06),
+   and the ROOT's verbatim UTF-8 text plus `path_key(&root)` (the
+   identity half of `ProjectFields::derive`, the add's own
+   derivation) become the new `path`/`path_key`. The path and the key
+   change together by construction — the key IS derived from the
+   canonical path (DB-030). The probe runs BEFORE the transaction on
+   the blocking pool (SYS-001 and the D-096 ordering: a dead drive
+   must not hold the one database lock — the add flow's own
+   placement): a folder outside any repository answers §10's
+   `E_NOT_A_REPO` ("pick the repository root"); a root whose
+   canonical text is not valid UTF-8 is the D-086 addendum's encoding
+   rejection. A DEAD new path never reaches the probe: the SEC-003
+   gate canonicalizes the sent path first, and an unresolvable path
+   answers its own recorded refusal (E_VALIDATION naming `path` —
+   "not allowlisted", whatever the OS reason, D-100's recorded cost);
+   the probe's own io-refusal belt (`E_PROJECT_UNAVAILABLE` with the
+   OS facts — "could not check" is not "not a repo", D-090's split,
+   `repo_lookup_failed`) covers the mid-flight race between the two
+   canonicalizations. **The OLD path is never probed at all**: the
+   common case is the folder MOVED (gone), but a copied
+   repository (the old path still alive) relinks identically — the
+   old folder's existence is not a fact this command reads, and no
+   file at either path is written or read beyond the root probe
+   itself.
+3. **The transaction: row read → convergence → DB-015 → the store's
+   `relink` → ONE journal entry.** The by-id read first: an id no
+   ACTIVE row matches — unknown, or archived since the column's
+   marking was rendered (the Locate action rides an active matrix
+   column, D-09/MAIN-028; the archived screen's own action is
+   Restore) — is the typed `E_VALIDATION` refusal naming
+   `project_id` with the bounded echo (D-115's cap; the
+   `project_update` stale-screen shape, D-201 point 4). Then the
+   idempotence rule (make-operations-idempotent): a re-send whose
+   resolved root equals the row's stored `path` AND `path_key`
+   converges — `Ok(())`, nothing written, no `updated_at` restamp, no
+   journal entry, no watch refresh (the D-201 point-5/D-204 point-9
+   verified no-op; a screen's retry after any interruption converges).
+   Then DB-015 INSIDE the transaction (the add flow's own
+   serialization rule: the check and the write share the one
+   connection, so the write cannot race past it):
+   `find_by_path_key` over the NEW key, the row itself excluded —
+   a collision is refused (point 5). Then the store's new
+   `relink(conn, id, path, path_key)` writer: ONE `UPDATE` setting
+   `path`, `path_key` and `updated_at` (the DB-002 stamp — the row's
+   own edit clock; the sync facts deliberately NOT restamped), with
+   the store-level convergence guard
+   `WHERE id = ? AND (path <> ? OR path_key <> ?)` — the
+   `archive`/`restore` shape (a matched-rows count of 0 reads the row
+   back: `None` is `NotFound`, `Some` is the converging no-op), and
+   the `duplicate_or_sql` belt mapping the schema's `path_key UNIQUE`
+   violation to `DuplicatePathKey` (unreachable past the command's
+   pre-check on the one connection — the D-103 convergence rule; if
+   it ever fires anyway it reaches the `projects_store_to_app_error`
+   fallback, never a masked conflict). The journal: ONE
+   `project.changed` entry — the closed vocabulary's own recorded
+   member ("A project's row changed (update, relink, reorder)",
+   `crates/eunomia-store/src/action_log.rs`; LOG-001…004 lists
+   "changing projects" with no relinking member of its own),
+   info/user/ok, entity and `project_id` naming the row, NO details
+   (the `project_update` shape: the row itself holds every fact this
+   command writes).
+4. **What the transition does NOT move: the family posture, mirrored
+   from D-205 point 6.** The assignments stay verbatim (DB-014 — the
+   DoD's second half; the store's assignment rows are keyed by the
+   project id, which does not move), and so do `sort_order`,
+   `added_via`, `state`, every §6.9/PRJ-012 field and — the load-
+   bearing keep — `last_synced_hash`/`last_synced_at` (OUT-020's
+   cells are the sync's own; the command writes no hash of its own).
+   The DB-020 formula covers the TARGET PATH
+   (`sha256('v1' + scheme + target path + …)`, the core's
+   `content_build` spelling `<root>/<base_name>`), so the stored
+   pre-relink hash and the next recomputation differ by construction:
+   the dirty verdict is decided by the row and the DB-022 service,
+   never written here (the D-194 point-3/D-204 point-5/D-205 point-6
+   row-decidable posture — the DoD pins it through the real
+   `recalc_and_emit` pass and `projects_list`'s `dirty` column: clean
+   before over the old target, dirty after over the new one).
+5. **The DB-015 refusals: `E_VALIDATION` naming `path`, the caller's
+   path echoed bounded, class-only reasons — and the archived arm
+   carries the restore offer's id.** §10's `E_VALIDATION` row owns
+   this ("the operation's own state forbids it": another row, active
+   or archived, holds the resolved key). Both arms refuse the whole
+   operation with the `rejected_field` shape (`field: "path"`, the
+   bounded echo of the caller's path, D-115's cap): an ACTIVE
+   collision — "an active project already has this path (DB-015)"
+   (the user's action is §10's own: fix the field, pick another
+   folder); an ARCHIVED collision — the DB-015 offer shape adapted to
+   the `Result<(), AppError>` wire: the same refusal plus
+   `params.existing_project_id`, the archived row's id (a UUIDv7
+   TEXT, DB-002 — machine-generated identity, not user content, so
+   Rule 8 does not keep it off the envelope; the add flows' existing
+   answer is the precedent). The id is what the offer needs: the UI
+   cannot find the archived row itself (`projects_list` serves no
+   path column), and the consumer exists — `project_restore`
+   (T-109/D-205) takes exactly that id. The refusal names the class
+   ("an archived project already has this path (DB-015)"), never the
+   stored name or path. Nothing is written in either arm.
+6. **The watch arm (SYS-007, T-279/D-204 — the LAST member of
+   T-279's list): the path IS a watch input, and the committed arm
+   awaits ONE full watch pass.** The pass's `ProjectFact` carries the
+   row's `root` (`file_watch.rs` — the watched file is
+   `root + target_file_name`), so a committed relink moves the watch
+   input exactly the way a scheme/file-name change does (D-204 point
+   7): strictly AFTER the transaction (the journal insert stays
+   inside it, the refresh never is), the committed arm — the row
+   actually moved — awaits ONE full pass through the bounded mutation
+   seam `file_watch::refresh_after_mutation` (D-156 — the same
+   awaited one-liner `project_add_manual`, T-107 and T-109 run),
+   never-fatal: a refused send, a failed pass or an expired budget
+   degrades with `logging::file_watch_mutation_refresh_degraded` and
+   the relink stands; the next anchor re-derives the set (D-144's
+   convergence). A refused arm never reaches the refresh; the
+   converging re-send runs none (a pass over a row that did not move
+   is file reads with no observable change, D-201 point 7's own
+   boundary). With this command landed, every member of T-279's
+   refresh list the spec names exists — `project_add_manual` (add),
+   `project_update` (scheme/file-name/extra), `project_restore`
+   (restore), `project_relink` (relink); the orchestrator can close
+   T-279's card.
+7. **The availability DoD ("снова доступен"): the command writes no
+   availability anywhere — the pin runs the real probe surfaces.**
+   Availability is a fact about the machine's current filesystem,
+   owned by the D-084 probes (`availability::recheck_and_emit`'s
+   diff and `projects_list`'s fresh per-read column, D-09/DB-032);
+   a relink that wrote a verdict would freeze a fact the next probe
+   re-derives. The DoD is pinned the family way (the dirty tests'
+   shape): the world starts in D-09's situation — the row's old
+   folder gone, one `recheck_and_emit` pass records the unavailable
+   verdict and emits the diff — then the relink lands, and the next
+   pass answers the RECOVERY change (`available: true`, the reason
+   gone) while `projects_list`'s column reads available over the new
+   path.
+8. **No file WRITES (the D-194/D-204/D-205 posture).** The old target
+   file, wherever it survived, is the user's own (the add's
+   "nothing is touched" half mirrored); the new target file is the
+   next sync's. The one file-system interaction is READ-only: the
+   root probe (point 2) and the watch pass it may await (OUT-011).
+   Complexity stays stated: the root probe is the canonical
+   walk-up's linear climb (D-090's own bound), the store writes are
+   indexed by-id and by-key, and the transaction is one
+   statement-plus-journal — untrusted text (the caller's path) is
+   probed, echoed bounded, and never interpolated into diagnostics
+   (Rule 8).
+
+SYS-005's gate runs as the first act (`reject_during_sync`, before
+SEC-003 and the database — the family ordering; during a sync the
+answer is the typed `E_SYNC_RUNNING` refusal whatever the input is);
+recovery mode answers the honest `NoDatabase` fallback. The
+registration makes it command #43: `collect_commands!` gains one
+line, `src/bindings.ts` is regenerated through the export pin
+(`projectRelink: (projectId, path) => Promise<null>`), the mock twin
+(`src/ipc/mock/commands.ts`) mirrors the command (the row's path
+move, the converging re-send, the two collision refusals with the
+archived arm's `existing_project_id`, the unknown-id refusal with the
+bounded echo, the `project.changed` journal, and the D-09 DoD's
+modelled half — the row's availability marking clears over the
+freshly located folder; the `.git` check, the SEC-003 gate, the
+`E_SYNC_RUNNING` gate and the watch pass are the stand-in's own
+documented limits), `mode.spec` pins the 43-name surface,
+`ARCHITECTURE.md`'s module table (between `project_archive.rs` and
+`project_update.rs`, alphabetical) and command count sentence
+("forty-three") follow, `manual-smoke.md`'s registered-command list
+names it, spec §7.10's command-notes paragraph gains the
+`project_relink` sentence, and `logging.rs` gains
+`project_relink_failed` (the `project_restore_failed` shape) with its
+own facade pin. The stale future-tense comments that name the relink
+(or the restore beside it) are made true: `file_watch.rs`'s
+set-membership doc (its "leaving `project_restore` and
+`project_relink` to join as they land" sentence predates T-109's
+landing and now names both as landed — T-279's list complete),
+`session_paths.rs`'s "the upcoming `project_relink` follows",
+`commands.rs`'s SYS-005 gate doc and the add flow's own "join as
+they land" lists, and `sync_running.rs`'s module doc (which T-109's
+sweep missed — the restore's name joins the relayed list there).
+
+Tests (BDD, red first — the compile failure over the un-registered
+command IS the red state): a new
+`src-tauri/src/project_relink_tests.rs` (the `project_restore_tests`
+mirror — mock-IPC invokes over a real migrated `Db`) carrying the
+DoD battery: the happy path (the moved-folder world with REAL
+assignments and a REAL seeded sync hash; the row's new path and
+path_key — the key oracle seeded deliberately different from the
+path — the assignments verbatim, the hash cell untouched, the ONE
+`project.changed` entry with the total journal count, `updated_at`
+restamped, the old target file's bytes byte-for-byte), the subfolder
+resolution (a pick inside the new repo lands on the canonical root),
+the converging re-send, the active and archived collisions (the
+archived arm's `existing_project_id` pinned, both
+nothing-was-written over a loaded world), the non-git refusal, the
+dead/foreign path refusal (the SEC-003 arm a dead new path honestly
+meets first, D-100's recorded cost), the `E_SYNC_RUNNING` gate (the
+spec-literal JSON, nothing written, the retry converges), the honest
+`NoDatabase`, the unknown and archived ids with the bounded echo,
+the D-051 rollback proof (the journal-insert trigger), the
+availability DoD (point 7's two-pass pin), the dirty DoD (point 4's
+row-decidable pin with the clean control), the two wiring pins
+(one awaited pass over the quiescent baseline; none on the converging
+re-send), and the registration census; the mock twin's
+`commands.spec.ts` battery mirrors the same arms; `mode.spec`'s
+surface pin moves to 43. Mutation groups are recorded in the review
+addendum below.
+
+Checks: `CARGO_BUILD_JOBS=2 cargo fmt --check`; `CARGO_BUILD_JOBS=2
+cargo clippy --workspace --all-targets -- -D warnings`;
+`CARGO_BUILD_JOBS=2 cargo nextest run --workspace --test-threads=4`
+(the export pin inside proves `bindings.ts`); `cargo test --doc
+--workspace` (D-195); `pnpm test`, `pnpm run format:check`,
+`pnpm run lint`, `pnpm run typecheck`.
+
+Mutation groups, red-then-green (Rust: M1 the refresh wiring dropped →
+the wiring-presence test red; M2 the `committed` guard dropped — the
+refresh always runs → the converging no-pass test red; M3 the archived
+arm's `existing_project_id` insert dropped → the archived-collision
+test red; M4 the journal insert dropped → the happy path's journal
+pins red; M5 the convergence early-return dropped → the converging
+test red through the journal churn; M6 the stored path set to the
+caller's raw pick instead of the resolved root → the subfolder test
+red; M7 the row read's active-state filter dropped → the archived-id
+test red; M8 the SYS-005 gate moved after the SEC-003 input gate →
+the sync test red — its refusal is sent with a FOREIGN path precisely
+so the order is pinned; M9, added with round 1's P3-4, the refresh
+hoisted onto the transaction's ERROR path → the refused-arm test red.
+Store: SM1 the statement's convergence guard dropped → the no-op test
+red (after the D-031 boundary sleep was added to it — without the
+sleep the restamp can share the creation millisecond and the no-op
+assertion was vacuous, caught while mutating); SM2 the
+`duplicate_or_sql` mapping dropped → the duplicate test red. Frontend:
+TM1 the mock's journal call dropped → the mock's happy-path test red;
+TM2 the mock's occupier search dropped → both collision tests red;
+TM3 the mock's availability clearing dropped → the happy-path
+marking assert red.)
+
+**Round-1 review addendum (same task, 2026-11-25; model
+`opencode-go/deepseek-v4.1-flash`, report
+`.opencode/reviews/t110-round1-report.md`: APPROVE, 0×P0/P1/P2,
+6×P3 — five taken in the amend, one routed).** The round independently
+verified the gate order against the add flow, the one-transaction
+shape with the journal insert inside and the refresh strictly after,
+the store guard's exact complement of the command's convergence test,
+the `duplicate_or_sql` mapping against the migration's single UNIQUE
+index, the D-051 rollback staging, both DoD halves through the real
+service seams, the 43-command census on all four surfaces (counted),
+the test audit's four checks (falsifiable oracles, nothing deleted,
+skipped or loosened), and the `existing_project_id` carrier's
+justification (`projects_list` serves no path column;
+`project_restore` consumes exactly that id). The six P3s and their
+dispositions:
+
+- _P3-1 (a mutation scratch note shipped in production source)._ A
+  leftover `// MUTATION M3` comment from the mutation-verification
+  cycle — the only `MUTATION` marker in the tree, naming a mutation
+  not in effect. Fixed — deleted (and the marker sweep re-verified
+  clean).
+- _P3-2 (the rewritten `file_watch.rs` set-membership paragraph was
+  mangled)._ A colon opened a parenthesis that closed eleven lines
+  later, "LANDED" was redundant after "every one of them landed", and
+  the lead-in mixed field changes with whole commands. Fixed — the
+  paragraph rewritten as the reviewer's shape ("the seam follows
+  every set-point member SYS-007 names, all of them landed: …"),
+  keeping the T-279-complete sentence.
+- _P3-3 (the mock invented an empty-path refusal the backend cannot
+  produce)._ The `validation.path_required` key exists nowhere in the
+  backend — copied from the add twin's legacy. Fixed the substance:
+  the arm now mirrors the REAL command's answer for an empty path
+  (the SEC-003 gate's `E_VALIDATION` envelope naming `path` with the
+  session sentence), the mock's known-limits doc names the one
+  modelled half, and a new spec test pins the arm.
+- _P3-4 ("refused arms run no refresh" was only structurally
+  guaranteed, not pinned)._ The criterion names three arms; only
+  committed and converging were tested. Fixed —
+  `a_refused_relink_runs_no_watch_pass` added over the real watch
+  service (the DB-015 collision, the arm that reaches deepest — the
+  probe passed, the transaction opened, the row read), asserting the
+  pass count stays at the settled baseline; mutation-verified as M9
+  above (a refactor that moved the refresh onto the error path
+  reddens exactly this test).
+- _P3-5 (§10's `E_NOT_A_REPO` row and DB-015's offer sentence are
+  add-only wordings)._ Real: the row says "a folder without `.git` is
+  being added" and DB-015 says "when the user ADDS the path" — the
+  relink is now a second producer and a second offer carrier. ROUTED,
+  not fixed here: those spec zones are outside this task's frozen
+  edit scope (the task's spec.md edits stay in §7.10's command-notes
+  paragraph and the Projects rows, the parallel
+  `docs-prototype-import` branch owning broader spec.md edits —
+  Rule 10); follow-up card material for the orchestrator, the
+  `E_NOT_A_REPO` localized text ("…is being added", the frontend
+  catalog) sharing the same root.
+- _P3-6 (the store's `# Errors` doc tangled `Sql` with
+  `DuplicatePathKey`)._ Fixed — the three variants enumerated
+  plainly: `NotFound`, `DuplicatePathKey` (the UNIQUE belt),
+  `Sql` (any other failure).
+
+Record-only notes from the round's "Questions" section: the offer
+carrier judged justified (no action); the mock's convergence
+fidelity — the twin compares the derived key alone because
+`MockProjectRow` carries no stored `path_key`, the documented
+stand-in limit (D-205's own note), harmless until a `pathKey` field
+lands; the self-exclusion `existing.id != project.id` branch stays
+unreachable through the flows (documented in place as the
+tampered-row belt); and the commit message's mock-test count was wrong twice: the first
+draft's "7 mock-twin tests" counted the mode.spec surface pin (a
+first correction said "six battery tests plus the surface pin"), and
+round-2's P3 caught that round-1's P3-3 fix had added a seventh
+battery test AFTER that correction — the final truth is seven
+battery tests plus the pin, and the final amend's message and this
+note say seven (the executor session hit the provider usage limit
+before processing the P3; the orchestrator took it from the
+worktree artifacts, message-only, no code change).
+
+Re-checked after the fixes, all green on real exit codes: fmt;
+clippy `-D warnings`; the full nextest suite (1943/1943 — one more
+than the commit's first run, P3-4's test); doc tests; the export pin;
+`pnpm test` (394/394, P3-3's pin); prettier, eslint, typecheck.

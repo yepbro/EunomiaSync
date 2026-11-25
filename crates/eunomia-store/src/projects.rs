@@ -737,10 +737,11 @@ pub fn list(conn: &Connection, scope: ListScope) -> Result<Vec<Project>, Project
 /// The mutable fields of a project (PRJ-008/PRJ-012), as an update
 /// instruction: `None` leaves the field unchanged.
 ///
-/// Deliberately absent: `path` and `path_key` (PRJ-008: the path
-/// cannot be changed — the identity is fixed at creation),
-/// `added_via` (fixed at creation), `state` ([`archive`]/[`restore`]
-/// own it), `sort_order` ([`reorder`] owns it), `last_synced_at`/
+/// Deliberately absent: `path` and `path_key` (PRJ-008: the settings
+/// modal cannot change them — the identity moves only through the
+/// dedicated [`relink`] writer, D-09's "Locate…"), `added_via` (fixed
+/// at creation), `state` ([`archive`]/[`restore`] own it),
+/// `sort_order` ([`reorder`] owns it), `last_synced_at`/
 /// `last_synced_hash` (OUT-020: the sync tasks own them) and
 /// `created_at`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -980,6 +981,61 @@ pub fn restore(conn: &Connection, id: &str) -> Result<Project, ProjectsError> {
     // Unreachable: the UPDATE above matched an archived row (one
     // connection, D-037 — no concurrent delete exists).
     Ok(get(conn, id)?.expect("the row just restored must be readable"))
+}
+
+/// Relinks the project with this id to a new repository location
+/// (D-09's "Locate…", T-110/D-208): `path` and `path_key` move
+/// TOGETHER — the key is derived from the canonical path (DB-030), so
+/// the caller passes the pair the derivation produced — and
+/// `updated_at` is restamped (the row's own edit clock, DB-002).
+/// NOTHING else moves: the assignments (DB-014, keyed by the row's
+/// unmoved id), `sort_order`, `added_via`, `state`, every content
+/// column and the OUT-020 sync cells (`last_synced_at`/
+/// `last_synced_hash` — the sync's own, kept exactly where they are)
+/// stay verbatim; the dirty verdict the moved target path implies
+/// (DB-020 covers it) is the DB-022 service's, never written here.
+///
+/// DB-015 is the CALLER's pre-check (the command boundary reads
+/// [`find_by_path_key`] inside its own transaction before calling
+/// this); the schema's `path_key UNIQUE` is the belt — a collision
+/// that slips past the pre-check surfaces as the typed
+/// [`ProjectsError::DuplicatePathKey`], never a silent overwrite.
+///
+/// Idempotent: a call whose `path` AND `path_key` equal the row's
+/// stored values writes nothing and returns the row unchanged (no
+/// `updated_at` churn — the [`archive`]/[`restore`] rule); the guard
+/// is the statement's own WHERE clause.
+///
+/// # Errors
+///
+/// Returns [`ProjectsError::NotFound`] when no row has this id;
+/// [`ProjectsError::DuplicatePathKey`] when another row already holds
+/// the key (the schema's `path_key UNIQUE`, the belt behind the
+/// caller's pre-check); [`ProjectsError::Sql`] for any other
+/// statement or read failure.
+pub fn relink(
+    conn: &Connection,
+    id: &str,
+    path: &str,
+    path_key: &str,
+) -> Result<Project, ProjectsError> {
+    let changed = conn
+        .execute(
+            "UPDATE projects
+             SET path = ?1, path_key = ?2, updated_at = ?3
+             WHERE id = ?4 AND (path <> ?1 OR path_key <> ?2)",
+            rusqlite::params![path, path_key, now_utc(), id],
+        )
+        .map_err(|err| duplicate_or_sql(err, path_key))?;
+    if changed == 0 {
+        // Either the id matches nothing, or the row already holds
+        // this exact location pair; the read tells the two apart
+        // (the archive/restore shape).
+        return existing_row(conn, id);
+    }
+    // Unreachable: the UPDATE above matched the row (one connection,
+    // D-037 — no concurrent delete exists).
+    Ok(get(conn, id)?.expect("the row just relinked must be readable"))
 }
 
 /// Records one project's last-sync facts (DB-024/OUT-020, §9.4 phase

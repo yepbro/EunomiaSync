@@ -61,17 +61,19 @@
 //!   [`refresh_after_mutation`] since T-280 — the after-sync seam's
 //!   twin with a wait budget, so the watch pass can no longer hang
 //!   the interactive answer; the add flow's own older probe
-//!   exposure stays D-144's recorded boundary), and the
-//!   scheme/file-name/restore/
-//!   relink changes call the same seam as their §7.10 commands land
-//!   (`project_update`'s scheme/file-name/extra arm — LANDED with
-//!   T-107/D-204: a committed patch that moved a watch input awaits
-//!   the bounded seam, that command's name/label/color/description
-//!   fields (T-106/D-201) deliberately call NO seam, none of them a
-//!   watch input, and `project_archive` (T-108/D-194) calls none
-//!   either — the next full pass's own re-derivation prunes the
-//!   leaver — leaving `project_restore` and `project_relink` to
-//!   join as they land, the SYS-005 gate's precedent). No
+//!   exposure stays D-144's recorded boundary), and the seam follows
+//!   every set-point member SYS-007 names, all of them landed:
+//!   `project_update`'s scheme/file-name/extra arm (T-107/D-204 — a
+//!   committed patch that moved a watch input awaits the bounded
+//!   seam; that command's name/label/color/description fields
+//!   (T-106/D-201) deliberately call NO seam, none of them a watch
+//!   input), `project_restore` (T-109/D-205 — the row returns to
+//!   the set) and `project_relink` (T-110/D-208 — the root is a
+//!   watch input and it moves), while `project_archive`
+//!   (T-108/D-194) is the deliberate non-member: the leaver exits
+//!   the set at the next anchor's pass, which every full pass's own
+//!   re-derivation prunes. With the relink landed, T-279's list is
+//!   complete. No
 //!   commit-hook piggyback exists here by design: the
 //!   DB-022 hook is the dirty service's, and this service's pass
 //!   probes folders — a hook that fires inside the connection's

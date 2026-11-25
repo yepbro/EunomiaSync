@@ -92,6 +92,7 @@ src-tauri/
   src/logging.rs           # File log: daily + 10 MB rotation, 5-file cap (working)
   src/markdown.rs          # Markdown preview renderer (pulldown-cmark; preview only) (working)
   src/project_archive.rs   # project_archive command: §6.4 row transition + PRJ-017 exclusion (working)
+  src/project_relink.rs    # project_relink command: D-09 Locate path transition + project.changed journal + mutation-seam watch refresh (working)
   src/project_restore.rs   # project_restore command: §6.4 row transition back + reason-agnostic exclusion removal + mutation-seam watch refresh (working)
   src/project_update.rs    # project_update command: PRJ-008/PRJ-012 patch + project.changed journal + mutation-seam watch refresh (working)
   src/recovery.rs          # Recovery-screen file mechanics       (working)
@@ -169,7 +170,7 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is forty-two commands — the §7.10 names that
+   The registered set is forty-three commands — the §7.10 names that
    are implemented so far, matching the `mode.spec` surface list. It comprises the
    recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
@@ -229,6 +230,23 @@ Rust commands are registered through `tauri-specta`:
    sync holds the flag; once committed, one full watch pass through
    the bounded mutation seam returns the row to the watched set
    (SYS-007, never-fatal) — the Projects module's
+   `project_relink` (T-110, `src-tauri/src/project_relink.rs`,
+   DECISIONS.md D-208): the D-09 "Locate…" — an id-addressed
+   re-pointing over the picked folder (the SEC-003 session gate and
+   the `.git` root probe first, the probe before any database
+   work), whose one `Db::run` transaction moves the row's `path`
+   and `path_key` to the repository's canonical root together with
+   the single `project.changed` journal entry; the assignments,
+   position, origin, settings and stored sync hash stay exactly
+   where they were (the dirty verdict is the recalculation
+   service's row-decidable answer over the new target path), a
+   `path_key` another project holds (DB-015) is the stale-screen
+   `E_VALIDATION` refusal naming `path` — the archived arm carrying
+   the restore offer's id — a re-send of the row's own location
+   converges with nothing written, and once committed one full
+   watch pass through the bounded mutation seam moves the watch
+   input with the row (SYS-007, never-fatal) — the Projects
+   module's
    `project_update` (T-106, `src-tauri/src/project_update.rs`,
    DECISIONS.md D-201; the PRJ-012 half added by T-107, D-204): the
    settings save — an id-addressed patch over the §6.9-validated
