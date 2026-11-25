@@ -1003,7 +1003,7 @@ export const mockCommands: IpcCommands = {
         labelsByInstruction.set(assignment.instructionId, labels)
       }
     }
-    return rows.map((row, index) => {
+    const tree = rows.map((row, index) => {
       if (row.kind === 'heading') {
         return {
           kind: 'heading' as const,
@@ -1037,6 +1037,13 @@ export const mockCommands: IpcCommands = {
         project_labels: labelsByInstruction.get(row.id) ?? [],
       }
     })
+    // D-200: the D-14 number rides the default answer — the count of
+    // hidden instructions, scope-independent, from this mock's own
+    // rows (no core here; the count is a filter, not a second read).
+    const hiddenCount = state.library.filter(
+      (row) => row.kind === 'instruction' && row.state === 'hidden',
+    ).length
+    return { tree, hidden_count: hiddenCount }
   },
   /** `heading_create` (§7.10, T-092): validated name/level, semantic placement, one journal row. */
   async headingCreate(name, level, parent) {

@@ -45,10 +45,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use eunomia_store::library::{
     AssignmentTarget, ItemKind, ItemScope, ItemState, ItemUpdate, LibraryError, LibraryItem,
     NewAssignment, NewLibraryItem, NewVariant, Variant, VariantState, VariantUpdate, assign,
-    create_item, create_variant, delete_heading, delete_variant, get_assignment, get_item,
-    get_variant, hide_item, list_assignments_for_project, list_assignments_for_variant, list_items,
-    list_variants, move_item, reassign, restore_item, restore_variant, set_custom, set_item_order,
-    set_main_variant, unassign, update_item, update_variant,
+    count_items, create_item, create_variant, delete_heading, delete_variant, get_assignment,
+    get_item, get_variant, hide_item, list_assignments_for_project, list_assignments_for_variant,
+    list_items, list_variants, move_item, reassign, restore_item, restore_variant, set_custom,
+    set_item_order, set_main_variant, unassign, update_item, update_variant,
 };
 use eunomia_store::projects as project_repo;
 use eunomia_store::projects::{AddedVia, NewProject, Project};
@@ -1470,6 +1470,18 @@ fn hiding_keeps_variants_assignments_and_position_and_is_idempotent() {
         .collect();
     assert_eq!(hidden_ids, vec![item.id.clone()]);
     assert_eq!(all_positions(&conn), vec![1, 2, 3], "table-wide and dense");
+
+    // D-200's helper agrees with the lists it twins — every scope,
+    // same world, so a predicate drift in either arm of the count
+    // fails against the list lengths.
+    for scope in [ItemScope::All, ItemScope::Active, ItemScope::Hidden] {
+        let counted = count_items(&conn, scope).expect("count should succeed");
+        let listed = list_items(&conn, scope).expect("list should succeed").len() as i64;
+        assert_eq!(
+            counted, listed,
+            "count_items({scope:?}) answers the list's own length"
+        );
+    }
 
     // Idempotent, without timestamp drift.
     let again = hide_item(&conn, &item.id).expect("a repeated hide should succeed");

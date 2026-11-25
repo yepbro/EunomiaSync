@@ -205,7 +205,12 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
 
   it('serves the tree in position order with both kinds tagged and the full field set', async () => {
     const rows = mockState().library
-    const tree = await commands.libraryGet(null)
+    const answer = await commands.libraryGet(null)
+    // D-200: the answer's own key set is pinned, and the D-14 number
+    // is zero here — the generator's PROFILE holds no hidden row.
+    expect(Object.keys(answer).sort()).toEqual(['hidden_count', 'tree'])
+    expect(answer.hidden_count).toBe(0)
+    const tree = answer.tree
     // The served order is the rows' position order; the default read
     // serves the visible library (the generator hides every 13th
     // instruction — with PROFILE's 4 items, none is hidden, so the
@@ -270,7 +275,7 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
         expected.set(assignment.instructionId, list)
       }
     }
-    const tree = await commands.libraryGet(null)
+    const tree = (await commands.libraryGet(null)).tree
     const labeled = tree.filter(isInstruction)
     expect(labeled.length).toBeGreaterThan(0)
     for (const instruction of labeled) {
@@ -296,7 +301,7 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
     expect(victim).toBeDefined()
     if (victim) {
       victim.state = 'archived'
-      const relisted = await commands.libraryGet(null)
+      const relisted = (await commands.libraryGet(null)).tree
       const stillLabeled = relisted
         .filter(isInstruction)
         .some((instruction) => instruction.project_labels.some((l) => l.project_id === victim.id))
@@ -314,7 +319,7 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
     expect(target).toBeDefined()
     if (target?.kind === 'instruction') {
       target.variants[0]!.content = ''
-      const tree = await commands.libraryGet(null)
+      const tree = (await commands.libraryGet(null)).tree
       const served = tree.filter(isInstruction).find((instruction) => instruction.id === target.id)
       expect(served?.variants[0]?.is_empty, 'the empty variant is marked (LIB-014)').toBe(true)
       expect(served?.variants[0]?.is_main, 'the main flag rides the same list (DB-010)').toBe(true)
@@ -324,7 +329,7 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
       // BOM blocks the right-hand strip, a leading one behind blank
       // lines does not.
       target.variants[0]!.content = ' \n\t '
-      const whitespace = await commands.libraryGet(null)
+      const whitespace = (await commands.libraryGet(null)).tree
       const servedBlank = whitespace
         .filter(isInstruction)
         .find((instruction) => instruction.id === target.id)
@@ -332,7 +337,7 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
         true,
       )
       target.variants[0]!.content = ' \u{FEFF}'
-      const trailingBom = await commands.libraryGet(null)
+      const trailingBom = (await commands.libraryGet(null)).tree
       const servedTrailing = trailingBom
         .filter(isInstruction)
         .find((instruction) => instruction.id === target.id)
@@ -341,7 +346,7 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
         'a TRAILING BOM blocks the strip: the variant outputs text',
       ).toBe(false)
       target.variants[0]!.content = '\n\u{FEFF}'
-      const leadingBom = await commands.libraryGet(null)
+      const leadingBom = (await commands.libraryGet(null)).tree
       const servedLeading = leadingBom
         .filter(isInstruction)
         .find((instruction) => instruction.id === target.id)
@@ -365,7 +370,7 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
     const rows = mockState().library
     const byPosition = [...rows].sort((a, b) => a.position - b.position).map((row) => row.id)
     mockState().library.reverse()
-    const tree = await commands.libraryGet(null)
+    const tree = (await commands.libraryGet(null)).tree
     expect(tree.map((entry) => entry.id)).toEqual(byPosition)
   })
 
@@ -385,7 +390,7 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
       headingRow('h-back', 7, 3, 'Back'),
     ]
     const flags = async (flag: boolean | null) => {
-      const tree = await commands.libraryGet(flag)
+      const tree = (await commands.libraryGet(flag)).tree
       return tree
         .filter(isHeading)
         .map((heading) => [heading.title, heading.level_skipped, heading.from_level] as const)
@@ -428,13 +433,18 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
       },
     ]
     const visible = await commands.libraryGet(null)
-    expect(visible.map((entry) => entry.title)).toEqual(['Dropper'])
+    expect(visible.tree.map((entry) => entry.title)).toEqual(['Dropper'])
     const widened = await commands.libraryGet(true)
-    const keeper = widened
+    const keeper = widened.tree
       .filter(isInstruction)
       .find((instruction) => instruction.title === 'Keeper')
     expect(keeper?.state).toBe('hidden')
     expect(keeper?.project_labels.map((l) => l.project_id)).toEqual([active!.id])
+    // D-200: the count is ONE hidden instruction, the same number
+    // under both scopes (the default answer knows its hidden half
+    // without serving it).
+    expect(visible.hidden_count).toBe(1)
+    expect(widened.hidden_count).toBe(1)
   })
 })
 
@@ -2775,7 +2785,7 @@ describe('assignmentSetCustom (T-331)', () => {
     expect(second?.created_at).toBe(first?.created_at)
     expect(second?.target).toEqual({ kind: 'custom', value: 'project one updated' })
     expect(instruction.variants).toHaveLength(variantCount)
-    const customLabels = await commands.libraryGet(null)
+    const customLabels = (await commands.libraryGet(null)).tree
     const customLabel = customLabels.find(
       (entry) => entry.kind === 'instruction' && entry.id === instruction.id,
     )
@@ -2789,7 +2799,7 @@ describe('assignmentSetCustom (T-331)', () => {
     expect(cleared?.target).toEqual({ kind: 'variant', value: main.id })
     expect(state.activity).toHaveLength(journalBefore + 3)
 
-    const labels = await commands.libraryGet(null)
+    const labels = (await commands.libraryGet(null)).tree
     const labeled = labels.find(
       (entry) => entry.kind === 'instruction' && entry.id === instruction.id,
     )

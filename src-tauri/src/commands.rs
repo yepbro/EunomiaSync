@@ -4325,6 +4325,23 @@ struct LibraryRead {
     assignments: Vec<eunomia_store::library::Assignment>,
 }
 
+/// The `library_get` answer (§7.10, D-200): the served tree plus the
+/// D-14 number — the count of hidden instructions the default scope
+/// does NOT serve.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct LibraryGetResult {
+    /// The flat position-ordered tree (D-187) — every row
+    /// LIB-001/008 names under the asked scope.
+    pub(crate) tree: Vec<LibraryTreeItem>,
+    /// The number of hidden instructions (`state = 'hidden'`; the
+    /// D-14 "Show hidden" toggle's number). Scope-independent: the
+    /// same count under either scope, computed in the same read
+    /// transaction — the default answer knows its hidden half without
+    /// serving it. Saturated at `u32::MAX` (the `variant_count`
+    /// precedent: specta forbids 64-bit integers on the wire).
+    pub(crate) hidden_count: u32,
+}
+
 /// Serves the instruction library's tree (§7.10 Library module
 /// `library_get`, §7.3): every row LIB-001/008 names — instructions
 /// (name, number of variants, creation and change dates, state) and
@@ -4335,7 +4352,9 @@ struct LibraryRead {
 ///
 /// A pure read: one `Db::run` transaction gathers the four lists (the
 /// items, the active variants, the active projects and their
-/// assignments — one snapshot, D-037), and the assembly is linear
+/// assignments — one snapshot, D-037) plus the hidden-scope count
+/// (`hidden_count`, D-200 — the answer's D-14 number), and the
+/// assembly is linear
 /// Rust over data already in memory (rule 6): the label join walks
 /// the projects once, the variant grouping walks the variants once,
 /// and the skip walk is `eunomia_core::gaps::heading_level_gaps` over
@@ -4353,7 +4372,7 @@ struct LibraryRead {
 pub(crate) async fn library_get<R: Runtime>(
     app: AppHandle<R>,
     include_hidden: Option<bool>,
-) -> Result<Vec<LibraryTreeItem>, AppError> {
+) -> Result<LibraryGetResult, AppError> {
     library_get_impl(app, include_hidden)
         .await
         .inspect_err(logging::library_get_failed)
@@ -4365,7 +4384,7 @@ pub(crate) async fn library_get<R: Runtime>(
 async fn library_get_impl<R: Runtime>(
     app: AppHandle<R>,
     include_hidden: Option<bool>,
-) -> Result<Vec<LibraryTreeItem>, AppError> {
+) -> Result<LibraryGetResult, AppError> {
     let database = managed_db(&app)?;
     let scope = if include_hidden == Some(true) {
         eunomia_store::library::ItemScope::All
@@ -4386,15 +4405,32 @@ async fn library_get_impl<R: Runtime>(
             let assignments =
                 eunomia_store::library::list_assignments_for_active_projects(transaction)
                     .map_err(library_store_to_app_error)?;
-            Ok(LibraryRead {
-                items,
-                variants,
-                projects,
-                assignments,
-            })
+            // D-200: the D-14 number rides the SAME read transaction —
+            // the default answer knows its hidden half without serving
+            // it.
+            let hidden_count = eunomia_store::library::count_items(
+                transaction,
+                eunomia_store::library::ItemScope::Hidden,
+            )
+            .map_err(library_store_to_app_error)?;
+            Ok((
+                LibraryRead {
+                    items,
+                    variants,
+                    projects,
+                    assignments,
+                },
+                hidden_count,
+            ))
         })
         .await?;
-    Ok(assemble_library_tree(read))
+    let (read, hidden_count) = read;
+    Ok(LibraryGetResult {
+        tree: assemble_library_tree(read),
+        // The wire bound's saturation (the `variant_count`
+        // precedent): the COUNT is i64, the wire is u32.
+        hidden_count: u32::try_from(hidden_count).unwrap_or(u32::MAX),
+    })
 }
 
 /// Builds the wire tree from the one-transaction read — pure, linear
@@ -4406,6 +4442,9 @@ async fn library_get_impl<R: Runtime>(
 /// items (instructions are transparent to the pair walk, so the flag
 /// set is identical under either scope; the indices address the
 /// served collection — the list the UI renders).
+///
+/// D-200: the answer also carries `hidden_count` — the read's fifth
+/// fact, the same transaction's hidden-scope count.
 fn assemble_library_tree(read: LibraryRead) -> Vec<LibraryTreeItem> {
     // The active variants grouped per instruction — the read's own
     // order (`instruction_id, created_at, id`) already groups them,

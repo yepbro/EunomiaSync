@@ -91,7 +91,7 @@ fn main_webview(
 fn invoke_library_get(
     webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
     include_hidden: serde_json::Value,
-) -> Result<Vec<LibraryTreeItem>, serde_json::Value> {
+) -> Result<crate::commands::LibraryGetResult, serde_json::Value> {
     let response = tauri::test::get_ipc_response(
         webview,
         invoke_request(
@@ -101,8 +101,8 @@ fn invoke_library_get(
     );
     match response {
         Ok(payload) => Ok(payload
-            .deserialize::<Vec<LibraryTreeItem>>()
-            .expect("the success payload must deserialize into the tree DTO")),
+            .deserialize::<crate::commands::LibraryGetResult>()
+            .expect("the success payload must deserialize into the answer DTO")),
         Err(error) => Err(error),
     }
 }
@@ -309,7 +309,8 @@ fn library_get_serves_the_position_ordered_tree_with_the_full_instruction_shape(
     // Act: the default read (includeHidden omitted).
     let webview = main_webview(&app);
     let tree = invoke_library_get(&webview, serde_json::Value::Null)
-        .expect("the default read must succeed");
+        .expect("the default read must succeed")
+        .tree;
 
     // Assert: position order — one flat vector, headings and
     // instructions interleaved the way they were appended.
@@ -492,7 +493,8 @@ fn library_get_labels_match_the_assignments() {
     // Act
     let webview = main_webview(&app);
     let tree = invoke_library_get(&webview, serde_json::Value::Null)
-        .expect("the default read must succeed");
+        .expect("the default read must succeed")
+        .tree;
 
     // Assert: "Assigned terse" carries exactly Alpha's chip naming the
     // empty variant it was assigned through.
@@ -575,7 +577,8 @@ fn library_get_labels_a_custom_assignment_without_inventing_a_variant_id() {
     .expect("custom assignment seed succeeds");
 
     let tree = invoke_library_get(&main_webview(&app), serde_json::Value::Null)
-        .expect("library read succeeds");
+        .expect("library read succeeds")
+        .tree;
     let entry = instruction_by_title(&tree, "Custom target");
     assert_eq!(entry.project_labels.len(), 1);
     assert_eq!(entry.project_labels[0].project_id, project);
@@ -618,7 +621,8 @@ fn library_get_marks_level_skips_on_the_arriving_headings_only() {
     let webview = main_webview(&app);
     for scope in [serde_json::Value::Null, serde_json::json!(true)] {
         let tree = invoke_library_get(&webview, scope.clone())
-            .expect("the read must succeed under either scope");
+            .expect("the read must succeed under either scope")
+            .tree;
         let flags = tree
             .iter()
             .filter_map(|entry| match entry {
@@ -658,7 +662,8 @@ fn library_get_marks_level_skips_on_the_arriving_headings_only() {
     // The widened read also serves the hidden instruction itself
     // (the default read's absence is the next test's own subject).
     let widened = invoke_library_get(&webview, serde_json::json!(true))
-        .expect("the widened read must succeed");
+        .expect("the widened read must succeed")
+        .tree;
     assert_eq!(widened.len(), 7);
     assert_eq!(instruction_by_title(&widened, "Shy").state, "hidden");
 
@@ -685,8 +690,9 @@ fn library_get_counts_only_active_variants() {
     .expect("soft-deleting the variant through the repository must work");
 
     let webview = main_webview(&app);
-    let tree =
-        invoke_library_get(&webview, serde_json::Value::Null).expect("the read must succeed");
+    let tree = invoke_library_get(&webview, serde_json::Value::Null)
+        .expect("the read must succeed")
+        .tree;
 
     let two_ways_entry = instruction_by_title(&tree, "Two ways");
     assert_eq!(
@@ -754,7 +760,8 @@ fn library_get_hides_hidden_instructions_behind_the_flag_and_keeps_their_labels(
     // (the `projects_list` reading, pinned on both spellings).
     let webview = main_webview(&app);
     let visible = invoke_library_get(&webview, serde_json::Value::Null)
-        .expect("the default read must succeed");
+        .expect("the default read must succeed")
+        .tree;
     assert_eq!(
         visible.len(),
         1,
@@ -762,7 +769,8 @@ fn library_get_hides_hidden_instructions_behind_the_flag_and_keeps_their_labels(
     );
     assert_eq!(instruction_of(&visible[0]).title, "Dropper");
     let explicitly_visible = invoke_library_get(&webview, serde_json::json!(false))
-        .expect("the explicit-false read must succeed");
+        .expect("the explicit-false read must succeed")
+        .tree;
     assert_eq!(
         explicitly_visible, visible,
         "an explicit includeHidden=false is the default scope"
@@ -770,7 +778,8 @@ fn library_get_hides_hidden_instructions_behind_the_flag_and_keeps_their_labels(
 
     // Widened: both, the hidden one marked, its labels kept (DB-013).
     let widened = invoke_library_get(&webview, serde_json::json!(true))
-        .expect("the widened read must succeed");
+        .expect("the widened read must succeed")
+        .tree;
     assert_eq!(widened.len(), 2);
     let keeper_entry = instruction_by_title(&widened, "Keeper");
     assert_eq!(keeper_entry.state, "hidden");
@@ -789,14 +798,16 @@ fn library_get_hides_hidden_instructions_behind_the_flag_and_keeps_their_labels(
 }
 
 #[test]
-fn library_get_answers_an_empty_list_for_a_fresh_database() {
-    // The empty library's honest answer: an empty list, not an error
-    // and not a null payload the frontend has to special-case.
+fn library_get_answers_an_empty_tree_for_a_fresh_database() {
+    // The empty library's honest answer: an empty tree with a zero
+    // count, not an error and not a null payload the frontend has to
+    // special-case.
     let (temp, app) = library_app();
     let webview = main_webview(&app);
-    let tree = invoke_library_get(&webview, serde_json::Value::Null)
+    let answer = invoke_library_get(&webview, serde_json::Value::Null)
         .expect("a fresh database must answer successfully");
-    assert_eq!(tree, Vec::new());
+    assert_eq!(answer.tree, Vec::new());
+    assert_eq!(answer.hidden_count, 0, "nothing is hidden either");
     drop(app);
     drop(temp);
 }
@@ -945,8 +956,9 @@ fn a_large_library_is_served_by_one_read_in_position_order() {
 
     // Act
     let webview = main_webview(&app);
-    let tree =
-        invoke_library_get(&webview, serde_json::Value::Null).expect("the large read must succeed");
+    let tree = invoke_library_get(&webview, serde_json::Value::Null)
+        .expect("the large read must succeed")
+        .tree;
 
     // Assert: every item served, in exactly the store's position
     // order, with the labels joined for every assigned instruction.
@@ -985,6 +997,52 @@ fn a_large_library_is_served_by_one_read_in_position_order() {
         labeled, assigned,
         "every assigned instruction carries its labels ({assigned} of {instructions})"
     );
+
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn library_get_counts_the_hidden_instructions_in_the_default_answer() {
+    // D-200/D-14: the default answer carries the number of hidden
+    // instructions — the "Show hidden" toggle's number — computed in
+    // the same read transaction, under BOTH scopes (the count is
+    // scope-independent; the default scope does not serve the rows it
+    // counts). Headings are never hidden (§6.2: they are always
+    // active), so the count is the instructions' alone.
+    let (temp, app) = library_app();
+    let database = app.state::<crate::db::Db>().inner().clone();
+    seed_instruction(&database, "Kept");
+    seed_instruction(&database, "Second kept");
+    let gone_one = seed_instruction(&database, "Gone one");
+    let gone_two = seed_instruction(&database, "Gone two");
+    seed_heading(&database, "Style", 2);
+    for id in [&gone_one, &gone_two] {
+        let id = id.clone();
+        tauri::async_runtime::block_on(database.run(move |tx| {
+            eunomia_store::library::hide_item(tx, &id)
+                .map(|_| ())
+                .map_err(crate::commands::library_store_to_app_error)
+        }))
+        .expect("hiding the instruction through the repository must work");
+    }
+
+    let webview = main_webview(&app);
+    let default_read = invoke_library_get(&webview, serde_json::Value::Null)
+        .expect("the default read must succeed");
+    assert_eq!(
+        default_read.hidden_count, 2,
+        "the D-14 number: two hidden instructions"
+    );
+    assert_eq!(
+        default_read.tree.len(),
+        3,
+        "the default scope serves neither hidden row"
+    );
+    let widened = invoke_library_get(&webview, serde_json::json!(true))
+        .expect("the widened read must succeed");
+    assert_eq!(widened.hidden_count, 2, "the count is scope-independent");
+    assert_eq!(widened.tree.len(), 5, "the widened scope serves them");
 
     drop(app);
     drop(temp);

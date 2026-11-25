@@ -275,7 +275,9 @@ Rust commands are registered through `tauri-specta`:
    projects) and headings (level, the LIB-032 skip flag from the
    `eunomia_core::gaps` walk) — one flat `position`-ordered vector
    read in ONE `Db::run` transaction, the `include_hidden` flag
-   widening it the `projects_list` way — and the Library module's
+   widening it the `projects_list` way, and the answer carrying the
+   D-14 `hidden_count` (the hidden instructions, counted in the same
+   transaction, D-200) — and the Library module's
    variant commands `variant_create`/`variant_update`/
    `variant_set_main`/`variant_delete`/`variant_restore` (T-329, the
    batch absorbing T-087…T-091, `src-tauri/src/variants.rs`): the

@@ -1099,6 +1099,44 @@ pub fn list_items(conn: &Connection, scope: ItemScope) -> Result<Vec<LibraryItem
     Ok(rows)
 }
 
+/// The number of library items in `scope` — the COUNT twin of
+/// [`list_items`]: the cells are decoded through the same member
+/// parser the list read uses, so an out-of-vocabulary `state` fails
+/// the count with `Member` exactly as it fails `list_items` — the
+/// module contract (D-039) holds for both, and a corrupted database
+/// cannot be silently under-counted. D-200: the caller is
+/// `library_get`'s `hidden_count` — the default answer's number of
+/// hidden instructions, computed in the same read transaction that
+/// serves the tree.
+///
+/// # Errors
+///
+/// [`LibraryError::Member`] on a corrupt vocabulary cell (D-039),
+/// [`LibraryError::Sql`] when the query fails.
+pub fn count_items(conn: &Connection, scope: ItemScope) -> Result<i64, LibraryError> {
+    // One column, every row: the scope filter runs in Rust over the
+    // DECODED members, so corruption fails the count the way it fails
+    // the list — a `WHERE state = ...` predicate would silently omit
+    // a row whose stored text matched no vocabulary member.
+    let mut statement = conn.prepare("SELECT state FROM library_items")?;
+    let states = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut count = 0i64;
+    for state in states {
+        let state = ItemState::from_member(&state)?;
+        let in_scope = match scope {
+            ItemScope::All => true,
+            ItemScope::Active => state == ItemState::Active,
+            ItemScope::Hidden => state == ItemState::Hidden,
+        };
+        if in_scope {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 // ---- Items: update, hide/restore, move, delete -------------------------------------
 
 /// The mutable fields of a library item, as an update instruction:
@@ -1348,7 +1386,7 @@ pub fn move_item(
     // The row count is the highest legal position under the gapless
     // invariant (DB-011) — and the safer bound if a corrupt gap ever
     // widened MAX past COUNT.
-    let max: i64 = conn.query_row("SELECT COUNT(*) FROM library_items", [], |row| row.get(0))?;
+    let max: i64 = count_items(conn, ItemScope::All)?;
     if !(1..=max).contains(&to_position) {
         return Err(LibraryError::PositionOutOfRange {
             requested: to_position,

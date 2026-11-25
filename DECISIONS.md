@@ -23928,11 +23928,6 @@ Checks: md-only diff (docs/spec.md, this file) — prettier and a
 factual re-read of every cited line (rule 2/11), the md-only regime
 (no test suites run), ONE review round.
 
-<<<<<<< HEAD
-
-> > > > > > > dc5aa62 (docs(spec): the variant_get contract joins §7.10 — the editor's body and the MAIN-006 tooltip's text source (T-348))
-> > > > > > > \=======
-
 ### D-199 — T-349: the heading record carries `from_level`, the skipped-from level, beside the LIB-032 skip flag — 2026-11-24
 
 Problem: LIB-032 / T-083's follow-up — the boolean `level_skipped`
@@ -23988,6 +23983,35 @@ mutant class; the 2–6 range wording narrowed to the real 2–4; the
 skip set folded into the map; this record's mutation wording aligned
 with both observed runs).
 
+Landing addendum (2026-11-25, D-200's tail — the flash batch's union
+note; the entries D-196…D-200 all landed by this rebase): the whole
+flash branch rebased onto main `753c96b` (D-195's CI fixes, D-193's
+`backups_list`, D-194's `project_archive` — the registered surface
+forty commands, the batch adding none). Conflicts were confined to
+this file's tail: main's D-195/D-193/D-194 blocks and this batch's
+D-196…D-200 are all tail appends, so the union kept both sides per
+commit (D-196 after main's tail, D-197…D-200 each after the
+previous). A replay artifact is recorded honestly: each conflict
+resolution of this rebase left one prettier-mangled marker remnant
+(a `> > > > > > >`-quoted `>>>>>>>` line) inside the INTERMEDIATE
+commits (the T-348 and T-349 replays carry it; the run that dropped
+the exact `>>>>>>>` lines missed prettier's normalized copies) — the
+FINAL tree is clean (verified: no conflict markers, no quoted
+remnants), and the intermediate-commit noise is history-only, its
+removal available as a targeted fixup pair if the owner wants the
+history pristine. Everything else auto-merged, and the wire surface
+was PROVEN rather than assumed: the bindings export pin ran green on
+the auto-merged file without a regeneration — the union of main's
+40-command registration and this batch's widened DTOs is
+byte-identical to what the exporter produces. Rebased checks, all
+exit 0: `cargo fmt --check`; `cargo clippy --workspace --all-targets
+-- -D warnings`; `cargo nextest run --workspace --test-threads=4`
+(**1861/1861**); `cargo test --doc --workspace` (every doc-test
+target ok — D-195's `snapshot.rs` fix is under this tree, the base
+red this batch flew with is gone); `pnpm test` (**360/360**);
+`pnpm run format:check`; `pnpm run lint`; `pnpm run typecheck`. No
+push, merge or board operation.
+
 ### D-200 — T-350: `library_get`'s answer widens to a struct carrying `hidden_count`, the UI's D-14 number, computed over the served transaction — 2026-11-24
 
 Problem: D-14's "Show hidden" toggle shows "the current number of
@@ -24031,6 +24055,3 @@ fmt, clippy `-p eunomia-sync`, targeted nextest (library_tests), the
 bindings export pin, prettier/eslint/targeted vitest over the mock
 chain, and the D-195 doc-test pass. The full suite runs once after
 the flash batch. One review round.
-
-> > > > > > > 62dfd44 (fixup! feat(library): the heading record carries from_level — the skipped-from half of the LIB-032 pair (T-349))
-> > > > > > > 19abacd (feat(library): the heading record carries from_level — the skipped-from half of the LIB-032 pair (T-349))

@@ -189,7 +189,9 @@ export const commands = {
 	 * 
 	 *  A pure read: one `Db::run` transaction gathers the four lists (the
 	 *  items, the active variants, the active projects and their
-	 *  assignments — one snapshot, D-037), and the assembly is linear
+	 *  assignments — one snapshot, D-037) plus the hidden-scope count
+	 *  (`hidden_count`, D-200 — the answer's D-14 number), and the
+	 *  assembly is linear
 	 *  Rust over data already in memory (rule 6): the label join walks
 	 *  the projects once, the variant grouping walks the variants once,
 	 *  and the skip walk is `eunomia_core::gaps::heading_level_gaps` over
@@ -203,7 +205,7 @@ export const commands = {
 	 *  the whole table (D-14's "Show hidden"). Headings are always active
 	 *  (§6.2), so the flag only ever adds instruction rows.
 	 */
-	libraryGet: (includeHidden: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<LibraryTreeItem_Serialize[]>("library_get", { includeHidden }, options),
+	libraryGet: (includeHidden: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<LibraryGetResult_Serialize>("library_get", { includeHidden }, options),
 	/**
 	 *  The `instruction_create` command (§7.10 Library module, LIB-002,
 	 *  §8 S3): the create dialog's save — one instruction, its main
@@ -2013,6 +2015,57 @@ export type InstructionCreated = {
 	 *  fits, the `AddedProject.sort_order` decision).
 	 */
 	position: number,
+};
+
+/**
+ *  The `library_get` answer (§7.10, D-200): the served tree plus the
+ *  D-14 number — the count of hidden instructions the default scope
+ *  does NOT serve.
+ */
+export type LibraryGetResult = LibraryGetResult_Serialize | LibraryGetResult_Deserialize;
+
+/**
+ *  The `library_get` answer (§7.10, D-200): the served tree plus the
+ *  D-14 number — the count of hidden instructions the default scope
+ *  does NOT serve.
+ */
+export type LibraryGetResult_Deserialize = {
+	/**
+	 *  The flat position-ordered tree (D-187) — every row
+	 *  LIB-001/008 names under the asked scope.
+	 */
+	tree: LibraryTreeItem_Deserialize[],
+	/**
+	 *  The number of hidden instructions (`state = 'hidden'`; the
+	 *  D-14 "Show hidden" toggle's number). Scope-independent: the
+	 *  same count under either scope, computed in the same read
+	 *  transaction — the default answer knows its hidden half without
+	 *  serving it. Saturated at `u32::MAX` (the `variant_count`
+	 *  precedent: specta forbids 64-bit integers on the wire).
+	 */
+	hidden_count: number,
+};
+
+/**
+ *  The `library_get` answer (§7.10, D-200): the served tree plus the
+ *  D-14 number — the count of hidden instructions the default scope
+ *  does NOT serve.
+ */
+export type LibraryGetResult_Serialize = {
+	/**
+	 *  The flat position-ordered tree (D-187) — every row
+	 *  LIB-001/008 names under the asked scope.
+	 */
+	tree: LibraryTreeItem_Serialize[],
+	/**
+	 *  The number of hidden instructions (`state = 'hidden'`; the
+	 *  D-14 "Show hidden" toggle's number). Scope-independent: the
+	 *  same count under either scope, computed in the same read
+	 *  transaction — the default answer knows its hidden half without
+	 *  serving it. Saturated at `u32::MAX` (the `variant_count`
+	 *  precedent: specta forbids 64-bit integers on the wire).
+	 */
+	hidden_count: number,
 };
 
 /**  A heading's tree row (§2 "Section heading", LIB-030). */

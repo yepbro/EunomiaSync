@@ -50,6 +50,7 @@ export type {
   LibraryHeadingEntry,
   LibraryInstructionEntry,
   LibraryTreeItem,
+  LibraryGetResult_Serialize as LibraryGetResultWire,
   LibraryTreeItem_Serialize as LibraryTreeItemWire,
   LibraryVariantEntry,
   MarkdownPreview,
