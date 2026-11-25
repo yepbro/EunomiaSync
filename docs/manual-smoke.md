@@ -320,7 +320,8 @@ surfaces (§7, §8, §11), because the main-window UI has not landed:
 as of 2026-11-24, `src/App.vue` renders the shell only — no toolbar
 buttons, library, matrix, scan modal or sync panel. The
 scenario-relevant backend commands (`project_add_manual`,
-`project_archive` (T-108), `scan_start`/`scan_cancel`/`scan_commit`, `sync_run`,
+`project_archive` (T-108), `project_update` (T-106),
+`scan_start`/`scan_cancel`/`scan_commit`, `sync_run`,
 `settings_get`/`settings_set`, the library read `library_get`, the
 instruction lifecycle
 `instruction_create`/`instruction_update`/`instruction_hide`/
@@ -372,7 +373,8 @@ DB-040…042.
 
 Pending: the "+ Add project" button, the system folder picker flow and
 the "Project settings" modal — spec §16 M1. (The backend
-`project_add_manual` and `dialog_pick_folder` are registered.)
+`project_add_manual`, `dialog_pick_folder` and the modal's save arm
+`project_update` are registered.)
 
 **Prepare.** Four throwaway repos (`r1`–`r4`), one plain non-Git
 folder, one Git folder with read access denied (Windows: `icacls

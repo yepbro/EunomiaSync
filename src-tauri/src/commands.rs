@@ -676,10 +676,11 @@ pub(crate) fn begin_sync<R: Runtime>(
 /// return `E_SYNC_RUNNING` during a sync". Today that is
 /// [`project_add_manual`], [`exclusion_remove`],
 /// [`projects_reorder`], — since T-077, it creates project rows —
-/// `scan_commit` (`scan.rs`), and — since T-108 —
-/// [`crate::project_archive::project_archive`]: the mutation commands
+/// `scan_commit` (`scan.rs`), — since T-108 —
+/// [`crate::project_archive::project_archive`], and — since T-106 —
+/// [`crate::project_update::project_update`]: the mutation commands
 /// that exist; the
-/// spec's `project_update`/`project_remove`/`project_relink` and P1
+/// spec's `project_remove`/`project_relink` and P1
 /// `backup_restore` join this gate as they land. Reads are never
 /// gated (SYS-005 names the changing commands only).
 ///
@@ -2907,9 +2908,9 @@ impl ExistingProject {
 ///    SYS-005 sync gate runs before the whole flow (the command's
 ///    first act above): during a sync the add answers
 ///    `E_SYNC_RUNNING` and nothing is written; the spec's own
-///    project-*editing* list (`project_update`,
-///    `project_remove`, `project_relink`, `backup_restore`) joins
-///    the same gate as those commands land.
+///    project-*editing* list joins the same gate — `project_update`
+///    since T-106, `project_remove`, `project_relink` and P1
+///    `backup_restore` as they land.
 /// 5. **Write-access warning** (§6.9, T-063/D-094): after the commit,
 ///    [`eunomia_fs::write_access::check_write_access`] over the
 ///    root's future target file, on the blocking pool (never inside
@@ -3187,7 +3188,8 @@ impl ProjectFields {
         // The description crosses the same save boundary even though
         // the add flows collect none (§7.1): the value stored today is
         // the constant empty string — the PRJ-008 modal's edit path
-        // lands with `project_update` (T-279) — routed through the
+        // landed with `project_update` (T-106; the modal's read half
+        // is the UI task's) — routed through the
         // validator so every description THESE FLOWS store is
         // validator-passed by construction (the store itself does not
         // enforce it — store-level writers must route through the

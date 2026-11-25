@@ -1542,6 +1542,34 @@ pub(crate) fn project_archive_failed(error: &AppError) {
     );
 }
 
+/// The `project_update` command failed (T-106, §10's every-error
+/// rule): the `project_archive_failed` shape — the reachable §10
+/// answers are the `E_SYNC_RUNNING` SYS-005 refusal while a sync
+/// holds the global flag (the gate runs first, so the refusal is the
+/// answer whatever the input is), the typed `E_VALIDATION` refusal of
+/// a field §6.9 rejects (the whole operation is refused before the
+/// database, D-201) or of an id no ACTIVE row matches (a stale
+/// screen's row, D-201 point 4), the shared base classifier's SQL
+/// classes (`ProjectsError::Sql` through the row read and the field
+/// update, `StorageError::Sql` through the journal insert — busy
+/// exhaustion, a corrupt database, a constraint abort), and the honest
+/// no-database fallback. A successful save is the journal's own
+/// `project.changed` entry, written inside the operation's
+/// transaction (D-051/D-201) — never duplicated into the file log
+/// (the info+user+ok unmirrored shape); the verified no-op (a re-send
+/// of the stored values) writes nothing and logs nothing.
+pub(crate) fn project_update_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::projects",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "saving the project settings failed"
+    );
+}
+
 /// The `projects_list` command failed (T-244, §10's every-error rule,
 /// closing the gap D-096 recorded for T-072): the
 /// `projects_reorder_failed` shape — the reachable §10 answers are the

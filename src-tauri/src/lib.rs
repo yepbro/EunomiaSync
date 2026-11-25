@@ -196,6 +196,15 @@ pub(crate) mod assignments;
 // no file I/O at all, and the SYS-005 gate first.
 pub(crate) mod project_archive;
 
+// The Projects module's `project_update` command (spec §7.10, T-106;
+// PRJ-008/009/011/021, §6.9, SYS-005, LOG-001…004; the contract is
+// D-201): one id-addressed patch over the four editable fields with
+// the core §6.9 validators, one transaction carrying the store update
+// and the single `project.changed` journal entry — the path, the
+// origin and every watch-set input untouched, no file I/O at all, and
+// the SYS-005 gate first.
+pub(crate) mod project_update;
+
 // The History module's revision reads (spec §7.10, T-331):
 // `revisions_list` and `revision_get` over the store's version repository.
 pub(crate) mod revisions;
@@ -242,6 +251,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // module's `dialog_pick_folder` (T-073), the Projects
         // module's `project_add_manual` (T-074), the Projects
         // module's `project_archive` (T-108, D-194), the Projects
+        // module's `project_update` (T-106, D-201), the Projects
         // module's `exclusions_list`/`exclusion_remove` (T-078), the
         // Projects module's `projects_reorder` (T-080), the
         // Projects module's `scan_start`/`scan_cancel`/`scan_commit`
@@ -271,6 +281,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::markdown_preview,
             commands::project_add_manual::<tauri::Wry>,
             project_archive::project_archive::<tauri::Wry>,
+            project_update::project_update::<tauri::Wry>,
             commands::projects_list::<tauri::Wry>,
             commands::projects_reorder::<tauri::Wry>,
             scan::scan_cancel::<tauri::Wry>,
@@ -988,6 +999,9 @@ mod assignments_tests;
 
 #[cfg(test)]
 mod project_archive_tests;
+
+#[cfg(test)]
+mod project_update_tests;
 
 #[cfg(test)]
 mod revisions_tests;

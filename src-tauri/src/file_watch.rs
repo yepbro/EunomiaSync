@@ -64,9 +64,11 @@
 //!   exposure stays D-144's recorded boundary), and the
 //!   scheme/file-name/archive/restore/
 //!   relink changes call the same seam as their §7.10 commands land
-//!   (`project_update`, `project_archive`, `project_restore`,
-//!   `project_relink` — the SYS-005 gate's "join as they land"
-//!   precedent). No commit-hook piggyback exists here by design: the
+//!   (`project_update`'s scheme/file-name arm — T-107's own half;
+//!   that command's landed name/label/color/description fields
+//!   (T-106/D-201) deliberately call NO seam, none of them a watch
+//!   input — `project_archive`, `project_restore`, `project_relink`
+//!   — the SYS-005 gate's "join as they land" precedent). No commit-hook piggyback exists here by design: the
 //!   DB-022 hook is the dirty service's, and this service's pass
 //!   probes folders — a hook that fires inside the connection's
 //!   mutex must never block (D-121).

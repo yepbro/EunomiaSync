@@ -333,9 +333,9 @@ export const commands = {
 	 *     SYS-005 sync gate runs before the whole flow (the command's
 	 *     first act above): during a sync the add answers
 	 *     `E_SYNC_RUNNING` and nothing is written; the spec's own
-	 *     project-*editing* list (`project_update`,
-	 *     `project_remove`, `project_relink`, `backup_restore`) joins
-	 *     the same gate as those commands land.
+	 *     project-*editing* list joins the same gate — `project_update`
+	 *     since T-106, `project_remove`, `project_relink` and P1
+	 *     `backup_restore` as they land.
 	 *  5. **Write-access warning** (§6.9, T-063/D-094): after the commit,
 	 *     [`eunomia_fs::write_access::check_write_access`] over the
 	 *     root's future target file, on the blocking pool (never inside
@@ -410,6 +410,62 @@ export const commands = {
 	 *  not mirrored to the file log).
 	 */
 	projectArchive: (projectId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("project_archive", { projectId }, options),
+	/**
+	 *  Updates the editable fields of the project with this id (PRJ-008:
+	 *  name, label, color, description) with §6.9 validation, in one
+	 *  transaction that also journals the single `project.changed` entry
+	 *  (LOG-001…004, D-201 point 5).
+	 * 
+	 *  Id-addressed like `project_archive` (the id comes from
+	 *  `projects_list`'s rows), and a PATCH: each field is
+	 *  `Option<String>` — absent (`null`) leaves the field unchanged, the
+	 *  store's own `ProjectUpdate` semantics — so a stale screen that
+	 *  re-sends one field cannot wipe the other three, and the modal's
+	 *  full save is the same contract. The answer is `()`: the screen
+	 *  re-reads through the already-landed `projects_list`.
+	 * 
+	 *  A duplicate name is SAVED, not refused (§6.9's "Duplicates are
+	 *  allowed with a warning"): the warning is the modal's live field
+	 *  validation (T-160), computable from the names `projects_list`
+	 *  already serves — the command carries no warning arm.
+	 * 
+	 *  Validation order (§6.9, all-or-nothing): the present fields are
+	 *  validated through the shared core validators in table order
+	 *  (name, label, description, color) BEFORE the database is resolved
+	 *  — the first invalid field answers with the `E_VALIDATION`
+	 *  envelope naming it, and nothing is saved (the card's DoD). The
+	 *  name, label and color refusals echo the caller's field bounded
+	 *  (D-115's cap; the `rejected_title_field` shape); the description
+	 *  refusal carries NO value — stored prose is the one thing SEC-008
+	 *  keeps out of envelopes (the variant-text rule), and the
+	 *  validator's reason already carries the measured length.
+	 * 
+	 *  An id no ACTIVE row matches — unknown, or archived since the
+	 *  modal opened (PRJ-008's pencil rides an active column; the D-115
+	 *  reorder precedent: "unknown OR archived: a stale screen's list") —
+	 *  is the typed `E_VALIDATION` refusal naming `project_id` with the
+	 *  id echoed bounded; nothing is written.
+	 * 
+	 *  The verified no-op (D-201 point 5): a send whose present fields
+	 *  all equal the stored values is stripped to an empty patch BEFORE
+	 *  the store call, so nothing is written, `updated_at` is not
+	 *  restamped (the store's own empty-update rule), and nothing is
+	 *  journaled.
+	 * 
+	 *  While a sync holds the global `sync_running` flag, the command
+	 *  answers the typed `E_SYNC_RUNNING` envelope instead (SYS-005, the
+	 *  card's own line; [`reject_during_sync`] — a check, never an
+	 *  acquire), and the screen's retry after the run ends converges.
+	 *  Recovery mode answers the honest `NoDatabase` fallback (the flag
+	 *  is down there by construction, so the answer comes from
+	 *  [`managed_db`]).
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::project_update_failed`]); a successful save is the
+	 *  journal entry itself (the D-051 mirror policy — info+user+ok is
+	 *  not mirrored to the file log).
+	 */
+	projectUpdate: (projectId: string, name: string | null, label: string | null, color: string | null, description: string | null, options?: InvokeOptions) => __TAURI_INVOKE<null>("project_update", { projectId, name, label, color, description }, options),
 	/**
 	 *  Lists the projects for the main window's columns and the "Archived
 	 *  projects" screen (§7.10 Projects module `projects_list`; §7.1; the

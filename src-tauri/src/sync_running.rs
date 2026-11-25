@@ -31,10 +31,11 @@
 //! the `sync_run` command) ever holds the guard — the flag means "a
 //! sync is running", so holding it is the sync's alone. The
 //! project-*changing* commands (SYS-005: today `project_add_manual`,
-//! `exclusion_remove`, `projects_reorder` — the mutation commands
-//! that exist; the spec's `project_update`, `project_remove`,
-//! `project_relink` and P1 `backup_restore` join the same gate as
-//! they land) never take the flag: they **check** it through
+//! `exclusion_remove`, `projects_reorder`, `scan_commit` (it creates
+//! project rows), `project_archive` (T-108) and `project_update`
+//! (T-106) — the mutation commands that exist; the spec's
+//! `project_remove`, `project_relink` and P1 `backup_restore` join
+//! the same gate as they land) never take the flag: they **check** it through
 //! [`SyncRunning::is_running`] via the `commands::reject_during_sync`
 //! gate and answer the typed `E_SYNC_RUNNING` refusal while it is up.
 //! Check, not hold, is deliberate: a mutation that held the guard

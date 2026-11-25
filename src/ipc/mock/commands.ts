@@ -186,6 +186,121 @@ function pickColor(projects: readonly MockProjectRow[]): string {
 }
 
 // ---------------------------------------------------------------------------
+// The project §6.9 field validators (T-106): the mock twins of the core
+// validators `project_update` routes through — the name (trim-then-count,
+// the D-126 NUL rule), the label (visible-character count, case kept), the
+// description (the silent NUL strip, the post-strip measure). Class-only
+// reasons, exactly the real refusals' texts: the control-character arm
+// formats the char the way Rust's `{:?}` Debug does (round 2's P3-1), and
+// the whitespace twin is Rust's `char::is_whitespace` (Unicode
+// White_Space), NOT JS `/\s/` — the two disagree on U+FEFF, which JS
+// trims and matches but Rust treats as the visible Cf char it is (round
+// 2's P3-2) — with the trim stripping that same set (never
+// `String.prototype.trim`, which also strips the BOM).
+// ---------------------------------------------------------------------------
+
+/** The §6.9 name verdict: the trimmed form, or the rejection reason. */
+function validateProjectName(name: string): { trimmed: string } | { reason: string } {
+  const trimmed = trimRustWhitespace(name)
+  const characters = Array.from(trimmed)
+  if (characters.length === 0) return { reason: 'project name is empty after trimming' }
+  if (characters.length > 100) {
+    return {
+      reason: `project name is ${characters.length} characters after trimming; the limit is 100`,
+    }
+  }
+  const nul = characters.findIndex((ch) => ch === '\0')
+  if (nul >= 0) return { reason: `project name contains NUL at index ${nul}` }
+  return { trimmed }
+}
+
+/** The §6.9 label verdict: the input as-is (case kept), or the reason. */
+function validateProjectLabel(label: string): { label: string } | { reason: string } {
+  const characters = Array.from(label)
+  if (characters.length > 6) {
+    return { reason: `project label is ${characters.length} characters; the limit is 6` }
+  }
+  if (!characters.some(isVisibleCharacter)) {
+    return { reason: 'project label has no visible characters' }
+  }
+  const offending = characters.findIndex((ch) => isControlCharacter(ch))
+  if (offending >= 0) {
+    return {
+      reason: `project label contains the control character ${rustCharDebug(characters[offending])} at index ${offending}`,
+    }
+  }
+  return { label }
+}
+
+/** The §6.9 description verdict: the stripped form, or the reason. */
+function validateProjectDescription(
+  description: string,
+): { stripped: string } | { reason: string } {
+  // The silent-sanitization ruling: strip, then measure — the limit
+  // governs the stored truth (§6.9's own exception note).
+  const stripped = description.split('\0').join('')
+  const length = Array.from(stripped).length
+  if (length > 1000) {
+    return { reason: `project description is ${length} characters; the limit is 1000` }
+  }
+  return { stripped }
+}
+
+/** Unicode Cc, the core validator's own `char::is_control` twin. */
+function isControlCharacter(ch: string): boolean {
+  // The Cc block: U+0000–U+001F and U+007F–U+009F.
+  const code = ch.codePointAt(0) ?? 0
+  return code <= 0x1f || (code >= 0x7f && code <= 0x9f)
+}
+
+/**
+ * Unicode White_Space, Rust `char::is_whitespace`'s exact set — the one
+ * property JS `/\s/` widens with U+FEFF. The explicit set keeps the
+ * mock twin faithful where the two runtimes disagree.
+ */
+function isRustWhitespace(ch: string): boolean {
+  const code = ch.codePointAt(0) ?? 0
+  return (
+    (code >= 0x09 && code <= 0x0d) ||
+    code === 0x20 ||
+    code === 0x85 ||
+    code === 0xa0 ||
+    code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200a) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    code === 0x202f ||
+    code === 0x205f ||
+    code === 0x3000
+  )
+}
+
+/** Strips the White_Space set from both ends (Rust `str::trim`'s rule). */
+function trimRustWhitespace(text: string): string {
+  let start = 0
+  let end = text.length
+  while (start < end && isRustWhitespace(text[start] ?? '')) start++
+  while (end > start && isRustWhitespace(text[end - 1] ?? '')) end--
+  return text.slice(start, end)
+}
+
+/** The core validator's `is_visible` twin: neither Cc nor White_Space. */
+function isVisibleCharacter(ch: string): boolean {
+  return !isControlCharacter(ch) && !isRustWhitespace(ch)
+}
+
+/**
+ * Rust's `char` `{:?}` Debug for the control characters the label
+ * refusal names (round 2's P3-1): `'\u{7}'`-style, lowercase hex,
+ * single quotes — the exact text `ProjectFieldError`'s Display
+ * produces, so a UI test written against the mock asserts a string
+ * the backend actually sends.
+ */
+function rustCharDebug(ch: string): string {
+  return `'\\u{${(ch.codePointAt(0) ?? 0).toString(16)}}'`
+}
+
+// ---------------------------------------------------------------------------
 // The variant commands' shared helpers (§7.10 Library module, T-329): the
 // mock twins of the store's own queries and the Rust command's §6.9 rules,
 // over the union-shaped library rows (T-083's MockLibraryRow). The D-19
@@ -450,6 +565,7 @@ function appendProjectRow(
     name,
     label: defaultLabel(name),
     color: pickColor(state.projects),
+    description: '',
     state: 'active',
     addedVia,
     sortOrder: state.projects.reduce((max, p) => Math.max(max, p.sortOrder), 0) + 1,
@@ -1429,6 +1545,116 @@ export const mockCommands: IpcCommands = {
       }
     }
     journal('project.archived', {
+      entityType: 'project',
+      entityId: row.id,
+      projectId: row.id,
+    })
+    return null
+  },
+
+  /**
+   * `project_update` (§7.10 Projects module, T-106/D-201): the PRJ-008
+   * settings save — a PATCH (absent fields unchanged), §6.9 validation
+   * all-or-nothing in the spec's table order (name, label, description,
+   * color; the duplicate-name warning is the modal's own live concern,
+   * so a duplicate saves here like the Rust command saves it), the
+   * verified no-op (a re-send of the stored values writes and journals
+   * nothing), the stale-screen refusal for an unknown OR archived id,
+   * and the one `project.changed` journal entry where `activityList`
+   * reads it. The description's silent NUL strip is mirrored (§6.9).
+   * The `E_SYNC_RUNNING` gate is not modelled (the `projectArchive`
+   * stand-in's own documented limit: no flag state exists here), and
+   * the stored description is read from the row directly — production
+   * serves no description on any read yet, so the mock mirrors that
+   * gap honestly.
+   */
+  async projectUpdate(projectId, name, label, color, description) {
+    const state = mockState()
+    // §6.9 first, the table order the Rust command runs (D-201 point 6).
+    let validatedName: string | undefined
+    if (name !== null) {
+      const verdict = validateProjectName(name)
+      if ('reason' in verdict) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'name',
+          value: boundedEcho(name),
+          reason: verdict.reason,
+        })
+      }
+      validatedName = verdict.trimmed
+    }
+    let validatedLabel: string | undefined
+    if (label !== null) {
+      const verdict = validateProjectLabel(label)
+      if ('reason' in verdict) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'label',
+          value: boundedEcho(label),
+          reason: verdict.reason,
+        })
+      }
+      validatedLabel = verdict.label
+    }
+    let validatedDescription: string | undefined
+    if (description !== null) {
+      // No value echo: the description is stored prose, the one thing
+      // SEC-008 keeps out of envelopes (the Rust command's rule,
+      // mirrored).
+      const verdict = validateProjectDescription(description)
+      if ('reason' in verdict) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'description',
+          reason: verdict.reason,
+        })
+      }
+      validatedDescription = verdict.stripped
+    }
+    let validatedColor: string | undefined
+    if (color !== null) {
+      if (!PALETTE.includes(color)) {
+        return rejectWith('E_VALIDATION', 'errors.validation', {
+          field: 'color',
+          value: boundedEcho(color),
+          reason: 'the color is not one of the 12 palette colors (DB-040)',
+        })
+      }
+      validatedColor = color
+    }
+    // D-201 point 4 (the D-115 reorder precedent): the id must name an
+    // ACTIVE row — unknown or archived is the same stale screen.
+    const row = state.projects.find(
+      (candidate) => candidate.id === projectId && candidate.state === 'active',
+    )
+    if (!row) {
+      // The real `rejected_field` refusal's own key (round 1's P3-7:
+      // `errors.validation`, not the older id arms' drifted
+      // `validation.invalid_value` — a mock-wide sweep is carded, this
+      // command mirrors its own backend).
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'project_id',
+        value: boundedEcho(projectId),
+        reason: 'no active project has this id',
+      })
+    }
+    // The verified no-op (D-201 point 5): only fields that actually
+    // change are written; an empty change set writes and journals
+    // nothing.
+    const change: { name?: string; label?: string; color?: string; description?: string } = {}
+    if (validatedName !== undefined && validatedName !== row.name) change.name = validatedName
+    if (validatedLabel !== undefined && validatedLabel !== row.label) change.label = validatedLabel
+    if (validatedColor !== undefined && validatedColor !== row.color) change.color = validatedColor
+    if (validatedDescription !== undefined && validatedDescription !== row.description)
+      change.description = validatedDescription
+    if (
+      change.name === undefined &&
+      change.label === undefined &&
+      change.color === undefined &&
+      change.description === undefined
+    ) {
+      return null
+    }
+    Object.assign(row, change)
+    journal('project.changed', {
       entityType: 'project',
       entityId: row.id,
       projectId: row.id,

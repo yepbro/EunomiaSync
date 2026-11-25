@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { mockCommands } from './commands'
-import { mockState, resetMockState, type MockLibraryRow } from './state'
+import { mockState, resetMockState, type MockLibraryRow, type MockProjectRow } from './state'
 import { mockEvents } from './events'
 import { BASE_TS_MS, PALETTE, type FixtureProfile } from '../fixtures/generator'
 import { isoUtc } from '../fixtures/rng'
 import { pathKeyOf } from '../fixtures/domain'
-import type { LibraryTreeItemWire } from '../contract'
+import type { ActivityEntryWire, AppErrorWire, LibraryTreeItemWire } from '../contract'
 
 /** A small pinned world: 4 projects (last one archived), 3 instructions. */
 const PROFILE: FixtureProfile = {
@@ -790,6 +790,323 @@ describe('projectArchive', () => {
     expect(forThePath).toHaveLength(1)
     expect(forThePath[0]?.reason).toBe('manual')
     expect(forThePath[0]?.id).toBe('pre-seeded-exclusion')
+  })
+})
+
+describe('projectUpdate', () => {
+  /**
+   * An active row to edit, straight from the store the command serves.
+   * Callers snapshot (`{ ...row }`) BEFORE the act: the store mutates
+   * rows in place, so comparing the live object with itself can never
+   * fail (round 1's P3-5).
+   */
+  function activeRow(): MockProjectRow {
+    const row = mockState().projects.find((candidate) => candidate.state === 'active')
+    expect(row, 'an active fixture row to edit').toBeDefined()
+    return row as MockProjectRow
+  }
+
+  /** The mock's journal, read through the screen's own list. */
+  async function changedEntries(): Promise<ActivityEntryWire[]> {
+    const page = await commands.activityList({ actions: ['project.changed'], limit: 500 })
+    return page.entries
+  }
+
+  it('saves the four fields and journals one attributable entry', async () => {
+    // T-106/D-201's happy path: every §6.9 boundary-legal field saved,
+    // the write readable back through `projectsList` (name, label,
+    // color — the columns the list serves), and one `project.changed`
+    // entry where `activityList` reads it. The row is snapshotted
+    // first: the immutable-half asserts must compare against the world
+    // as it stood, not the object the command just mutated.
+    const row = activeRow()
+    const before = { ...row }
+    const journalBefore = (await changedEntries()).length
+
+    await expect(
+      commands.projectUpdate(row.id, 'x'.repeat(100), 'L'.repeat(6), 'teal', 'd'.repeat(1000)),
+    ).resolves.toBeNull()
+
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored?.name).toBe('x'.repeat(100))
+    expect(stored?.label).toBe('L'.repeat(6))
+    expect(stored?.color).toBe('teal')
+    expect(stored?.description).toBe('d'.repeat(1000))
+    const columns = await commands.projectsList(true)
+    const column = columns.find((entry) => entry.id === row.id)
+    expect(column?.name).toBe('x'.repeat(100))
+    expect(column?.label).toBe('L'.repeat(6))
+    expect(column?.color).toBe('teal')
+    // The immutable half (PRJ-008): the path and the origin stay.
+    expect(stored?.path).toBe(before.path)
+    expect(stored?.addedVia).toBe(before.addedVia)
+    const journal = await changedEntries()
+    expect(journal).toHaveLength(journalBefore + 1)
+    // `activityList` serves newest-first, so the NEW entry is index 0
+    // (round 1's P3-5: the last index is the oldest).
+    const entry = journal[0]
+    expect(entry?.action).toBe('project.changed')
+    expect(entry?.entity_type).toBe('project')
+    expect(entry?.entity_id).toBe(row.id)
+    expect(entry?.project_id).toBe(row.id)
+    expect(entry?.visibility).toBe('user')
+    expect(entry?.result).toBe('ok')
+    expect(entry?.details).toBeNull()
+  })
+
+  it('rejects each invalid field with E_VALIDATION, changing nothing', async () => {
+    // The card's DoD: an invalid field refuses the whole save — the
+    // row stays verbatim and the journal claims nothing. One case per
+    // §6.9 field rule, the Rust battery's mirror.
+    const row = activeRow()
+    const before = { ...row }
+    const journalBefore = (await changedEntries()).length
+    const cases: Array<[string, string | null, string | null, string | null, string | null]> = [
+      ['name', 'x'.repeat(101), 'NEWL', 'teal', 'new description'],
+      ['label', 'New Name', 'ABCDEFG', 'teal', 'new description'],
+      ['description', 'New Name', 'NEWL', 'teal', 'd'.repeat(1001)],
+      ['color', 'New Name', 'NEWL', 'purple', 'new description'],
+    ]
+    for (const [field, name, label, color, description] of cases) {
+      await expect(
+        commands.projectUpdate(row.id, name, label, color, description),
+      ).rejects.toMatchObject({
+        code: 'E_VALIDATION',
+        params: { field },
+      })
+    }
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored).toEqual(before)
+    expect((await changedEntries()).length).toBe(journalBefore)
+  })
+
+  it('echoes no value in the description refusal (SEC-008, round 1 P3-6)', async () => {
+    // The description is the one field whose refusal carries NO value:
+    // stored prose never rides the envelope (the Rust command's
+    // variant-text rule, mirrored). The rejection is captured with its
+    // honest wire type so the absence itself is asserted.
+    const row = activeRow()
+    const before = { ...row }
+    const rejection = await commands
+      .projectUpdate(row.id, 'New Name', 'NEWL', 'teal', 'd'.repeat(1001))
+      .then(
+        () => undefined,
+        (error: AppErrorWire) => error,
+      )
+    expect(rejection?.code).toBe('E_VALIDATION')
+    expect(rejection?.params?.field).toBe('description')
+    expect(rejection?.params?.value).toBeUndefined()
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored).toEqual(before)
+  })
+
+  it('answers the field validation before the id, in table order', async () => {
+    // Round 1's P2-4 mirror: the fields validate before the row lookup
+    // (an unknown id plus an invalid field answers about the FIELD),
+    // and the §6.9 table order decides which invalid field answers.
+    await expect(
+      commands.projectUpdate('no-such-row', 'x'.repeat(101), null, 'purple', null),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'name',
+        value: `${'x'.repeat(64)} (+37 more code points)`,
+      },
+    })
+  })
+
+  it('answers the middle fields in table order too (round 2 P3-3)', async () => {
+    // The §6.9 table order's MIDDLE pair: an invalid label and an
+    // over-long description together answer about the label (the
+    // earlier of the two) — the first-vs-last pin above cannot catch
+    // a label/description swap.
+    const row = activeRow()
+    await expect(
+      commands.projectUpdate(row.id, 'New Name', 'ABCDEFG', null, 'd'.repeat(1001)),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'label' },
+    })
+  })
+
+  it('mirrors the label control-character refusal text exactly (round 2 P3-1)', async () => {
+    // The reason string is the Rust Display's own text — the char
+    // formatted the way Rust's `{:?}` Debug formats it ('\u{7}'),
+    // never JSON.stringify's "\u0007" — so a UI test written against
+    // the mock asserts a string the backend actually sends.
+    const row = activeRow()
+    const rejection = await commands.projectUpdate(row.id, null, 'a\u0007b', null, null).then(
+      () => undefined,
+      (error: AppErrorWire) => error,
+    )
+    expect(rejection?.code).toBe('E_VALIDATION')
+    expect(rejection?.params?.field).toBe('label')
+    expect(rejection?.params?.reason).toBe(
+      "project label contains the control character '\\u{7}' at index 1",
+    )
+  })
+
+  it('treats U+FEFF as the visible character Rust treats it as (round 2 P3-2)', async () => {
+    // JS `/\s` and `String.trim()` treat the BOM (U+FEFF, a Cf char)
+    // as whitespace; Rust's `char::is_whitespace` does not — the
+    // char is VISIBLE, so a BOM-only label is a legal 1-character
+    // label and a BOM-fringed name keeps its inner text verbatim.
+    // The mock's validators use Rust's White_Space set, so both hold
+    // here exactly as the core validators hold them.
+    const row = activeRow()
+    const before = { ...row }
+
+    await expect(commands.projectUpdate(row.id, null, '\uFEFF', null, null)).resolves.toBeNull()
+
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored?.label).toBe('\uFEFF')
+    expect(stored).toEqual({ ...before, label: '\uFEFF' })
+  })
+
+  it('leaves absent fields unchanged (the patch semantics)', async () => {
+    const row = activeRow()
+    const before = { ...row }
+
+    await expect(commands.projectUpdate(row.id, null, 'ONLY', null, null)).resolves.toBeNull()
+
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored?.label).toBe('ONLY')
+    expect(stored?.name).toBe(before.name)
+    expect(stored?.color).toBe(before.color)
+    expect(stored?.description).toBe(before.description)
+  })
+
+  it('answers an unchanged resend as a no-op, journaling nothing', async () => {
+    // The verified no-op (D-188/D-201): a re-send of the stored values
+    // writes and journals nothing. The snapshot is the oracle — the
+    // live row object would compare with itself.
+    const row = activeRow()
+    const before = { ...row }
+    const journalBefore = (await changedEntries()).length
+
+    await expect(
+      commands.projectUpdate(row.id, row.name, row.label, row.color, row.description),
+    ).resolves.toBeNull()
+
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored).toEqual(before)
+    expect((await changedEntries()).length).toBe(journalBefore)
+  })
+
+  it('answers the all-null send as a no-op too', async () => {
+    // D-201 point 5's other no-op arm: every field `null` — an empty
+    // patch, nothing written, nothing journaled.
+    const row = activeRow()
+    const before = { ...row }
+    const journalBefore = (await changedEntries()).length
+
+    await expect(commands.projectUpdate(row.id, null, null, null, null)).resolves.toBeNull()
+
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored).toEqual(before)
+    expect((await changedEntries()).length).toBe(journalBefore)
+  })
+
+  it('rejects an empty name, saving nothing (the 6.9 lower bound)', async () => {
+    const row = activeRow()
+    const before = { ...row }
+
+    await expect(commands.projectUpdate(row.id, '   ', null, null, null)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'name' },
+    })
+
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored).toEqual(before)
+  })
+
+  it('saves an empty description as a real change (6.9: empty is legal)', async () => {
+    // The fixture rows seed the column default `''`, so the row's
+    // description is set directly first (the §5.7-marking posture) —
+    // clearing prose is a REAL change, journaled like any other, not
+    // the no-op a null send would be.
+    const row = activeRow()
+    row.description = 'seeded prose'
+    const journalBefore = (await changedEntries()).length
+
+    await expect(commands.projectUpdate(row.id, null, null, null, '')).resolves.toBeNull()
+
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored?.description).toBe('')
+    expect((await changedEntries()).length).toBe(journalBefore + 1)
+  })
+
+  it('saves a description with a NUL stripped (6.9)', async () => {
+    const row = activeRow()
+
+    await expect(
+      commands.projectUpdate(row.id, null, null, null, 'kept text\0stripped byte'),
+    ).resolves.toBeNull()
+
+    const stored = mockState().projects.find((candidate) => candidate.id === row.id)
+    expect(stored?.description).toBe('kept textstripped byte')
+  })
+
+  it('saves a duplicate name without refusal (6.9 warning case)', async () => {
+    // §6.9's "Duplicates are allowed with a warning": the duplicate
+    // saves — the warning is the modal's live concern, never a refusal.
+    // The generator's index suffix keeps the fixture names unique, so
+    // this send is a real change, not the verified no-op.
+    const [first, second] = mockState().projects.filter((candidate) => candidate.state === 'active')
+    expect(second).toBeDefined()
+    expect(first?.name).not.toBe(second?.name)
+    const journalBefore = (await changedEntries()).length
+
+    await expect(
+      commands.projectUpdate(second.id, first.name, null, null, null),
+    ).resolves.toBeNull()
+
+    const stored = mockState().projects.find((candidate) => candidate.id === second?.id)
+    expect(stored?.name).toBe(first?.name)
+    const untouched = mockState().projects.find((candidate) => candidate.id === first?.id)
+    expect(untouched?.name).toBe(first?.name)
+    expect((await changedEntries()).length).toBe(journalBefore + 1)
+  })
+
+  it('rejects an unknown or archived id with E_VALIDATION, bounded echo included', async () => {
+    const journalBefore = (await changedEntries()).length
+
+    await expect(
+      commands.projectUpdate('no-such-row', 'New Name', null, null, null),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'project_id',
+        value: 'no-such-row',
+        reason: 'no active project has this id',
+      },
+    })
+    // D-115's cap, pinned at the boundary: an over-long id echoes
+    // truncated with the suffix, never whole.
+    const longId = 'x'.repeat(70)
+    await expect(commands.projectUpdate(longId, null, null, null, null)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'project_id',
+        value: `${'x'.repeat(64)} (+6 more code points)`,
+        reason: 'no active project has this id',
+      },
+    })
+    // The archived row answers the same refusal (D-201 point 4): the
+    // modal opens from an active column, so a row archived since the
+    // modal opened is a stale screen.
+    const archived = mockState().projects.find((candidate) => candidate.state === 'archived')
+    expect(archived).toBeDefined()
+    await expect(
+      commands.projectUpdate(archived?.id ?? '', 'New Name', null, null, null),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'project_id',
+        reason: 'no active project has this id',
+      },
+    })
+    expect((await changedEntries()).length).toBe(journalBefore)
   })
 })
 

@@ -24069,3 +24069,209 @@ unit; this line is the D-record duplicate the board rule asks for.
 Written as a service commit in main after the merge — md-only, no
 suites under the md-only regime; prettier and the pre-commit hook
 gate it.
+
+### D-201 — T-106: the `project_update` command's contract — the four editable fields as an id-addressed patch, the warning-not-refusal duplicate name, and T-279's refresh declined for fields no watch input reads — 2026-11-25
+
+The card (§7.10 Projects module `project_update`; PRJ-008/009/011/021,
+§6.9, SYS-005, LOG-001…004) leaves seven points open to more than one
+reading; the chosen readings were written here BEFORE the
+implementation (the rule-1 discipline). The command follows D-194's
+module shape: `project_update.rs` + `project_update_tests.rs`,
+`reject_during_sync` first, `managed_db`'s honest `NoDatabase` answer,
+then ONE `Db::run` transaction carrying the store update and the
+journal insert.
+
+1. **The wire: id-addressed patch, flat optional args.**
+   `project_update(project_id, name, label, color, description)` →
+   `Result<(), AppError>`, each field `Option<String>` — the D-194
+   id-addressed reading for the project family (`exclusion_remove`'s
+   shape), with the patch semantics the store's own `ProjectUpdate`
+   already chose ("`None` leaves the field unchanged"; "PRJ-008 saves
+   the whole modal at once, but the repository does not force a full
+   overwrite" — `crates/eunomia-store/src/projects.rs:737-784`).
+   Absent field = unchanged: a stale screen that re-sends one field
+   cannot wipe the other three, and the future PRJ-008 modal (T-160)
+   sending all four is the same contract. The screen re-reads through
+   the already-landed `projects_list` (name/label/color on the
+   column), so the answer is `()` — no echo payload. Flat args, not a
+   payload struct: the `instruction_update(id, name)` form is the
+   update family's precedent, and tauri-specta maps each arg to one
+   invoke key.
+2. **The duplicate name is saved, not refused (§6.9/PRJ-011).** §6.9's
+   name row is explicit: "Duplicates are allowed with a warning" — a
+   UI-level field warning, never a store refusal, so the command saves
+   a duplicate name like any other. The warning is the modal's live
+   field validation (T-160), computable client-side from the names
+   `projects_list` already serves — unlike the add flow's
+   `write_access_warning` (a Rust-only filesystem fact), it needs no
+   wire arm; `Result<(), AppError>` carries nothing and no journal
+   difference exists between a duplicate and a unique name.
+3. **"The path cannot be changed" is answered by contract, not
+   refusal (PRJ-008's AC).** The command's args ARE the editable
+   field list — no `path`, no `scheme`/`base_name`/`extra_*` (those
+   are T-107's own card, DB-023's watch-set inputs) — and the store's
+   `ProjectUpdate` has no `path`/`path_key`/`added_via` members at
+   all. There is no wire surface a path could ride, so no typed
+   refusal exists to test; the oracle pins the row instead: after an
+   update, `path`, `path_key`, `added_via` (and `state`, `sort_order`,
+   `last_synced_*`) are verbatim. The spec §7.10 note says so.
+4. **The archived row is a stale screen's refusal (D-115's reorder
+   precedent).** PRJ-008's modal opens from an ACTIVE column's pencil
+   icon; an id that names no row, or a row archived since the modal
+   opened, is the same stale-screen re-send reorder refused
+   ("unknown OR archived"). The refusal is the typed `E_VALIDATION`
+   naming `project_id`, reason "no active project has this id", the
+   caller's id echoed bounded (`bounded_echo`, D-115's cap); nothing
+   is written, nothing journaled.
+5. **The journal: ONE `project.changed` entry, only for a real
+   change.** D-119 recorded `ProjectChanged` for exactly this family
+   ("the future update family will use the same member"); LOG-001's
+   "changing projects" is its category. Info/user/ok, entity and
+   `project_id` naming the row, no details (the `register_project`/
+   `project_archived` shape — the row itself holds the facts). A send
+   whose present fields all equal the stored values — including the
+   all-`None` send — is the D-188 verified no-op: the equal fields are
+   stripped BEFORE the store call (no `updated_at` restamp — the
+   store's own empty/no-op rule), nothing written, nothing journaled.
+6. **Validation order (§6.9 all-or-nothing).** SYS-005 gate first
+   (the family's first act), then every PRESENT field through the
+   shared core validators in §6.9 table order (name, label,
+   description, color — the first invalid field answers with the
+   `E_VALIDATION` envelope naming it, `rejected_field`; the
+   description's NUL-strip is §6.9's own silent rule), then
+   `managed_db`, then the one transaction. An entity is never saved
+   partly: a refused field means NOTHING was written (the card's DoD).
+   The echo split inside that envelope (the `rejected_text_field` vs
+   `rejected_title_field` precedents): the name, label and color echo
+   the caller's field bounded (D-115's cap — identity fields); the
+   description echoes NO value — stored prose is the one thing SEC-008
+   keeps out of envelopes, and the validator's reason already carries
+   the measured length. The color refusal also states its class
+   itself instead of the validator's Display: that Display
+   interpolates the sent value, and a caller-supplied string must not
+   ride the envelope whole.
+7. **T-279's `refresh_after_sync` declined for this card (the D-144
+   cross-reference the board asks for).** SYS-007's own list ties
+   watch-set changes to a project's addition, scheme or file-name
+   change and its archival — name, label, color and description touch
+   none of those inputs, so a refresh pass would be file I/O with NO
+   observable change (D-194 declined the retrofit for `archive`, a
+   command that actually REMOVES watches, on the same basis). The
+   wiring belongs to T-107's scheme arm and to T-279's own retrofit
+   when it lands (its card lists this arm); PRJ-008's "saving updates
+   the column header right away" is the UI re-reading `projects_list`,
+   not a watch fact.
+
+Tests: `project_update_tests.rs` — the happy path (four boundary-legal
+fields — name 100, label 6, description 1000 code points — saved, the
+immutable columns verbatim, one attributable journal entry), the
+card's DoD battery (each invalid field: row verbatim + journal
+absent), the patch half (absent fields unchanged), the verified
+no-op (`updated_at` not restamped, journal absent), the §6.9 NUL-strip
+save, SYS-005 before anything runs (spec-literal envelope, nothing
+written, retry converges), the unknown-id and archived-row refusals,
+the honest `NoDatabase` answer, the D-051 rollback (journal-insert
+abort rolls the fields back), and the lib.rs registration pin.
+Frontend: the mock twin + `commands.spec.ts` (the same batteries over
+the mock store) and the `mode.spec` surface pin at 41 names. Mutation
+groups are recorded in the review addendum below.
+
+Checks: BDD red-first (the suite written against a module that does
+not exist yet — the compile failure IS the red state — then green
+after the implementation); all runs exit-code-gated under
+`CARGO_BUILD_JOBS=2`, nextest `--test-threads=4`; the D-195 doc-test
+pass included; prettier/eslint/typecheck for the frontend half.
+
+**Round-1 review addendum (same task, 2026-11-25; model
+`opencode-go/deepseek-v4.1-flash`, report
+`.opencode/reviews/t106-round1-report.md`: REQUEST CHANGES, 0×P0/P1,
+4×P2, 7×P3 — all taken or routed in the amend).**
+
+- _P2-1 (the description has no read surface)._ Verified: no
+  registered command serves `description` (or the modal's
+  `path`/`added_via`) — `ProjectColumnEntry` carries none of them, so
+  the PRJ-008 modal (T-160) cannot prefill, and a modal that renders
+  an empty description and saves `Some("")` would wipe stored prose.
+  The write half is this card's; the READ half is a follow-up card
+  for the orchestrator (a widened read or a `project_get`), recorded
+  here per the follow-up rule — the card is the tracking unit. No
+  code change in this task.
+- _P2-2/P2-3 (stale "joins as they land" claims)._ `sync_running.rs`'s
+  module doc and `project_add_manual`'s doc both still named
+  `project_update` as a future SYS-005 joiner; both now name it as
+  gated (T-106), with `scan_commit`/`project_archive` added to the
+  gate module's "today" list too (its own older omission, P2-2's
+  second half).
+- _P2-4 (the three ordering claims were unpinned)._ Three tests
+  added: an invalid name plus an off-palette color over an UNKNOWN id
+  answers about `name` (validation before the row read, table order —
+  the Rust battery and the mock block each), and the sync test now
+  also sends an INVALID name while the flag is held and expects the
+  literal `E_SYNC_RUNNING` envelope (the gate before validation).
+  Mutation-verified: M7 (the name validation skipped) reddens both
+  new pins.
+- _P3-1 (the stale "(T-279)" attribution)._ `ProjectFields::derive`'s
+  comment now says the edit path LANDED with T-106; P3-2:
+  `file_watch.rs`'s seam list now narrows to `project_update`'s
+  scheme/file-name arm (T-107) and names this command's
+  name/label/color/description half as seam-free by D-201's own
+  reading — a doc-comment deviation in a D-147 watch-out zone,
+  recorded here per Rule 10 (no code touched).
+- _P3-3 (the dangling addendum reference)._ Resolved by this
+  addendum's existence.
+- _P3-4 (the lower bounds and the all-null send)._ Four tests added
+  (empty name refused; empty description a legal journaled change;
+  the all-`null` send the verified no-op; mirrors in the mock block,
+  where the empty-description row is seeded directly — the fixtures
+  seed the column default `''`).
+- _P3-5 (the mock's self-comparisons)._ The mock block's rows are
+  snapshotted (`{ ...row }`) before every act — the store mutates in
+  place, so comparing the live object proved nothing — and the new
+  journal entry is read at index 0 (`activityList` is newest-first;
+  the last index is the oldest).
+- _P3-6 (the echo rules unpinned)._ The name refusal's value is
+  asserted bounded (64 + the count), the label/color echoes verbatim,
+  and the description refusal asserts `value` ABSENT — both suites.
+- _P3-7 (the mock's id-refusal message key)._ This command's mock
+  refusal now uses the real `rejected_field` key (`errors.validation`);
+  the older id arms' `validation.invalid_value` drift
+  (`projectArchive`, `projectsReorder`, `exclusionRemove` in the mock)
+  is a pre-existing divergence — a follow-up card for the
+  orchestrator, not silently widened here.
+
+Mutation groups, red-then-green (Rust: M1 the SYS-005 gate removed →
+the sync refusal test red; M2 the strip-equal dropped → the no-op test
+red, `updated_at` restamped; M3 the journal insert dropped → five
+journal-asserting tests red; M4 the Active filter dropped → the
+archived-row test red; M5 the name validation skipped → the
+invalid-name test red; M6 the entry attribution dropped → four
+attributable-entry tests red; M7 the name validation skipped over a
+two-fault send → the ordering and empty-name pins red. Frontend: TM1
+the strip dropped → the no-op pin red; TM2 the journal call dropped →
+two tests red; TM3 the Active filter dropped → the archived-id pin
+red; TM4 the name validation skipped → the invalid-name pin red; TM5
+the same over a two-fault send → three tests red.)
+
+**Round-2 review addendum (same task, 2026-11-25; model
+`opencode-go/hy4-flash-free`, report
+`.opencode/reviews/t106-round2-report.md`: APPROVE, 0×P0/P1/P2,
+3×P3 — all three taken in the second amend, after the round-1 fixes
+were verified landed).**
+
+- _P3-1 (the mock's label control-character reason text)._ The
+  mock's `rustCharDebug` now formats the offending char the way
+  Rust's `char` `{:?}` Debug does (`'\u{7}'`, single quotes,
+  lowercase hex), replacing the `JSON.stringify` spelling
+  (`"\u0007"`) the real Display never produces; the mock spec pins
+  the exact reason string.
+- _P3-2 (the mock's whitespace classifier)._ The mock's twin
+  validators now use Rust's `char::is_whitespace` set (Unicode
+  White_Space) and a `str::trim`-faithful trim, not JS `/\s/` and
+  `String.prototype.trim` — the two runtimes disagree on U+FEFF (JS
+  trims/matches it; Rust treats the Cf char as visible), and a
+  BOM-only label is legal in both halves now; the mock spec pins
+  the U+FEFF acceptance.
+- _P3-3 (only the ends of the validation order were pinned)._ A
+  two-fault MIDDLE send (invalid label + over-long description →
+  `field: label`) added to both suites, so a label/description
+  validator swap reddens the battery too.

@@ -47,6 +47,15 @@ export type MockProjectRow = {
   name: string
   label: string
   color: string
+  /**
+   * §6.2's `description` column (PRJ-008's editable field, T-106):
+   * fixture rows seed the column default `''`; `projectUpdate` writes
+   * it. Deliberately NOT served by `projectsList` — production's
+   * column entry carries no description either (the modal's read
+   * surface is a future task's), so tests read the row directly, the
+   * §5.7-marking posture.
+   */
+  description: string
   state: MockProjectState
   addedVia: 'manual' | 'scan'
   sortOrder: number
@@ -455,6 +464,7 @@ function rowsFromFixtures(
     name: project.name,
     label: project.label,
     color: project.color,
+    description: '',
     state: project.state === 'archived' ? 'archived' : 'active',
     addedVia: 'scan',
     sortOrder: i + 1,
