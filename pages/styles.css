@@ -1416,6 +1416,10 @@ input[type='checkbox']:disabled {
   flex: 1 1 auto;
   min-block-size: 0;
   overflow-y: auto;
+  /* Inner side insets: with overlay scrollbars the fields otherwise sit
+     flush against (and partly under) the scrollbar, and the content
+     touches the dialog borders on both sides while scrolling */
+  padding-inline: 12px;
 }
 
 /* `hidden` must win over the flex display of panels and fields */
