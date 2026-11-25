@@ -17,7 +17,8 @@ checks from D-143 (the file log's size half, T-255) — what the unit
 suite cannot reach: the real clock, the production worker-thread path
 of the degradation warn, and Windows' GUI stderr and file locking.
 Section 4 (D-186) is the first any-OS item that joined them: the
-recovery path's re-arm of the state services. Part two: the scenario
+recovery path's re-arm of the state services; section 5 joined it in
+the same shape — the externally-modified display half of OUT-014. Part two: the scenario
 runs S1–S7, S9, S10 that spec §15.5 conditions the release on (added
 by T-315). Items for other OSes and other subsystems may join below.
 
@@ -245,6 +246,63 @@ edit its target file in an editor outside the app.
   chosen copy replaced the database …" — and after them neither the
   "watching is disabled until the next launch" warning nor a
   "state not managed" panic.
+
+## 5. An external target-file change is displayed and not written back (any OS)
+
+Source: spec §5.7 SYS-007/008, §7.5 OUT-014 (its display half — the
+column state, no merge, no write on a watch event), OUT-015; §7.4
+MAIN-028. Not a §8 scenario: this entry was added for the follow-up
+recorded at D-183's P3-5 (T-126) — the watcher suite pins the service
+half of OUT-014; the display half is UI and has no automation —
+written in the same entry shape as the scenario runs below. An
+external edit here means a change made by anything but the app — an
+editor, another tool.
+
+Pending: the matrix column headers (MAIN-028) — spec §16 M3. The
+watching backend is landed (§5.7: the debounced watcher, the re-check,
+`state://file-changed`); the column state icon and text are not. Until
+the matrix lands, the item waits.
+
+**Prepare.** One throwaway scheme-A repo (the scenario section's common
+preparation: `git init` plus one commit — never a live repository),
+one project added and synced once — its column is clean and shows the
+short last-sync time (MAIN-028), and the target file
+`<repo>/AGENTS.md` exists. An external editor.
+
+**Do.**
+
+1. In the editor, outside the app, add a line to `<repo>/AGENTS.md`
+   and save. Watch the project's column header for a minute — the
+   debounce is 300 ms (SYS-007) and the re-check follows it (SYS-008),
+   so watch, don't stopwatch.
+2. While the mark is showing, read the file again.
+3. Restart the app without touching the file; read the column.
+4. Run sync; then read the file and `<data dir>/backups/`.
+
+**Pass when.**
+
+- Step 1 flips the column header to the "externally modified" state
+  (MAIN-028) by itself — no restart, no manual refresh, and no dialog,
+  merge view or conflict prompt anywhere (OUT-014: an external edit
+  flips the state without any dialog; the app never merges).
+- The unsynced-changes counter does not light: the externally-modified
+  state is independent of the dirty flag (SYS-008, DB-021) — a file
+  edit is not a library change, and the build hash is unmoved.
+- Step 2 sees the editor's bytes, unchanged by the app (OUT-014: the
+  app never writes a file because of a watch event).
+- Step 3 shows the mark once the matrix first renders after the launch
+  — the state is computed at startup (SYS-008), not only from live
+  watch events.
+- Step 4 overwrites the file: the editor's line is gone (OUT-015; the
+  acceptance column: content added by hand disappears after a sync),
+  and `<data dir>/backups/<project_id>__<slug>/` gains one copy of the
+  externally modified file (OUT-014's acceptance: a sync still
+  overwrites the file and makes a backup; BKP-001). The column returns
+  to clean and shows the new last-sync time (MAIN-028).
+
+**Restore.** No rights or locks to undo; the scratch project goes with
+the scenario section's common-preparation cleanup (the step-4 backup
+copy stays under `<data dir>/backups/` by design).
 
 ## Scenario runs S1–S7, S9, S10
 
