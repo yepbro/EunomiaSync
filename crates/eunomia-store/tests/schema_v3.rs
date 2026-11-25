@@ -26,6 +26,15 @@ impl Drop for TempDir {
     }
 }
 
+/// Creates this test's scratch directory.
+///
+/// `label` is the uniqueness namespace inside this binary and must stay
+/// unique per test: the directory name is `label` + pid + clock nanos,
+/// and the clock is only microsecond-fine on some CI runners, so two
+/// tests sharing a label can land on one clock tick and share one
+/// directory — CI run 45542135360 (macos-15-intel) failed exactly that
+/// way, its two tests colliding on one `db.sqlite3` (D-195). Distinct
+/// labels make the directories disjoint by construction.
 fn temp_dir(label: &str) -> TempDir {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -168,7 +177,7 @@ fn v2_assignments_upgrade_verbatim_to_the_v3_target_shape() {
 
 #[test]
 fn v3_rejects_illegal_targets_cross_instruction_variants_and_oversize_custom_text() {
-    let temp = temp_dir("upgrade");
+    let temp = temp_dir("rejects");
     let mut conn = open_db(&temp.path().join("db.sqlite3")).expect("database opens");
     run_migrations(&mut conn, &temp.path().join("db-backups")).expect("fresh database migrates");
     seed_project(&conn, "p1");

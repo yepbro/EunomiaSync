@@ -190,7 +190,7 @@ pub enum SnapshotError {
 /// ```
 /// use std::path::Path;
 ///
-/// use eunomia_core::assignment::Assignment;
+/// use eunomia_core::assignment::{Assignment, AssignmentTarget};
 /// use eunomia_core::library::{
 ///     Heading, HeadingLevel, Instruction, InstructionState, ItemId, LibraryItem, Variant,
 ///     VariantId,

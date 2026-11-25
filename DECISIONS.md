@@ -23163,3 +23163,60 @@ Rebased checks, all exit 0: `cargo fmt --check`; `cargo clippy --workspace
 --test-threads=4` (**1831/1831**); `pnpm test` (**353/353**);
 `pnpm run format:check`; `pnpm run lint`; `pnpm run typecheck`. Everything is
 folded into the single T-331 commit; no push, merge or board operation.
+
+### D-195 — CI 45542135360: local-green/CI-red — doctests outside the nextest gate, and a microsecond clock colliding temp-dir labels — 2026-11-24
+
+Problem: CI run 45542135360 (main, `3c1c5e4..748c7de`, T-331 on top)
+was red on every test-matrix leg while the local suite on the same tree
+was 1831/1831 green. Two independent defects, both introduced by
+T-331's `748c7de`:
+
+1. All four legs failed the `Rust tests` step at the same doc-test: the
+   `BuildSnapshot` example (`crates/eunomia-core/src/snapshot.rs:190`)
+   used `AssignmentTarget` at :232 but its import list at :193 named only
+   `Assignment` — `E0433`, the example cannot compile. CI runs
+   `cargo test --workspace` (`.github/workflows/ci.yml:192`), which
+   compiles doc-tests; the local gate runs `cargo nextest run
+--workspace`, and nextest executes no doc-tests (clippy's
+   `--all-targets` compiles none either), so a deterministic compile
+   break reached main invisible to every local check — D-192's rebase
+   check list shows exactly that hole.
+2. macos-15-intel alone failed both tests of
+   `crates/eunomia-store/tests/schema_v3.rs` with SQLite errors.
+   `v3_rejects…` at :173 got `Migration` wrapping "table settings
+   already exists"; `v2_assignments…` at :114 got `Backup` wrapping
+   "disk I/O error" from `VACUUM INTO` (`storage.rs:843`). Root cause:
+   both tests built their scratch directory with the same
+   `temp_dir("upgrade")` label (748c7de's :107/:171). The name is label
+   plus pid plus `SystemTime::now()` nanos, and that runner's clock is
+   microsecond-fine — the collided path's nanos (`…625143000`) is a
+   whole microsecond — so the two parallel-spawned tests read one tick
+   and shared one directory and one `db.sqlite3`: test 2 read
+   `user_version = 0` before test 1's seed transaction committed, then
+   its `CREATE TABLE settings` ran after the commit (a deferred write
+   transaction applies to the latest committed state) → "table settings
+   already exists"; test 2's panic ran `TempDir::drop` → `remove_dir_all`
+   on the shared directory under test 1's in-flight `VACUUM INTO` →
+   "disk I/O error". One cause, both messages — and cargo's fail-fast
+   masked that leg's doc-test failure (schema_v3 runs before the
+   doc-tests).
+
+Solution (the CI-fix service commit, referencing T-331):
+
+1. The example now imports both types:
+   `use eunomia_core::assignment::{Assignment, AssignmentTarget};` —
+   the shape of `assignment.rs`'s own example. Reproduced red locally
+   with `cargo test --doc --workspace`, green after the fix
+   (eunomia-core 86, eunomia-fs 12, the other crates 0 — no further
+   hidden doc-test failures).
+2. The second test's label is now `"rejects"`; distinct labels make the
+   two directories disjoint by construction — the invariant every
+   sibling suite already keeps (a repo-wide audit of all
+   `temp_dir`/`temp_data_dir` call sites found the duplicate only in
+   `schema_v3.rs`). The helper now documents the uniqueness contract.
+3. Ruling: a task that touches Rust adds `cargo test --doc --workspace`
+   to its check chain — nextest alone cannot see doc-tests, and CI's
+   `cargo test --workspace` keeps catching what the local gate misses.
+   The scheme's residual exposure (a future same-label pair plus one
+   clock tick) stays open as a board follow-up: a shared helper or a
+   per-process counter would close the class, not the instance.
