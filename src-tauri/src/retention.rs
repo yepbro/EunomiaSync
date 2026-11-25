@@ -17,7 +17,8 @@
 //! - **At startup, then once a day.** [`spawn_daily_cleanup`] spawns
 //!   one task on tauri's async runtime that runs the cleanup
 //!   immediately (the startup run — LOG-006's "at startup", fired
-//!   right after the database is managed, off the `setup` thread)
+//!   right after the database is managed, as a spawned task the
+//!   caller never waits on)
 //!   and then every [`DAILY_INTERVAL`]. Honest boundary, recorded in
 //!   D-054: the interval is 24 h counted from launch, not a UTC
 //!   midnight boundary — an app kept running prunes once per day on
@@ -94,8 +95,9 @@ use eunomia_store::storage::StorageError;
 const DAILY_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Spawns the retention task: the startup cleanup runs immediately
-/// (asynchronously — the `setup` hook does not wait for it; the
-/// database is already open and managed when this is called), then
+/// (asynchronously — the caller does not wait for it; the database
+/// is already open and managed when this is called, in the shared
+/// session tail, D-186), then
 /// the task ticks every [`DAILY_INTERVAL`]. The task owns its `Db`
 /// clone (a handle to the one connection, D-037's cheap-clone shape)
 /// for the whole app run. The loop body is [`cleanup_loop`] — the

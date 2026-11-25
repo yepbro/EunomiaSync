@@ -22040,6 +22040,32 @@ carry the spec's own first letters. Checks: md-only diff — this
 addendum; no test suites run, the md-only regime; `pnpm run
 format:check` green.
 
+Closure addendum (dated, the D-183 shape; 2026-11-24, T-347): the
+follow-up above — the four modules attributing the startup wiring to
+the `setup` hook alone — is closed. The sites were located by
+content, not by the record's numbers: `file_watch.rs`'s
+`listen_availability` reference had drifted 58 lines (T-342's
+shutdown-seam insertions), while the other recorded references still
+matched at this branch's base — so no number was trusted. They now
+name the caller truthfully: the shared session
+tail (`start_database_session`), run by the `setup` hook and by the
+recovery commands' path alike — `dirty_recalc.rs`'s startup bullet,
+its recovery-mode reason, `spawn_service`'s doc and `commit_hook`'s
+doc (the tail, not the hook, hands the closure to `Db::
+set_commit_hook` — the follow-up list never recorded that line, so
+the content search reached it);
+`file_watch.rs`'s startup bullet, its recovery-mode reason, and
+`listen_availability`'s doc; `availability.rs`'s startup bullet and
+the recheck callers' sentence; `retention.rs`'s startup bullet and
+`spawn_daily_cleanup`'s doc (the caller, not "setup", is what does
+not wait). The "managed in the `setup` hook" state sentences stay as
+written — they are scoped to the state where no database is managed,
+exactly as they say (state management IS hook-only: the recovery
+commands manage none of these states — they publish only the
+database, through the tail). Doc-only diff; the Rust check class
+runs (fmt, clippy, the doc tests, the touched modules' suites), one
+review round.
+
 ### D-187 — T-083: the `library_get` command — labels are active-project chips, the tree is one flat position-ordered vector, variants ride inline with the emptiness flag — 2026-11-23
 
 Problem: the §7.10 Library module's read command (`library_get`, spec

@@ -8,8 +8,11 @@
 //! own per-project gate. This module owns the first three through one
 //! recheck, [`recheck_and_emit`]:
 //!
-//! - **Startup** — the `setup` hook in `lib.rs` spawns it right after
-//!   the database is managed (DB-032's "at startup"; a background
+//! - **Startup** — the shared session tail (`start_database_session`,
+//!   D-186: run by the `setup` hook and, since T-322, by the recovery
+//!   commands' path alike) spawns it as the tail's last step, once
+//!   the database is managed and the other state services are armed
+//!   (DB-032's "at startup"; a background
 //!   task, because four metadata probes per project over possibly
 //!   dead drives must not hold the launch — §5.4 SYS-001, NFR-002's
 //!   startup budget).
@@ -404,9 +407,9 @@ pub(crate) async fn recheck_and_emit<R: Runtime>(
 /// guard frees the slot when the task ends or panics.
 ///
 /// Failures are logged through the facade, never propagated: the
-/// callers (the `setup` hook, the window-event route) have no one to
-/// return them to, and a failed availability pass must not disturb
-/// the launch or the window it was triggered by.
+/// callers (the shared session tail, the window-event route) have no
+/// one to return them to, and a failed availability pass must not
+/// disturb the launch or the window it was triggered by.
 ///
 /// The returned join handle lets the IPC tests await the pass
 /// deterministically; production callers drop it (the task runs on —

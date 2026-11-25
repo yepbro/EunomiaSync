@@ -33,7 +33,9 @@
 //! SYS-007 fixes the watch-set points, SYS-008 the state points; both
 //! run through one pass, [`refresh_pass`]:
 //!
-//! - **Startup** — the `setup` hook spawns [`spawn_service`], which
+//! - **Startup** — the shared session tail (`start_database_session`,
+//!   D-186: run by the `setup` hook and, since T-322, by the recovery
+//!   commands' path alike) spawns [`spawn_service`], which
 //!   drops the first `Refresh` permit before its spawn (the dirty
 //!   service's precedent: the permit cannot race the task's first
 //!   `recv`).
@@ -140,8 +142,9 @@
 //!
 //! No database (the T-024 state): the honest `NoDatabase` answer
 //! through the [`crate::commands::managed_db`] edge, no event, no
-//! panic; the service is never spawned there (the `setup` hook
-//! returns before the spawn).
+//! panic; the service is never spawned there (no database is managed
+//! until a recovery command's shared tail runs, and nothing is armed
+//! before that).
 //!
 //! # The diagnostic edges (D-137's follow-up 1, landed D-155)
 //!
@@ -332,7 +335,8 @@ const CLEAN: FileFlags = FileFlags {
 /// Managed in the `setup` hook before anything that could fail (the
 /// [`crate::session_paths::SessionPaths`] shape, like the
 /// availability and dirty states); in recovery mode it exists unused
-/// — no service is spawned, no listener registered.
+/// — no service is spawned, no listener registered, until a recovery
+/// command's shared tail arms both.
 pub(crate) struct FileWatchState {
     /// Last recorded verdicts per project id (absent ≡ [`CLEAN`]).
     /// Guarded by a short synchronous critical section, never held
@@ -1155,8 +1159,9 @@ pub(crate) fn refusal_wire_class(kind: WatchRefusalKind) -> &'static str {
 
 /// Subscribes to T-079's `state://project-availability` event: every
 /// diff drops a `Refresh` permit, so the watch set follows folders
-/// that die and return (SYS-007's add/remove rule). Called in the
-/// `setup` hook BEFORE the startup availability recheck is spawned —
+/// that die and return (SYS-007's add/remove rule). Called by the
+/// shared session tail (D-186) BEFORE the startup availability
+/// recheck is spawned —
 /// Rust listeners deliver synchronously inside `emit`, so a listener
 /// registered earlier cannot miss the session's first verdicts.
 pub(crate) fn listen_availability<R: Runtime>(app: &AppHandle<R>) {

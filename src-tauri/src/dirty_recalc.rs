@@ -7,10 +7,12 @@
 //! committed transaction, at startup, and after a sync — and this
 //! module owns all three through one pass, [`recalc_and_emit`]:
 //!
-//! - **Startup** — the `setup` hook in `lib.rs` calls
-//!   [`spawn_service`] right after the database is managed; the spawn
-//!   puts the startup trigger on the bus itself, so "spawned" and
-//!   "startup pass scheduled" cannot drift apart.
+//! - **Startup** — the shared session tail (`start_database_session`,
+//!   D-186: run by the `setup` hook and, since T-322, by the recovery
+//!   commands' path alike) calls [`spawn_service`] right after the
+//!   database is managed; the spawn puts the startup trigger on the
+//!   bus itself, so "spawned" and "startup pass scheduled" cannot
+//!   drift apart.
 //! - **After each committed transaction** — the executor's point seam:
 //!   `Db::run` fires the hook this module's [`commit_hook`] builds
 //!   after a transaction **committed with at least one row change**
@@ -118,8 +120,10 @@
 //! **Recovery mode** (no database, the T-024 state) answers the
 //! honest `NoDatabase` error through the same
 //! [`crate::commands::managed_db`] edge every database command uses;
-//! the service is never spawned there (the `setup` hook returns
-//! before it), and the recovery screen has no matrix columns to mark.
+//! the service is never spawned there (no database is managed until
+//! a recovery command's shared tail runs, and nothing is armed
+//! before that), and the recovery screen has no matrix columns to
+//! mark.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -210,7 +214,8 @@ pub(crate) enum Trigger {
 /// [`crate::session_paths::SessionPaths`] shape, like
 /// `AvailabilityState`): the commit hook reads it through the managed
 /// state at fire time, and in recovery mode it exists unused — no
-/// service is spawned, no hook is ever set.
+/// service is spawned, no hook is ever set, until a recovery
+/// command's shared tail arms both.
 pub(crate) struct DirtyState {
     /// The diff cache with its monotonic "applied" ticket: the last
     /// known verdicts per active project id (absent ≡ the clean
@@ -467,7 +472,9 @@ pub(crate) async fn recalc_and_emit<R: Runtime>(
 }
 
 /// Spawns the service task over the bus's receiving half and sends
-/// the DB-022 startup trigger — the `setup` hook's one call. The task
+/// the DB-022 startup trigger — the shared session tail's call
+/// (D-186), run by the `setup` hook and by the recovery commands'
+/// path alike. The task
 /// is the bus's only consumer, so passes serialize on it: `recv` a
 /// trigger, debounce it when it is a [`Trigger::Commit`], drain
 /// whatever permits collapsed behind it, run one
@@ -518,8 +525,10 @@ pub(crate) fn spawn_service_with_window<R: Runtime>(
     });
 }
 
-/// Builds the executor's commit seam closure (the `setup` hook hands
-/// it to `Db::set_commit_hook`): one [`Trigger::Commit`] permit onto
+/// Builds the executor's commit seam closure (the shared session
+/// tail hands it to `Db::set_commit_hook`, D-186 — the tail runs in
+/// the `setup` hook and in the recovery commands' path alike): one
+/// [`Trigger::Commit`] permit onto
 /// the bus per committed write transaction. The closure runs on the
 /// blocking pool while the connection's mutex is still held, so it
 /// must never block — `try_send` onto the capacity-1 bus is exactly
