@@ -325,6 +325,7 @@ scenario-relevant backend commands (`project_add_manual`,
 `project_update` (T-106),
 `scan_start`/`scan_cancel`/`scan_commit`, `sync_run`,
 `sync_cancel` (T-120),
+`sync_status`/`sync_last_result` (T-121),
 `settings_get`/`settings_set`, the library read `library_get`, the
 instruction lifecycle
 `instruction_create`/`instruction_update`/`instruction_hide`/

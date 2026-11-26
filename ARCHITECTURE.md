@@ -102,6 +102,7 @@ src-tauri/
   src/session_paths.rs     # SEC-003 session allowlist + UI path check (working)
   src/single_instance.rs   # Single-instance handoff: restore + focus (SYS-006) (working)
   src/sync_cancel.rs       # sync_cancel command: the slot's token latch + three-state answer (working)
+  src/sync_reads.rs        # sync_status / sync_last_result commands: the panel's two reads (working)
   src/sync_phase0.rs       # Sync phase 0: flag, run record, built content (working)
   src/sync_phase1.rs       # Sync phase 1 preflight: ready/unchanged/skipped (working)
   src/sync_phase2.rs       # Sync phase 2: §7.6 backups + records (working)
@@ -171,7 +172,7 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is forty-four commands — the §7.10 names that
+   The registered set is forty-six commands — the §7.10 names that
    are implemented so far, matching the `mode.spec` surface list. It comprises the
    recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
@@ -330,7 +331,20 @@ Rust commands are registered through `tauri-specta`:
    (D-197's clock-injection pattern). A post-phase-0 `Err` whose run
    row is still `running` gets that row a terminal `aborted` status
    with the error's own §10 code, decided by the row's state inside
-   one transaction (D-138's wrapper) — and the Library
+   one transaction (D-138's wrapper) — and the Sync module's two
+   reads `sync_status`/`sync_last_result` (T-121,
+   `src-tauri/src/sync_reads.rs`, DECISIONS.md D-217): the panel's
+   cold-start facts (the SYS-004 flag's plain load, MAIN-027's
+   derived last-success time, the "last attempt partial" fact over
+   the newest terminal run row, and the dirty count aggregated from
+   the same `DirtyState` verdicts `projects_list`'s column serves)
+   and the last attempt's summary (the newest terminal run's rows
+   read back through D-138's summary shape, plus the run row's own
+   §10 code through the `run_error_code_or_none` seam — the cell's
+   first production reader, D-147's half 3, collapsing the two
+   no-code spellings); no terminal run yet answers the `noRuns`
+   state. Both commands are reads: no SYS-005 gate, no journal, and
+   the honest `NoDatabase` refusal in recovery mode — and the Library
    module's `library_get` (T-083, DECISIONS.md D-187): the §7.3
    instruction library's tree — instructions (name, variant count,
    dates, state, the variants inline with LIB-014's emptiness flag

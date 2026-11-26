@@ -21,6 +21,7 @@ import type {
   SettingItem,
   VariantRecordWire,
 } from '../contract'
+import type { SyncRunSummary_Serialize } from '../../bindings'
 import type { ExclusionFixture, ProjectFixture } from '../fixtures/domain'
 import {
   BASE_TS_MS,
@@ -136,6 +137,26 @@ export type MockState = {
    * cancelled walk leaves it untouched (ERR-002).
    */
   scanFindings: string[]
+  /**
+   * The `syncRun` stand-in's memory of its last completed run (T-121):
+   * the answer's summary payload remembered verbatim plus the
+   * run-level §10 code (always `null` here — the stand-in has no
+   * abort paths, its verdicts are `success`/`partial`/`failed` over
+   * per-project rows that carry their own codes). A one-run memory,
+   * not a history: a later run replaces it, a reset clears it, and
+   * the seeded fixture carries none (the mock writes no run rows —
+   * `syncRun`'s own documented limit, so the two sync reads serve
+   * from this memory instead of mirroring the store).
+   */
+  lastSyncRun: { summary: SyncRunSummary_Serialize; errorCode: string | null } | null
+  /**
+   * The `finished_at` of the last mock run with the `success` verdict
+   * (MAIN-027's rule mirrored): moved only by a success, never by a
+   * `partial`/`failed` run — the stand-in's own approximation of the
+   * derived "newest success run" read (no run history exists to
+   * derive from).
+   */
+  lastSyncSuccessAt: string | null
 }
 
 /** One `library_items` row in the mock store (§6.2 columns the UI can
@@ -639,6 +660,11 @@ export function resetMockState(profile: FixtureProfile): MockState {
     // A fresh world is a fresh session: no scan completed yet, so the
     // commit admits nothing.
     scanFindings: [],
+    // No mock run completed yet: the sync reads answer the cold-start
+    // facts (`noRuns`, no success time — the seeded world has no run
+    // rows, and the stand-in's memory starts empty with it).
+    lastSyncRun: null,
+    lastSyncSuccessAt: null,
   }
   // A fresh world is a fresh session: no project has been probed yet, so
   // the availability cache restarts from the D-112 baseline.

@@ -26081,3 +26081,324 @@ from the CI path: root 57 with its trailing slash + `.tmpTpxyPs` 10
   recorded (canonical `picked`, the archived sibling's absent `value`
   assert, the ASCII fixture) — none introduced or worsened by this
   commit.
+
+### D-217 — T-121: the sync panel's two reads — `sync_status` over the flag, MAIN-027's derived time and the dirty cache's count, and `sync_last_result` as the run row's `error_code` first production reader through the D-147 seam — 2026-11-26
+
+The card (§7.10 Sync row's two remaining names, MAIN-024…027/030/031,
+LOG-007, OUT-009, §9.4 phase 4 step 4, §10; the DoD "после partial
+общее время не меняется, а сводка содержит причины") lands the panel's
+two read commands. The named dependencies were verified by grep
+before any reliance (Rule 2): `summary_of`/`stop_run`/
+`run_error_code_or_none`/the `SyncCancelSlot` in `commands.rs` (D-138/
+D-147), phase 4's counted finish (D-134, `finish_run` +
+`last_success_finished_at`), the `DirtyState` cache and
+`projects_list`'s `dirty_verdict` (T-254/D-121), and the D-210
+`sync_cancel.rs` family shape — all landed. The pinned T-282 card
+comment (D-147's half 3) is consumed verbatim and NOT re-opened:
+`sync_last_result` reads the RUN row's `error_code` through
+`run_error_code_or_none` — the one seam collapsing NULL and "" to "no
+code" — and the tests carry the `count_empty_run_error_codes` census
+over every run shape they produce. Eight readings were open; the
+chosen readings were written here BEFORE the implementation (the
+rule-1 discipline).
+
+1. **Module shape — ONE new module `src-tauri/src/sync_reads.rs` for
+   BOTH commands, the battery in `ipc_tests.rs`'s sync section.** The
+   D-204/D-205/D-208/D-210 family precedent is one-command-one-module,
+   and it is declined for this pair by a recorded reason: the family
+   split exists because each mutation carries its own contract; these
+   two are READS over the same facts serving one surface (MAIN-024's
+   panel), sharing every source they read (the flag, the runs tail,
+   the dirty cache, `summary_of`) — splitting them would two-file one
+   cohesive read family. The battery lands beside the sync-run
+   lifecycle tests (the D-210 ruling verbatim: the tests are
+   lifecycle-shaped and every fixture they need — `sync_app`,
+   `run_sync_with`, `count_empty_run_error_codes`, the
+   `DatabaseGate` park — already lives there); the wire-tag pins land
+   beside `sync_cancel`'s (the same file's section). No separate test
+   file exists for this module, exactly as none exists for
+   `sync_cancel.rs`.
+2. **The read posture — no SYS-005 gate, no mutation, no journal,
+   honest `NoDatabase` in recovery mode.** SYS-005's list is the
+   project-_changing_ commands; reads are never gated (the
+   `library_get`/`projects_list` posture, `sync_running.rs`'s own
+   rule); reading is not an event, so nothing is journaled. Both
+   commands take the shared `managed_db` edge like every database
+   command: recovery mode answers the typed `NoDatabase` refusal (the
+   recovery screen has no sync panel to serve; the flag knowledge
+   would be `false` there anyway — phase 0 refuses before any flag
+   semantics could matter).
+3. **`sync_status`'s four members and their sources (MAIN-024…027).**
+   - `is_running` — the `SyncRunning` flag's plain load (SYS-004's
+     OWN surface: "the global `sync_running` flag"), read through
+     `managed_sync_flag` the `reject_during_sync` check-never-acquire
+     way (a poll is a moment-of-read fact; a run boundary between two
+     members' reads can mix moments — inherent to polls and documented
+     on the DTO, the `projects_list` verdict-read posture).
+   - `last_success_finished_at` — MAIN-027's DERIVED time, read
+     through the single owner `last_success_finished_at` (D-134:
+     `finished_at` of the newest `success` run, `ORDER BY started_at
+DESC, id DESC`; a `partial`/`failed`/`aborted`/`interrupted`
+     finish moves nothing — §9.4 phase 4 step 4's own rule); `None`
+     over a database with no success run (the pre-first-sync state).
+   - `last_attempt_partial` — §9.4 phase 4 step 4's "the UI shows
+     'Last attempt: partial'". The last ATTEMPT is the NEWEST
+     TERMINAL run row (every terminal verdict counts — an aborted or
+     interrupted run was an attempt whose outcome is known; a LIVE
+     run is not an attempt yet: while it runs, the panel shows the
+     live k-of-N region, and the run's own answer — `sync_run`'s
+     summary — is the outcome its consumer reads). The flag is true
+     iff that row's verdict is the `partial` literal. A new store
+     read `sync_runs::last_attempt` (the D-054 order) — the minimal
+     store widening (the D-147 precedent): the "newest terminal row"
+     is a new query shape; by-id `get` and the success-only
+     derivation both exist and neither answers it.
+   - `dirty_projects` — the COUNT, not a bare flag: MAIN-024's own
+     words ("a counter pill of projects with unsynced changes with
+     singular and plural wording", MAIN-026/S9: "the counter matches
+     the number of dirty projects") demand the number the pill
+     renders; the card's "признак dirty" is the weaker reading and
+     the board copy's "число dirty" the spec's own — resolved to the
+     count (the UI derives the pill's presence/wording from it).
+     The SOURCE is the same two halves `projects_list`'s column
+     serves: the `DirtyState` cache's last recorded verdicts (the
+     recalculation service's own state seam, absent ≡ the clean
+     baseline) plus the row-decidable DB-014 archived half, through
+     the SHARED `dirty_verdict` helper (made `pub(crate)`, one truth
+     with the column and the `state://dirty` event — the read, not
+     the silence, settles a stale dot), counted over the active-rows
+     list read in the same transaction as the two run facts. `i32`
+     with the sync chips' own wire posture (D-138: specta forbids
+     BigInt-style types; a projects-table row count cannot reach
+     `i32::MAX` — the reasoned-panic conversion).
+4. **`sync_last_result` — `Result<SyncLastResult, AppError>`,
+   serde-tagged `{"outcome": …}` (the `SyncRunOutcome`/
+   `SyncCancelOutcome` family shape) with TWO arms: `noRuns` (no
+   terminal row exists — a fresh database, or only a live run; a
+   STATE, never an `Err`, D-138's answer-shape discipline) and
+   `completed { summary, error_code }`.** The row answered is the
+   newest TERMINAL row (OUT-009/MAIN-031: "After a run, a summary …
+   is shown" — a run that reached an outcome; an interrupted row
+   counts — its rows are honest and `finished_at` is stamped,
+   D-147's invariant). While a run is live the command answers the
+   PREVIOUS terminal attempt — the cold-start reading: the live
+   run's own summary is its own answer, and a mid-run read of a
+   half-written row set would lie. The `summary` member is D-138's
+   `SyncRunSummary` VERBATIM over the reused `summary_of` (made
+   `pub(crate)`): one DTO, one read shape, the committed-rows-read-
+   back rule — the reuse is the honest contract, recorded as the
+   answer to "reuse `summary_of`'s shape or record why not": the
+   cold-start need differs from the run's own answer in exactly ONE
+   member, the RUN row's `error_code` (a stopped/failed attempt's
+   §10 code, the UI-011 what-to-do hint's input; `sync_run`'s
+   summary does not carry it because its refusal path answers the
+   typed `Err` envelope). That member rides as the command's own
+   field, read through the ONE seam `run_error_code_or_none` (the
+   pinned T-282 path — this command is the cell's first production
+   reader; the `#[allow(dead_code)]` on the seam is removed). The
+   PER-PROJECT rows' codes stay the summary's own contract — each
+   row's own column, never the seam's business (a `skipped`/`failed`
+   row carries a real §10 literal by definition; `written`/
+   `unchanged` rows carry NULL and the wire serves that NULL — D-147's
+   census spelling). The read is two transactions over a FIXED run
+   id (`last_attempt`, then `summary_of` by id): a terminal row is
+   never rewritten (the pinned invariant), so the pair is consistent
+   by construction; the two arms share one `Db::run`-shaped
+   transaction boundary each, never a half-read row set.
+5. **Registration makes it commands #45 and #46.** `collect_commands!`
+   gains two lines (`sync_reads::sync_last_result` and
+   `sync_reads::sync_status`, both `::<tauri::Wry>`, the path-prefix
+   order after `sync_cancel::sync_cancel`), `src/bindings.ts`
+   regenerates through the export pin (`syncStatus` over the new
+   `SyncStatus` DTO, `syncLastResult` over `SyncLastResult`), the
+   mock twins land in `src/ipc/mock/commands.ts`, `mode.spec.ts`'s
+   surface pin moves to the 46-name list, `ARCHITECTURE.md`'s module
+   table gains the `sync_reads.rs` row and its count sentence says
+   forty-six, `manual-smoke.md`'s registered-command list names both,
+   and spec §7.10's command-notes paragraph gains the two sentences
+   (the Sync module's TABLE row already names both commands — only
+   the notes were missing). The stale "future `sync_last_result`"
+   comments are made true: `commands.rs`'s seam doc names the real
+   reader, and `sync_phase4.rs`'s `Phase4Outcome::run` allow carries
+   the TRUE reason (the landed reader reads the committed row, not
+   the outcome — the field stays tests-only).
+6. **The mock twins model the mock state's honest run memory.** The
+   mock `syncRun` stand-in writes no run rows (its documented limit),
+   so the two reads cannot be mirrors of the store; what the mock
+   state CAN honestly serve is the stand-in's own memory of its own
+   runs: `lastSyncSuccessAt` (moved only by a mock run whose verdict
+   is `success` — MAIN-027's rule mirrored) and `lastSyncRun` (the
+   last completed mock run's answer payload, remembered verbatim — a
+   ONE-run memory, not a history: a later run replaces it, and the
+   seeded fixture carries none, so a fresh mock answers `noRuns` and
+   `null`). `syncStatus`'s mock: `is_running` always `false` (the
+   stand-in is synchronous — no live-run window, the same documented
+   limit `syncCancel` carries), the two time facts from the memory
+   fields, `dirty_projects` counted over the mock's ACTIVE rows'
+   `dirty` flags (the `toColumnEntry` archived arm's rule). The
+   boundary, recorded: no run history exists — MAIN-027's "newest
+   success run" is approximated by the stand-in's own last-success
+   memory, and runs before a mock reset do not exist; the run-level
+   `error_code` is always `null` on the mock (the stand-in has no
+   abort paths — its verdicts are `success`/`partial`/`failed` over
+   per-project rows that carry their own codes).
+7. **The logging edges — `sync_status_failed` and
+   `sync_last_result_failed`** (the `projects_list_failed` shape, a
+   READ's failure edge: `error` level, the §10 code, class-only
+   fields; the reachable answers are the honest `NoDatabase`
+   fallback and the classified store errors of the one transaction
+   each). Successful reads log nothing (reading is not an event).
+8. **Determinism.** No new polling and no fixed sleeps: the live-run
+   arm uses the `DatabaseGate` rendezvous's phase-3 twin (the
+   parked WRITE seam — the flag is held while the run parks inside
+   the injected write operation, and the database is free between
+   the write transactions, so the two reads answer over the real
+   IPC path while the run is provably live; the D-147/D-210 shape,
+   the entry/recv_timeout rendezvous); every other arm is
+   synchronous.
+
+Tests: store (`tests/sync_runs.rs`) —
+`last_attempt_answers_the_newest_terminal_row_not_a_live_one`: the
+None over a fresh table, the live `running` row never winning over
+an older terminal one, the whole row answered (an `interrupted`
+corpse — the weakest terminal writer — with its D-147 stamp), and
+the same-start tie resolving by `id DESC` (the D-054 rule). Logging
+— `the_sync_read_failure_lines_carry_the_code_and_diagnostic`: both
+read edges' lines over the reachable `NoDatabase` class (each its
+own message, the code literal, the diagnostic — counted twice, one
+per edge). `ipc_tests.rs` (the sync section, beside the lifecycle
+batteries) — the cold-start arm (a fresh database: four honest
+facts, `noRuns`, the idempotent re-send, census 0); THE DoD
+(`a_partial_attempt_keeps_the_success_time_and_serves_the_reasons`:
+a success run then a partial one over an added scheme-B markerless
+project — the member keeps the SUCCESS run's `finished_at`, the
+partial fact flips, the dirty pill counts the never-stamped skipped
+project (DB-021), the summary answers the partial verdict with the
+chips, the per-project rows in `sort_order` each carrying exactly
+one status, the skip's `E_MARKERS_INVALID` code and message, the
+run-level code `None` through the seam, census 0); the seam pin
+(`the_last_result_reads_the_run_code_through_the_seam`: an
+E_BACKUP_FAILED error abort SURFACES as the run-level code, a
+pre-latched cancel stop's `""` COLLAPSES to `None` while the raw
+cell says `Some("")` — with both abort stamps pinned to FIXED
+far-future `jiff::Timestamp::constant` instants through the D-197
+abort clock, making the derivation-source discriminator
+deterministic: the far-future stamps never leak into MAIN-027's
+member — census exactly 1); the live arm
+(`sync_status_reports_the_live_run_and_last_result_answers_the_
+previous_attempt`: a finished success run, then a second run parked
+mid-phase-3 — `is_running` true, the last result still answering
+the PREVIOUS terminal run, and after the release both reads move;
+census 0); the recovery-mode honesty (both commands refuse with the
+typed `NoDatabase`, the flag state managed); the wire-tag pin (the
+`noRuns`/`completed` spellings, round-tripped, the completed arm's
+member names); and the two registration census pins (each command
+exactly once in `lib.rs`, the D-034 rationale). The mock battery
+(`commands.spec.ts`) — the cold-start facts from the rows (the
+pinned world's one dirty active row counted, the archived arm never
+counting, `noRuns` before any run, the idempotent re-send) and the
+one-run memory (a success run's stamp and summary answered, a
+partial attempt after it keeping the time and flipping the fact
+with the skipped row's `E_PROJECT_UNAVAILABLE` reason, the
+run-level code `null` — MAIN-027/OUT-009 mirrored over the
+stand-in's own facts).
+
+Mutation check (each run red, then reverted — all green after):
+M1 the store read's terminal filter dropped → the store pin AND the
+live-arm test red (a live `running` row would win); M2 the partial
+flag deciding over the success verdict → the DoD red; M3 the
+last-success member reading the newest terminal row's stamp instead
+of the success-only derivation → the seam test red (the far-future
+abort stamps leak) and the DoD red (the partial run's stamp
+answered); M4 the seam bypassed (the raw `error_code` cell read)
+→ the seam test red (`Some("")` surfaces); M5 one registration line
+dropped → the census pin red (and the export pin rewrites the
+bindings without the command, the D-034 mechanic); M6 the mock
+twin's arm broken (always `noRuns`) → the mock spec red; M7 the
+dirty count pinned to zero → the DoD red (the fresh-database arm
+cannot discriminate — its zero is the mutation's own value; the
+DoD's skipped-project count is the discriminator, recorded
+honestly).
+
+Checks (exit codes): `cargo fmt --check` 0; `cargo clippy
+--workspace --all-targets -- -D warnings` 0; `cargo nextest run
+--workspace --test-threads=4` 0 (1962/1962); `cargo test --doc
+--workspace` 0 (98: eunomia-core 86, eunomia-fs 12); `pnpm test` 0
+(397/397); `pnpm run format:check` 0; `pnpm run lint` 0; `pnpm run
+typecheck` 0. Frozen zones untouched (`file_watch.rs`,
+`dirty_recalc.rs`, `sync_phase0.rs`, `benches/`); `commands.rs`'s
+sync region widened only by the three `pub(crate)` visibility moves
+and the doc updates (`summary_of`, `dirty_verdict`,
+`managed_sync_flag` — the D-210 sibling-consumer precedent); the
+store read and the two logging edges are the minimal unavoidable
+widenings outside that pair, each justified above.
+
+**Round-1 review addendum (same task, 2026-11-26; model
+`opencode-go/deepseek-v4.1-flash`, report
+`.opencode/reviews/t121-round1-report.md`: VERDICT APPROVED, 1×P2,
+3×P3 — all four processed in the first amend).** The round verified
+the registration/docs set (46 commands in `collect_commands!`,
+46 in `bindings.ts`, 46 names in `mode.spec`, the ARCHITECTURE
+module row and count, the spec notes' word-diff addition-only), the
+seam discipline (the one production reader at
+`sync_reads.rs`/the per-project codes never routed through it), the
+read posture, the two-transaction consistency (terminal rows are
+never rewritten; retention prunes by the same order, so the
+answered row cannot vanish between the two reads), the determinism
+(the park sits in the injected write seam, the DB free; the fixed
+abort stamps), and all four test-audit checks. The findings and
+dispositions:
+
+- _P2-1 (the mock's MAIN-027 pin was non-deterministic — the two
+  mock runs' millisecond stamps normally collide, so the equality
+  assertion could pass over a mock that wrongly moves the time on a
+  `partial` run)._ TAKEN: the sentinel fix — after the success run
+  the test overwrites `lastSyncSuccessAt` with a fixed stamp, runs
+  the partial, and asserts the sentinel survived; a mock that moved
+  the time on `partial` now fails deterministically.
+- _P3-2 (the shared `SyncRunSummary.verdict` doc's literal list
+  omitted `interrupted`, which the cold-start reader can now
+  serve)._ TAKEN: the doc names the fifth literal and where it
+  enters (the cold-start reader over a crash-recovered attempt);
+  `bindings.ts` regenerated through the export pin.
+- _P3-3 (the DoD test's "time did not move" discriminator could
+  silently vanish if the two phase-4 stamps collide; suggested
+  `assert second.finished_at != first` or a phase-4 finish-clock
+  seam)._ DECLINED, recorded: the suggested precondition assert
+  turns a rare timing coincidence into a spurious suite failure —
+  the D-140 anti-flaky posture — and a phase-4 finish-clock seam is
+  a design change to D-134's landed instant discipline, out of this
+  card's territory. The deterministic oracle for the derivation
+  source EXISTS in the seam test (the fixed far-future abort
+  stamps, M3's second red), and the DoD test's equality assertion
+  stays as the end-to-end oracle with this recorded caveat.
+- _P3-4 (the "only a live run exists" → `None`/`noRuns` arm was
+  named in D-217 but not pinned)._ TAKEN: the store test now seeds a
+  live-only `running` row in a clean database and asserts
+  `last_attempt` still answers `None` (the ipc-level composition is
+  the store pin plus the cold-start test's `noRuns` arm plus the
+  live arm's previous-terminal arm; the ipc live-only shape is
+  covered by the same store-level semantics, the reviewer's
+  "optionally" declined as redundant).
+
+**Round-2 review addendum (same task, 2026-11-26; model
+`opencode-go/hy4-flash-free`, report
+`.opencode/reviews/t121-round2-report.md`: VERDICT APPROVED, no
+findings).** The round independently re-verified the registration
+chain (44 → 46 across `collect_commands!`, `bindings.ts`,
+`mode.spec`'s exact-46 list, ARCHITECTURE's row and count,
+manual-smoke, the spec notes' addition-only word-diff), the seam
+discipline (the one production invocation of the seam; the
+per-project reads at `summary_of` and phase 4's journal never
+routed through it; the census in every run-producing test), the
+read posture (no gate/journal/write anywhere in `sync_reads.rs`),
+the determinism (the only wait is the bounded write-seam rendezvous;
+the fixed `Timestamp::constant` stamps), all four test-audit checks
+(the diff's only deletions are an import line, a comment line and a
+comma), the two-transaction consistency, and every round-1 fix at
+its anchor — the sentinel, the verdict doc's fifth literal, the
+live-only store case. It re-raised neither dismissed finding (P3-3
+and the declined ipc-only arm: "the D-217 addendum's reasoning is
+sound and I found no new verified evidence"). No findings at any
+level; the review phase is complete after the second round (no
+third round).

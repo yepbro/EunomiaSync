@@ -39,6 +39,10 @@
 //!   MAIN-027's derived read (`last_success_finished_at`) moves on
 //!   `success` only, and an unsettled row or a finished run is the
 //!   typed refusal, never a verdict over half a run;
+//! * the "last attempt" read (T-121): `last_attempt` answers the
+//!   newest TERMINAL row by the runs order — a live `running` row is
+//!   not an attempt yet, every terminal verdict (an `interrupted`
+//!   corpse included) is one, and a fresh database answers `None`;
 //! * the corrupt-cell policy (D-039): a `status` cell tampered
 //!   outside the CHECK vocabulary surfaces as the typed `Member`
 //!   refusal at the read, never as a guess.
@@ -51,7 +55,7 @@ use eunomia_store::settings::{BaseName, ExtraFile, Position, Scheme};
 use eunomia_store::storage::{open_db, run_migrations};
 use eunomia_store::sync_runs::{
     NewSyncRunProject, SyncRunProjectStatus, SyncRunStatus, SyncRunsError, abort_run,
-    create_running, finish_run, get, last_success_finished_at, list_projects,
+    create_running, finish_run, get, last_attempt, last_success_finished_at, list_projects,
     mark_interrupted_runs, mark_project_failed, mark_project_skipped, mark_project_unchanged,
     mark_project_written, reset_projects_not_started,
 };
@@ -1133,6 +1137,107 @@ fn last_success_finished_at_answers_the_newest_success_by_the_run_order() {
             .as_deref(),
         Some("2026-11-21T12:30:00.000Z"),
         "the newest START is the last success, whatever the finish stamps say"
+    );
+}
+
+#[test]
+fn last_attempt_answers_the_newest_terminal_row_not_a_live_one() {
+    // The "last attempt" read's own pins (T-121): a LIVE run is not an
+    // attempt yet — a newer `running` row must not win over an older
+    // terminal one; every terminal verdict counts as an attempt (the
+    // `interrupted` corpse the startup sweep recovered is the weakest
+    // writer, and it still is one); the answer is the WHOLE row (the
+    // `finished_at` D-147 stamped included); and a fresh database
+    // answers `None`.
+    let (conn, _guard) = runs_db("last-attempt");
+    assert_eq!(
+        last_attempt(&conn).expect("the read should work"),
+        None,
+        "no runs at all — no last attempt"
+    );
+
+    // The other `None` shape (round-1's P3-4 fix): a database where
+    // ONLY a live run exists — the row is real, but a live run is not
+    // an attempt yet, so the read still answers `None` (the
+    // `noRuns`-while-live case D-217's no-runs arm names).
+    let live_only_project = seed_project(&conn, 9);
+    create_running(
+        &conn,
+        "2026-11-21T10:00:00.000Z",
+        &[run_project(&live_only_project, 9)],
+    )
+    .expect("the live-only run should create");
+    assert_eq!(
+        last_attempt(&conn).expect("the read should work"),
+        None,
+        "a live run alone is no last attempt — its own answer is the \
+         outcome its consumer reads"
+    );
+
+    let project = seed_project(&conn, 1);
+    // The terminal row the read must answer, by the weakest terminal
+    // writer there is (the sweep — no verdict of its own).
+    let terminal = create_running(
+        &conn,
+        "2026-11-21T11:00:00.000Z",
+        &[run_project(&project, 1)],
+    )
+    .expect("the terminal run should create");
+    mark_interrupted_runs(&conn, "2026-11-21T11:05:00.000Z")
+        .expect("the recovery sweep should take the corpse");
+    // A LIVE run that started later: not an attempt yet — the pin's
+    // discriminator (a naive "newest row" read answers it instead).
+    create_running(
+        &conn,
+        "2026-11-21T12:00:00.000Z",
+        &[run_project(&project, 2)],
+    )
+    .expect("the live run should create");
+
+    let answered = last_attempt(&conn)
+        .expect("the read should work")
+        .expect("a terminal row exists — the read answers it");
+    assert_eq!(
+        answered.id, terminal.id,
+        "the live run is not an attempt yet (it answers its own summary)"
+    );
+    assert_eq!(answered.status, SyncRunStatus::Interrupted);
+    assert_eq!(
+        answered.finished_at.as_deref(),
+        Some("2026-11-21T11:05:00.000Z"),
+        "the row the read answers carries its terminal stamp (D-147's invariant)"
+    );
+
+    // Terminal rows compete by the runs order, never by kind: a
+    // same-start pair resolves by `id DESC` (UUIDv7 creation order,
+    // the D-054 rule `last_success_finished_at` shares).
+    let first_tie = create_running(&conn, STARTED_AT, &[run_project(&project, 3)])
+        .expect("the first same-stamp run should create");
+    mark_project_written(&conn, &first_tie.id, &project).expect("the verdict should work");
+    finish_run(&conn, &first_tie.id, "2026-11-21T12:10:00.000Z")
+        .expect("finishing the first tie should work");
+    let second_tie = create_running(&conn, STARTED_AT, &[run_project(&project, 4)])
+        .expect("the second same-stamp run should create");
+    abort_run(
+        &conn,
+        &second_tie.id,
+        "2026-11-21T12:11:00.000Z",
+        "E_DISK_FULL",
+        "free 0 bytes",
+    )
+    .expect("aborting the second tie should work");
+
+    let answered = last_attempt(&conn)
+        .expect("the read should work")
+        .expect("the ties replaced the interrupted row as the newest terminals");
+    assert_eq!(
+        answered.id, second_tie.id,
+        "same-millisecond starts resolve by UUIDv7 creation order"
+    );
+    assert_eq!(
+        answered.status,
+        SyncRunStatus::Aborted,
+        "an aborted attempt is an attempt — the read never filters by kind"
     );
 }
 

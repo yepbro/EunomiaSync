@@ -10236,7 +10236,9 @@ fn sync_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
 /// transitions (T-104) — and the SHARED body [`sync_app`] delegates
 /// to: every state the run's seams read, `projects_list` registered
 /// beside `sync_run` (the MAIN-028 carrier read; registering a
-/// command a plain sync test never calls changes nothing), and the
+/// command a plain sync test never calls changes nothing) and the
+/// sync reads `sync_status`/`sync_last_result` registered beside
+/// them (T-121 — the same posture), and the
 /// watch command bus's receiving half returned **unspawned**, so the
 /// fixture can seed its world and go live in the order the awaited
 /// seam requires: the service must be spawned before any `sync_run`,
@@ -10295,7 +10297,9 @@ fn sync_watch_app() -> (
         .invoke_handler(tauri::generate_handler![
             crate::commands::sync_run,
             crate::commands::projects_list,
-            crate::sync_cancel::sync_cancel
+            crate::sync_cancel::sync_cancel,
+            crate::sync_reads::sync_status,
+            crate::sync_reads::sync_last_result
         ])
         .build(mock_context(noop_assets()))
         .expect("failed to build mock app");
@@ -12744,6 +12748,580 @@ fn the_sync_run_command_is_registered_with_the_specta_builder() {
         lib.matches("commands::sync_run").count(),
         1,
         "lib.rs must register the `sync_run` command exactly once (§7.10, T-118)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `sync_status` / `sync_last_result` (T-121, §7.10 Sync module,
+// MAIN-024…027/031, LOG-007, OUT-009, §9.4 phase 4 step 4, D-217)
+// ---------------------------------------------------------------------------
+
+/// Invokes `sync_status` over the real IPC envelope, deserializing the
+/// answer into the typed DTO; errors come back as the serialized
+/// `AppError` JSON.
+fn invoke_sync_status(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+) -> Result<crate::sync_reads::SyncStatus, serde_json::Value> {
+    match tauri::test::get_ipc_response(
+        webview,
+        invoke_request("sync_status", serde_json::json!({})),
+    ) {
+        Ok(payload) => Ok(payload
+            .deserialize::<crate::sync_reads::SyncStatus>()
+            .expect("the success payload must deserialize into the DTO")),
+        Err(error) => Err(error),
+    }
+}
+
+/// Invokes `sync_last_result` over the real IPC envelope, deserializing
+/// the answer into the typed outcome; errors come back as the
+/// serialized `AppError` JSON.
+fn invoke_sync_last_result(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+) -> Result<crate::sync_reads::SyncLastResult, serde_json::Value> {
+    match tauri::test::get_ipc_response(
+        webview,
+        invoke_request("sync_last_result", serde_json::json!({})),
+    ) {
+        Ok(payload) => Ok(payload
+            .deserialize::<crate::sync_reads::SyncLastResult>()
+            .expect("the success payload must deserialize into the outcome DTO")),
+        Err(error) => Err(error),
+    }
+}
+
+#[test]
+fn the_sync_reads_answer_the_cold_start_of_a_fresh_database() {
+    // The no-runs arm (MAIN-024's panel before the first sync): every
+    // member is a fact, none an error — nothing is running, no
+    // success time exists (MAIN-027 has nothing to derive from), the
+    // last attempt is not partial, no project carries unsynced
+    // changes (DB-021 over zero projects), and the last result is the
+    // `noRuns` STATE (D-138's answer-shape discipline: never an `Err`
+    // over the absence of data).
+    let (temp, app) = sync_app();
+    let webview = main_webview(&app);
+
+    let status = invoke_sync_status(&webview).expect("a fresh database answers its status");
+    assert_eq!(
+        status,
+        crate::sync_reads::SyncStatus {
+            is_running: false,
+            last_success_finished_at: None,
+            last_attempt_partial: false,
+            dirty_projects: 0,
+        },
+        "the pre-first-sync panel: four honest facts, no error"
+    );
+    assert_eq!(
+        invoke_sync_last_result(&webview).expect("a fresh database answers its last result"),
+        crate::sync_reads::SyncLastResult::NoRuns,
+        "no terminal run row exists yet"
+    );
+    // The idempotent re-send converges (the poll posture).
+    assert_eq!(
+        invoke_sync_last_result(&webview).expect("the re-send converges"),
+        crate::sync_reads::SyncLastResult::NoRuns
+    );
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        0,
+        "no run rows exist at all"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_partial_attempt_keeps_the_success_time_and_serves_the_reasons() {
+    // The card's DoD: "после partial общее время не меняется, а сводка
+    // содержит причины". A success run moves MAIN-027's derived time;
+    // the PARTIAL attempt after it (one project `unchanged`, one
+    // scheme-B target without markers `skipped`) moves NOTHING — the
+    // member still answers the SUCCESS run's `finished_at` (§9.4
+    // phase 4 step 4: "For `partial`, the overall time is not
+    // updated") — the panel flips "Last attempt: partial", the dirty
+    // pill counts the skipped project's unsynced changes (DB-021:
+    // its build is non-empty and it was never stamped), and the
+    // summary carries the per-project REASONS OUT-009/MAIN-031
+    // demand (the skip's `E_MARKERS_INVALID` code and class-only
+    // message) plus the run-level code through the seam (NULL on a
+    // finished run — "no code").
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (alpha, alpha_repo) = sync_repo_project(
+        &app,
+        &repos,
+        20,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &alpha, "Be brief.");
+    std::fs::write(alpha_repo.join("AGENTS.md"), b"old bytes")
+        .expect("the fixture must be writable");
+    let webview = main_webview(&app);
+
+    // Run 1 — success: the file differs, so it is written, and phase
+    // 4's finish moves MAIN-027's derivation source.
+    let outcome = invoke_sync_run(&webview, serde_json::json!(null)).expect("the run must work");
+    let crate::commands::SyncRunOutcome::Completed { summary: first } = outcome else {
+        panic!("the first run completes");
+    };
+    assert_eq!(first.verdict, "success");
+    let first_finished = first.finished_at.clone().expect("phase 4 stamped the end");
+
+    // Run 2 — partial: alpha now matches its build (`unchanged`), and
+    // a scheme-B project without markers refuses the preflight
+    // (`skipped`, E_MARKERS_INVALID — the `the_summary_carries_the_
+    // skip_and_failure_codes_by_name` fixture shape).
+    let (beta, beta_repo) = sync_repo_project(
+        &app,
+        &repos,
+        21,
+        eunomia_store::settings::Scheme::B,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &beta, "Run the tests.");
+    std::fs::write(beta_repo.join("AGENTS.md"), b"no markers at all\n")
+        .expect("the markerless fixture must be writable");
+    let outcome = invoke_sync_run(&webview, serde_json::json!(null)).expect("the run must work");
+    let crate::commands::SyncRunOutcome::Completed { summary: second } = outcome else {
+        panic!("the partial run completes over its rows");
+    };
+    assert_eq!(second.verdict, "partial");
+
+    // THE DoD, half 1: the overall time did not move.
+    let status = invoke_sync_status(&webview).expect("the status read must work");
+    assert!(
+        !status.is_running,
+        "the run answered — SYS-004's flag is free"
+    );
+    assert_eq!(
+        status.last_success_finished_at.as_deref(),
+        Some(first_finished.as_str()),
+        "MAIN-027: a `partial` finish moves the derivation source nothing — \
+         the member still answers the SUCCESS run's stamp"
+    );
+    assert!(
+        status.last_attempt_partial,
+        "§9.4 phase 4 step 4: the UI shows \"Last attempt: partial\""
+    );
+    assert_eq!(
+        status.dirty_projects, 1,
+        "DB-021: the skipped project's build is non-empty and it was never \
+         stamped — the counter pill counts it (the written one is clean)"
+    );
+
+    // THE DoD, half 2: the summary carries the reasons.
+    let answered = invoke_sync_last_result(&webview).expect("the last-result read must work");
+    let crate::sync_reads::SyncLastResult::Completed {
+        summary,
+        error_code,
+    } = answered
+    else {
+        panic!("a terminal run exists — the answer is its summary, got {answered:?}");
+    };
+    assert_eq!(
+        summary.run_id, second.run_id,
+        "the LAST attempt is answered"
+    );
+    assert_eq!(summary.verdict, "partial");
+    assert_eq!(summary.projects_total, 2);
+    assert_eq!(summary.projects_written, 0);
+    assert_eq!(summary.projects_unchanged, 1);
+    assert_eq!(summary.projects_skipped, 1);
+    assert_eq!(summary.projects_failed, 0);
+    assert_eq!(
+        summary
+            .projects
+            .iter()
+            .map(|entry| (entry.project_id.as_str(), entry.status.as_str()))
+            .collect::<Vec<_>>(),
+        [(alpha.as_str(), "unchanged"), (beta.as_str(), "skipped")],
+        "every project of the attempt, in sort_order, each with exactly one status"
+    );
+    let skipped = &summary.projects[1];
+    assert_eq!(skipped.error_code.as_deref(), Some("E_MARKERS_INVALID"));
+    assert!(
+        skipped.error_message.is_some(),
+        "OUT-009/MAIN-031: the reason rides the row"
+    );
+    // The run-level code through the ONE seam: a finished run's cell
+    // is NULL — the collapsed "no code" answer.
+    assert_eq!(error_code, None, "a finished run names no run-level code");
+    // The census over this test's run shapes: two finished runs,
+    // neither a user-shaped stop — zero empty literals (D-147).
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        0,
+        "finished runs hold NULL, never the empty literal"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_last_result_reads_the_run_code_through_the_seam() {
+    // The pinned T-282 path (D-147's half 3), bound to the real
+    // reading path: the RUN row's `error_code` reaches the wire ONLY
+    // through `run_error_code_or_none`. An error abort's §10 literal
+    // (E_BACKUP_FAILED, the phase's own abort) SURFACES as the
+    // `completed` arm's `error_code`; the cancel stop's empty literal
+    // COLLAPSES to "no code" — the raw cell says `Some("")`, the wire
+    // must answer `None`, and re-deciding the spelling here is the
+    // exact drift the seam exists to prevent. The abort stamps ride
+    // the injected abort clock (D-197), pinned to a FIXED far-future
+    // instant, so the derivation-source discriminator is
+    // deterministic: the newest terminal row's far-future
+    // `finished_at` must NEVER leak into MAIN-027's member.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        22,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let target = repo.join("AGENTS.md");
+    std::fs::write(&target, b"old bytes").expect("the fixture must be writable");
+    let webview = main_webview(&app);
+
+    // Run 1 — the error abort: the copy refuses, the phase aborts the
+    // row with its own §10 literal.
+    let seams = crate::commands::SyncRunSeams {
+        backup: std::sync::Arc::new(|_target: &eunomia_fs::backup::BackupTarget<'_>| {
+            Err(eunomia_fs::backup::BackupError::FolderCreateFailed {
+                path: std::path::PathBuf::from("/data/backups"),
+                source: std::io::Error::from_raw_os_error(13),
+            })
+        }),
+        write: crate::commands::SyncRunSeams::production().write,
+        abort_clock: std::sync::Arc::new(|| jiff::Timestamp::constant(1_800_000_000, 0)),
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
+    };
+    let error = run_sync_with(&app, None, crate::commands::CancelToken::new(), seams)
+        .expect_err("the failing copy must abort the run");
+    assert_eq!(error.code.as_str(), "E_BACKUP_FAILED");
+
+    let answered = invoke_sync_last_result(&webview).expect("the read must work");
+    let crate::sync_reads::SyncLastResult::Completed {
+        summary,
+        error_code,
+    } = answered
+    else {
+        panic!("the abort row is terminal — the answer is its summary");
+    };
+    assert_eq!(summary.verdict, "aborted");
+    assert_eq!(
+        error_code.as_deref(),
+        Some("E_BACKUP_FAILED"),
+        "the run-level §10 literal surfaces through the seam"
+    );
+
+    // Run 2 — the cancel stop: the row goes `aborted` with the EMPTY
+    // no-code literal (the pre-latched token's shape), stamped by the
+    // same fixed far-future clock.
+    let cancel = crate::commands::CancelToken::new();
+    cancel.cancel();
+    let seams = crate::commands::SyncRunSeams {
+        backup: crate::commands::SyncRunSeams::production().backup,
+        write: crate::commands::SyncRunSeams::production().write,
+        abort_clock: std::sync::Arc::new(|| jiff::Timestamp::constant(1_800_001_000, 0)),
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
+    };
+    let outcome = run_sync_with(&app, None, cancel, seams)
+        .expect("the cancelled run is an outcome, not an error");
+    let crate::commands::SyncRunOutcome::Completed { summary: cancelled } = outcome else {
+        panic!("the cancelled run answers its summary");
+    };
+    assert_eq!(cancelled.verdict, "aborted");
+    assert_eq!(
+        sync_run_row(&app, &cancelled.run_id).error_code.as_deref(),
+        Some(""),
+        "the raw cell spells the user-shaped stop the store writer's way"
+    );
+
+    let answered = invoke_sync_last_result(&webview).expect("the read must work");
+    let crate::sync_reads::SyncLastResult::Completed {
+        summary,
+        error_code,
+    } = answered
+    else {
+        panic!("the cancel stop is terminal — the answer is its summary");
+    };
+    assert_eq!(summary.run_id, cancelled.run_id, "the NEWEST terminal row");
+    assert_eq!(summary.verdict, "aborted");
+    assert_eq!(
+        error_code, None,
+        "THE SEAM: the empty literal collapses to \"no code\" — the raw cell \
+         says Some(\"\"), the wire answers None"
+    );
+    assert_eq!(
+        summary.details.as_deref(),
+        Some("cancelled by the user before the backups"),
+        "the stop row's class-only line rides the summary"
+    );
+    // The deterministic derivation-source discriminator: the newest
+    // terminal row's `finished_at` is the fixed far-future stamp, and
+    // MAIN-027's member must answer it never (no success run exists).
+    let status = invoke_sync_status(&webview).expect("the status read must work");
+    assert_eq!(
+        status.last_success_finished_at, None,
+        "no success run exists — the far-future abort stamps never leak into \
+         MAIN-027's derived member"
+    );
+    assert!(
+        !status.last_attempt_partial,
+        "the last attempt is the abort, never a partial verdict"
+    );
+    // The census over this test's run shapes: one error abort (its §10
+    // literal) and one cancel stop (the empty literal) — exactly one.
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        1,
+        "the cancel stop is one of the two \"\" spellings; the error abort \
+         carries its §10 literal"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn sync_status_reports_the_live_run_and_last_result_answers_the_previous_attempt() {
+    // The live arm (MAIN-024's panel while a run is live): the flag
+    // member answers SYS-004's truth, and the last result answers the
+    // PREVIOUS terminal attempt — a live run is not an attempt yet,
+    // and its half-written row set must not leak into a summary
+    // (D-217's cold-start reading). The park is the parked WRITE seam
+    // (the D-147/D-210 shape): the run is mid-phase-3, the flag is
+    // held, and the database is free between the write transactions,
+    // so the two reads answer while the run is provably live. After
+    // the release the run finishes `success` and BOTH reads move.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        23,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let target = repo.join("AGENTS.md");
+    std::fs::write(&target, b"old bytes").expect("the fixture must be writable");
+    let webview = main_webview(&app);
+
+    // Run 1 — success: the terminal row the live arm must answer.
+    let outcome = invoke_sync_run(&webview, serde_json::json!(null)).expect("the run must work");
+    let crate::commands::SyncRunOutcome::Completed { summary: first } = outcome else {
+        panic!("the first run completes");
+    };
+    assert_eq!(first.verdict, "success");
+    let first_finished = first.finished_at.clone().expect("phase 4 stamped the end");
+    // An external edit makes the target differ again, so run 2's
+    // phase 3 really writes (and parks on the seam).
+    std::fs::write(&target, b"changed bytes").expect("the edit must land");
+
+    // Run 2 — live, parked mid-write.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let seams = crate::commands::SyncRunSeams {
+        backup: crate::commands::SyncRunSeams::production().backup,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
+        write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
+            entered_tx
+                .send(target.to_path_buf())
+                .expect("the test must live to receive the entry signal");
+            release_rx
+                .lock()
+                .expect("the release lock must not be poisoned")
+                .recv()
+                .expect("the test must live to release the parked write");
+            crate::sync_phase3::production_write(target, contents)
+        }),
+    };
+    let handle = app.app_handle().clone();
+    let running = tauri::async_runtime::spawn(async move {
+        crate::commands::sync_run_with(handle, None, crate::commands::CancelToken::new(), seams)
+            .await
+    });
+    let _parked = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the pipeline must reach its write phase");
+    assert!(
+        app.state::<crate::sync_running::SyncRunning>().is_running(),
+        "the rendezvous proof: the run holds SYS-004's flag while parked"
+    );
+
+    // Act: both reads over the real IPC path, while the run is live.
+    let status = invoke_sync_status(&webview).expect("the status read must work");
+    assert!(status.is_running, "MAIN-024: the panel knows a run is live");
+    assert_eq!(
+        status.last_success_finished_at.as_deref(),
+        Some(first_finished.as_str()),
+        "MAIN-027 keeps answering the last success while a new run is live"
+    );
+    assert!(
+        !status.last_attempt_partial,
+        "the live run is not an attempt yet — the last attempt is still the \
+         previous terminal one"
+    );
+    let answered = invoke_sync_last_result(&webview).expect("the last-result read must work");
+    let crate::sync_reads::SyncLastResult::Completed { summary, .. } = answered else {
+        panic!("a terminal run exists — the answer is its summary");
+    };
+    assert_eq!(
+        summary.run_id, first.run_id,
+        "the PREVIOUS terminal attempt is answered, never the live run's \
+         half-written rows"
+    );
+    assert_eq!(summary.verdict, "success");
+
+    // Release: the run finishes, and both reads move.
+    release_tx
+        .send(())
+        .expect("the parked write must be released");
+    let outcome = tauri::async_runtime::block_on(running)
+        .expect("the parked run must join")
+        .expect("the run completes");
+    let crate::commands::SyncRunOutcome::Completed { summary: second } = outcome else {
+        panic!("the released run completes");
+    };
+    assert_eq!(second.verdict, "success");
+
+    let status = invoke_sync_status(&webview).expect("the status read must work");
+    assert!(!status.is_running, "§9.4 phase 4 step 5 freed the flag");
+    let answered = invoke_sync_last_result(&webview).expect("the last-result read must work");
+    let crate::sync_reads::SyncLastResult::Completed { summary, .. } = answered else {
+        panic!("the finished run is the last attempt now");
+    };
+    assert_eq!(
+        summary.run_id, second.run_id,
+        "the finished run is answered"
+    );
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        0,
+        "both runs are finished — the census holds zero empty literals"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn sync_reads_answer_honestly_without_a_database() {
+    // Recovery mode (the `managed_db` honesty every database command
+    // shares): no `Db` managed — both reads answer the honest
+    // `NoDatabase` refusal. The flag state IS managed (the `setup`
+    // shape), so `sync_status`'s flag read succeeds first and the
+    // database edge answers after it — the recovery screen has no
+    // sync panel to serve, and a pretend-empty status would lie.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            crate::sync_reads::sync_status,
+            crate::sync_reads::sync_last_result
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(data_dirs::DataRoot(temp.path().to_path_buf()));
+    app.manage(crate::sync_running::SyncRunning::new());
+    app.manage(crate::commands::SyncCancelSlot::new());
+    let webview = main_webview(&app);
+
+    for command in ["sync_status", "sync_last_result"] {
+        let error = match tauri::test::get_ipc_response(
+            &webview,
+            invoke_request(command, serde_json::json!({})),
+        ) {
+            Ok(payload) => panic!("{command} must refuse without a database, got {payload:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+        assert_eq!(
+            error["details"]["os_kind"],
+            serde_json::json!("NoDatabase"),
+            "{command}: the honest recovery-mode answer"
+        );
+    }
+    assert!(
+        !app.state::<crate::sync_running::SyncRunning>().is_running(),
+        "no run is live (and none could start)"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_sync_last_result_outcome_tags_serialize_as_the_wire_spellings() {
+    // The two states on the wire, the `SyncCancelOutcome` pin's shape:
+    // the generated TS union is literal-typed over these tags, so the
+    // spellings are the frontend's contract.
+    use crate::sync_reads::SyncLastResult;
+    let wire = serde_json::to_value(&SyncLastResult::NoRuns).expect("the variant must serialize");
+    assert_eq!(wire, serde_json::json!({ "outcome": "noRuns" }));
+    let back: SyncLastResult =
+        serde_json::from_value(wire).expect("the wire spelling must round-trip");
+    assert_eq!(back, SyncLastResult::NoRuns);
+
+    // The completed arm's tag and member names (the summary's own
+    // members are D-138's DTO — pinned by its round-trip; here the
+    // ARM's shape is the contract).
+    let completed = SyncLastResult::Completed {
+        summary: crate::commands::SyncRunSummary {
+            run_id: "run-1".to_owned(),
+            verdict: "partial".to_owned(),
+            started_at: "2026-11-26T08:00:00.000Z".to_owned(),
+            finished_at: Some("2026-11-26T08:00:02.000Z".to_owned()),
+            projects_total: 1,
+            projects_written: 0,
+            projects_unchanged: 1,
+            projects_skipped: 0,
+            projects_failed: 0,
+            details: None,
+            projects: Vec::new(),
+        },
+        error_code: None,
+    };
+    let wire = serde_json::to_value(&completed).expect("the variant must serialize");
+    assert_eq!(
+        wire["outcome"],
+        serde_json::json!("completed"),
+        "the arm's tag, the SyncRunOutcome family spelling"
+    );
+    assert_eq!(wire["error_code"], serde_json::json!(null));
+    assert_eq!(wire["summary"]["verdict"], serde_json::json!("partial"));
+    let back: SyncLastResult =
+        serde_json::from_value(wire).expect("the wire spelling must round-trip");
+    assert_eq!(back, completed);
+}
+
+#[test]
+fn the_sync_read_commands_are_registered_with_the_specta_builder() {
+    // The §7.10 Sync-module names, registered exactly once each — the
+    // `sync_run` pin's shape (the D-034 wiring-pin rationale: without
+    // this pin, dropping a registration would leave
+    // `export_bindings_are_up_to_date` green while it silently
+    // rewrote the committed bindings without the command).
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("sync_reads::sync_status").count(),
+        1,
+        "lib.rs must register the `sync_status` command exactly once (§7.10, T-121)"
+    );
+    assert_eq!(
+        lib.matches("sync_reads::sync_last_result").count(),
+        1,
+        "lib.rs must register the `sync_last_result` command exactly once (§7.10, T-121)"
     );
 }
 

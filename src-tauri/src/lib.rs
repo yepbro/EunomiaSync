@@ -158,6 +158,22 @@ pub(crate) mod sync_phase4;
 // only state read.
 pub(crate) mod sync_cancel;
 
+// The Sync module's two READ commands (spec §7.10 Sync row's
+// `sync_status` and `sync_last_result`, MAIN-024…027/031, LOG-007,
+// OUT-009, §9.4 phase 4 step 4; T-121, D-217): the sync panel's
+// cold-start facts and the last attempt's summary. `sync_status`
+// answers four members — the SYS-004 flag (a plain load, the
+// check-never-acquire posture), MAIN-027's derived last-success time,
+// the "last attempt partial" fact over the newest TERMINAL run row,
+// and the dirty count aggregated from the same `DirtyState` verdicts
+// `projects_list`'s column serves. `sync_last_result` answers the
+// newest terminal run's `SyncRunSummary` (the D-138 shape reused
+// verbatim) plus the RUN row's `error_code` read through the ONE seam
+// `run_error_code_or_none` (D-147's half 3 — this command is the
+// cell's first production reader). No SYS-005 gate, no mutation, no
+// journal; recovery mode answers the honest `NoDatabase`.
+pub(crate) mod sync_reads;
+
 // The target-file watch service (spec §5.7, SYS-007…009, OUT-014,
 // §7.10's `state://file-changed` event; T-102): the debounced watch
 // over the target files of active, available projects, the SYS-008
@@ -312,8 +328,9 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // Projects module's `projects_reorder` (T-080), the
         // Projects module's `scan_start`/`scan_cancel`/`scan_commit`
         // (T-076/T-077), the Sync module's `sync_run` (T-118,
-        // D-138), the Sync module's `sync_cancel` (T-120, D-210)
-        // and the Backups module's `backups_list` (T-125,
+        // D-138), the Sync module's `sync_cancel` (T-120, D-210),
+        // the Sync module's `sync_status`/`sync_last_result` (T-121,
+        // D-217) and the Backups module's `backups_list` (T-125,
         // D-193 — the project-settings "Backups" tab's read). Every
         // later command task lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
@@ -350,6 +367,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::settings_set::<tauri::Wry>,
             commands::sync_run::<tauri::Wry>,
             sync_cancel::sync_cancel::<tauri::Wry>,
+            sync_reads::sync_last_result::<tauri::Wry>,
+            sync_reads::sync_status::<tauri::Wry>,
             variants::variant_create::<tauri::Wry>,
             variants::variant_delete::<tauri::Wry>,
             variants::variant_restore::<tauri::Wry>,

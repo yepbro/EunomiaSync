@@ -149,10 +149,11 @@ pub(crate) struct Phase4Outcome {
     /// The finished run row: the §9.4 verdict, `finished_at`, the
     /// counted per-status counters, and the empty-run message in
     /// `details` when the run had no active projects. No production
-    /// reader: the sync summary reads the committed row back
-    /// (`commands::summary_of`), so this copy rides the outcome for
-    /// the tests and the future `sync_last_result` diagnostics.
-    #[allow(dead_code)] // `summary_of` reads the committed row; tested today
+    /// reader: the sync summary and the `sync_last_result` command
+    /// (T-121) read the COMMITTED row back (`commands::summary_of`,
+    /// D-217's ruling), so this copy rides the outcome for the tests
+    /// alone.
+    #[allow(dead_code)] // both production readers read the committed row; tested today
     pub(crate) run: SyncRun,
     /// The BKP-003 retention sweep's report (never fatal — the
     /// module docs' ruling).

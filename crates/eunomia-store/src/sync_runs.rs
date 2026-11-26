@@ -1035,6 +1035,44 @@ pub fn last_success_finished_at(conn: &Connection) -> Result<Option<String>, Syn
     }
 }
 
+/// The NEWEST run row whose status is NOT `running` (MAIN-024's
+/// "last attempt" reading, T-121): the last attempt the UI can
+/// describe — every terminal verdict counts as one (`success`,
+/// `partial`, `failed`, `aborted`, `interrupted` — an aborted or
+/// interrupted run was an attempt whose outcome is known), while a
+/// live run is not an attempt yet (its own answer, `sync_run`'s
+/// summary, is the outcome its consumer reads; while it runs, the
+/// panel shows the live region, not a past attempt's badge).
+///
+/// Newest by `started_at DESC, id DESC` — the D-054 ordering
+/// [`last_success_finished_at`] shares, so the two "last …" reads of
+/// the table cannot disagree about which start is newest
+/// (same-millisecond starts resolve by UUIDv7 creation order,
+/// D-031).
+///
+/// # Errors
+///
+/// Returns [`SyncRunsError::Member`] when the stored `status` cell of
+/// the matched row is outside the CHECK vocabulary (D-039), and
+/// [`SyncRunsError::Sql`] when the query fails. `Ok(None)` answers a
+/// database with no terminal run yet (a fresh database, or one where
+/// only a run is live).
+pub fn last_attempt(conn: &Connection) -> Result<Option<SyncRun>, SyncRunsError> {
+    let found = conn.query_row(
+        &format!(
+            "SELECT {SYNC_RUN_COLUMNS} FROM sync_runs WHERE status != 'running' \
+         ORDER BY started_at DESC, id DESC LIMIT 1"
+        ),
+        [],
+        SyncRunRow::from_row,
+    );
+    match found {
+        Ok(row) => row.into_sync_run().map(Some),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(SyncRunsError::Sql(err)),
+    }
+}
+
 /// The zero-rows-changed refusal shared by the per-project writers: an
 /// UPDATE that matched nothing is surfaced, not swallowed.
 fn row_was_there(changed: usize) -> Result<(), SyncRunsError> {

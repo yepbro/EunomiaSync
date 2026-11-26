@@ -631,8 +631,10 @@ pub(crate) fn sync_running_refusal() -> AppError {
 /// uninitialized-app bug — the recorded D-037 fallback with a
 /// diagnostic naming it, not a panic, and not a silently-permissive
 /// gate. The returned [`tauri::State`] derefs to `&SyncRunning`, so
-/// callers use the seam directly.
-fn managed_sync_flag<'a, R: Runtime>(
+/// callers use the seam directly. `pub(crate)`: the `sync_status`
+/// command (T-121, `sync_reads.rs`) reads the flag through the same
+/// fallback-carrying lookup — one truth with the gate.
+pub(crate) fn managed_sync_flag<'a, R: Runtime>(
     app: &'a AppHandle<R>,
 ) -> Result<tauri::State<'a, sync_running::SyncRunning>, AppError> {
     app.try_state::<sync_running::SyncRunning>().ok_or_else(|| {
@@ -757,7 +759,9 @@ pub(crate) struct SyncRunSummary {
     /// The run row's id (UUIDv7 TEXT, DB-002).
     pub(crate) run_id: String,
     /// The run's verdict — the store's §6.2 status literal
-    /// (`success`/`partial`/`failed`/`aborted`).
+    /// (`success`/`partial`/`failed`/`aborted`; `interrupted` reaches
+    /// this DTO only through the cold-start reader, `sync_last_result`
+    /// over a crash-recovered attempt's row — T-121).
     pub(crate) verdict: String,
     /// When the run started (DB-002), the flag-take moment phase 0
     /// recorded.
@@ -1860,13 +1864,13 @@ async fn stop_run_if_running<R: Runtime>(
 /// ([`finish_run`]'s verdicts, the startup `interrupted` sweep) and
 /// the empty literal `""` (the two user-shaped stops, whose store
 /// writer takes `&str`; no §10 code names a user decision). The first
-/// reader of the cell — the future `sync_last_result` command (§7.10)
-/// — must collapse both spellings to "no code", and every later
-/// reader reuses this seam instead of re-deciding the spelling. The
-/// PER-PROJECT rows' codes are not this helper's business: a
-/// `skipped`/`failed` row carries a real §10 literal by definition,
-/// and phase 4's journal already shape-checks those against §10.
-#[allow(dead_code)] // consumed by the future sync_last_result command's task; tested today
+/// reader of the cell — the `sync_last_result` command (§7.10, T-121,
+/// `sync_reads.rs`) — collapses both spellings to "no code" through
+/// this seam, and every later reader reuses it instead of
+/// re-deciding the spelling. The PER-PROJECT rows' codes are not
+/// this helper's business: a `skipped`/`failed` row carries a real
+/// §10 literal by definition, and phase 4's journal already
+/// shape-checks those against §10.
 pub(crate) fn run_error_code_or_none(error_code: Option<&str>) -> Option<&str> {
     match error_code {
         None | Some("") => None,
@@ -1878,8 +1882,11 @@ pub(crate) fn run_error_code_or_none(error_code: Option<&str>) -> Option<&str> {
 /// verdict and counters `finish_run` wrote (or the abort this command
 /// wrote), and every per-project row in `sort_order`. Called only over
 /// terminal rows (the finish, the cancel stop), so a missing row here
-/// names a broken invariant, not a data state.
-async fn summary_of<R: Runtime>(
+/// names a broken invariant, not a data state. `pub(crate)`: the
+/// `sync_last_result` command (T-121, `sync_reads.rs`) reuses the
+/// same committed-rows read over the last attempt's row — one DTO,
+/// one read shape (D-217's ruling).
+pub(crate) async fn summary_of<R: Runtime>(
     app: &AppHandle<R>,
     run_id: &str,
 ) -> Result<SyncRunSummary, AppError> {
@@ -2782,7 +2789,13 @@ async fn projects_list_impl<R: Runtime>(
 /// mix pre- and post-pass verdicts in one response — every value
 /// still a verdict the cache truthfully held, and cheaper than a
 /// map clone per read; the next read (or event) settles it.
-fn dirty_verdict(cache: Option<&DirtyState>, project: &eunomia_store::projects::Project) -> bool {
+/// `pub(crate)`: the `sync_status` command (T-121, `sync_reads.rs`)
+/// aggregates the SAME verdicts into the panel's dirty count — one
+/// truth with the column and the event, never a second derivation.
+pub(crate) fn dirty_verdict(
+    cache: Option<&DirtyState>,
+    project: &eunomia_store::projects::Project,
+) -> bool {
     match project.state {
         // DB-014: an archived project takes part in no sync and is
         // never counted as dirty — the rule's only row-decidable

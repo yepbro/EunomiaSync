@@ -949,6 +949,35 @@ export const commands = {
 	 */
 	syncCancel: (options?: InvokeOptions) => __TAURI_INVOKE<SyncCancelOutcome>("sync_cancel", undefined, options),
 	/**
+	 *  Serves the last attempt's summary (§7.10 Sync module
+	 *  `sync_last_result`, OUT-009/MAIN-031): the newest TERMINAL run
+	 *  row's committed rows read back the `sync_run` answer's way, plus
+	 *  the run row's §10 code through the one seam — or the `noRuns`
+	 *  state when no terminal run exists.
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::sync_last_result_failed`]); both ANSWERS are states
+	 *  and log nothing (reading is not an event).
+	 */
+	syncLastResult: (options?: InvokeOptions) => __TAURI_INVOKE<SyncLastResult_Serialize>("sync_last_result", undefined, options),
+	/**
+	 *  Serves the sync panel's cold-start facts (§7.10 Sync module
+	 *  `sync_status`, MAIN-024…027): whether a run is live, the overall
+	 *  time of the last successful sync, whether the last attempt was
+	 *  `partial`, and the count of projects with unsynced changes.
+	 * 
+	 *  One read transaction carries the three database facts (MAIN-027's
+	 *  derived time, the last attempt row, the active projects list the
+	 *  dirty count aggregates over); the flag is read before it (the
+	 *  cheapest act, the `reject_during_sync` check posture) and the
+	 *  dirty verdicts after it (the cache read the
+	 *  `projects_list` staleness rule orders after its own blocking
+	 *  probes — this command probes nothing, so the read follows the
+	 *  transaction directly). Failures reach the log with their §10 code
+	 *  ([`logging::sync_status_failed`]); a successful read logs nothing.
+	 */
+	syncStatus: (options?: InvokeOptions) => __TAURI_INVOKE<SyncStatus_Serialize>("sync_status", undefined, options),
+	/**
 	 *  Adds one variant to an instruction (§7.3 LIB-017…022's "Add
 	 *  variant"): a copy of the main one or an empty one, with the
 	 *  CALLER's name.
@@ -3775,6 +3804,115 @@ export type SyncCancelOutcome =
 { outcome: "nothingToCancel" };
 
 /**
+ *  The `sync_last_result` command's answer (§7.10 Sync module,
+ *  OUT-009/MAIN-031): the last attempt's summary, or the no-runs
+ *  state — serde-tagged the [`crate::commands::SyncRunOutcome`]
+ *  family way (`{"outcome": …}`).
+ * 
+ *  The `completed` arm's `summary` is D-138's
+ *  [`crate::commands::SyncRunSummary`] verbatim — the committed rows
+ *  read back — so the dialog re-opened at cold start renders exactly
+ *  what the run's own answer rendered; the ONE member the cold-start
+ *  read adds is `error_code`, the RUN row's §10 code through the
+ *  [`crate::commands::run_error_code_or_none`] seam (the pinned
+ *  T-282 path: both no-code spellings collapse to "no code" — a
+ *  finished run answers `None`, an error abort its §10 literal).
+ */
+export type SyncLastResult = SyncLastResult_Serialize | SyncLastResult_Deserialize;
+
+/**
+ *  The `sync_last_result` command's answer (§7.10 Sync module,
+ *  OUT-009/MAIN-031): the last attempt's summary, or the no-runs
+ *  state — serde-tagged the [`crate::commands::SyncRunOutcome`]
+ *  family way (`{"outcome": …}`).
+ * 
+ *  The `completed` arm's `summary` is D-138's
+ *  [`crate::commands::SyncRunSummary`] verbatim — the committed rows
+ *  read back — so the dialog re-opened at cold start renders exactly
+ *  what the run's own answer rendered; the ONE member the cold-start
+ *  read adds is `error_code`, the RUN row's §10 code through the
+ *  [`crate::commands::run_error_code_or_none`] seam (the pinned
+ *  T-282 path: both no-code spellings collapse to "no code" — a
+ *  finished run answers `None`, an error abort its §10 literal).
+ */
+export type SyncLastResult_Deserialize = 
+/**
+ *  No terminal run row exists: a fresh database, or one where
+ *  only a run is live (a live run is not an attempt yet — the
+ *  command answers the PREVIOUS terminal attempt, never a
+ *  half-written row set). A state, never an `Err`: the panel
+ *  simply has no last result to render.
+ */
+{ outcome: "noRuns" } | 
+/**
+ *  The newest terminal attempt's summary: the verdict, MAIN-024's
+ *  counter chips, the §9.4 details cell, and every project's row
+ *  (status, target path, §10 code, class-only message — the
+ *  reasons OUT-009/MAIN-031 demand), plus the run row's own §10
+ *  code through the one seam.
+ */
+{ outcome: "completed"; 
+/**
+ *  The last attempt's committed rows, read back the
+ *  `sync_run` answer's way (D-138's shape).
+ */
+summary: SyncRunSummary_Deserialize; 
+/**
+ *  The RUN row's §10 code of a non-success outcome, read
+ *  through [`crate::commands::run_error_code_or_none`] (the
+ *  T-282 seam: `NULL` and `""` both answer "no code"). The
+ *  PER-PROJECT codes ride the summary's own rows — this
+ *  member is the run-level refusal's code alone.
+ */
+error_code?: string | null };
+
+/**
+ *  The `sync_last_result` command's answer (§7.10 Sync module,
+ *  OUT-009/MAIN-031): the last attempt's summary, or the no-runs
+ *  state — serde-tagged the [`crate::commands::SyncRunOutcome`]
+ *  family way (`{"outcome": …}`).
+ * 
+ *  The `completed` arm's `summary` is D-138's
+ *  [`crate::commands::SyncRunSummary`] verbatim — the committed rows
+ *  read back — so the dialog re-opened at cold start renders exactly
+ *  what the run's own answer rendered; the ONE member the cold-start
+ *  read adds is `error_code`, the RUN row's §10 code through the
+ *  [`crate::commands::run_error_code_or_none`] seam (the pinned
+ *  T-282 path: both no-code spellings collapse to "no code" — a
+ *  finished run answers `None`, an error abort its §10 literal).
+ */
+export type SyncLastResult_Serialize = 
+/**
+ *  No terminal run row exists: a fresh database, or one where
+ *  only a run is live (a live run is not an attempt yet — the
+ *  command answers the PREVIOUS terminal attempt, never a
+ *  half-written row set). A state, never an `Err`: the panel
+ *  simply has no last result to render.
+ */
+{ outcome: "noRuns" } | 
+/**
+ *  The newest terminal attempt's summary: the verdict, MAIN-024's
+ *  counter chips, the §9.4 details cell, and every project's row
+ *  (status, target path, §10 code, class-only message — the
+ *  reasons OUT-009/MAIN-031 demand), plus the run row's own §10
+ *  code through the one seam.
+ */
+{ outcome: "completed"; 
+/**
+ *  The last attempt's committed rows, read back the
+ *  `sync_run` answer's way (D-138's shape).
+ */
+summary: SyncRunSummary_Serialize; 
+/**
+ *  The RUN row's §10 code of a non-success outcome, read
+ *  through [`crate::commands::run_error_code_or_none`] (the
+ *  T-282 seam: `NULL` and `""` both answer "no code"). The
+ *  PER-PROJECT codes ride the summary's own rows — this
+ *  member is the run-level refusal's code alone.
+ */
+error_code: string | null };
+
+/**
  *  §9.4's phase words on the `sync://progress` wire, serialized as
  *  the spec's own lower-case spellings — the [`crate::scan::
  *  ScanClassWire`] shape. No `start` member: phase 0 is
@@ -3994,7 +4132,9 @@ export type SyncRunSummary_Deserialize = {
 	run_id: string,
 	/**
 	 *  The run's verdict — the store's §6.2 status literal
-	 *  (`success`/`partial`/`failed`/`aborted`).
+	 *  (`success`/`partial`/`failed`/`aborted`; `interrupted` reaches
+	 *  this DTO only through the cold-start reader, `sync_last_result`
+	 *  over a crash-recovered attempt's row — T-121).
 	 */
 	verdict: string,
 	/**
@@ -4042,7 +4182,9 @@ export type SyncRunSummary_Serialize = {
 	run_id: string,
 	/**
 	 *  The run's verdict — the store's §6.2 status literal
-	 *  (`success`/`partial`/`failed`/`aborted`).
+	 *  (`success`/`partial`/`failed`/`aborted`; `interrupted` reaches
+	 *  this DTO only through the cold-start reader, `sync_last_result`
+	 *  over a crash-recovered attempt's row — T-121).
 	 */
 	verdict: string,
 	/**
@@ -4077,6 +4219,102 @@ export type SyncRunSummary_Serialize = {
 	 *  rows MAIN-024 renders with their `E_*` code.
 	 */
 	projects: SyncRunProjectEntry_Serialize[],
+};
+
+/**
+ *  The `sync_status` command's answer (§7.10 Sync module, MAIN-024…
+ *  027): the four facts the sync panel renders between runs. Every
+ *  member is a fact, never an error state — an empty database
+ *  answers `false`/`None`/`false`/`0` honestly (the pre-first-sync
+ *  panel), and a missing database is the command's `Err` (the
+ *  recovery-mode `NoDatabase` every database command shares).
+ */
+export type SyncStatus = SyncStatus_Serialize | SyncStatus_Deserialize;
+
+/**
+ *  The `sync_status` command's answer (§7.10 Sync module, MAIN-024…
+ *  027): the four facts the sync panel renders between runs. Every
+ *  member is a fact, never an error state — an empty database
+ *  answers `false`/`None`/`false`/`0` honestly (the pre-first-sync
+ *  panel), and a missing database is the command's `Err` (the
+ *  recovery-mode `NoDatabase` every database command shares).
+ */
+export type SyncStatus_Deserialize = {
+	/**
+	 *  Whether a sync holds the SYS-004 flag right now — the panel's
+	 *  disabled "Run sync" button and live region. A poll read: the
+	 *  moment-of-load fact (a run boundary between this and another
+	 *  member's read can mix moments; the next read settles it).
+	 */
+	is_running: boolean,
+	/**
+	 *  MAIN-027's overall time of the last successful sync (LOG-007):
+	 *  the `finished_at` of the newest `success` run (DB-002 UTC
+	 *  ISO-8601), DERIVED, never stored; `None` before the first
+	 *  successful sync. A `partial` attempt moves it never (§9.4
+	 *  phase 4 step 4).
+	 */
+	last_success_finished_at?: string | null,
+	/**
+	 *  §9.4 phase 4 step 4's "Last attempt: partial" fact: the newest
+	 *  TERMINAL run row's verdict is `partial`. A live run is not an
+	 *  attempt yet (its own answer is the outcome its consumer
+	 *  reads); every terminal verdict counts — an aborted or
+	 *  interrupted run was an attempt whose outcome is known.
+	 */
+	last_attempt_partial: boolean,
+	/**
+	 *  The count of active projects with unsynced changes (MAIN-024's
+	 *  counter pill, DB-021): aggregated from the same
+	 *  [`DirtyState`] verdicts `projects_list`'s column serves, so
+	 *  the pill, the column dots and the `state://dirty` event agree.
+	 *  `i32` (specta forbids BigInt-style types on the wire; a
+	 *  projects-table row count cannot reach `i32::MAX`).
+	 */
+	dirty_projects: number,
+};
+
+/**
+ *  The `sync_status` command's answer (§7.10 Sync module, MAIN-024…
+ *  027): the four facts the sync panel renders between runs. Every
+ *  member is a fact, never an error state — an empty database
+ *  answers `false`/`None`/`false`/`0` honestly (the pre-first-sync
+ *  panel), and a missing database is the command's `Err` (the
+ *  recovery-mode `NoDatabase` every database command shares).
+ */
+export type SyncStatus_Serialize = {
+	/**
+	 *  Whether a sync holds the SYS-004 flag right now — the panel's
+	 *  disabled "Run sync" button and live region. A poll read: the
+	 *  moment-of-load fact (a run boundary between this and another
+	 *  member's read can mix moments; the next read settles it).
+	 */
+	is_running: boolean,
+	/**
+	 *  MAIN-027's overall time of the last successful sync (LOG-007):
+	 *  the `finished_at` of the newest `success` run (DB-002 UTC
+	 *  ISO-8601), DERIVED, never stored; `None` before the first
+	 *  successful sync. A `partial` attempt moves it never (§9.4
+	 *  phase 4 step 4).
+	 */
+	last_success_finished_at: string | null,
+	/**
+	 *  §9.4 phase 4 step 4's "Last attempt: partial" fact: the newest
+	 *  TERMINAL run row's verdict is `partial`. A live run is not an
+	 *  attempt yet (its own answer is the outcome its consumer
+	 *  reads); every terminal verdict counts — an aborted or
+	 *  interrupted run was an attempt whose outcome is known.
+	 */
+	last_attempt_partial: boolean,
+	/**
+	 *  The count of active projects with unsynced changes (MAIN-024's
+	 *  counter pill, DB-021): aggregated from the same
+	 *  [`DirtyState`] verdicts `projects_list`'s column serves, so
+	 *  the pill, the column dots and the `state://dirty` event agree.
+	 *  `i32` (specta forbids BigInt-style types on the wire; a
+	 *  projects-table row count cannot reach `i32::MAX`).
+	 */
+	dirty_projects: number,
 };
 
 /**

@@ -2189,6 +2189,112 @@ describe('syncCancel (the mock stand-in, T-120)', () => {
   })
 })
 
+describe('syncStatus / syncLastResult (the mock stand-ins, T-121)', () => {
+  it('answers the cold-start facts from the rows before any run', async () => {
+    // A fresh reset carries no run memory (the stand-in writes no run
+    // rows): the panel's pre-first-sync facts — no run live (the
+    // stand-in is synchronous), no success time, no partial attempt —
+    // and the dirty count aggregated over the ACTIVE rows' flags the
+    // way the backend aggregates its verdicts. The pinned world
+    // (seed 21): exactly one of the three active rows is dirty, and
+    // DB-014's archived arm means the archived row's flag never
+    // counts.
+    const rows = mockState().projects
+    expect(rows.filter((row) => row.state === 'active' && row.dirty)).toHaveLength(1)
+
+    const status = await commands.syncStatus()
+    expect(status).toEqual({
+      is_running: false,
+      last_success_finished_at: null,
+      last_attempt_partial: false,
+      dirty_projects: 1,
+    })
+    await expect(commands.syncLastResult()).resolves.toEqual({ outcome: 'noRuns' })
+    // Idempotent: the re-send converges.
+    await expect(commands.syncLastResult()).resolves.toEqual({ outcome: 'noRuns' })
+
+    // The count follows the rows: flagging a clean active row moves
+    // the pill's number, and the archived row's flag never does.
+    const archived = rows.find((row) => row.state === 'archived')
+    expect(archived).toBeDefined()
+    archived!.dirty = true
+    const cleanActive = rows.find((row) => row.state === 'active' && !row.dirty)
+    expect(cleanActive).toBeDefined()
+    cleanActive!.dirty = true
+    expect((await commands.syncStatus()).dirty_projects).toBe(2)
+  })
+
+  it('serves the last run from the one-run memory, MAIN-027 mirrored', async () => {
+    // The card's DoD over the mock's own facts: a SUCCESS run moves
+    // the last-success time and is answerable as the last result; a
+    // PARTIAL attempt after it (an unavailable project skips, the
+    // others are written) moves the success time NOTHING and flips
+    // the partial fact, and the summary carries the skipped row's
+    // reason (OUT-009/MAIN-031). The memory is one run deep: a later
+    // run replaces the answered summary wholesale.
+    const actives = mockState().projects.filter((row) => row.state === 'active')
+    expect(actives.length).toBeGreaterThanOrEqual(3)
+
+    const success = await commands.syncRun(null)
+    expect(success.outcome).toBe('completed')
+    if (success.outcome !== 'completed') return
+    expect(success.summary.verdict).toBe('success')
+
+    let status = await commands.syncStatus()
+    expect(status.is_running).toBe(false)
+    expect(status.last_success_finished_at).toBe(success.summary.finished_at)
+    expect(status.last_attempt_partial).toBe(false)
+    let answered = await commands.syncLastResult()
+    expect(answered.outcome).toBe('completed')
+    if (answered.outcome !== 'completed') return
+    expect(answered.summary).toEqual(success.summary)
+    // The stand-in has no abort paths: the run-level code is the
+    // honest "no code" (the real backend's finished runs answer the
+    // same through the seam).
+    expect(answered.error_code).toBeNull()
+
+    // The partial attempt: one active row goes unavailable → skipped,
+    // the others written → `partial` (the stand-in's own rule).
+    const skipped = actives[2]!
+    skipped.available = false
+    skipped.unavailableReason = 'missing'
+    // The sentinel (round-1's P2 fix): the two mock runs' stamps share
+    // the millisecond this side of determinism, so the equality
+    // assertion below cannot discriminate a mock that wrongly moves
+    // the time on a `partial` run — the sentinel makes it a fact: if
+    // the partial run moved `lastSyncSuccessAt`, the member answers
+    // the partial run's `now` and the pin fails.
+    mockState().lastSyncSuccessAt = '2026-01-01T00:00:00.000Z'
+    const partial = await commands.syncRun(null)
+    expect(partial.outcome).toBe('completed')
+    if (partial.outcome !== 'completed') return
+    expect(partial.summary.verdict).toBe('partial')
+
+    status = await commands.syncStatus()
+    // MAIN-027 mirrored: the partial attempt moves the success time
+    // nothing — the member keeps the sentinel the success run left.
+    expect(status.last_success_finished_at).toBe('2026-01-01T00:00:00.000Z')
+    expect(status.last_attempt_partial).toBe(true)
+    // OUT-020 mirrored: the skipped project keeps its previous sync
+    // state — the first run cleared its flag, so the pill reads zero
+    // (the backend's DB-021 derivation would count a NEVER-synced
+    // skipped project; the stand-in's row-flag approximation is the
+    // documented boundary, D-217 point 6).
+    expect(status.dirty_projects).toBe(0)
+
+    answered = await commands.syncLastResult()
+    expect(answered.outcome).toBe('completed')
+    if (answered.outcome !== 'completed') return
+    expect(answered.summary).toEqual(partial.summary)
+    expect(answered.summary.run_id).not.toBe(success.summary.run_id)
+    // The reason rides the skipped row (OUT-009/MAIN-031).
+    const row = answered.summary.projects.find((p) => p.project_id === skipped.id)
+    expect(row?.status).toBe('skipped')
+    expect(row?.error_code).toBe('E_PROJECT_UNAVAILABLE')
+    expect(row?.error_message).not.toBeNull()
+  })
+})
+
 describe('scanStart / scanCancel', () => {
   /** The fixture world's scan root: every project lives under it. */
   const ROOT = '/home/dev/src'

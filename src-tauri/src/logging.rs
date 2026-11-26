@@ -1762,6 +1762,45 @@ pub(crate) fn sync_cancel_failed(error: &AppError) {
     );
 }
 
+/// The `sync_status` command failed (T-121, §10's every-error rule):
+/// the `projects_list_failed` shape over the sync target — a READ's
+/// failure edge, so the reachable §10 answers are the honest
+/// `NoDatabase` fallback (recovery mode) and the classified store
+/// errors of the one transaction (the shared SQLite base classifier
+/// for `Sql`, the D-037 fallback for a corrupt vocabulary cell —
+/// class-only text, SEC-008's rule). A successful read logs nothing:
+/// reading is not an event, and every ANSWER the command gives is a
+/// state.
+pub(crate) fn sync_status_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::sync",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "reading the sync status failed"
+    );
+}
+
+/// The `sync_last_result` command failed (T-121, §10's every-error
+/// rule): the `sync_status_failed` twin over this command's own
+/// reachable classes — the honest `NoDatabase` fallback (recovery
+/// mode) and the classified store errors of the two read
+/// transactions (the `noRuns`/`completed` ANSWERS are states and log
+/// nothing).
+pub(crate) fn sync_last_result_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::sync",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "reading the last sync result failed"
+    );
+}
+
 /// Emitting a `sync://progress` event failed (T-119): the run itself
 /// is unaffected — the emission is display-only, throttled to at most
 /// ten per second, and the command's ANSWER carries the terminal
@@ -4346,6 +4385,44 @@ mod tests {
                 && log.contains("os_kind=Some(\"SyncCancelSlotMissing\")"),
             "the fallback line carries its code literal and the missing-state diagnostic, \
              got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_sync_read_failure_lines_carry_the_code_and_diagnostic() {
+        // The two read commands' §10 edges (T-121), in the
+        // `projects_list_failed` pin shape: the reachable class is the
+        // honest `NoDatabase` fallback (recovery mode — the sync panel
+        // has no data to serve there, and the answer is the refusal,
+        // not a pretend-empty status). Both ANSWERS (`SyncStatus`
+        // facts, `noRuns`/`completed`) are states and log nothing —
+        // that half is structural (no tracing call exists on the
+        // answer paths).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut no_database = AppError::new(crate::errors::ErrorCode::DbLocked);
+        no_database.details = Some(crate::errors::ErrorDetails {
+            os_code: None,
+            os_kind: Some("NoDatabase".to_owned()),
+            os_message: Some("no database is running (recovery mode?)".to_owned()),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            sync_status_failed(&no_database);
+            sync_last_result_failed(&no_database);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("reading the sync status failed")
+                && log.contains("reading the last sync result failed")
+                && log.matches("code=\"E_DB_LOCKED\"").count() == 2
+                && log.matches("os_kind=Some(\"NoDatabase\")").count() == 2,
+            "both read edges carry their own message, the code literal and the \
+             recovery-mode diagnostic, got: {log}"
         );
         drop(temp);
     }

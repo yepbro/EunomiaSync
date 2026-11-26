@@ -49,7 +49,12 @@ import type {
   SettingItem,
   ScanSkipWire,
 } from '../contract'
-import type { SyncRunOutcome_Serialize, SyncCancelOutcome } from '../../bindings'
+import type {
+  SyncRunOutcome_Serialize,
+  SyncCancelOutcome,
+  SyncStatus_Serialize,
+  SyncLastResult_Serialize,
+} from '../../bindings'
 import { version as appVersion } from '../../../package.json'
 import { defaultLabel, pathKeyOf } from '../fixtures/domain'
 import { ACTION_MEMBERS, PALETTE } from '../fixtures/generator'
@@ -2620,21 +2625,32 @@ export const mockCommands: IpcCommands = {
       level: verdict === 'success' ? 'info' : 'warn',
       result: verdict === 'success' ? 'ok' : 'skipped',
     })
+    const summary = {
+      run_id: runId,
+      verdict,
+      started_at: now,
+      finished_at: now,
+      projects_total: projects.length,
+      projects_written: written,
+      projects_unchanged: 0,
+      projects_skipped: skipped,
+      projects_failed: 0,
+      details: projects.length === 0 ? 'no active projects to synchronize' : null,
+      projects,
+    }
+    // The one-run memory the two sync reads serve (T-121): the
+    // stand-in writes no run rows (the documented limit above), so
+    // `syncStatus`/`syncLastResult` answer from this verbatim copy of
+    // the answer. The run-level code is always `null` — the stand-in
+    // has no abort paths. MAIN-027's rule mirrored: only a `success`
+    // verdict moves the last-success time.
+    state.lastSyncRun = { summary, errorCode: null }
+    if (verdict === 'success') {
+      state.lastSyncSuccessAt = now
+    }
     return {
       outcome: 'completed',
-      summary: {
-        run_id: runId,
-        verdict,
-        started_at: now,
-        finished_at: now,
-        projects_total: projects.length,
-        projects_written: written,
-        projects_unchanged: 0,
-        projects_skipped: skipped,
-        projects_failed: 0,
-        details: projects.length === 0 ? 'no active projects to synchronize' : null,
-        projects,
-      },
+      summary,
     }
   },
 
@@ -2651,6 +2667,51 @@ export const mockCommands: IpcCommands = {
    */
   async syncCancel(): Promise<SyncCancelOutcome> {
     return { outcome: 'nothingToCancel' }
+  },
+
+  /**
+   * `sync_status` (§7.10, MAIN-024…027; T-121): the mock twin of the
+   * panel's cold-start read, served from the stand-in's own memory
+   * and the row flags — with the documented limits: `is_running` is
+   * always `false` (the `syncRun` stand-in is SYNCHRONOUS, so no
+   * live-run window exists — the same limit `syncCancel` documents),
+   * and the time facts come from the one-run memory, not a run
+   * history (MAIN-027's "newest success run" is approximated by the
+   * last-success time the stand-in itself moved; the seeded world
+   * carries none, so a fresh mock answers `null`). The dirty count
+   * mirrors the backend's aggregation: active rows' `dirty` flags
+   * (DB-014's archived arm — the `toColumnEntry` rule).
+   */
+  async syncStatus(): Promise<SyncStatus_Serialize> {
+    const state = mockState()
+    const dirtyProjects = state.projects.filter((row) => row.state === 'active' && row.dirty).length
+    return {
+      is_running: false,
+      last_success_finished_at: state.lastSyncSuccessAt,
+      last_attempt_partial: state.lastSyncRun?.summary.verdict === 'partial',
+      dirty_projects: dirtyProjects,
+    }
+  },
+
+  /**
+   * `sync_last_result` (§7.10, OUT-009/MAIN-031; T-121): the mock twin
+   * of the last attempt's summary read, served from the stand-in's
+   * one-run memory — `noRuns` before any mock run (the stand-in
+   * writes no run rows, its documented limit; a reset clears the
+   * memory the same way), the remembered summary verbatim afterwards,
+   * with the run-level `error_code` always `null` (the stand-in has
+   * no abort paths — its per-project rows carry their own codes).
+   */
+  async syncLastResult(): Promise<SyncLastResult_Serialize> {
+    const state = mockState()
+    if (!state.lastSyncRun) {
+      return { outcome: 'noRuns' }
+    }
+    return {
+      outcome: 'completed',
+      summary: state.lastSyncRun.summary,
+      error_code: state.lastSyncRun.errorCode,
+    }
   },
 
   // -------------------------------------------------------------------------
