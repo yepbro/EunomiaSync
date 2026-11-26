@@ -24,9 +24,7 @@
 // remove it).
 import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
-import App from '../App.vue'
-import { i18n } from '../i18n'
+import { mountApp } from '../mount-app'
 import { useOsTheme } from './theme'
 
 const readSource = (name: string): string => readFileSync(new URL(name, import.meta.url), 'utf8')
@@ -399,19 +397,22 @@ describe('useOsTheme', () => {
 })
 
 describe('App wiring (the shell owns the theme bridge)', () => {
-  const mountApp = () => mount(App, { global: { plugins: [i18n] } })
-
-  it('mounts with data-theme already applied', () => {
+  // The shell mounts through the shared helper (mount-app.ts): the
+  // DEV-guarded seed import App.vue starts in onMounted is awaited
+  // before mount and flushed after it, so unmount below cannot leave
+  // the barrel loading into Vitest's environment teardown (the exit-1
+  // race D-218 fixed in App.spec.ts — shared here since 2026-11-26).
+  it('mounts with data-theme already applied', async () => {
     stubPrefersColorScheme(false)
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     expect(themeAttribute()).toBe('light')
     wrapper.unmount()
     expect(themeAttribute()).toBeUndefined()
   })
 
-  it('mounts dark when the OS prefers dark, and follows a live OS switch', () => {
+  it('mounts dark when the OS prefers dark, and follows a live OS switch', async () => {
     const mql = stubPrefersColorScheme(true)
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     expect(themeAttribute()).toBe('dark')
     mql.flipTo(false)
     expect(themeAttribute()).toBe('light')

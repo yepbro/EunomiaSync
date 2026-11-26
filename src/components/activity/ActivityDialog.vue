@@ -15,6 +15,7 @@ import { useId } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseModal from '../ui/BaseModal.vue'
 import type { ActivityEntry, ActivityResult, ActivityType } from '../../dev/seed'
+import type { CatalogKey } from '../../i18n'
 
 const props = defineProps<{
   /** The entries, newest first (the seed's demo list). */
@@ -41,22 +42,22 @@ const resultFilterId = useId()
 const actTypes: readonly ActivityType[] = ['projects', 'library', 'assignments', 'sync', 'backups']
 
 /** The type chip's and filter option's wording key. */
-const typeKey: Record<ActivityType, string> = {
+const typeKey = {
   projects: 'activity.type.projects',
   library: 'activity.type.library',
   assignments: 'activity.type.assignments',
   sync: 'activity.type.sync',
   backups: 'activity.type.backups',
-}
+} satisfies Record<ActivityType, CatalogKey>
 
 /** The closed result vocabulary (the chips and the filter options). */
 const results: readonly ActivityResult[] = ['ok', 'skipped', 'error']
 
-const resultKey: Record<ActivityResult, string> = {
+const resultKey = {
   ok: 'activity.result.ok',
   skipped: 'activity.result.skipped',
   error: 'activity.result.error',
-}
+} satisfies Record<ActivityResult, CatalogKey>
 
 /** The result chip's tint class per result. */
 const resultClass: Record<ActivityResult, string> = {
@@ -66,7 +67,10 @@ const resultClass: Record<ActivityResult, string> = {
 }
 
 /** The date presets, in the filter's option order (the §7.7 UI row). */
-const datePresets: readonly { readonly value: string; readonly key: string }[] = [
+const datePresets: readonly {
+  readonly value: string
+  readonly key: CatalogKey
+}[] = [
   { value: 'all', key: 'activity.dateAll' },
   { value: '7d', key: 'activity.date7d' },
   { value: 'today', key: 'activity.dateToday' },

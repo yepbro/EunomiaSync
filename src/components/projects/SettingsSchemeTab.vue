@@ -16,6 +16,7 @@
 import { computed, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { Project, ProjectScheme } from '../../dev/seed'
+import type { CatalogKey } from '../../i18n'
 
 const props = defineProps<{
   /** The project the section shows (scheme, base file, extra files). */
@@ -33,11 +34,11 @@ const schemes: readonly ProjectScheme[] = ['A', 'B', 'C']
 
 /** Each scheme radio's wording key (the letter itself is the option's
  * value — data, rendered as the <strong> lead). */
-const schemeTextKey: Record<ProjectScheme, string> = {
+const schemeTextKey = {
   A: 'projects.settings.schemeA',
   B: 'projects.settings.schemeB',
   C: 'projects.settings.schemeC',
-}
+} satisfies Record<ProjectScheme, CatalogKey>
 
 /** The base file's stem: the derived names and the snippet follow it
  * (D-20; the demo's stemOf, app.js ~2982 — a display derivation). */

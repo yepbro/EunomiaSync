@@ -51,7 +51,7 @@ const toggle = (): void => {
         />
       </svg>
     </button>
-    <ColumnMenu v-if="open" :anchor="anchor" @close="open = false" />
+    <ColumnMenu v-if="open" :anchor="anchor" :trigger="trigger" @close="open = false" />
   </section>
 </template>
 

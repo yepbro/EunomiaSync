@@ -12,9 +12,9 @@
 // (skeleton minimum; scroll-close is T-184/T-355's). Positioning
 // computes from this component's own element plus the anchor data —
 // container-agnostic (floating.ts; T-169 re-hosts it).
-import { computed, onMounted, ref, useTemplateRef } from 'vue'
+import { computed, onMounted, ref, toRef, useTemplateRef } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { placeFloating, useDismiss, type Anchor } from './floating'
+import { placeFloating, useDismiss, useExclusiveLayer, type Anchor } from './floating'
 
 /** One variant line of the popover (the caller derives it from the row). */
 export type VariantEntry = {
@@ -33,6 +33,9 @@ const props = defineProps<{
   readonly entries: readonly VariantEntry[]
   /** The trigger's bottom-right corner (anchor data, not traversal). */
   readonly anchor: Anchor
+  /** This layer's own trigger element (the eye that opened it):
+   *  useDismiss ignores only THIS element's clicks. */
+  readonly trigger?: Element | null
 }>()
 
 const emit = defineEmits<{ close: [] }>()
@@ -53,12 +56,18 @@ const positionStyle = computed(() => ({
   top: `${position.value.top}px`,
 }))
 
+// One popover at a time across the matrix (review H2): mounting
+// claims the kind's single slot and closes the layer holding it;
+// unmount releases the slot.
+useExclusiveLayer('popover', () => emit('close'))
+
 useDismiss(
   box,
   () => emit('close'),
-  // The eye's toggle click must not close what it just opened (the
-  // demo's own hit-test, app.js ~1290).
-  '.cell-icon--eye',
+  // The eye's toggle click must not close what it just opened — this
+  // layer's OWN trigger element, not a class (a class matches every
+  // cell's eye, which left two popovers open at once; review H2).
+  toRef(() => props.trigger),
 )
 </script>
 

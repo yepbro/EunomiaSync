@@ -52,24 +52,56 @@ export function placeFloating(
 }
 
 /**
+ * The kinds of floating layer the matrix family opens. At most ONE
+ * layer of each kind may be open (review H2; MAIN-032, MAIN-033 — the
+ * demo has one #variants-popover and one #column-menu). The
+ * single-owner re-host is card T-368's; until then the invariant lives
+ * here, structurally: a layer claims its kind's slot when it mounts
+ * (each mounts only while open) and the claim closes the previous
+ * holder.
+ */
+export type FloatingLayerKind = 'popover' | 'menu'
+
+/** The close callback of the layer currently holding each kind's slot. */
+const openLayers = new Map<FloatingLayerKind, () => void>()
+
+/**
+ * The exclusive-slot invariant for one mounted floating layer:
+ * claiming the kind's single slot closes the layer that holds it;
+ * unmounting releases the slot — only if this instance still holds it,
+ * so a layer closed by a successor does not free the successor's slot.
+ */
+export function useExclusiveLayer(kind: FloatingLayerKind, close: () => void): void {
+  const previous = openLayers.get(kind)
+  openLayers.set(kind, close)
+  if (previous !== undefined) previous()
+  onBeforeUnmount(() => {
+    if (openLayers.get(kind) === close) openLayers.delete(kind)
+  })
+}
+
+/**
  * Close-on-dismiss for a mounted floating box: outside click and Escape
  * call `close` (the skeleton's minimum usability; scroll-close and the
- * real behavior are T-184/T-355's). `ignoreSelector` names the trigger
- * so the toggle click that opened the box does not immediately close
- * it — the demo's own hit-test idiom (app.js checks the target against
- * `.col-menu-btn` / `.cell-icon--eye`), a target hit-test, not a
- * structural traversal.
+ * real behavior are T-184/T-355's). `ignore` is the layer's OWN trigger
+ * element (this eye, this "⋮") — the toggle click that opened the box
+ * must not immediately close it. It is an element REFERENCE, not the
+ * demo's class hit-test (app.js checks the target against
+ * `.col-menu-btn` / `.cell-icon--eye`): a class matches ANY instance's
+ * trigger, which left two layers of the same kind open at once
+ * (review H2).
  */
 export function useDismiss(
   target: Ref<HTMLElement | null>,
   close: () => void,
-  ignoreSelector?: string,
+  ignore?: Ref<Element | null | undefined>,
 ): void {
   const onDocumentClick = (event: MouseEvent): void => {
     const box = target.value
     if (box === null) return
     const hit = event.target instanceof Element ? event.target : null
-    if (ignoreSelector !== undefined && hit?.closest(ignoreSelector) !== null) return
+    const own = ignore?.value
+    if (own !== null && own !== undefined && (hit === own || own.contains(hit))) return
     if (hit === null || !box.contains(hit)) close()
   }
   const onKeydown = (event: KeyboardEvent): void => {

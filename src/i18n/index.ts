@@ -29,11 +29,13 @@
 // Enforcement: user-visible raw text in templates is banned by the
 // `eunomia/no-raw-ui-text` ESLint rule (see `./no-raw-ui-text.ts` and
 // eslint.config.js) — every UI string goes through a key here. Key
-// typos are caught by the catalog-coverage test in `./i18n.spec.ts`
-// (every `t('…')` literal in `.vue` files must exist in the MERGED
-// catalog this module builds): the `MessageSchema` generic below feeds
-// vue-i18n's key AUTOCOMPLETE only — its `t()` accepts any string, so
-// the generic does not reject unknown keys at compile time.
+// typos are caught on two independent gates: the catalog-coverage test
+// in `./i18n.spec.ts` checks every `t('…')` LITERAL in `.vue` files
+// against the MERGED catalog this module builds, and the `CatalogKey`
+// type below turns any TABLE-passed key (`t(table[member])`, invisible
+// to a literal scan) into a `vue-tsc` error when it does not exist.
+// The `MessageSchema` generic feeds vue-i18n's key AUTOCOMPLETE only —
+// its `t()` accepts any string, so the generic alone rejects nothing.
 
 import { createI18n } from 'vue-i18n'
 import en from '../locales/en.json'
@@ -71,6 +73,24 @@ const catalog = {
 
 /** The message catalog type: nested feature namespaces, string leaves. */
 export type MessageSchema = typeof catalog
+
+/**
+ * Every dotted key path of the merged catalog, e.g.
+ * `shell.toolbar.showHidden`. The compile-time half of the typo gate
+ * (the runtime half is the catalog-coverage test in ./i18n.spec.ts):
+ * a table of keys typed `satisfies Record<Enum, CatalogKey>` fails
+ * `vue-tsc` on a typo or a renamed key — the regular scan only sees
+ * string literals. The distribution keeps the type a real union even
+ * though the DEV guard makes `devMessages` a two-arm union, so the
+ * dev.* paths stay part of the key set in development.
+ */
+type DotPaths<T> = T extends object
+  ? { [K in keyof T & string]: T[K] extends string ? K : `${K}.${DotPaths<T[K]>}` }[keyof T &
+      string]
+  : never
+
+/** The catalog's dotted key paths; built from MessageSchema by DotPaths. */
+export type CatalogKey = DotPaths<MessageSchema>
 
 /** The app's single locale (message catalogs under `src/locales/`). */
 export type AppLocale = 'en'

@@ -118,13 +118,29 @@ src/                      # Frontend
   ipc/                     # Typed IPC facade: only bindings importer, mock/real backend (D-003) (working)
   main.ts                  # Frontend entry: createApp + Pinia + i18n (working)
   i18n/                    # vue-i18n setup + the no-raw-ui-text lint rule (working)
-  locales/en.json          # Message catalog, nested feature namespaces (working)
+  locales/                 # Message catalogs (UI-020): en.json (base) + en/<feature>.json per
+                           # feature, merged into one catalog at load — TEMPORARY per-feature
+                           # split, ends with the skeleton phase (D-207) (working)
   date/                    # Date/time formatting helpers (UI-020) (working)
-  assets/                  # Tailwind theme tokens + global styles (working)
-  components/              # Reusable UI components               (working)
-    AppErrorAlert.vue      # UI-011 AppError alert, copyable details (working)
-  App.vue                  # Root view                           (working)
-  views/, stores/          # Vue views / Pinia stores            (planned)
+  assets/                  # Tailwind theme tokens; main.css centralizes every stylesheet
+                           # import in one explicit cascade order (D-221) (working)
+  styles/                  # Shared CSS primitives only (base, buttons, form, modal, motion);
+                           # family stylesheets live next to their components (D-221) (working)
+  components/              # UI components, one folder per family (working)
+    about/ activity/ help/ library/ matrix/ projects/ settings/ shell/ sync/ ui/
+                           # ten family folders, 47 components; every dialog wraps
+                           # ui/BaseModal.vue — contract: v-model:open, the close
+                           # event carries the form's result, beforeClose guards Esc
+    AppErrorAlert.vue, app-error-actions.ts
+                           # UI-011 error alert + its action-key table (the only
+                           # component files outside a family folder)
+  dev/                     # DEV-ONLY (import.meta.env.DEV; proven absent from dist/ by the
+                           # build grep, D-211 rule 3): seed/ (demo data + its types),
+                           # screens.ts (the screen registry), DevGallery.vue + showcases/.
+                           # Components take props; only App.vue imports seed VALUES,
+                           # behind the DEV guard (working)
+  App.vue                  # Root view: toolbar + matrix frame + sync panel (working)
+  stores/                  # Pinia stores                     (planned)
 ```
 
 `eunomia-core` is deliberately independent of Tauri so that markdown,

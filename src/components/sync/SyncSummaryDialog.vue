@@ -23,6 +23,7 @@ import { useI18n } from 'vue-i18n'
 import BaseModal from '../ui/BaseModal.vue'
 import UnsyncedChangesList from './UnsyncedChangesList.vue'
 import type { SyncPendingRow, SyncStatus, SyncSummaryRow } from '../../dev/seed'
+import type { CatalogKey } from '../../i18n'
 
 const props = defineProps<{
   /** Which view renders: the run summary or the pending list. */
@@ -67,10 +68,10 @@ const outcome = computed(() =>
 )
 
 /** The outcome badge's wording key (the closed §6.2 sync_runs enum). */
-const outcomeKey: Record<'success' | 'partial', string> = {
+const outcomeKey = {
   success: 'sync.outcome.success',
   partial: 'sync.outcome.partial',
-}
+} satisfies Record<'success' | 'partial', CatalogKey>
 
 /** The outcome badge's tint class. */
 const outcomeClass: Record<'success' | 'partial', string> = {
@@ -79,19 +80,19 @@ const outcomeClass: Record<'success' | 'partial', string> = {
 }
 
 /** The outcome's short explanation (the demo's ssRunNote copy). */
-const outcomeNoteKey: Record<'success' | 'partial', string> = {
+const outcomeNoteKey = {
   success: 'sync.outcomeNote.success',
   partial: 'sync.outcomeNote.partial',
-}
+} satisfies Record<'success' | 'partial', CatalogKey>
 
 /** The status badge's wording key (the closed §6.2 status enum, not
  * seed data). */
-const statusKey: Record<SyncStatus, string> = {
+const statusKey = {
   written: 'sync.status.written',
   unchanged: 'sync.status.unchanged',
   skipped: 'sync.status.skipped',
   failed: 'sync.status.failed',
-}
+} satisfies Record<SyncStatus, CatalogKey>
 
 /** The status badge's tint class per status. */
 const statusClass: Record<SyncStatus, string> = {

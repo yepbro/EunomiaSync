@@ -39,8 +39,14 @@ describe('i18n message catalog (en)', () => {
 // scan (comments are stripped first) rather than an AST walk: it covers
 // template and `<script setup>` call sites with zero parser plumbing.
 // Known false negatives, accepted: an aliased `t` (`const { t: tr }`)
-// and dynamically built keys are invisible to the regex — none exist
-// today; a planted typo in a literal `t('…')` is caught either way.
+// and dynamically built keys are invisible to the regex. Dynamically
+// built keys — keys reaching `t()` through a table
+// (`t(table[member])`) — are covered at compile time instead: every
+// such table is typed `satisfies Record<Enum, CatalogKey>` (the type
+// lives in src/i18n/index.ts; ActivityDialog's date-presets list, the
+// one non-Record holder, types its key field `CatalogKey`), so a typo
+// or a renamed key there fails `vue-tsc`; a planted typo in a literal
+// `t('…')` is caught by this scan either way.
 const T_CALL_LITERAL = /\bt\(\s*(['"])([^'"\n]+)\1/g
 
 /** Line/block/HTML comments, where a `t('…')` mention is not a usage. */

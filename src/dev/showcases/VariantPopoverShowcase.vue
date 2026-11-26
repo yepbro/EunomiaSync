@@ -72,7 +72,13 @@ const toggle = (): void => {
         />
       </svg>
     </button>
-    <VariantPopover v-if="open" :entries="entries" :anchor="anchor" @close="open = false" />
+    <VariantPopover
+      v-if="open"
+      :entries="entries"
+      :anchor="anchor"
+      :trigger="trigger"
+      @close="open = false"
+    />
   </section>
 </template>
 

@@ -16,6 +16,7 @@ import { computed, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseModal from '../ui/BaseModal.vue'
 import type { ExcludedPath, ExclusionReason } from '../../dev/seed'
+import type { CatalogKey } from '../../i18n'
 
 const props = defineProps<{
   /** The excluded paths (the seed's demo list). */
@@ -33,10 +34,10 @@ const hasRows = computed(() => props.rows.length > 0)
 
 /** The reason badge's wording key (the demo's EXCLUSION_REASONS table
  * is catalog copy keyed by the DDL enum). */
-const reasonKey: Record<ExclusionReason, string> = {
+const reasonKey = {
   removed_scanned: 'projects.excluded.reasonRemoved',
   manual: 'projects.excluded.reasonManual',
-}
+} satisfies Record<ExclusionReason, CatalogKey>
 
 /** The badge's modifier class (a class name, not copy — computed in
  * script; the template-only raw-text rule reads template literals). */

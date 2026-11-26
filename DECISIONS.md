@@ -26573,7 +26573,13 @@ base: 'Strict' }` (the variant the demo assigns to task-id-mcp in
    the frozen menu (index.html 2811–2828) and §7.4/MAIN-033 name
    "Preview file…" / "Assign all visible" / "Clear column", and those
    three are what the component ports; a move command for columns is
-   not in the spec's column menu.
+   not in the spec's column menu. Corrected 2026-11-26 (D-222):
+   PRJ-019/020 (docs/spec.md:455) DO name the menu — the order
+   changes "through the 'Move left / Move right' menu (keyboard
+   alternative)" — so the last claim was false about the spec. The
+   two items are ported as inert markup after "Clear column" (keys
+   matrix.menu.moveLeft / matrix.menu.moveRight; ids reach the owner,
+   nothing writes on them); T-179 adds the behavior.
 
 8. **Consistency edits (none run, none skipped or deleted — the
    owner acceptance ruling).** App.spec.ts: one test became untrue
@@ -28373,8 +28379,12 @@ rules.cjs, order-flips.cjs, co-class-check.cjs, diff.cjs).
    programmatic focus shows no ring; when the hover is skipped, no
    mouse input preceded the focus and the ring shows. Hovers succeed
    and fail differently from run to run — the two repeat runs on the
-   same code differ in hover rows per screen (64 vs 77, 85 vs 98,
-   91 vs 104, 165 vs 184). Therefore the rest state is proven
+   same code differ in hover rows per screen (light: matrix-cells
+   83 vs 76, library-editor 104 vs 100, help 110 vs 106, main
+   187 vs 200; dark: 83 vs 86, 104 vs 110, 110 vs 116, 193 vs 186).
+   Corrected 2026-11-26 (D-222): the pairs originally quoted here
+   (64 vs 77, 85 vs 98, 91 vs 104, 165 vs 184) appear in no retained
+   log; capture-det1.log / capture-det2.log are the evidence. Therefore the rest state is proven
    identical by the capture; hover and focus captures are NOT a valid
    oracle for this refactor (they depend on the input modality and on
    hover actionability); interactive states are covered by the static
@@ -28399,3 +28409,135 @@ rules.cjs, order-flips.cjs, co-class-check.cjs, diff.cjs).
 7. **Supersession.** The "styles under src/styles/" statements in
    D-211…D-216 describe the port-time layout and are superseded by
    this record; as dated history they are not rewritten.
+
+### D-222 — the architecture review's confirmed fixes: one floating layer per kind, the modal's close result and Esc guard, the column menu's move items, the test-harness race, and the records that stopped being true — 2026-11-26
+
+Problem: the Vue architecture review of 2026-11-26
+(/home/brooks/projects/business/EunomiaSync/.opencode/audits/
+vue-architecture-review-2026-11-26.md) confirmed two defects (H1, H2),
+a false record (D-212 item 7(i)), and two documents that stopped being
+true during the skeleton batch (L2, L4); the unit suite also exited 1
+on a green 405/405 run because of a harness race in theme.spec.ts. The
+owner's rulings of 2026-11-26: `v-html` is allowed only in a single
+future MarkdownPreview.vue for HTML sanitized by the backend
+(SEC-005) — card T-190's work; the confirmed defects, the false record
+and the stale documents are fixed now, in one commit; the layered work
+goes through the existing cards T-149, T-150, T-153 and T-368; the
+separate review of the styles commit 4b3d788 is waived — one review
+covers both commits.
+
+1. **One floating layer per kind (review H2).** useDismiss ignored a
+   CLASS (`ignoreSelector`): the outside-click check returned early
+   for a hit inside ANY `.cell-icon--eye` / `.col-menu-btn`, so a
+   click on cell B's eye with cell A's popover open left BOTH open
+   (the review reproduced two popovers, aria-expanded
+   ["true","true"]; the same for two column menus). Two structural
+   changes in src/components/matrix/floating.ts, minimal by design —
+   the full single-owner host is T-368's: (a) useDismiss takes the
+   layer's OWN trigger as an element REFERENCE (`ignore?: Ref<Element
+| null | undefined>`); the hosts (MatrixCell, ProjectColumnHeader)
+   capture the trigger element and pass it through a new optional
+   `trigger` prop of VariantPopover / ColumnMenu; (b) the
+   exclusive-slot invariant `useExclusiveLayer(kind, close)`: at most
+   one variant popover and at most one column menu open — a layer
+   claims its kind's single slot on mount and closes the previous
+   holder; on unmount it releases the slot only if it still holds it.
+   Regression test src/components/matrix/floating-layers.spec.ts (two
+   instances with real triggers): the dual-open assertions were RED
+   before the fix (the two new specs together: 5 failed / 2 passed,
+   exit 1 — the two already-safe assertions, outside click and the
+   non-preventing guard, passed and are pinned), GREEN after.
+
+2. **The modal's close result and the Esc guard (review H1).**
+   BaseModal.vue handled closing with one line (`@close="open =
+false"`): the result of the 35 method="dialog" buttons was never
+   read, returnValue persisted between openings, Esc could not be
+   intercepted. In BaseModal.vue only — no dialog's markup or behavior
+   changed (four dialogs carry only the L2 key-table retype of point 5)
+   and useDialog.ts untouched; T-149 evolves the contract: the dialog's
+   `close` handler reads `event.target.returnValue` and emits a typed
+   `close: [result: string]` ('' when Esc or close() ended the
+   dialog); returnValue resets to '' before every showModal(); a
+   `beforeClose?: () => boolean | Promise<boolean>` prop consults the
+   cancelable `cancel` event (Esc): false preventDefaults it and the
+   dialog stays open, true closes as usual; a promise verdict holds
+   the close synchronously (an async preventDefault would be too
+   late) and closes the dialog itself when allowed. Documented limit:
+   a method="dialog" form closes natively ON SUBMIT and fires no
+   cancel event — beforeClose guards the Esc path only; how the
+   buttons close is T-149's. Tests in
+   src/components/ui/BaseModal.spec.ts; happy-dom does not implement
+   dialog form submission, so the tests replay Chromium's
+   submit-close (the markup button's value into returnValue, the
+   dialog closed, then `close` dispatched) — the pinned contract is
+   BaseModal's handling of the event. The result and cancel
+   assertions were RED before the fix, GREEN after (7/7 with the
+   floating spec).
+
+3. **The test-harness race (theme.spec.ts).** The App-wiring block
+   mounted the shell synchronously and unmounted without awaiting the
+   DEV-guarded seed import of App.vue's onMounted; Vitest tore the
+   environment down while the seed barrel was still loading — two
+   unhandled EnvironmentTeardownError rejections, exit 1 on a green
+   run (the hazard D-218 fixed in App.spec.ts only). Fixed ONCE:
+   src/mount-app.ts exports mountApp() — `await import('./dev/seed')`,
+   mount, `await flushPromises()` — and BOTH specs use it
+   (App.spec.ts dropped its local copy). Test-support code: nothing
+   under src/components/** or src/App.vue imports it; App.vue is
+   unmodified.
+
+4. **The D-212 correction and the column menu's move items.** D-212
+   item 7(i) claimed "a move command for columns is not in the spec's
+   column menu" — false: PRJ-019/020 (docs/spec.md:455) require the
+   order to change "through the 'Move left / Move right' menu
+   (keyboard alternative)". Corrected in place and visibly (the
+   paragraph in D-212 carries the correction note; the original
+   wording stays as dated history). "Move left" / "Move right" are
+   ported to src/components/matrix/ColumnMenu.vue as inert buttons
+   exactly like its existing three (keys matrix.menu.moveLeft /
+   matrix.menu.moveRight in src/locales/en/matrix.json, after "Clear
+   column"); the ids reach the owner and nothing writes on them — the
+   behavior is T-179's.
+
+5. **Two documents that stopped being true (review L2/L4).** (a)
+   src/i18n/i18n.spec.ts claimed dynamically built keys are invisible
+   to its scan and "none exist today" — 13 call sites pass keys
+   through tables. The comment is true by construction now: a
+   recursive `CatalogKey` type (every dotted key path of the merged
+   catalog) is exported from src/i18n/index.ts; all ten key tables
+   are typed `satisfies Record<Enum, CatalogKey>` (SyncSummaryDialog
+   ×3, ScanDialog ×2, ExcludedPathsDialog, ActivityDialog ×2,
+   SettingsSchemeTab, SettingsDefaultsSection) and ActivityDialog's
+   date-presets key field is typed CatalogKey; a planted typo fails
+   vue-tsc with TS2820 against the full key union (verified, then
+   reverted). (b) ARCHITECTURE.md's src/ block described the frontend
+   before the skeleton (one component under components/, one en.json,
+   views/ planned); it now states the real tree: the ten family
+   folders (47 components), the BaseModal dialog contract, src/dev/
+   with its DEV-guard + dist-grep rule and the
+   seed-values-only-in-App.vue rule, the per-feature locale files
+   (temporary, D-207), the styles partition by owner (D-221),
+   stores/ planned; views/ dropped.
+
+6. **The suites.** Light checks all exit 0: cargo fmt --all -- --check,
+   eslint, prettier --check (three touched files re-formatted
+   individually, never repo-wide), vue-tsc, vite build. The unit
+   suite ran three times in a row: 412/412, 412/412, 412/412 (405 +
+   the 7 tests of the two new specs), each run exiting 0 — the race
+   is gone. E2E: 4/4 green.
+
+7. **Platform facts.** The dialog facts behind fix 2 — returnValue
+   written by a method="dialog" submit, its persistence between
+   openings, the cancelable `cancel` event on Esc — and the H2
+   reproduction were verified in CHROMIUM ONLY (the review's
+   Playwright Chromium 1255 stands; happy-dom for the modal tests);
+   WebKit, the WKWebView of the Tauri build, was not exercised.
+
+8. **Card limits.** T-149 owns the dialog contract's evolution
+   (payload, the confirm() promise interface, where an error region
+   lives); T-150 owns the nine confirmations' consolidation; T-153
+   owns the app-level UI-state owners; T-368 owns the single-owner
+   floating layer (one host, provide/inject) that replaces the
+   exclusive-slot invariant; T-179 owns the column order behavior
+   behind the two new menu items; T-190 owns the only allowed v-html
+   (backend-sanitized HTML in MarkdownPreview.vue, SEC-005).

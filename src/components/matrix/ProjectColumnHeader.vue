@@ -85,12 +85,15 @@ const statusText = computed(() => {
 // --- The skeleton's minimum menu behavior: the "⋮" toggles it. ---
 const menuOpen = ref(false)
 const menuAnchor = ref<Anchor>({ left: 0, right: 0, top: 0, bottom: 0 })
+/** The "⋮" element the dismiss check ignores (THIS header's, not a class). */
+const menuTrigger = ref<Element | null>(null)
 
 const toggleMenu = (event: MouseEvent): void => {
   if (menuOpen.value) {
     menuOpen.value = false
     return
   }
+  menuTrigger.value = event.currentTarget as Element
   menuAnchor.value = anchorOf(event.currentTarget as Element)
   menuOpen.value = true
 }
@@ -195,6 +198,12 @@ const hasWarningIcon = (status: ProjectStatus): boolean =>
       </svg>
       {{ statusText }}
     </span>
-    <ColumnMenu v-if="menuOpen" :anchor="menuAnchor" @close="closeMenu" @select="onMenuSelect" />
+    <ColumnMenu
+      v-if="menuOpen"
+      :anchor="menuAnchor"
+      :trigger="menuTrigger"
+      @close="closeMenu"
+      @select="onMenuSelect"
+    />
   </th>
 </template>

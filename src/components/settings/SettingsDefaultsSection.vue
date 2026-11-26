@@ -16,6 +16,7 @@
 import { computed, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ProjectScheme, Settings } from '../../dev/seed'
+import type { CatalogKey } from '../../i18n'
 
 const props = defineProps<{
   /** The defaults for new projects (the seed's default.* group). */
@@ -34,11 +35,11 @@ const schemes: readonly ProjectScheme[] = ['A', 'B', 'C']
 
 /** Each scheme radio's wording key (shared with the project settings
  * modal — one wording, two screens). */
-const schemeTextKey: Record<ProjectScheme, string> = {
+const schemeTextKey = {
   A: 'projects.settings.schemeA',
   B: 'projects.settings.schemeB',
   C: 'projects.settings.schemeC',
-}
+} satisfies Record<ProjectScheme, CatalogKey>
 
 /** The base file's stem: the derived extra-file names follow it (D-20;
  * the demo's stemOf — a display derivation). */

@@ -152,12 +152,15 @@ const popoverEntries = computed(() => [
 // --- The skeleton's minimum popover behavior: the eye toggles it. ---
 const popoverOpen = ref(false)
 const popoverAnchor = ref<Anchor>({ left: 0, right: 0, top: 0, bottom: 0 })
+/** The eye element the dismiss check ignores (THIS cell's, not a class). */
+const popoverTrigger = ref<Element | null>(null)
 
 const togglePopover = (event: MouseEvent): void => {
   if (popoverOpen.value) {
     popoverOpen.value = false
     return
   }
+  popoverTrigger.value = event.currentTarget as Element
   popoverAnchor.value = anchorOf(event.currentTarget as Element)
   popoverOpen.value = true
 }
@@ -298,6 +301,7 @@ const closePopover = (): void => {
       v-if="popoverOpen"
       :entries="popoverEntries"
       :anchor="popoverAnchor"
+      :trigger="popoverTrigger"
       @close="closePopover"
     />
   </td>

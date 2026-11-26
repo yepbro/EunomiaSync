@@ -21,6 +21,7 @@ import { useId } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseModal from '../ui/BaseModal.vue'
 import type { ScanKnownRow, ScanNewRow, ScanSkipReason, ScanSkipRow } from '../../dev/seed'
+import type { CatalogKey } from '../../i18n'
 
 const props = defineProps<{
   /** The display form of the scanned root (the demo's "~/projects"). */
@@ -55,25 +56,25 @@ const skippedHeadingId = useId()
 
 /** The reason badge's wording key (the wording is catalog copy keyed
  * by the closed reason vocabulary, not seed data). */
-const reasonKey: Record<ScanSkipReason, string> = {
+const reasonKey = {
   excluded: 'projects.scan.reason.excluded',
   submodule: 'projects.scan.reason.submodule',
   noAccess: 'projects.scan.reason.noAccess',
   nonUtf8: 'projects.scan.reason.nonUtf8',
   archived: 'projects.scan.reason.archived',
   inExclusions: 'projects.scan.reason.inExclusions',
-}
+} satisfies Record<ScanSkipReason, CatalogKey>
 
 /** The reason's fix hint key (PRJ-002: each skipped row carries a
  * short hint on how to fix it). */
-const hintKey: Record<ScanSkipReason, string> = {
+const hintKey = {
   excluded: 'projects.scan.skipHint.excluded',
   submodule: 'projects.scan.skipHint.submodule',
   noAccess: 'projects.scan.skipHint.noAccess',
   nonUtf8: 'projects.scan.skipHint.nonUtf8',
   archived: 'projects.scan.skipHint.archived',
   inExclusions: 'projects.scan.skipHint.inExclusions',
-}
+} satisfies Record<ScanSkipReason, CatalogKey>
 
 /** The badge tint class per reason (the demo's `tone` field is
  * presentation; the seed carries the reason alone). Neutral reasons

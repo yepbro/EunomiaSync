@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
-import App from './App.vue'
-import { i18n } from './i18n'
+import { mountApp } from './mount-app'
 
 // The shell contract (T-363): the main window renders the toolbar, the
 // matrix frame and the sync panel, and it imports NO IPC module — the
@@ -9,20 +7,9 @@ import { i18n } from './i18n'
 // DEV-guarded dynamic import, which the Vitest environment (DEV)
 // resolves. The IPC facade claims of the old placeholder test are
 // gone with the placeholder; T-212 wires app_info/projects_list back
-// into this window and restores those assertions.
-const mountApp = async () => {
-  // The seed arrives through the DEV-only dynamic import in App.vue's
-  // onMounted. The barrel spans the whole src/dev/seed/ tree, so the
-  // module runner resolves it over several event-loop turns — more than
-  // one flushPromises macrotask. Pre-loading the same module here makes
-  // the component's import() settle from cache within a single
-  // flushPromises, deterministically; the assertions below stay
-  // unchanged and still run against the rendered DOM.
-  await import('./dev/seed')
-  const wrapper = mount(App, { global: { plugins: [i18n] } })
-  await flushPromises()
-  return wrapper
-}
+// into this window and restores those assertions. The mount itself
+// (the D-218 seed-timing harness, shared with theme.spec.ts) lives in
+// ./mount-app.
 
 // The .vue raw-source scan (the i18n.spec.ts pattern): App.vue must
 // not import the ipc facade — the seed is the shell's only data

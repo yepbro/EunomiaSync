@@ -18,7 +18,9 @@
       "label": "Column actions",
       "preview": "Preview file…",
       "assignAll": "Assign all visible",
-      "clearColumn": "Clear column"
+      "clearColumn": "Clear column",
+      "moveLeft": "Move left",
+      "moveRight": "Move right"
     },
     "row": {
       "selectRow": "Select row: {name}",
