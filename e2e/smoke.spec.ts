@@ -37,15 +37,15 @@ test('the theme follows the OS color scheme and switches without a reload (T-145
   await page.goto('/')
   await expect(shell).toBeVisible()
   await expect(html).toHaveAttribute('data-theme', 'light')
-  await expect.poll(backgroundOf).toBe('rgb(255, 255, 255)') // --page (light)
+  await expect.poll(backgroundOf).toBe('rgb(238, 242, 247)') // --page (light)
 
   await page.emulateMedia({ colorScheme: 'dark' })
   await expect(html).toHaveAttribute('data-theme', 'dark')
-  await expect.poll(backgroundOf).toBe('rgb(24, 24, 27)') // --page (dark)
+  await expect.poll(backgroundOf).toBe('rgb(11, 18, 32)') // --page (dark)
 
   await page.emulateMedia({ colorScheme: 'light' })
   await expect(html).toHaveAttribute('data-theme', 'light')
-  await expect.poll(backgroundOf).toBe('rgb(255, 255, 255)')
+  await expect.poll(backgroundOf).toBe('rgb(238, 242, 247)')
 })
 
 // The pre-JS paint (T-145 round-1 P2-1): with every script blocked, a
@@ -59,5 +59,5 @@ test('a dark OS paints dark before any JavaScript runs (CSS fallback)', async ({
   const background = await page.evaluate(
     () => getComputedStyle(document.documentElement).backgroundColor,
   )
-  expect(background).toBe('rgb(24, 24, 27)') // --page (dark)
+  expect(background).toBe('rgb(11, 18, 32)') // --page (dark)
 })

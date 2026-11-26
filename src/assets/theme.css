@@ -1,5 +1,6 @@
 /*
- * EunomiaSync theme tokens (T-145, spec UI-021/NFR-019/NFR-022, §11.5/§12.4).
+ * EunomiaSync theme tokens (T-145, palette extended by T-362; spec
+ * UI-021/NFR-019/NFR-022, §11.5/§12.4).
  *
  * The palette lives ONLY here: the root element carries the light set,
  * [data-theme='dark'] — set on <html> by useOsTheme() (src/assets/theme.ts)
@@ -19,37 +20,74 @@
  *      bg-, text- and border- classes exist for it;
  *   3. add its contrast pairs to src/assets/theme.spec.ts.
  *
- * Pairs the contrast test pins (both themes): ink, ink-muted, accent and
- * danger on page and surface >= 4.5:1; focus-ring and line (UI
- * boundaries) >= 3:1. The AppErrorAlert surfaces (alert and envelope
- * backgrounds from T-143's scoped styles) are cross-checked against the
- * ink token of the matching theme.
+ * Token roles: page — app background; surface — raised panels and code
+ * blocks; surface-2 — the second, softer panel level (alt rows,
+ * wells); ink / ink-muted — primary / secondary text; accent — accent
+ * text and links; accent-strong — primary-button background;
+ * accent-soft — soft accent-tinted background; on-accent — text on
+ * accent-strong; warning / danger — cautionary / destructive accents;
+ * focus-ring — the :focus-visible outline; line — borders of
+ * interactive controls. Values start from the approved mock-up
+ * (docs/prototype/styles.css) adjusted so every pinned pair clears its
+ * threshold; the color owner may retune them within the contrast
+ * rules.
+ *
+ * Decorative values are deliberately NOT tokens — they have no
+ * contrast story and no utility mapping (the row hover tint, radii,
+ * the header divider, column widths): they stay plain custom
+ * properties in the styles of the components that draw them, outside
+ * the contrast test.
+ *
+ * Pairs the contrast test pins (both themes): ink, ink-muted, accent,
+ * warning and danger as text on page, surface and surface-2 >= 4.5:1;
+ * on-accent on accent-strong and accent-strong on accent-soft
+ * >= 4.5:1; focus-ring and line (UI boundaries) on page and surface
+ * >= 3:1; accent-strong on surface (the primary button's fill against
+ * its panel) >= 3:1. The AppErrorAlert surfaces (alert and envelope
+ * backgrounds from T-143's scoped styles) are cross-checked against
+ * the ink token of the matching theme.
  */
 :root {
   color-scheme: light;
-  /* page: app background; surface: raised panels and code blocks */
-  --page: #ffffff;
-  --surface: #f3f4f6;
-  /* ink: primary text; ink-muted: secondary text (7.5:1 on page) */
-  --ink: #111827;
-  --ink-muted: #4b5563;
-  /* accent: links and primary actions */
-  --accent: #4338ca;
-  --danger: #b91c1c;
-  --focus-ring: #4338ca;
-  --line: #6b7280;
+  /* page: app background; surface: raised panels and code blocks;
+     surface-2: the second, softer panel level (alt rows, wells) */
+  --page: #eef2f7;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  /* ink: primary text; ink-muted: secondary text (4.55:1 on page) */
+  --ink: #0f172a;
+  --ink-muted: #606f85;
+  /* accent: links and accent text; accent-strong: primary-button
+     background; accent-soft: soft accent-tinted background;
+     on-accent: text on accent-strong (5.48:1) */
+  --accent: #047d58;
+  --accent-strong: #047857;
+  --accent-soft: #d1fae5;
+  --on-accent: #ffffff;
+  /* warning / danger: cautionary / destructive accents */
+  --warning: #af5109;
+  --danger: #d52222;
+  /* focus-ring: :focus-visible outline; line: border of interactive
+     controls (3:1 on page, WCAG 1.4.11) */
+  --focus-ring: #2563eb;
+  --line: #708cad;
 }
 
 [data-theme='dark'] {
   color-scheme: dark;
-  --page: #18181b;
-  --surface: #27272a;
-  --ink: #f4f4f5;
-  --ink-muted: #a1a1aa;
-  --accent: #818cf8;
+  --page: #0b1220;
+  --surface: #16213a;
+  --surface-2: #1d2a45;
+  --ink: #e2e8f0;
+  --ink-muted: #94a3b8;
+  --accent: #10b981;
+  --accent-strong: #34d399;
+  --accent-soft: #064e3b;
+  --on-accent: #052e22;
+  --warning: #f59e0b;
   --danger: #f87171;
-  --focus-ring: #818cf8;
-  --line: #71717a;
+  --focus-ring: #60a5fa;
+  --line: #7f93b5;
 }
 
 /* The pre-JS paint and the no-JS world: until useOsTheme() (or without
@@ -62,13 +100,18 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     color-scheme: dark;
-    --page: #18181b;
-    --surface: #27272a;
-    --ink: #f4f4f5;
-    --ink-muted: #a1a1aa;
-    --accent: #818cf8;
+    --page: #0b1220;
+    --surface: #16213a;
+    --surface-2: #1d2a45;
+    --ink: #e2e8f0;
+    --ink-muted: #94a3b8;
+    --accent: #10b981;
+    --accent-strong: #34d399;
+    --accent-soft: #064e3b;
+    --on-accent: #052e22;
+    --warning: #f59e0b;
     --danger: #f87171;
-    --focus-ring: #818cf8;
-    --line: #71717a;
+    --focus-ring: #60a5fa;
+    --line: #7f93b5;
   }
 }

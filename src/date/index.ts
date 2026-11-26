@@ -36,12 +36,15 @@
 //   `dateStyle`/`timeStyle` — ECMA-402 throws a TypeError when either
 //   style option is combined with any component option, and
 //   `timeZoneName` (the UI-020 "always with the time zone" half) is one.
-// - `timeZoneName: 'longOffset'` needs WebKit ≥ 15.4 (the Tauri
-//   WKWebView on macOS ≥ 12.3; NFR-001's floor is macOS 12). Older
-//   engines throw a RangeError on the option value at construction, so
-//   it is feature-detected once at module load and degrades to `'short'`
-//   (`GMT+1`, `CEST`): still an explicit zone marker per UI-020 — only
-//   the exact `±hh:mm` shape is lost on those WebKits.
+// - `timeZoneName: 'longOffset'` needs WebKit ≥ 15.4 — exactly the
+//   WKWebView the Tauri build ships on the NFR-001 floor, macOS 12.3.
+//   The option is still feature-detected once at module load and
+//   degrades to `'short'` (`GMT+1`, `CEST`). History: while NFR-001
+//   floored support at macOS 12, the 12.0–12.2 WebKits below it threw
+//   a RangeError on this option at construction and the degrade was
+//   load-bearing there; it stays as defense in depth — still an
+//   explicit zone marker per UI-020, only the exact `±hh:mm` shape is
+//   lost where it fires.
 // - Formatters are cached per (shape, locale, zone): construction costs
 //   ~100× a cached `format()` call (measured ~0.36 ms vs ~3.6 µs on
 //   Node 22), and the matrix view may format hundreds of timestamps per

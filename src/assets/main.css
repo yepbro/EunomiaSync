@@ -9,10 +9,22 @@
  *    query: one switch point for variables, utilities and any future
  *    manual override.
  *  - @theme inline maps each palette token to standard Tailwind color
- *    utilities — bg-page, bg-surface, text-ink, text-ink-muted,
- *    text-accent, text-danger, border-line … — `inline` keeps the
- *    var() reference in the generated utility, so classes re-resolve
- *    live when the attribute flips.
+ *    utilities — bg-page, bg-surface, bg-surface-2, bg-accent-strong,
+ *    bg-accent-soft, text-ink, text-ink-muted, text-accent,
+ *    text-on-accent, text-warning, text-danger, border-line … —
+ *    `inline` keeps the var() reference in the generated utility, so
+ *    classes re-resolve live when the attribute flips.
+ *  - @source not excludes the frozen visual reference (docs/prototype)
+ *    from Tailwind's candidate scanning: automatic source detection
+ *    starts at the project root and reads the mock-up's styles.css
+ *    today, leaking stray candidates into the bundle — a utility and
+ *    a theme variable the app never renders, but the bytes were in
+ *    the output (the round-1 review measured the with/without
+ *    difference). The explicit exclusion keeps the demo out of the
+ *    build entirely. The directive's path resolves against the
+ *    directory of the file carrying it (this file), not the project
+ *    root — tailwindcss 4.3.5 builds each source's base from the
+ *    containing stylesheet — hence the two levels up.
  *  - @layer base carries the app-wide accessibility norms: a visible
  *    theme-aware focus ring (UI-021) and the >=24px minimum for
  *    interactive controls (NFR-022). Component styles may override the
@@ -22,14 +34,23 @@
 @import 'tailwindcss';
 @import './theme.css';
 
+/* The frozen mock-up is not a source of utility candidates (see the
+   header note above). */
+@source not '../../docs/prototype';
+
 @custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
 
 @theme inline {
   --color-page: var(--page);
   --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
   --color-ink: var(--ink);
   --color-ink-muted: var(--ink-muted);
   --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-warning: var(--warning);
   --color-danger: var(--danger);
   --color-focus-ring: var(--focus-ring);
   --color-line: var(--line);
@@ -51,9 +72,10 @@
   }
 
   /* The app shell fills the window. vh first, dvh as progressive
-     enhancement: dvh needs Safari 15.4 (macOS 12.3), and NFR-001 floors
-     support at macOS 12 — without the vh fallback the shell stops
-     filling the window on 12.0–12.2. */
+     enhancement: dvh needs Safari 15.4 (macOS 12.3) — exactly the
+     NFR-001 floor. History: while the floor was macOS 12, the shell
+     stopped filling the window on 12.0–12.2 without the vh line; the
+     fallback stays as defense in depth. */
   main {
     min-height: 100vh;
     min-height: 100dvh;

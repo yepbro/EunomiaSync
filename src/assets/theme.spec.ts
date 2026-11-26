@@ -133,13 +133,18 @@ describe('theme.css palette structure', () => {
   it('keeps the documented token inventory in the light block', () => {
     expect(Object.keys(lightTokens).sort()).toEqual([
       'accent',
+      'accent-soft',
+      'accent-strong',
       'danger',
       'focus-ring',
       'ink',
       'ink-muted',
       'line',
+      'on-accent',
       'page',
       'surface',
+      'surface-2',
+      'warning',
     ])
   })
 
@@ -177,11 +182,23 @@ describe('theme.css palette structure', () => {
 const TEXT_PAIRS: Array<[fg: string, bg: string]> = [
   ['ink', 'page'],
   ['ink', 'surface'],
+  ['ink', 'surface-2'],
   ['ink-muted', 'page'],
   ['ink-muted', 'surface'],
+  ['ink-muted', 'surface-2'],
   ['accent', 'page'],
   ['accent', 'surface'],
+  ['accent', 'surface-2'],
+  // The primary button and the soft accent background carry their own
+  // label/foreground pairs (on-accent, accent-strong).
+  ['accent-strong', 'accent-soft'],
+  ['on-accent', 'accent-strong'],
+  ['warning', 'page'],
+  ['warning', 'surface'],
+  ['warning', 'surface-2'],
   ['danger', 'page'],
+  ['danger', 'surface'],
+  ['danger', 'surface-2'],
 ]
 
 /** Non-text pairs (focus indicator, UI boundaries): required >= 3:1 (WCAG 1.4.11). */
@@ -190,6 +207,9 @@ const NON_TEXT_PAIRS: Array<[fg: string, bg: string]> = [
   ['focus-ring', 'surface'],
   ['line', 'page'],
   ['line', 'surface'],
+  // The primary button's fill against the panel it sits on: its visual
+  // boundary must survive without a border.
+  ['accent-strong', 'surface'],
 ]
 
 describe.each([

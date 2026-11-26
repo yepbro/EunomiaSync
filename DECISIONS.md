@@ -25725,6 +25725,132 @@ clippy `-D warnings`; the full nextest suite (1943/1943 — one more
 than the commit's first run, P3-4's test); doc tests; the export pin;
 `pnpm test` (394/394, P3-3's pin); prettier, eslint, typecheck.
 
+### D-209 — T-362: the full theme palette with contrast pairs, the explicit Tailwind exclusion of the frozen mock-up, and the macOS 12.3 floor in the two code comments — 2026-11-25
+
+Problem: the theme shipped only the eight T-145 tokens (page, surface,
+ink, ink-muted, accent, danger, focus-ring, line) while the approved
+mock-up (docs/prototype/styles.css) already paints with a richer set —
+a second surface level, the accent trio for buttons and soft badges,
+a warning color. The card's starting values were that palette
+pre-adjusted for the contrast rules, but nothing verified the
+adjustment. Two smaller debts rode along: D-207 (ruling 2) raised the
+NFR-001 floor to macOS 12.3 and left the two code comments naming the
+old floor to this task, and Tailwind's automatic source detection has
+been silently reading the frozen mock-up's styles.css.
+
+Sources: card T-362; D-207 ruling 2 (the floor); the frozen mock-up
+palette (docs/prototype/styles.css, light block from line 24, dark
+block from line 58).
+
+1. **The palette is the card's starting values, unchanged.** Thirteen
+   tokens, each in ALL THREE theme.css blocks (light `:root`,
+   `[data-theme='dark']`, and the `@media (prefers-color-scheme:
+dark)` fallback — the two dark sets identical), six-digit hex.
+
+   | token         | light   | dark    |
+   | ------------- | ------- | ------- |
+   | page          | #eef2f7 | #0b1220 |
+   | surface       | #ffffff | #16213a |
+   | surface-2     | #f8fafc | #1d2a45 |
+   | ink           | #0f172a | #e2e8f0 |
+   | ink-muted     | #606f85 | #94a3b8 |
+   | accent        | #047d58 | #10b981 |
+   | accent-strong | #047857 | #34d399 |
+   | accent-soft   | #d1fae5 | #064e3b |
+   | on-accent     | #ffffff | #052e22 |
+   | warning       | #af5109 | #f59e0b |
+   | danger        | #d52222 | #f87171 |
+   | focus-ring    | #2563eb | #60a5fa |
+   | line          | #708cad | #7f93b5 |
+
+   Deviations from the card: none — every starting value was checked
+   against its pairs with the WCAG relative-luminance math (the same
+   formula theme.spec.ts pins) and every pair clears its threshold,
+   so no further tuning was needed. The tightest margins, all light
+   theme: ink-muted on page 4.55:1, accent on page 4.58:1, danger on
+   page 4.58:1, line on page 3.09:1.
+
+2. **Contrast pairs.** theme.spec.ts's TEXT_PAIRS (>= 4.5:1) pin, per
+   theme: ink, ink-muted, accent, warning and danger on page, surface
+   AND surface-2; on-accent on accent-strong; accent-strong on
+   accent-soft. NON_TEXT_PAIRS (>= 3:1): focus-ring and line on page
+   and surface; accent-strong on surface (the primary button's fill
+   against its panel). Computed ratios, light / dark:
+
+   | pair                                    | light                 | dark                  |
+   | --------------------------------------- | --------------------- | --------------------- |
+   | ink on page / surface / surface-2       | 15.88 / 17.85 / 17.06 | 15.19 / 12.98 / 11.59 |
+   | ink-muted on page / surface / surface-2 | 4.55 / 5.11 / 4.88    | 7.30 / 6.24 / 5.57    |
+   | accent on page / surface / surface-2    | 4.58 / 5.15 / 4.92    | 7.38 / 6.31 / 5.63    |
+   | warning on page / surface / surface-2   | 4.67 / 5.25 / 5.01    | 8.72 / 7.45 / 6.66    |
+   | danger on page / surface / surface-2    | 4.58 / 5.15 / 4.92    | 6.77 / 5.78 / 5.17    |
+   | on-accent on accent-strong              | 5.48                  | 7.69                  |
+   | accent-strong on accent-soft            | 4.84                  | 5.06                  |
+   | focus-ring on page / surface            | 4.60 / 5.17           | 7.36 / 6.29           |
+   | line on page / surface                  | 3.09 / 3.47           | 6.01 / 5.14           |
+   | accent-strong on surface                | 5.48                  | 8.32                  |
+
+   The guard "leaves no token without a contrast pair" holds: every
+   token except page and surface appears in some pair (surface-2 and
+   accent-soft as backgrounds, the rest as foregrounds). The
+   AppErrorAlert cross-check — its hardcoded T-143 surfaces against
+   the theme ink, computed, no edit: light ink #0f172a on #fef2f2
+   16.32:1 and on #f3f4f6 16.22:1; dark ink #e2e8f0 on #2c1a1a
+   13.42:1 and on #1f1f1f 13.37:1 — all >= 4.5:1. Follow-up note (the
+   round-1 review's F3, for that component's owner): the alert's own
+   T-143 palette stays hardcoded and does not track the tokens — its
+   light border #b91c1c is the danger value this palette replaced
+   (the dark border #f87171 happens to equal the new dark danger);
+   migrating it to var(--danger) is outside this task's file scope.
+
+3. **Decorative values stay out of theme.css.** The row hover tint,
+   the radii, the header divider, the column widths: no contrast
+   story, no utility mapping — they remain ordinary custom properties
+   in the styles of the components that draw them, outside the
+   contrast test.
+
+4. **`@source not '../../docs/prototype'` in src/assets/main.css.**
+   Automatic source detection starts at the Vite project root
+   (base = e.root, pattern '**/*') and reads the frozen mock-up's
+   styles.css today, leaking stray candidates into the bundle — a
+   utility candidate and a theme-variable candidate the app never
+   renders. A with/without compile of the stylesheet showed the
+   difference in the output bytes, so the directive is not cosmetic;
+   it keeps the demo out of the build entirely. (This record names no
+   leaked token verbatim on purpose: DECISIONS.md is itself inside
+   the scan root, and naming one would re-leak it.)
+   The directive's path resolves against the
+   directory of the file carrying it, not the cwd — verified in the
+   installed tailwindcss 4.3.5: the `@source` handler pushes
+   `{base: O.context.base, pattern, negated}`
+   (node_modules/tailwindcss/dist/lib.js:32, inside `Wn`); an
+   imported stylesheet's nodes carry the base its loader returned
+   (lib.js:21, `Or`); the loader returns
+   `base: dirname(loaded stylesheet)`
+   (node_modules/.pnpm/@tailwindcss+node@4.3.5/.../dist/index.js:10,
+   `Kt`); the entry stylesheet is compiled with
+   `base: dirname(entry css)` (@tailwindcss/vite/dist/index.mjs:1).
+   An empirical probe with the installed compile API confirmed a
+   directive in a nested stylesheet resolving `../docs/prototype`
+   against that stylesheet's own directory — hence `../../` from
+   src/assets/.
+
+5. **The floor in the two code comments (D-207 ruling 2 applied).**
+   src/assets/main.css's dvh note and src/date/index.ts's
+   `longOffset` note no longer say "NFR-001 floors support at macOS
+   12": both state the floor as macOS 12.3 and keep their fallbacks
+   (the vh line; the `'short'` degrade) with the 12.0–12.2 story
+   rewritten as decision history. No code path changed.
+
+6. **The two test files were edited for consistency and NOT run**
+   (owner's ruling of 2026-11-25: T-362 writes and runs no tests;
+   the visual match to the mock-up is checked by code review):
+   src/assets/theme.spec.ts — the pinned token inventory extended to
+   the thirteen tokens and TEXT_PAIRS/NON_TEXT_PAIRS extended per
+   ruling 2, nothing weakened or deleted; e2e/smoke.spec.ts — the
+   four --page color literals follow the new page values (light
+   rgb(238, 242, 247), dark rgb(11, 18, 32)).
+
 ### D-210 — T-120: the `sync_cancel` command — the slot's token latched through the command (the pinned path), a point-of-no-return KNOWLEDGE latch beside the token, and the three-state answer — 2026-11-25
 
 The card (SYS-003, §9.4 phase 2 step 3, §7.10's Sync row, §10; the
