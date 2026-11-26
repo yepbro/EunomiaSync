@@ -55,6 +55,13 @@
 @import '../styles/matrix-cells.css';
 @import '../styles/matrix-states.css';
 
+/* The library family's ported sections (T-365): the instruction
+   editor (UI-003), the history panel (LIB-026/027) and the small
+   confirmation dialogs' slot (no rules of their own — see the file). */
+@import '../styles/library-editor.css';
+@import '../styles/library-history.css';
+@import '../styles/library-dialogs.css';
+
 /* The frozen mock-up is not a source of utility candidates (see the
    header note above). */
 @source not '../../docs/prototype';

@@ -125,6 +125,59 @@ export type Assignment =
 /** Assignments keyed by instruction name, then by project name. */
 export type AssignmentMatrix = Readonly<Record<string, Readonly<Record<string, Assignment>>>>
 
+/**
+ * The operation recorded on a history revision (the demo's op vocabulary,
+ * app.js ~2405: create / update / hide / restore / delete). The chip
+ * class `hist-op--<op>` keys off it.
+ */
+export type HistoryOp = 'create' | 'update' | 'hide' | 'restore' | 'delete'
+
+/**
+ * The snapshot a revision carries (D-16: an instruction version stores
+ * the name and the active/hidden state; a variant version the name and
+ * the text — the main-variant flag and the library order are not part
+ * of snapshots). The `kind` discriminant picks the snapshot body the
+ * history panel renders.
+ */
+export type HistorySnapshot =
+  | { readonly kind: 'instruction'; readonly name: string; readonly state: 'active' | 'hidden' }
+  | { readonly kind: 'variant'; readonly name: string; readonly text: string }
+
+/**
+ * One revision row of the history panel (LIB-026): number, time,
+ * operation, entity and snapshot. `revNo` is unique per entity; `when`
+ * is the display stamp (the demo renders its fixed UTC+3 clock format,
+ * app.js histStamp — the seed stores the rendered strings, like the
+ * projects' `syncedAt`). `restored` is the demo's post-restore
+ * feedback state (a delete row flips to restore + the chip, LIB-027);
+ * the seed data starts with none.
+ */
+export type HistoryRevision = {
+  readonly entityType: 'instruction' | 'variant'
+  /** The variant's name; unused for instruction rows (the cell shows
+   * the word "Instruction"). */
+  readonly entityName: string
+  readonly op: HistoryOp
+  readonly revNo: number
+  readonly when: string
+  readonly snapshot: HistorySnapshot
+  readonly restored: boolean
+}
+
+/**
+ * One typed block of the static Preview sample the editor's Preview tab
+ * renders (T-365): the tab shows template markup shaped like
+ * markdown_preview's output (headings, paragraphs, lists, a code block)
+ * without any renderer here — the real rendering is markdown_preview's
+ * (7.10, SEC-005), a behavior card's. The seed data rides the same
+ * DEV-only branch as the rest of the bundle.
+ */
+export type PreviewBlock =
+  | { readonly kind: 'heading'; readonly level: 2 | 3 | 4; readonly text: string }
+  | { readonly kind: 'paragraph'; readonly text: string }
+  | { readonly kind: 'code'; readonly text: string }
+  | { readonly kind: 'list'; readonly items: readonly string[] }
+
 /** The §6.5 settings defaults (demo SETTINGS; the real app keeps them
  * in the settings table as JSON — D-18). Key names mirror the table. */
 export type Settings = {

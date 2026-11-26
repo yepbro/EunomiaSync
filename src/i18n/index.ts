@@ -3,12 +3,13 @@
 // (`legacy: false`), one message catalog per locale. TEMPORARY SHAPE —
 // during the frontend skeleton work the texts live in per-feature
 // files under `src/locales/en/<feature>.json` (today `shell.json` for
-// the main-window shell and `dev.json` for the DEV-only gallery) and
-// are merged into the one catalog here at load time; the base
-// `src/locales/en.json` keeps its T-142 content untouched. When the
-// skeleton phase ends, the per-feature files are merged back into a
-// single `en.json` and this header's note goes away.
-//
+// the main-window shell, `matrix.json` for the matrix family,
+// `library.json` for the library family and `dev.json` for the
+// DEV-only gallery) and are merged into the one catalog here at load
+// time; the base `src/locales/en.json` keeps its T-142 content
+// untouched. When the skeleton phase ends, the per-feature files are
+// merged back into a single `en.json` and this header's note goes
+// away.
 // Key convention (UI-020's `project.settings.title` example): a nested
 // namespace per UI feature (`app.*` for the base catalog, `shell.*`
 // for the main-window shell, `dev.*` for the gallery, later
@@ -34,6 +35,7 @@ import { createI18n } from 'vue-i18n'
 import en from '../locales/en.json'
 import shell from '../locales/en/shell.json'
 import matrix from '../locales/en/matrix.json'
+import library from '../locales/en/library.json'
 import dev from '../locales/en/dev.json'
 
 // The dev namespace serves only the DEV-only gallery (T-363): the
@@ -43,7 +45,7 @@ import dev from '../locales/en/dev.json'
 const devMessages = import.meta.env.DEV ? dev : {}
 
 /** The merged English catalog: the base file plus the per-feature files. */
-const catalog = { ...en, ...shell, ...matrix, ...devMessages }
+const catalog = { ...en, ...shell, ...matrix, ...library, ...devMessages }
 
 /** The message catalog type: nested feature namespaces, string leaves. */
 export type MessageSchema = typeof catalog

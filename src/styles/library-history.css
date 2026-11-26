@@ -1,0 +1,191 @@
+/*
+ * History modal (T-365, LIB-026/027, D-16): the mock-up's section
+ * (docs/prototype/styles.css 1916–2093) ported with the theme-token
+ * swap applied (the swap table lives in DECISIONS.md, D-206/D-211;
+ * the reference's muted and faint text tokens both map to
+ * `--ink-muted`, its focus token to `--focus-ring`, its strong-border
+ * token to `--line`). The op chips ride the ported `.chip` base
+ * (src/styles/matrix-rows.css). The two
+ * `.modal-lg` layout rules here are this section's own (the subtitle
+ * and the scrolling body); the `.modal-lg` width lives in
+ * src/styles/modal.css and is not ported twice. The scrolling body
+ * engages once the project-settings card's fixed-height
+ * `.modal-lg form` rule (styles.css ~1546, T-366's section) lands —
+ * the seed's twelve rows render fine without it.
+ *
+ * The mock-up's class names are kept (the porting rule).
+ */
+
+.modal-lg .hist-subtitle {
+  flex: none;
+}
+
+.modal-lg .hist-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+
+.hist-table {
+  border-collapse: collapse;
+  inline-size: 100%;
+  font-size: 12.5px;
+}
+
+.hist-table th,
+.hist-table td {
+  text-align: start;
+  padding: 7px 8px;
+  border-block-end: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.hist-table th {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+
+.hist-col-no {
+  inline-size: 44px;
+}
+
+.hist-col-when {
+  inline-size: 168px;
+}
+
+.hist-col-op {
+  inline-size: 96px;
+}
+
+.hist-col-snap {
+  inline-size: 110px;
+}
+
+.hist-no {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.hist-when {
+  white-space: nowrap;
+}
+
+.hist-op-cell {
+  white-space: nowrap;
+}
+
+.hist-entity {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+.hist-entity .hist-restore-btn {
+  margin-block-start: 6px;
+}
+
+/* Operation badges (NFR-020: the op is always in the text; the tint is a
+   secondary cue mixed from the theme vars so both themes stay readable) */
+.hist-op {
+  font-weight: 600;
+}
+
+.hist-op--create,
+.hist-op--restore {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.hist-op--update {
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+.hist-op--hide {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+.hist-op--delete {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+.hist-op--revert {
+  color: var(--focus-ring);
+  background: color-mix(in srgb, var(--focus-ring) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--focus-ring) 40%, var(--border));
+}
+
+/* Demo feedback after a restore */
+.hist-restored {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}
+
+/* Snapshot disclosure */
+.hist-snap summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.hist-snap summary:hover {
+  color: var(--ink);
+}
+
+.hist-snap summary::marker {
+  color: var(--ink-muted);
+}
+
+.hist-snap-body {
+  margin-block-start: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+}
+
+.hist-snap-row {
+  display: flex;
+  gap: 8px;
+  min-inline-size: 0;
+}
+
+.hist-snap-key {
+  flex: none;
+  inline-size: 44px;
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+
+.hist-snap-text {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-block-size: 140px;
+  overflow-y: auto;
+}
+
+/* Restore action on delete rows */
+.hist-table .btn {
+  font-size: 12px;
+  min-block-size: 26px;
+  padding: 3px 10px;
+}
+
+.hist-empty {
+  margin: 32px 0;
+  text-align: center;
+  color: var(--ink-muted);
+}

@@ -23,6 +23,16 @@ import VariantPopoverShowcase from './showcases/VariantPopoverShowcase.vue'
 import TooltipShowcase from './showcases/TooltipShowcase.vue'
 import BulkAssignDialog from '../components/matrix/BulkAssignDialog.vue'
 import BulkConfirmDialog from '../components/matrix/BulkConfirmDialog.vue'
+import InstructionEditorShowcase from './showcases/InstructionEditorShowcase.vue'
+import InstructionEditorEmptyShowcase from './showcases/InstructionEditorEmptyShowcase.vue'
+import InstructionEditorCustomShowcase from './showcases/InstructionEditorCustomShowcase.vue'
+import HistoryShowcase from './showcases/HistoryShowcase.vue'
+import RestoreVariantShowcase from './showcases/RestoreVariantShowcase.vue'
+import VariantDeleteShowcase from './showcases/VariantDeleteShowcase.vue'
+import HeadingShowcase from './showcases/HeadingShowcase.vue'
+import UnsavedChangesDialog from '../components/library/UnsavedChangesDialog.vue'
+import HideInstructionDialog from '../components/library/HideInstructionDialog.vue'
+import HeadingDeleteDialog from '../components/library/HeadingDeleteDialog.vue'
 
 export type Screen = {
   /** Stable id used in the `#screen=<id>` hash. */
@@ -55,4 +65,52 @@ export const screens: readonly Screen[] = [
   { id: 'matrix-tooltip', title: 'Instruction text tooltip', component: TooltipShowcase },
   { id: 'matrix-bulk', title: 'Bulk assign dialog', component: BulkAssignDialog },
   { id: 'matrix-bulk-confirm', title: 'Bulk confirm dialog', component: BulkConfirmDialog },
+  /* The library family (T-365): the editor in its three states, the
+     history panel and the six confirmation/restore dialogs. */
+  {
+    id: 'library-editor',
+    title: 'Instruction editor — the library edit (UI-003)',
+    component: InstructionEditorShowcase,
+  },
+  {
+    id: 'library-editor-empty',
+    title: 'Instruction editor — the empty single variant (LIB-014, D-207)',
+    component: InstructionEditorEmptyShowcase,
+  },
+  {
+    id: 'library-editor-custom',
+    title: 'Instruction editor — the per-project custom mode (MAIN-007, MAIN-034)',
+    component: InstructionEditorCustomShowcase,
+  },
+  { id: 'library-history', title: 'History panel (LIB-026, 027)', component: HistoryShowcase },
+  {
+    id: 'library-restore',
+    title: 'Restore variant dialog (LIB-027)',
+    component: RestoreVariantShowcase,
+  },
+  {
+    id: 'library-variant-delete',
+    title: 'Variant delete confirmation (LIB-023)',
+    component: VariantDeleteShowcase,
+  },
+  {
+    id: 'library-unsaved',
+    title: 'Unsaved changes dialog (UI-010)',
+    component: UnsavedChangesDialog,
+  },
+  {
+    id: 'library-hide',
+    title: 'Hide instruction dialog (UI-010)',
+    component: HideInstructionDialog,
+  },
+  {
+    id: 'library-heading',
+    title: 'Add/rename section dialog (LIB-030, 031)',
+    component: HeadingShowcase,
+  },
+  {
+    id: 'library-heading-delete',
+    title: 'Delete section dialog (UI-010)',
+    component: HeadingDeleteDialog,
+  },
 ]

@@ -26589,6 +26589,215 @@ base: 'Strict' }` (the variant the demo assigns to task-id-mcp in
    the same fix the demo ships; the button's `hidden` attribute
    binding is unchanged.
 
+### D-213 — T-365: the library skeleton on seed data — the two-pane instruction editor, the history panel, the confirmation dialogs — 2026-11-26
+
+Problem: the library family had no screens — the editor, the history
+panel and the six confirmation/restore dialogs of UI-003/UI-010 did
+not exist, and the structure cards behind them (T-185's create flow,
+T-189…T-195's behavior family) need the markup to refine. The card
+had to port the reference's `#edit-dialog`, `#history-dialog` and the
+small confirmations as behavior-free Vue components on seed data,
+with the LIB-036/LIB-024 gates and the D-207 hint exception rendered
+from data, without breaking the seed's DEV-only bundle gate.
+
+Sources: card T-365 (the acceptance ruling of 2026-11-25: no tests
+written or run, the visual match is checked by code review without
+screenshots); D-206/D-211's porting rules and token swap; the D-212
+precedents (shared form idioms, the registry's seed-free rule, the
+dist/ proof); spec UI-003, UI-010, LIB-002, LIB-009…016, LIB-017…022,
+LIB-023/024/025, LIB-026/027, LIB-036, MAIN-007/LIB-018, MAIN-034,
+NFR-019; T-186 absorbed (its criterion — a component test of the
+editor's structure — is superseded by the owner's no-tests ruling).
+
+1. **Structure.** `src/components/library/` —
+   InstructionEditorDialog.vue (the two-pane UI-003 window, size-xl
+   BaseModal; props `instruction: LibraryInstruction`, `mode:
+'instruction' | 'custom'`, and the custom mode's `projectName`,
+   `customText`, `customBaseLabel`; plus `previewBlocks`), with its
+   panes as components: EditorVariantList.vue (`variants`,
+   `selected`; emits `select`), EditorFields.vue (`instructionName`,
+   `variantName`), EditorTextTabs.vue (`text`, `placeholder`,
+   `previewBlocks`; the ARIA tablist and both panels); HistoryDialog.vue
+   (`instructionName`, `revisions`, size lg), RestoreVariantDialog.vue
+   (`variantName`), UnsavedChangesDialog.vue, HideInstructionDialog.vue,
+   HeadingDialog.vue (`mode: 'add' | 'rename'` — the title follows it
+   like the demo's openHeadingDialog, app.js ~840–845 — and
+   `initialName`, the rename prefill),
+   HeadingDeleteDialog.vue, VariantDeleteDialog.vue (`variantName`,
+   `affectedProjects`). Every dialog is on the T-363 contract:
+   BaseModal + `defineModel<boolean>('open')`; title ids from
+   `useId()`; the reference's method="dialog" forms make Save/Cancel/
+   Close/Delete/Restore/Hide/Discard the dialogs' own return values.
+   No component imports the seed's DATA or `src/ipc/**` — types ride
+   `import type` from `../../dev/seed` (the D-212 precedent), data
+   only through props.
+
+2. **Data-derived states and their sources.** (a) The main variant
+   always heads the list: the dialog derives the rows — the implicit
+   main first (the seed's `text: null` main), then
+   `instruction.variants` in order. (b) LIB-014: a row whose body is
+   empty (main `text === null`, alternative `text === ''`) gets the
+   matrix's dashed `.empty-mark` and the dimmed `.ie-variant-empty`
+   label. (c) LIB-036's UI gate: the "Make main" star is disabled
+   when the row is already main or its name is blank or its body is
+   empty, with the reason as title/aria-label; the seed's
+   "Pre-commit checks" shows the disabled star (its reason is the
+   already-main wording — the no-name/no-body reason has no seed
+   state, every alternative in the seed library carries a name and a
+   body; the same row drives the D-207 hint-less Delete). (d) LIB-024: the
+   main variant's Delete is disabled with the hint "Make another
+   variant main first — the main variant cannot be deleted"; D-207:
+   when the instruction has only the main variant the hint is NOT
+   rendered at all — the button keeps its action name as the
+   accessible name (an icon-only control must be named), but no
+   reason text, and the demo's LIB-025 "last variant" tooltip is
+   never ported (the spec: LIB-025 never fires through the UI). The
+   seed's single-variant rows drive it. (e) LIB-023: the
+   variant-deletion confirmation names the NUMBER of affected
+   projects — the spec wins over the demo's static line (the demo's
+   requestDeleteVariant text carries no count, app.js ~1889); the
+   count arrives as a prop, pluralized 0/1/other. (f) The history
+   panel renders op chips keyed by the revision's op, the Restore
+   variant button on delete rows (inert), the "Restored" chip on a
+   `restored` row (the seed starts with none), and the snapshot body
+   per D-16 (instruction: name + state; variant: name + text); the
+   empty state shows through the mock-up's own hidden toggling.
+
+3. **Local UI state only** (no side effects, no IPC): the selected
+   variant row (switching swaps the fields'/textarea's `:value`
+   rendering), the active Edit/Preview tab (click switching; the
+   arrow-key/Home/End roving focus is a feature card's), and the
+   MAIN-034 replace/extend radio (it moves the placeholder between
+   the three mode wordings and toggles the "Appended after" hint —
+   the draft-resetting of MAIN-034 is behavior). Everything else is
+   NOT done: no validation, no save, no unsaved-changes tracking, no
+   restore, no Markdown rendering. The owners: T-185 (the create
+   flow, the Section picker, the heading add/rename/delete flows),
+   T-189's family (validation, saving, the unsaved-changes guard and
+   the change tracking behind it), T-190…T-195 (the variant
+   actions — add/Make main/Delete —, the restore flow, the hide
+   flow, and the custom-editor semantics of MAIN-034/MAIN-007).
+
+4. **The seed extension.** types.ts gained `HistoryOp`,
+   `HistorySnapshot` (the `kind` discriminant), `HistoryRevision`
+   (`restored: boolean` required — the demo's runtime feedback flag
+   seeded explicitly false everywhere) and `PreviewBlock` (a typed
+   union: heading/paragraph/code/list). history.ts stores the demo
+   builder's OUTPUT as data — JS is never ported, so
+   `buildDemoRevisions` (app.js 2404–2468) is not carried; its
+   result for "Commit messages" is: 12 revisions, newest first, with
+   `when` stamps precomputed by the demo's histStamp formula
+   (HIST_NOW_MS 19 Nov 2026, 14:32 UTC+3; "D Mon YYYY, HH:MM
+   (UTC+3)"), including the deleted "Old wording" pair (the delete
+   row carries the panel's restore button) and the
+   "Conventional Commits" hide/restore pair. preview.ts holds the
+   static Preview sample (five typed blocks over the same
+   instruction's copy). Both export through seed/index.ts. The
+   custom-mode text rides a PROP: the seed's Assignment union has no
+   text field (T-364's shape, untouched), and the showcase passes the
+   demo's add-flow draft — the base variant's text (app.js
+   2680–2692; the edit flow's stored custom text is 2651–2660).
+
+5. **CSS sections ported** (theme-token swap applied; one file each,
+   imported from src/assets/main.css after the matrix family's):
+   Instruction editor modal 1160–1493 → library-editor.css; History
+   modal 1916–2093 → library-history.css (the `--text-faint` and
+   `--text-muted` maps to `--ink-muted`, `--focus` to
+   `--focus-ring`, `--border-strong` to `--line`; `--accent` as a
+   border/badge color stays `--accent`). Not re-ported: the
+   `.modal-xl` width (1167–1169) and the `.modal-lg` width
+   (1545–1547) — already in src/styles/modal.css (T-363's header
+   note says so); `.extend-mark` (1250–1265) — T-364's
+   matrix-cells.css. Three editor rules physically sit past the
+   File-preview header (1513–1540: `.ie-warnings`,
+   `.ie-warnings-list`, the 760px media query) and are ported with
+   the editor — they style `#edit-dialog`'s markup. The shared
+   markdown selector groups (`:is(.ie-preview, .fp-body) …`) are
+   ported verbatim as the in-range rulesets they are; their
+   `.fp-body` halves are inert until T-366's file-preview modal
+   mounts that class (its own section 1494–1542 stays T-366's). The
+   small confirmation dialogs have NO section and NO rules of their
+   own: grep by their markup's class names found every class already
+   ported (modal.css, buttons.css, toolbar.css); library-dialogs.css
+   exists as the documented slot (no rules) — the heading dialog's
+   `.ps-field/.ps-input/.ps-error/.ps-hint` and the editor's
+   `.ps-tabs/.ps-tab` stay in the markup with their rules left to the
+   project-settings section (1543–1915, T-366), per the D-212
+   precedent. The history body's scrolling (`flex: 1 1 auto;
+overflow-y: auto`) engages once T-366 lands the fixed-height
+   `.modal-lg form` rule (~1546); the seed's twelve rows render fine
+   without it.
+
+6. **The create-mode decision.** The Section select IS part of the
+   reference's `#edit-dialog` form (index.html 2610–2615), so its
+   markup is ported — inert: an empty `.ps-select`, the label through
+   i18n, `.ie-section-field` staying `display:none` outside
+   `.ie-create` (the mock-up's own rule); no picker logic (T-185's).
+   No `.ie-create` class is ever applied by this component.
+
+7. **Readings chosen where the brief was open.** (a) The editor-mode
+   showcase is split into THREE registry screens — the library edit
+   ("Commit messages": main badge + two alternatives + the LIB-024
+   hint), the empty single variant ("Pre-commit checks": LIB-014 +
+   LIB-036 + the D-207 hint-less Delete), and the custom mode
+   ("Response tone" — quotameter, base label "Response tone — Main")
+   — so every data-derived state is visible from the gallery.
+   (b) The main variant's list name and badge render one i18n key,
+   `library.editor.mainVariantName` = "Main" (LIB-002's naming, the
+   D-212 "spec wins over the demo's Default" line). (c) The custom
+   mode's title composes "Custom instruction — {instruction} —
+   {project}" through the two props (the demo's title fact, app.js
+   2651). (d) The D-207 suppression removes only the REASON: the
+   Delete button's accessible name stays the action name, because an
+   icon-only control must be named (NFR-019); the hint-as-tooltip
+   disappears with the title. (e) The variant rows' key is the row
+   name (names are unique within an instruction, §6.9). (f) The
+   radio group keeps the reference's static `name="ie-custom-mode"`
+   (one editor instance renders at a time). (g) The registry lists
+   the three prop-less dialogs (unsaved, hide, heading-delete)
+   directly, like T-364's bulk dialogs; the prop-ful ones ride small
+   showcases under src/dev/showcases/, and the variant-delete
+   showcase derives its LIB-023 count from the seed assignments
+   ("Spanish" — one project). (h) `#` in the history row and the op
+   words (`{{ rev.op }}`, `{{ rev.snapshot.state }}`) are
+   data/interp, not catalog copy.
+
+8. **Checks and proofs.** cargo fmt --check, pnpm lint,
+   format:check, typecheck, build — all exit 0 (no tests written or
+   run, per the acceptance ruling). The dist/ proof: grep for the
+   dev-only strings (the seed history wordings, the registry ids and
+   titles, the gallery title, the preview sample's code line, the
+   seed project name) — zero matches; the production bundle carries
+   the `library.*` catalog keys (the components' t() copy) and the
+   ported CSS classes, exactly like the `matrix.*` catalog in the
+   D-212 proof. Existing test files needed no change (App.spec and
+   the smoke test cover the shell, untouched; the catalog-coverage
+   scan resolves every new literal against the merged catalog).
+
+9. **Round-1 review fixes** (the review: deepseek-v4.1-flash,
+   verdict NEEDS_FIXES; all findings accepted, none declined). P1:
+   the LIB-023 count line was one piped plural whose 1/other forms
+   carried only the count phrase — vue-i18n pipe plurals are
+   whole-message alternatives, so the question and the variant name
+   vanished exactly in the state the gallery shows; split into
+   `library.variantDelete.question` + `library.variantDelete.count`,
+   composed in the dialog. P2: the instruction-name field's label is
+   "Instruction name" (spec UI-003/LIB-002's explicit field names)
+   instead of the mock-up's bare "Name". P3: D-213 2(c) reworded to
+   what the seed actually shows (the empty main renders the
+   already-main star reason; the no-name/no-body reason has no seed
+   state); the custom-draft citation corrected to app.js 2680–2692
+   (the add flow; 2651–2660 is the edit flow); the
+   library-history.css header reworded so no reference token literal
+   (`--text-faint` et al.) survives the check-(c) grep; the
+   `.ie-variants` aside carries the reference's landmark name
+   (`aria-label` through the same i18n key as its visible label);
+   the "Restored" chip moved into the history row's variant branch
+   (the demo attaches it there only, app.js ~2492); HeadingDialog
+   gained the `mode` prop driving "Add section"/"Rename section"
+   (the demo's openHeadingDialog fact) instead of a fixed add title
+   over a rename prefill.
+
 ### D-214 — CI 45782298320: T-110's DB-015 echo oracle was platform-blind — the macOS temp root pushed the picked path over D-115's cap; the fixture is deliberately over-cap on every platform now and the expectation is computed from the documented arithmetic — 2026-11-26
 
 Problem: CI run 45782298320 (push of `3b800ca`, T-120's landing) was

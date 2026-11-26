@@ -1,0 +1,101 @@
+{
+  "library": {
+    "editor": {
+      "titleEdit": "Edit instruction — {name}",
+      "titleCustom": "Custom instruction — {instruction} — {project}",
+      "mainVariantName": "Main",
+      "variantsLabel": "Variants",
+      "variantEmptyTitle": "Empty variant — outputs no text, can be assigned (D-13)",
+      "makeMain": "Make main — {name}",
+      "makeMainAlready": "Already the main variant",
+      "makeMainEmpty": "An empty variant — no name or no text — cannot be made main",
+      "deleteVariant": "Delete variant — {name}",
+      "deleteMainHint": "Make another variant main first — the main variant cannot be deleted",
+      "addLabel": "Add variant",
+      "addCopy": "Copy of main",
+      "addCopyTitle": "Add a copy of the main variant (LIB-017)",
+      "addEmpty": "Empty",
+      "addEmptyTitle": "Add an empty variant — outputs no text, can be assigned (D-13, LIB-015)",
+      "sectionLabel": "Section",
+      "nameLabel": "Instruction name",
+      "variantNameLabel": "Variant name",
+      "modeLabel": "Custom instruction",
+      "modeReplace": "Fully replaces the library variant",
+      "modeReplaceHint": "Only this text is output; the library variant is ignored.",
+      "modeExtend": "Supplements the library variant",
+      "modeExtendHint": "This text is appended after the library variant's text.",
+      "modeBase": "Appended after: {base}",
+      "tabsLabel": "Text editor views",
+      "tabEdit": "Edit",
+      "tabPreview": "Preview",
+      "textLabel": "Variant text (Markdown)",
+      "placeholder": "Instruction text (Markdown)…",
+      "placeholderCustom": "Write the custom instruction text…",
+      "placeholderExtend": "Write the text to append to the library variant…",
+      "charCount": "{count} / 262,144",
+      "warningsLabel": "Warnings (do not block saving)",
+      "noWarnings": "No Markdown warnings.",
+      "history": "History",
+      "cancel": "Cancel",
+      "save": "Save"
+    },
+    "history": {
+      "title": "History — {name}",
+      "titleFallback": "History — instruction",
+      "subtitle": "A version is created only on a real change; up to 200 versions per entity, the oldest beyond that are deleted.",
+      "caption": "Revisions: number, time, operation, entity and snapshot",
+      "colNo": "#",
+      "colWhen": "When",
+      "colOp": "Operation",
+      "colEntity": "Entity",
+      "colSnap": "Snapshot",
+      "empty": "No versions yet.",
+      "entityInstruction": "Instruction",
+      "restoredChip": "Restored",
+      "restoreButton": "Restore variant",
+      "snapshot": "Snapshot",
+      "snapName": "Name",
+      "snapState": "State",
+      "close": "Close"
+    },
+    "unsaved": {
+      "title": "Unsaved changes",
+      "text": "The instruction has unsaved changes. Close the editor and discard them?",
+      "keep": "Keep editing",
+      "discard": "Discard"
+    },
+    "variantDelete": {
+      "title": "Delete variant",
+      "question": "Delete the variant \"{name}\"? Its assignments move to the main variant;",
+      "count": "no projects are affected. | 1 project is affected. | {count} projects are affected.",
+      "cancel": "Cancel",
+      "delete": "Delete"
+    },
+    "restore": {
+      "title": "Restore variant",
+      "text": "Restore the variant \"{name}\"? It comes back with its name and text; no version is erased (LIB-027).",
+      "cancel": "Cancel",
+      "restore": "Restore"
+    },
+    "hide": {
+      "title": "Hide instruction",
+      "text": "The instruction will be excluded from built files. Assignments are kept; files change only after the next sync.",
+      "cancel": "Cancel",
+      "hide": "Hide"
+    },
+    "heading": {
+      "titleAdd": "Add section",
+      "titleRename": "Rename section",
+      "nameLabel": "Section name",
+      "hint": "Name: 1–200 characters, one line (§6.9).",
+      "cancel": "Cancel",
+      "save": "Save"
+    },
+    "headingDelete": {
+      "title": "Delete section",
+      "text": "The section's instructions stay in place and become part of the previous section.",
+      "cancel": "Cancel",
+      "delete": "Delete"
+    }
+  }
+}

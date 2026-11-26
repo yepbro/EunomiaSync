@@ -14,7 +14,21 @@
       "variantPopover": "Variant contents popover",
       "popoverHint": "Open by default; the eye toggles, outside click and Escape close.",
       "tooltip": "Instruction text tooltip (MAIN-006)",
-      "tooltipHint": "Visible; the delay, triggers and viewport clamping are T-187's."
+      "tooltipHint": "Visible; the delay, triggers and viewport clamping are T-187's.",
+      "instructionEditor": "Instruction editor — the library edit (UI-003)",
+      "editorHint": "Open on the seed's \"Commit messages\"; selection, tabs and the mode radio are local state.",
+      "editorEmpty": "Instruction editor — the empty single variant",
+      "editorEmptyHint": "\"Pre-commit checks\": LIB-014's dashed mark, LIB-036's disabled star, D-207's hint-less Delete.",
+      "editorCustom": "Instruction editor — the per-project custom mode (MAIN-007, MAIN-034)",
+      "editorCustomHint": "The .ie-custom window; switching replace/extend changes the placeholder and the base hint.",
+      "history": "Instruction history panel (LIB-026, 027)",
+      "historyHint": "The seed's demo revisions for \"Commit messages\"; the restore flow is a behavior card's.",
+      "restoreVariant": "Restore variant dialog (LIB-027)",
+      "restoreHint": "Open on the seed history's deleted \"Old wording\".",
+      "variantDelete": "Variant delete confirmation (LIB-023)",
+      "variantDeleteHint": "The count is derived from the seed assignments (\"Spanish\" — one project).",
+      "heading": "Add/rename section dialog (LIB-030, 031)",
+      "headingHint": "Open prefilled with a seed heading's name; validation is T-185's."
     }
   }
 }

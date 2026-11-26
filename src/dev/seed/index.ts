@@ -16,3 +16,7 @@ export * from './projects'
 export * from './library'
 export * from './assignments'
 export * from './settings'
+/* The library family's additions (T-365): the history panel's demo
+   revisions and the static Preview sample. */
+export * from './history'
+export * from './preview'
