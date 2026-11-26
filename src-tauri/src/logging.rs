@@ -1739,6 +1739,29 @@ pub(crate) fn sync_run_aborted(reason: &str) {
     );
 }
 
+/// The `sync_cancel` command failed (T-120, §10's every-error rule):
+/// the `sync_run_failed` shape over the one reachable answer — the
+/// honest missing-state fallback of the managed slot
+/// (`SyncCancelSlotMissing`, an uninitialized-app bug: the state is
+/// managed by `setup` before anything that could fail, so its absence
+/// is a wiring gap, and the command owns no database access for any
+/// store refusal to reach the wire through). Every ANSWER the
+/// command gives — `cancelled`, `tooLate`, `nothingToCancel` — is a
+/// state, never a failure, and logs nothing here: the run's own
+/// answer (the `aborted` summary D-138's law defines, or its
+/// completion) is the record the next reader meets.
+pub(crate) fn sync_cancel_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::sync",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "cancelling the running sync failed"
+    );
+}
+
 /// Emitting a `sync://progress` event failed (T-119): the run itself
 /// is unaffected — the emission is display-only, throttled to at most
 /// ten per second, and the command's ANSWER carries the terminal
@@ -4285,6 +4308,43 @@ mod tests {
                 && log.contains("emitting a sync progress event failed; the run continues")
                 && log.contains("a window with label `main` already exists"),
             "the degraded line is WARN and carries its message and the error's Display form, \
+             got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_sync_cancel_failure_line_carries_the_code_and_diagnostic() {
+        // The cancel command's §10 edge (T-120), in the restore pin's
+        // shape: the one reachable class is the honest missing-state
+        // fallback of the managed slot (E_DB_LOCKED with the
+        // `SyncCancelSlotMissing` diagnostic — an uninitialized-app
+        // bug; the command owns no database access, so no store
+        // refusal can reach the wire through it). Every ANSWER the
+        // command gives is a state, never a failure, and logs
+        // nothing — those halves are structural (no tracing call
+        // exists on the answer paths).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut slot_missing = AppError::new(crate::errors::ErrorCode::DbLocked);
+        slot_missing.details = Some(crate::errors::ErrorDetails {
+            os_code: None,
+            os_kind: Some("SyncCancelSlotMissing".to_owned()),
+            os_message: Some("the sync cancel slot was not managed at startup".to_owned()),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            sync_cancel_failed(&slot_missing);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("cancelling the running sync failed")
+                && log.contains("code=\"E_DB_LOCKED\"")
+                && log.contains("os_kind=Some(\"SyncCancelSlotMissing\")"),
+            "the fallback line carries its code literal and the missing-state diagnostic, \
              got: {log}"
         );
         drop(temp);

@@ -25606,3 +25606,280 @@ Re-checked after the fixes, all green on real exit codes: fmt;
 clippy `-D warnings`; the full nextest suite (1943/1943 — one more
 than the commit's first run, P3-4's test); doc tests; the export pin;
 `pnpm test` (394/394, P3-3's pin); prettier, eslint, typecheck.
+
+### D-210 — T-120: the `sync_cancel` command — the slot's token latched through the command (the pinned path), a point-of-no-return KNOWLEDGE latch beside the token, and the three-state answer — 2026-11-25
+
+The card (SYS-003, §9.4 phase 2 step 3, §7.10's Sync row, §10; the
+DoD "отмена в preflight не меняет файлы и время синхронизации")
+consumes the D-147/T-258 slot. The pinned card comment (T-284's half
+
+1. is consumed verbatim and NOT re-opened: the command takes the
+   token through `SyncCancelSlot::token()` and cancels by latching that
+   same Arc — "cancel through the slot" IS the existing check, and no
+   second path to the token, no second consultation, and no second
+   latch exists after this task. Seven readings were open; the chosen
+   readings were written here BEFORE the implementation (the rule-1
+   discipline).
+
+1) **Module shape — a NEW module `src-tauri/src/sync_cancel.rs`, the
+   battery in `ipc_tests.rs`.** The D-204/D-205/D-208 family
+   precedent (one command, one module) holds: a new file keeps
+   `commands.rs`'s sync region (already D-138/D-147/D-202's home,
+   ~7400 lines) from growing, and the command is a SIBLING consumer
+   of the slot, not a pipeline resident. The battery, though, lands
+   in `ipc_tests.rs`'s sync-run section — NOT in a self-contained
+   family file: the tests are lifecycle-shaped (a run parked before
+   the check point, a run parked mid-phase-3, the slot, the census,
+   the run rows), and every fixture they need (`sync_app`, the
+   gated-database park, `published_cancel_token`,
+   `count_empty_run_error_codes`, `run_sync_with`) already lives
+   there; the family's self-contained file would duplicate the whole
+   parked-run machinery. The command, its wire DTO and the
+   `logging::sync_cancel_failed` edge are the module's own; the
+   slot, the token and the check point stay in `commands.rs` where
+   D-138/D-147 left them.
+2) **The answer — `Result<SyncCancelOutcome, AppError>`, THREE unit
+   members** (serde-tagged `{"outcome": …}`, the `SyncRunOutcome`
+   wire shape): `cancelled` / `tooLate` / `nothingToCancel`. D-138's
+   answer-shape discipline mirrored: a state answer rides `Ok`,
+   never `Err` — a declined cancel is a state, not a system failure,
+   so the typed-refusal reading is declined. §10's vocabulary has NO
+   member for it (`E_SYNC_RUNNING` names a second run or a project
+   edit; `E_VALIDATION`'s elastic clause names field/state refusals
+   whose user action is "fix the field" — neither fits a late
+   cancel), and inventing `E_CANCEL_TOO_LATE` is an owner-scope
+   decision recorded here as declined (prefer the spec's existing
+   words). The flat `()` of the scan twin is declined for a
+   structural reason the scan never has: §9.4 phase 2 step 3 gives
+   the sync a point of no return, so "will stop", "is finishing
+   anyway" and "nothing was live" are three different UI facts; the
+   scan's cancel is always eventually honored, one fact, `()`.
+3) **No live run — `nothingToCancel`, the converging no-op.** The
+   `scan_cancel` mirror (its own words: "the window-close race must
+   not error in the loser branch"): §10 names no situation, and a
+   cancel arriving after the run answered converges the way
+   D-194/D-205's same-state re-sends do. A typed refusal would error
+   the stale-click race the twin explicitly protects.
+4) **The post-point knowledge — a KNOWLEDGE latch in the slot, never
+   a second cancellation channel.** `SyncCancelSlot` gains
+   `past_point: AtomicBool`, marked by `sync_run_with`
+   immediately after the ONE consultation falls through (the check
+   read not-cancelled — the run enters §9.4 phase 2's uncancellable
+   tail), and reset by `CancelLease`'s `clear_if_current` together
+   with the token: one lifecycle, because only the flag holder marks
+   (a losing start never reaches a check), and the flag holder's
+   lease always clears — the D-147 interleavings keep their
+   meanings (a loser's clear no-ops over the winner's latch, and a
+   stale flag cannot outlive its run's token). The pipeline NEVER
+   reads it and no branch of the pipeline consults it: it is pure
+   knowledge for the command's answer. The run row was rejected as
+   the source (no phase column exists; adding one is a schema
+   change, an owner decision far heavier than a latch), and
+   `backup_records`-presence was rejected (not every run writes
+   one, and it costs a database read on a command that owns none).
+5) **The command's order — latch first, one behavior, then read the
+   knowledge.** `token()` → `cancel()` unconditionally when a token
+   exists (the pinned T-284 path; the post-point latch is D-147's
+   documented harmless no-op — one behavior, three answers), THEN
+   read the latch. The certainty split, recorded honestly: `tooLate`
+   read after the latch is CERTAIN (the latch set ⟹ the consultation
+   completed ⟹ it read the pre-latch state — a latch before the
+   consultation would have stopped the run and left the latch
+   unset); `cancelled` is ADVISORY — the round-1 review widened the
+   windows beyond the nanosecond consultation-in-flight one: a
+   pre-check stop (the D-25 gate's `NeedsConfirmation`, an
+   availability-checkpoint or phase-1 `Err`) ends the run before the
+   consultation and the latch is never honoured (the confirmed
+   re-call is a full new run with a new token), and a run boundary
+   between the command's slot read and its knowledge read can leave
+   the answer describing a run other than the one latched. The DTO's
+   doc states all of them: the run's OWN answer — the `aborted`
+   summary D-138's law defines — is the authoritative outcome; this
+   answer names the state the command acted on. (Closing the windows
+   structurally would require serializing the latch with the
+   consultation — a restructuring of the landed D-138/D-147
+   mechanism this card is explicitly forbidden from making: the
+   pinned path is the plain latch. The card's own wording — "до
+   окончания фазы 2" — reads the END of phase 2 as the point; the
+   effective point is the single consultation D-138 placed before
+   the backups, so a cancel arriving DURING the copies already
+   answers `tooLate`: the consultation has passed, and no code will
+   perform the stop a `cancelled` would name. §9.4's sentence is
+   satisfied a fortiori; recorded here so a later reader does not
+   re-open the point.)
+6) **No SYS-005 gate, no database access at all.** The command IS
+   the escape hatch for a running sync — SYS-005's list is the
+   project-CHANGING commands, and a cancel mutates nothing. The slot
+   is the only state read (managed in every mode, D-147; recovery
+   mode answers `nothingToCancel` — the honest shape there, the slot
+   is empty by construction). The missing-slot wiring bug answers
+   the `scan_slot_missing` honest fallback shape
+   (`SyncCancelSlotMissing`, the D-037 fallback — a diagnostic
+   naming the state, not a panic, not a silent Ok).
+7) **Registration makes it command #44.** `collect_commands!` gains
+   one line (`sync_cancel::sync_cancel::<tauri::Wry>`, beside
+   `commands::sync_run` — the path-prefix order), `src/bindings.ts`
+   regenerates through the export pin (`syncCancel` over the
+   `SyncCancelOutcome` DTO), the mock twin `syncCancel` models the
+   `nothingToCancel` arm ONLY — the mock `syncRun` stand-in is
+   synchronous, so no live-run window exists for a latch to land in
+   (the documented stand-in limit, recorded beside the mock's other
+   sync limits: the `cancelled`/`tooLate` arms and the
+   `E_SYNC_RUNNING` gate are not modelled), `mode.spec` pins the
+   44-name surface, `ARCHITECTURE.md`'s module table and
+   "forty-four" count sentence follow, `manual-smoke.md`'s
+   registered-command list names it, spec §7.10's command-notes
+   paragraph gains the `sync_cancel` sentence, and the stale
+   future-tense comments that name the command (`commands.rs`'s
+   `CancelToken`/`SyncCancelSlot` docs and the two
+   `#[allow(dead_code)]` markers on `cancel`/`token`, `ipc_tests.rs`'s
+   three, `lib.rs`'s one, `ARCHITECTURE.md`'s "for the future
+   `sync_cancel`") are made true. `logging.rs` gains
+   `sync_cancel_failed` (the `sync_run_failed` family shape).
+
+Tests (`ipc_tests.rs`'s sync section, BDD red first — the compile
+failure over the un-registered command IS the red state): the DoD
+(the gated-database park inside phase 0 — the flag is observable
+before the run parks on the one connection, so the rendezvous is
+deterministic, the parked-availability-pass shape: invoke
+`sync_cancel` over the real IPC path while the run is live and
+before the check → the answer `cancelled`, the HELD token latched —
+the no-second-path identity pin, only the slot's token can latch it
+— plus the `shares_latch` probe while parked; released, the run
+answers the `aborted` summary: the target bytes untouched, no
+backup, the stamps `None` (OUT-020), the row `aborted` with the
+empty `error_code` and the class-only line, the phase-1 verdict
+staying, the slot cleared, the census exactly one, the flag freed,
+and NO `success` row — MAIN-027's derivation source has nothing to
+move to); the post-point arm (the parked-write seam, D-147's shape:
+the command answers `tooLate` while the run parks mid-phase-3, the
+held token IS latched — the harmless no-op — and the released run
+finishes `success`, census 0, the project stamped); the no-live-run
+arm (a fresh app: `nothingToCancel`, no run rows, the idempotent
+re-send); the inter-run knowledge reset (a completed past-point run
+followed by a second run parked before ITS check: the second
+cancel answers `cancelled` — a stale `tooLate` would fail — and the
+second run aborts at its own check); the slot-missing arm (the
+typed `SyncCancelSlotMissing` refusal); the wire-tag pin (each
+variant serializes to its `{"outcome": …}` literal); the
+registration census (the `sync_run` pin's shape). The mock twin's
+`commands.spec.ts` battery mirrors the modelled arm and its
+idempotence; `mode.spec`'s surface pin moves to 44. Mutation
+groups, red-then-green: M1 the command bypasses the slot's token
+(a fresh token latched instead) → the DoD's held-token pin, the
+post-point latch pin and the reset test red; M2 the knowledge mark
+dropped → the post-point arm red (`tooLate` collapses to
+`cancelled`); M3 the mark hoisted to the PRE-TAKE `publish` → the
+DoD and the reset test red (`cancelled` collapses to `tooLate`);
+M4 the lease's flag reset dropped → the inter-run reset test red;
+M5 the no-live-run arm answers `cancelled` → the no-run test red;
+M6 the registration dropped → the census pin red and the export pin
+red (which regenerated the bindings without the command — the
+D-034 mechanic); M7 the answer arms inverted (`tooLate` ↔
+`cancelled`) → the DoD, the post-point and the reset tests red;
+M8, the round-1 P2-1 group, the mark moved AFTER phase 2 (into the
+success path past `sync_phase2::run_with_abort_clock`) → the
+during-the-backups test red (a cancel parked inside phase 2 would
+read the mark unset and answer `cancelled`); TM1 the mock twin
+answers `cancelled` → the mock spec red. The M3
+boundary, recorded honestly: the NARROWER hoist — into
+`publish_owned` (after the flag take, before the check) — is NOT
+observable through the existing seams: no injectable park exists
+between the flag take and the consultation (the gated database
+parks phase 0's snapshot read, the write seam parks phase 3), so a
+command landing in that window cannot be driven deterministically
+— the same posture D-147 recorded for the check point itself; the
+pre-take hoist is the discriminating mutation this battery pins.
+
+**Round-1 review addendum (same task, 2026-11-25; model
+`opencode-go/deepseek-v4.1-flash`, report
+`.opencode/reviews/t120-round1-report.md`: REQUEST CHANGES, 1×P2,
+3×P3 — all four taken in the first amend).** The round verified the
+pinned T-284 path honoured exactly (one `token()` read, one
+unconditional `cancel()`, one knowledge read; the consultation
+still consulted once), the battery deterministic (the gate and the
+flag rendezvous are provable meetings, not timing lotteries), all
+four test-audit checks answered explicitly, and the reset invariant
+held for the D-147 interleavings. The findings and dispositions:
+
+- _P2-1 (the mark's LOWER bound was unpinned — a mark moved into or
+  after phase 2 passed the whole battery)._ TAKEN as the new
+  `sync_cancel_during_the_backups_answers_too_late` (the parked COPY
+  seam, the phase-2 twin of the parked write): a run parked inside
+  phase 2, the command answers `tooLate` — the consultation passed
+  before the phase began, and no code will perform the stop a
+  `cancelled` would name — the latch still lands (the harmless
+  no-op), and the released run finishes `success` with its copy and
+  stamp. The mark is now boxed from both sides: the hoist reddens
+  the DoD test (M3), the drop-after-phase-2 reddens this one
+  (M8, run red-then-reverted — the mutation paragraph above).
+- _P3-1 (the `cancelled` advisory doc named only the nanosecond
+  consultation window; two other windows also produce a false
+  `cancelled`)._ TAKEN as doc widenings (the DTO's `Cancelled` doc
+  and point 5 here): the pre-check stops — the D-25 gate's
+  `NeedsConfirmation`, an availability-checkpoint or phase-1 `Err` —
+  end the run before the consultation (the latch is never honoured;
+  the confirmed re-call is a full new run), and a run boundary
+  between the command's slot read and its knowledge read can leave
+  the answer describing a run other than the one latched. The
+  reviewer's optional lock-consistency refactor (reading the token
+  and the knowledge under one slot lock) is DECLINED, recorded: the
+  pinned path names `token()`; a combined read would be a second
+  surface on the slot, and the widened docs carry the honesty with
+  the run's own answer declared authoritative.
+- _P3-2 (D-210 point 6's recovery-mode claim had no test)._ TAKEN as
+  the new `sync_cancel_answers_nothing_to_cancel_in_recovery_mode`
+  (no `Db` managed at all): the invoke SUCCEEDS with
+  `nothingToCancel` — the "no database access" claim is structural
+  now, not by inspection.
+- _P3-3 (D-210 named `past_point_of_no_return` where the code says
+  `past_point`; the knowledge-read doc attributed the certainty to
+  the ordering pair)._ TAKEN both halves: the entry's field name
+  aligned with the code, and `is_past_point_of_no_return`'s doc now
+  names the mark's PLACEMENT as the certainty's source (stored only
+  on the fall-through path — a `true` read after a latch proves the
+  consultation read the pre-latch value), the Acquire/Release pair
+  reduced to the visibility argument.
+
+Two record-only notes from the round's Questions, folded here: the
+card's "до окончания фазы 2" wording vs D-138's landed consultation
+point (point 5's parenthetical — a cancel during the copies already
+answers `tooLate`, §9.4 satisfied a fortiori, recorded so a later
+reader does not re-open it), and the pre-existing D-147 publication
+window (a losing start's pre-take `publish` can leave the slot
+briefly empty over a live winner — a `sync_cancel` in that window
+answers `nothingToCancel` and the cancel is lost; out of scope by
+the brief, the command merely surfaces it — follow-up material for
+the orchestrator). The reviewer's theoretical drop-glue interleave
+(a new run completing phase 0 between the guard's and the lease's
+drops, leaving a stale mark) could not be constructed in the suite
+and was not raised; if the owner ever wants it closed by
+construction, resetting the mark in `publish_owned` is the
+recorded candidate — not taken (unreachable defensive code).
+
+**Round-2 review addendum (same task, 2026-11-26; model
+`opencode-go/hy4-flash-free`, report
+`.opencode/reviews/t120-round2-report.md`: APPROVE — 0 findings
+(0×P0/P1/P2/P3), the review phase closes with no second amend).**
+The round verified every round-1 fix in place and DISCRIMINATING
+(`git diff c2da407 2c6c33a` isolating exactly the four: the
+during-the-backups park with its `tooLate`/latch/`success` asserts —
+it independently re-derived that moving the mark past phase 2 flips
+the parked assertion to `cancelled`; the three-window advisory doc;
+the no-`Db` recovery-mode invoke; the field name and the
+placement-not-atomics certainty doc), confirmed the single
+cancellation channel (`is_cancelled()` consulted once at the check,
+the mark knowledge-only), every park a bounded rendezvous, the
+aborted-summary/census/slot-lifecycle/`shares_latch` conformance to
+D-138/D-147, and the D-210-vs-code audit — then answered the
+test-audit four explicitly (all pass; the amend adds tests and docs
+only). Its record-only notes: the not-run suites (the read-only
+rule, the export pin's regeneration), the card-wording and
+publication-window notes already recorded here, the unconstructible
+drop-glue/narrow-hoist shapes (both would restructure landed
+D-147/D-138 behavior the brief forbids), and one NOT-a-finding
+judgement: `lib.rs`'s compressed module comment ("advisory, the run
+will stop at its check") follows the normal-case-sentence-plus-
+ADVISORY-qualifier reading while the DTO doc carries the full
+honesty — judged consistent with round 1's accepted widening. No
+tree change from this round; the one commit stands as amended.

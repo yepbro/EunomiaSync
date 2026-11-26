@@ -101,6 +101,7 @@ src-tauri/
   src/scan.rs              # scan_start/scan_cancel/scan_commit commands, scan://progress (working)
   src/session_paths.rs     # SEC-003 session allowlist + UI path check (working)
   src/single_instance.rs   # Single-instance handoff: restore + focus (SYS-006) (working)
+  src/sync_cancel.rs       # sync_cancel command: the slot's token latch + three-state answer (working)
   src/sync_phase0.rs       # Sync phase 0: flag, run record, built content (working)
   src/sync_phase1.rs       # Sync phase 1 preflight: ready/unchanged/skipped (working)
   src/sync_phase2.rs       # Sync phase 2: §7.6 backups + records (working)
@@ -170,7 +171,7 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is forty-three commands — the §7.10 names that
+   The registered set is forty-four commands — the §7.10 names that
    are implemented so far, matching the `mode.spec` surface list. It comprises the
    recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
@@ -313,8 +314,11 @@ Rust commands are registered through `tauri-specta`:
    `NeedsConfirmation` with the project ids, the UI's confirm
    re-call a full new run), the one cancel check point before phase 2
    (the live run's token is published through the managed
-   `SyncCancelSlot` (T-258, D-147) for the future `sync_cancel`
-   command; after phase 2 no stop exists), phases 2/3/4, the
+   `SyncCancelSlot` (T-258, D-147) for the `sync_cancel` command
+   (T-120, D-210 — `src-tauri/src/sync_cancel.rs`: latches that very
+   token and answers `cancelled`/`tooLate`/`nothingToCancel` over the
+   slot's point-of-no-return knowledge latch);
+   after phase 2 no stop exists), phases 2/3/4, the
    never-fatal after-sync refresh and finish reports, and the summary
    read back from the committed rows — emitting the §7.10
    `sync://progress` event throughout (T-119, SYS-003, D-202): the

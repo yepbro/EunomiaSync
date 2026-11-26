@@ -49,7 +49,7 @@ import type {
   SettingItem,
   ScanSkipWire,
 } from '../contract'
-import type { SyncRunOutcome_Serialize } from '../../bindings'
+import type { SyncRunOutcome_Serialize, SyncCancelOutcome } from '../../bindings'
 import { version as appVersion } from '../../../package.json'
 import { defaultLabel, pathKeyOf } from '../fixtures/domain'
 import { ACTION_MEMBERS, PALETTE } from '../fixtures/generator'
@@ -2636,6 +2636,21 @@ export const mockCommands: IpcCommands = {
         projects,
       },
     }
+  },
+
+  /**
+   * `sync_cancel` (§7.10, §9.4 phase 2 step 3; T-120): the mock twin
+   * of the live-run latch — with the documented limit that the mock
+   * `syncRun` stand-in is SYNCHRONOUS, so no live-run window exists
+   * and the slot this command would read is always empty: every call
+   * answers `nothingToCancel` and converges on the re-send (the
+   * stale-click race the real backend's arm protects). The `cancelled`
+   * and `tooLate` arms need a live run — the mock models neither,
+   * exactly like the `E_SYNC_RUNNING` gate and the D-25 confirmation
+   * the `syncRun` stand-in already documents as not modelled.
+   */
+  async syncCancel(): Promise<SyncCancelOutcome> {
+    return { outcome: 'nothingToCancel' }
   },
 
   // -------------------------------------------------------------------------

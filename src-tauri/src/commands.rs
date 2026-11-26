@@ -814,8 +814,8 @@ pub(crate) struct SyncRunProjectEntry {
 ///
 /// The token the command drives the pipeline with is PUBLISHED for
 /// the run's lifetime through the managed [`SyncCancelSlot`] (T-258,
-/// D-138's recorded follow-up landed), so the future `sync_cancel`
-/// command reaches this same latch; the check point and the abort
+/// D-138's recorded follow-up landed), so the `sync_cancel` command
+/// (T-120) reaches this same latch; the check point and the abort
 /// shape it triggers land here, tested through [`sync_run_with`].
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CancelToken {
@@ -829,8 +829,8 @@ impl CancelToken {
     }
 
     /// Latches the cancel request (Release: the pipeline's check must
-    /// not read it early).
-    #[allow(dead_code)] // consumed by the future sync_cancel command's task; tested today
+    /// not read it early). The `sync_cancel` command's act (T-120),
+    /// over the clone the slot publishes.
     pub(crate) fn cancel(&self) {
         self.cancelled
             .store(true, std::sync::atomic::Ordering::Release);
@@ -860,9 +860,9 @@ impl CancelToken {
 /// The managed slot publishing the LIVE run's cancel token (D-138's
 /// recorded follow-up, landed here — T-258): [`sync_run_with`]
 /// publishes the token it drives the pipeline with at the run's start
-/// and clears it at the run's end, so the future `sync_cancel`
-/// command (§7.10, T-120) reaches the ONE cooperative cancel point
-/// through the same latched token the pipeline consults (§9.4 phase 2
+/// and clears it at the run's end, so the `sync_cancel` command
+/// (§7.10, T-120) reaches the ONE cooperative cancel point through
+/// the same latched token the pipeline consults (§9.4 phase 2
 /// step 3's point of no return) — no second cancel mechanism exists
 /// or is needed: `token().cancel()` IS the cancel, and its semantics
 /// are D-138's law unchanged (a latch before the check point stops
@@ -898,13 +898,29 @@ impl CancelToken {
 ///
 /// Managed by `setup` in every mode (recovery included) beside
 /// [`sync_running::SyncRunning`], for the same reason the flag is:
-/// the future `sync_cancel` must FIND the state in every mode — in
-/// recovery mode it simply stays empty (a sync refuses at phase 0).
+/// the `sync_cancel` command (T-120) must FIND the state in every
+/// mode — in recovery mode it simply stays empty (a sync refuses at
+/// phase 0).
 #[derive(Debug, Default)]
 pub(crate) struct SyncCancelSlot {
     /// `std::sync::Mutex` — the guard never crosses an await point
     /// (each method body is one lock); `None` means no run is live.
     token: std::sync::Mutex<Option<CancelToken>>,
+    /// The point-of-no-return KNOWLEDGE (T-120, D-210): `true` from
+    /// the moment the live run's ONE consultation fell through (the
+    /// check read not-cancelled — the run enters §9.4 phase 2's
+    /// uncancellable tail) until the lease clears the slot. An
+    /// `AtomicBool` beside the token, not inside the mutex: the
+    /// pipeline marks it once, the command reads it once, and
+    /// neither takes the other's lock. KNOWLEDGE ONLY — the pipeline
+    /// never reads it, no pipeline branch consults it, and it latches
+    /// nothing: the single cancellation channel stays the token
+    /// (D-138's law, the pinned T-284 path). Reset together with the
+    /// token by `clear_if_current`, so the flag is always a fact
+    /// about the run whose token is published (only the flag holder
+    /// marks — a losing start never reaches a consultation — and the
+    /// flag holder's lease always clears).
+    past_point: std::sync::atomic::AtomicBool,
 }
 
 impl SyncCancelSlot {
@@ -948,10 +964,9 @@ impl SyncCancelSlot {
             .expect("the cancel slot must not be poisoned") = Some(token.clone());
     }
 
-    /// The live run's token, if one is published — the future
-    /// `sync_cancel` command's (T-120) read; cancelling the clone is
-    /// cancelling the run's (one `Arc` latches both spellings).
-    #[allow(dead_code)] // consumed by the future sync_cancel command's task; tested today
+    /// The live run's token, if one is published — the `sync_cancel`
+    /// command's (T-120) read; cancelling the clone is cancelling the
+    /// run's (one `Arc` latches both spellings).
     pub(crate) fn token(&self) -> Option<CancelToken> {
         self.token
             .lock()
@@ -959,9 +974,40 @@ impl SyncCancelSlot {
             .clone()
     }
 
+    /// The pipeline's single knowledge mark (T-120, D-210): called
+    /// ONCE per run, by [`sync_run_with`] immediately after the ONE
+    /// consultation falls through — the check read not-cancelled, so
+    /// the run enters §9.4 phase 2's uncancellable tail and a cancel
+    /// latched from here on is the no-op the spec defines. Only the
+    /// flag holder reaches the call site, so exactly one run marks;
+    /// the lease's `clear_if_current` resets the flag with the token
+    /// when that run answers.
+    pub(crate) fn mark_past_point_of_no_return(&self) {
+        self.past_point
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The knowledge read (T-120): whether the live run — the run
+    /// whose token the slot publishes — has passed §9.4 phase 2
+    /// step 3's point of no return. `true` is read only by the
+    /// `sync_cancel` command, after it latched the token. The
+    /// CERTAINTY of the too-late verdict comes from the mark's
+    /// PLACEMENT, not the atomics: the mark is stored only on the
+    /// consultation's fall-through path, so a `true` read after a
+    /// latch proves the consultation completed and read the
+    /// pre-latch value (a latch before the consultation would have
+    /// stopped the run and left the mark unset) — the Acquire/
+    /// Release pair only makes that write visible in time.
+    pub(crate) fn is_past_point_of_no_return(&self) -> bool {
+        self.past_point.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Clears the slot only while it still holds exactly `token`'s
     /// latch — a lease that published nothing (the slot was occupied)
     /// clears nothing, so no run's exit unpublishes another's token.
+    /// The knowledge flag resets with the token (one lifecycle, the
+    /// field's own doc): the next run starts with the point of no
+    /// return unmarked.
     fn clear_if_current(&self, token: &CancelToken) {
         let mut slot = self
             .token
@@ -970,6 +1016,8 @@ impl SyncCancelSlot {
         let current = slot.as_ref();
         if current.is_some_and(|current| Arc::ptr_eq(&current.cancelled, &token.cancelled)) {
             *slot = None;
+            self.past_point
+                .store(false, std::sync::atomic::Ordering::Release);
         }
     }
 }
@@ -1353,7 +1401,7 @@ pub(crate) async fn sync_run_with<R: Runtime>(
     let data_dir = data_root(&app)?;
 
     // Step 0 — publish the cancel token (T-258, D-138's recorded
-    // follow-up): the managed slot the future `sync_cancel` command
+    // follow-up): the managed slot the `sync_cancel` command
     // reads. BEFORE the flag take (the missed-cancel window closes:
     // phase 0's snapshot build takes real time, and a cancel arriving
     // over it must find the latch), set-if-empty (a refused second
@@ -1511,6 +1559,17 @@ pub(crate) async fn sync_run_with<R: Runtime>(
         let summary = summary_of(&app, &run_id).await?;
         return Ok(SyncRunOutcome::Completed { summary });
     }
+
+    // The point of no return is PASSED (§9.4 phase 2 step 3): the
+    // consultation above has read the token, and from here to the
+    // answer no stop exists. The KNOWLEDGE mark (T-120, D-210): the
+    // one write the `sync_cancel` command's answer reads — placed
+    // immediately after the consultation, so the mark answers "this
+    // run's cancel window closed". Never a second consultation, never
+    // a gate the pipeline reads: the token stays the single
+    // cancellation channel. Only the flag holder reaches here, and
+    // this run's lease resets the flag with the token at the exit.
+    app.state::<SyncCancelSlot>().mark_past_point_of_no_return();
 
     // The backups boundary (T-119): phase 1's verdicts are decided
     // rows, so k opens at the decided count. Emitted after the gate

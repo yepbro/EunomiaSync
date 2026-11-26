@@ -2171,6 +2171,24 @@ describe('syncRun (the mock stand-in, T-118/D-144)', () => {
   })
 })
 
+describe('syncCancel (the mock stand-in, T-120)', () => {
+  it('answers nothing to cancel — the mock run is synchronous', async () => {
+    // The stand-in's documented limit, pinned: the mock `syncRun` has
+    // no live-run window (it is synchronous), so the slot this
+    // command would read is always empty — every call converges on
+    // `nothingToCancel`, the arm the real backend gives the
+    // stale-click and window-close races (the `scanCancel` twin's
+    // idempotence). Nothing was latched, nothing written: the mock
+    // store is unchanged.
+    const before = structuredClone(mockState().projects)
+    const outcome = await commands.syncCancel()
+    expect(outcome).toEqual({ outcome: 'nothingToCancel' })
+    // Idempotent: the re-send converges.
+    await expect(commands.syncCancel()).resolves.toEqual({ outcome: 'nothingToCancel' })
+    expect(mockState().projects).toEqual(before)
+  })
+})
+
 describe('scanStart / scanCancel', () => {
   /** The fixture world's scan root: every project lives under it. */
   const ROOT = '/home/dev/src'

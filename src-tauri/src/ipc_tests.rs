@@ -10294,7 +10294,8 @@ fn sync_watch_app() -> (
     let app = mock_builder()
         .invoke_handler(tauri::generate_handler![
             crate::commands::sync_run,
-            crate::commands::projects_list
+            crate::commands::projects_list,
+            crate::sync_cancel::sync_cancel
         ])
         .build(mock_context(noop_assets()))
         .expect("failed to build mock app");
@@ -10468,7 +10469,7 @@ fn sync_all_runs(app: &tauri::App<tauri::test::MockRuntime>) -> Vec<(String, Str
 }
 
 /// The live run's published cancel token through the managed slot —
-/// the EXACT read the future `sync_cancel` command (T-120) will make;
+/// the EXACT read the `sync_cancel` command (T-120) makes;
 /// cancelling the returned clone is cancelling the run's latch (one
 /// `Arc`).
 fn published_cancel_token(
@@ -10589,6 +10590,76 @@ fn run_sync_with(
         cancel,
         seams,
     ))
+}
+
+/// Invokes `sync_cancel` over the real IPC envelope, deserializing
+/// the answer into the typed outcome; errors come back as the
+/// serialized `AppError` JSON.
+fn invoke_sync_cancel(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+) -> Result<crate::sync_cancel::SyncCancelOutcome, serde_json::Value> {
+    match tauri::test::get_ipc_response(
+        webview,
+        invoke_request("sync_cancel", serde_json::json!({})),
+    ) {
+        Ok(payload) => Ok(payload
+            .deserialize::<crate::sync_cancel::SyncCancelOutcome>()
+            .expect("the success payload must deserialize into the outcome DTO")),
+        Err(error) => Err(error),
+    }
+}
+
+/// Takes the one database connection and parks inside its own
+/// `Db::run` transaction until released (the availability suite's
+/// gate shape): the deterministic park for a run BEFORE its cancel
+/// check — a spawned `sync_run_with` parks inside phase 0's snapshot
+/// read on the same connection, and the sync flag is observable
+/// before the park (phase 0 takes it first), so the rendezvous needs
+/// no polling of anything the run has not yet done.
+struct DatabaseGate {
+    release: std::sync::mpsc::Sender<()>,
+    parked: tauri::async_runtime::JoinHandle<Result<(), crate::errors::AppError>>,
+}
+
+impl DatabaseGate {
+    /// Holds the connection open; returns once the gate's transaction
+    /// is genuinely in flight.
+    fn hold(app: &tauri::App<tauri::test::MockRuntime>) -> Self {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let database = sync_database_of(app);
+        let parked = tauri::async_runtime::spawn(async move {
+            database
+                .run(move |_transaction| {
+                    held_tx
+                        .send(())
+                        .expect("the test waits for the gate to be held");
+                    release_rx
+                        .recv()
+                        .expect("the test releases the gate before teardown");
+                    Ok(())
+                })
+                .await
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the gate must reach its transaction");
+        Self {
+            release: release_tx,
+            parked,
+        }
+    }
+
+    /// Releases the gate and joins its task: the transaction commits,
+    /// the connection frees, and the parked run proceeds.
+    fn release(self) {
+        self.release
+            .send(())
+            .expect("the gate receiver waits for this release");
+        tauri::async_runtime::block_on(self.parked)
+            .expect("the gate task must join")
+            .expect("the gated operation must commit");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -11153,7 +11224,7 @@ fn a_second_sync_run_while_one_runs_is_refused_with_e_sync_running() {
 fn the_published_token_reaches_the_live_run_and_no_other() {
     // T-258's publication lifecycle, the whole table in one run: the
     // slot is empty before and between runs; the live run's token is
-    // reachable through it (the exact read the future `sync_cancel`
+    // reachable through it (the exact read the `sync_cancel` command
     // makes); a refused second start neither evicts the live run's
     // token (set-if-empty) nor clears it on its exit
     // (clear-if-current — the identity discriminator: after the
@@ -11235,10 +11306,11 @@ fn the_published_token_reaches_the_live_run_and_no_other() {
         "the refused start left the live run's token in place"
     );
 
-    // The future `sync_cancel`'s use, after the point of no return
-    // (§9.4 phase 2 step 3): the latch lands on the live run's own
-    // token — and changes nothing, because the one check point
-    // already passed. Releasing the park lets the run finish.
+    // The `sync_cancel` command's own use of the raw latch, after the
+    // point of no return (§9.4 phase 2 step 3): the latch lands on the
+    // live run's own token — and changes nothing, because the one
+    // check point already passed. Releasing the park lets the run
+    // finish.
     published.cancel();
     release_tx
         .send(())
@@ -12040,6 +12112,624 @@ fn sync_run_answers_honestly_without_a_database() {
     );
     drop(app);
     drop(temp);
+}
+
+// ---------------------------------------------------------------------------
+// `sync_cancel` (T-120, §7.10 Sync module, SYS-003, §9.4 phase 2 step 3,
+// D-210): the command that latches the live run's published token
+// through the managed slot — the pinned T-284 path — and answers over
+// the point-of-no-return knowledge the slot carries beside the token.
+// ---------------------------------------------------------------------------
+
+/// Waits until the sync flag goes up (the gated-run rendezvous):
+/// phase 0 takes the flag BEFORE its first database transaction, so
+/// "flag up + gate held" means the run is live and parked before its
+/// cancel check — the bounded condition-wait over a shared atomic the
+/// availability suite uses (never wall-time sleeps).
+fn wait_for_sync_flag_up(app: &tauri::App<tauri::test::MockRuntime>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !app.state::<crate::sync_running::SyncRunning>().is_running() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the spawned run must take the sync flag (it parks on the gated database)"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn sync_cancel_stops_the_live_run_before_the_backups() {
+    // The card's DoD: "отмена в preflight не меняет файлы и время
+    // синхронизации" — a cancel that lands while the run is live and
+    // BEFORE its check point stops it the D-138 law's way, and not
+    // one observable of a successful sync moves. The park is the
+    // gated database: the run parks inside phase 0's snapshot read
+    // (the flag is already up — phase 0 takes it first), the command
+    // answers over the real IPC path (it owns no database access), and
+    // the release lets the run walk to its ONE consultation, which
+    // sees the latched token and stops before the backups. The
+    // identity legs: the slot's published token shares the latch with
+    // the token the test drove the run with (the D-147 probe), and
+    // after the command answers THAT token is latched — only the
+    // slot's token can do this, so the command reached the pipeline's
+    // own latch through the slot (no second path, pinned).
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        16,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let target = repo.join("AGENTS.md");
+    std::fs::write(&target, format!("Be brief.\n\n{SYNC_MARKER}\n"))
+        .expect("writing the matching fixture must work");
+
+    // The gate: the one database connection, parked in its own
+    // transaction — the run's phase 0 will queue on it.
+    let gate = DatabaseGate::hold(&app);
+
+    // The run: driven through the body seam with the test's token
+    // (the identity probe needs the latch it consults).
+    let cancel = crate::commands::CancelToken::new();
+    let running_token = cancel.clone();
+    let handle = app.app_handle().clone();
+    let running = tauri::async_runtime::spawn(async move {
+        crate::commands::sync_run_with(
+            handle,
+            None,
+            running_token,
+            crate::commands::SyncRunSeams::production(),
+        )
+        .await
+    });
+    wait_for_sync_flag_up(&app);
+
+    // The identity leg while parked: the slot holds the run's latch.
+    let published = published_cancel_token(&app).expect("the live run's token is published");
+    assert!(
+        published.shares_latch(&cancel),
+        "the slot's token shares the latch the pipeline consults"
+    );
+
+    // Act: the command, over the real IPC path. The run is live and
+    // has not passed the point of no return — the answer is the
+    // advisory `cancelled`, and the latch the command set is the
+    // run's own (only the slot's token can latch it).
+    let webview = main_webview(&app);
+    let answer =
+        invoke_sync_cancel(&webview).expect("a cancel is an outcome, not an error (D-138)");
+    assert_eq!(
+        answer,
+        crate::sync_cancel::SyncCancelOutcome::Cancelled,
+        "the run had not passed the point of no return"
+    );
+    assert!(
+        cancel.is_cancelled(),
+        "the command latched the pipeline's own token through the slot — no second path"
+    );
+
+    // Release: phase 0 completes, the checkpoint runs, phase 1
+    // verdicts, the D-25 gate (empty list), then the ONE consultation
+    // sees the latch — the stop, before the backups.
+    gate.release();
+    let outcome = tauri::async_runtime::block_on(running)
+        .expect("the run must join")
+        .expect("the cancelled run is an outcome, not an error");
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the cancelled run answers its summary, got {outcome:?}");
+    };
+    assert_eq!(summary.verdict, "aborted");
+
+    // THE DoD: not one target byte moved, no backup, no stamp.
+    assert_eq!(
+        std::fs::read(&target).expect("the target must be readable"),
+        format!("Be brief.\n\n{SYNC_MARKER}\n").into_bytes(),
+        "not one target byte moved"
+    );
+    assert!(sync_backup_files(temp.path()).is_empty(), "no backup");
+    assert_eq!(
+        sync_project_stamps(&app, &project),
+        (None, None),
+        "OUT-020: a cancelled run stamps nothing"
+    );
+    // MAIN-027's derivation source — the `finished_at` of the last
+    // `success` run — has nothing to move to: the aborted row is the
+    // run table's only row.
+    assert_eq!(
+        sync_all_runs(&app),
+        vec![(summary.run_id.clone(), "aborted".to_owned())],
+        "MAIN-027's source: no success row exists for a cancelled run"
+    );
+    // The stop row: the empty `error_code` literal, the class-only
+    // line, phase 1's verdict staying (the D-131 tail shape).
+    let rows = sync_run_rows(&app, &summary.run_id);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.status.as_str())
+            .collect::<Vec<_>>(),
+        ["unchanged"],
+        "the verdicts phase 1 wrote stay"
+    );
+    let row = sync_run_row(&app, &summary.run_id);
+    assert_eq!(row.error_code.as_deref(), Some(""));
+    assert_eq!(
+        row.details.as_deref(),
+        Some("cancelled by the user before the backups"),
+        "the stop row's no-code literal and class-only line"
+    );
+    // The slot cleared with the answer, the census holds exactly one
+    // empty literal, and the flag freed (§9.4 phase 4 step 5's reset
+    // happens at the stop the same way).
+    assert!(
+        published_cancel_token(&app).is_none(),
+        "the cancel stop cleared the slot"
+    );
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        1,
+        "the cancel stop is one of the two \"\" spellings"
+    );
+    assert!(
+        !app.state::<crate::sync_running::SyncRunning>().is_running(),
+        "the flag freed with the stop"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn sync_cancel_after_the_point_of_no_return_answers_too_late() {
+    // §9.4 phase 2 step 3 ("After phase 2 succeeds, the run cannot be
+    // canceled"), through the COMMAND this time: the run is parked
+    // mid-phase-3 (the D-147 seam — past the check), the command
+    // latches the token anyway (the harmless no-op D-147 pinned over
+    // the raw token) and answers `tooLate` over the knowledge latch;
+    // the released run finishes `success` with its write stamped.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        17,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let target = repo.join("AGENTS.md");
+    std::fs::write(&target, b"old bytes").expect("the fixture must be writable");
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let seams = crate::commands::SyncRunSeams {
+        backup: crate::commands::SyncRunSeams::production().backup,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
+        write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
+            entered_tx
+                .send(target.to_path_buf())
+                .expect("the test must live to receive the entry signal");
+            release_rx
+                .lock()
+                .expect("the release lock must not be poisoned")
+                .recv()
+                .expect("the test must live to release the parked write");
+            crate::sync_phase3::production_write(target, contents)
+        }),
+    };
+    let cancel = crate::commands::CancelToken::new();
+    let running_token = cancel.clone();
+    let handle = app.app_handle().clone();
+    let running = tauri::async_runtime::spawn(async move {
+        crate::commands::sync_run_with(handle, None, running_token, seams).await
+    });
+    let _parked = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the pipeline must reach its write phase");
+
+    // Act: the command over the real IPC path — the knowledge latch
+    // says the run passed the point of no return.
+    let webview = main_webview(&app);
+    let answer = invoke_sync_cancel(&webview)
+        .expect("a declined cancel is an outcome, not an error (D-138)");
+    assert_eq!(
+        answer,
+        crate::sync_cancel::SyncCancelOutcome::TooLate,
+        "§9.4 phase 2 step 3: the run is past the point of no return"
+    );
+    // The latch landed anyway — the harmless no-op, on the run's own
+    // token (only the slot's token can latch the test's clone).
+    assert!(
+        cancel.is_cancelled(),
+        "the command still latched the pipeline's own token — the no-op §9.4 defines"
+    );
+
+    release_tx
+        .send(())
+        .expect("the parked write must be released");
+    let outcome = tauri::async_runtime::block_on(running)
+        .expect("the parked run must join")
+        .expect("a post-phase-2 cancel cannot fail the run");
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the too-late-cancelled run completes, got {outcome:?}");
+    };
+    assert_eq!(summary.verdict, "success", "the no-op, per §9.4");
+    assert_eq!(summary.projects_written, 1, "the write really happened");
+    assert!(
+        sync_project_stamps(&app, &project).0.is_some(),
+        "OUT-020: the finished run stamped the project"
+    );
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        0,
+        "a finished run carries NULL, never the empty literal"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn sync_cancel_during_the_backups_answers_too_late() {
+    // Round-1 P2-1 (the mark's LOWER bound): the cancel window closes
+    // BEFORE phase 2 begins — the consultation is the check point
+    // D-138 placed before the backups — so a cancel arriving while
+    // the copies run answers `tooLate`: the consultation already
+    // happened, and no code will ever perform the stop a `cancelled`
+    // answer would name (the card's "до окончания фазы 2" is served
+    // a fortiori — the effective point is the single consultation,
+    // and during the backups it has passed). The parked COPY seam
+    // (the phase-2 twin of the parked write) makes the
+    // during-phase-2 position deterministic, boxing the mark from
+    // both sides: a hoist to publication reddens the DoD test (M3),
+    // a drop to after phase 2 reddens THIS test (M8).
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        19,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let target = repo.join("AGENTS.md");
+    std::fs::write(&target, b"old bytes").expect("the fixture must be writable");
+    let production_backup = crate::commands::SyncRunSeams::production().backup;
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let seams = crate::commands::SyncRunSeams {
+        backup: std::sync::Arc::new(move |target: &eunomia_fs::backup::BackupTarget<'_>| {
+            entered_tx
+                .send(target.source.to_path_buf())
+                .expect("the test must live to receive the entry signal");
+            release_rx
+                .lock()
+                .expect("the release lock must not be poisoned")
+                .recv()
+                .expect("the test must live to release the parked copy");
+            production_backup(target)
+        }),
+        write: crate::commands::SyncRunSeams::production().write,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
+    };
+    let cancel = crate::commands::CancelToken::new();
+    let running_token = cancel.clone();
+    let handle = app.app_handle().clone();
+    let running = tauri::async_runtime::spawn(async move {
+        crate::commands::sync_run_with(handle, None, running_token, seams).await
+    });
+    let _parked = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the pipeline must reach its backups phase");
+
+    // Act: the command, over the real IPC path, while the run parks
+    // INSIDE phase 2 — the knowledge answers "the window closed"
+    // (the consultation passed before the phase began).
+    let webview = main_webview(&app);
+    let answer = invoke_sync_cancel(&webview)
+        .expect("a declined cancel is an outcome, not an error (D-138)");
+    assert_eq!(
+        answer,
+        crate::sync_cancel::SyncCancelOutcome::TooLate,
+        "the run's single consultation already passed — no stop exists"
+    );
+    // The latch still landed — the harmless no-op, on the run's own
+    // token (only the slot's token can latch the test's clone).
+    assert!(
+        cancel.is_cancelled(),
+        "the command still latched the pipeline's own token — the no-op §9.4 defines"
+    );
+
+    release_tx
+        .send(())
+        .expect("the parked copy must be released");
+    let outcome = tauri::async_runtime::block_on(running)
+        .expect("the parked run must join")
+        .expect("a during-phase-2 cancel cannot fail the run");
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the too-late-cancelled run completes, got {outcome:?}");
+    };
+    assert_eq!(summary.verdict, "success", "the run finishes on its own");
+    assert_eq!(summary.projects_written, 1, "the write really happened");
+    // The run's own aftermath landed: the copy exists, the stamp
+    // landed — a `cancelled` answer here would have been a lie the
+    // run's answer immediately contradicts.
+    assert_eq!(
+        sync_backup_files(temp.path()).len(),
+        1,
+        "the parked copy completed with the run"
+    );
+    assert!(
+        sync_project_stamps(&app, &project).0.is_some(),
+        "OUT-020: the finished run stamped the project"
+    );
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        0,
+        "a finished run carries NULL, never the empty literal"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn sync_cancel_with_no_live_run_answers_nothing_to_cancel() {
+    // The scan twin's converging no-op: no run is live (the slot is
+    // empty), so the stale-click / window-close race must not error —
+    // the answer names the state, and the re-send converges. Nothing
+    // is written: no run row exists.
+    let (temp, app) = sync_app();
+    let webview = main_webview(&app);
+    assert!(published_cancel_token(&app).is_none(), "no run is live");
+
+    let answer = invoke_sync_cancel(&webview).expect("the no-run arm is an outcome");
+    assert_eq!(
+        answer,
+        crate::sync_cancel::SyncCancelOutcome::NothingToCancel,
+        "the converging no-op (the scan_cancel mirror)"
+    );
+    // Idempotent: the re-send converges.
+    assert_eq!(
+        invoke_sync_cancel(&webview).expect("the re-send must answer"),
+        crate::sync_cancel::SyncCancelOutcome::NothingToCancel
+    );
+    assert_eq!(
+        sync_all_runs(&app),
+        Vec::<(String, String)>::new(),
+        "nothing was written — no run row exists"
+    );
+    assert!(
+        !app.state::<crate::sync_running::SyncRunning>().is_running(),
+        "the flag was never taken"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn sync_cancel_answers_nothing_to_cancel_in_recovery_mode() {
+    // Round-1 P3-2, pinning D-210 point 6's claim: the command owns
+    // NO database access, so recovery mode (no `Db` managed; the slot
+    // managed in every mode, D-147 — empty there by construction,
+    // a sync refusing at phase 0) answers `nothingToCancel`, NOT the
+    // `NoDatabase` refusal the database commands give. The claim is
+    // structural here, not by inspection: the app below manages no
+    // `Db` at all, and the invoke succeeds.
+    let temp = tempfile::tempdir().expect("failed to create a temp directory");
+    data_dirs::ensure_data_layout(temp.path())
+        .expect("creating the data-directory layout in a temp directory must work");
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::sync_cancel::sync_cancel])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(data_dirs::DataRoot(temp.path().to_path_buf()));
+    app.manage(crate::sync_running::SyncRunning::new());
+    app.manage(crate::commands::SyncCancelSlot::new());
+    let webview = main_webview(&app);
+
+    let answer = invoke_sync_cancel(&webview).expect("the recovery-mode arm is an outcome");
+    assert_eq!(
+        answer,
+        crate::sync_cancel::SyncCancelOutcome::NothingToCancel,
+        "no database, no live run — the honest converging answer, not NoDatabase"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_point_of_no_return_knowledge_resets_between_runs() {
+    // The knowledge latch's lifecycle: it resets with the lease when
+    // the run that marked it answers. Run 1 completes past the point
+    // (parked mid-phase-3, released); run 2 then parks BEFORE its own
+    // check (the gated database) — a cancel over run 2 must answer
+    // `cancelled`, not a stale `tooLate`, and run 2 stops at ITS
+    // check. The success row run 1 wrote is what MAIN-027's
+    // derivation keeps pointing at after run 2's abort.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        18,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let target = repo.join("AGENTS.md");
+    std::fs::write(&target, b"old bytes").expect("the fixture must be writable");
+
+    // Run 1: parked mid-phase-3 (past the point), released, completes.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let seams = crate::commands::SyncRunSeams {
+        backup: crate::commands::SyncRunSeams::production().backup,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
+        write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
+            entered_tx
+                .send(target.to_path_buf())
+                .expect("the test must live to receive the entry signal");
+            release_rx
+                .lock()
+                .expect("the release lock must not be poisoned")
+                .recv()
+                .expect("the test must live to release the parked write");
+            crate::sync_phase3::production_write(target, contents)
+        }),
+    };
+    let first_handle = app.app_handle().clone();
+    let first = tauri::async_runtime::spawn(async move {
+        crate::commands::sync_run_with(
+            first_handle,
+            None,
+            crate::commands::CancelToken::new(),
+            seams,
+        )
+        .await
+    });
+    let _parked = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("run 1 must reach its write phase");
+    release_tx
+        .send(())
+        .expect("run 1's parked write must be released");
+    let outcome = tauri::async_runtime::block_on(first)
+        .expect("run 1 must join")
+        .expect("run 1 must finish");
+    let crate::commands::SyncRunOutcome::Completed {
+        summary: first_summary,
+    } = outcome
+    else {
+        panic!("run 1 completes, got {outcome:?}");
+    };
+    assert_eq!(first_summary.verdict, "success", "run 1 passed the point");
+    assert!(
+        published_cancel_token(&app).is_none(),
+        "run 1's lease cleared the slot with its answer"
+    );
+
+    // Run 2: the gated database parks phase 0 BEFORE its own check.
+    let gate = DatabaseGate::hold(&app);
+    let second_handle = app.app_handle().clone();
+    let second = tauri::async_runtime::spawn(async move {
+        crate::commands::sync_run_with(
+            second_handle,
+            None,
+            crate::commands::CancelToken::new(),
+            crate::commands::SyncRunSeams::production(),
+        )
+        .await
+    });
+    wait_for_sync_flag_up(&app);
+
+    let webview = main_webview(&app);
+    let answer = invoke_sync_cancel(&webview).expect("the second cancel must answer");
+    assert_eq!(
+        answer,
+        crate::sync_cancel::SyncCancelOutcome::Cancelled,
+        "run 2 had not passed the point — the knowledge reset with run 1's lease"
+    );
+
+    gate.release();
+    let outcome = tauri::async_runtime::block_on(second)
+        .expect("run 2 must join")
+        .expect("the cancelled run is an outcome");
+    let crate::commands::SyncRunOutcome::Completed {
+        summary: second_summary,
+    } = outcome
+    else {
+        panic!("run 2 answers its summary, got {outcome:?}");
+    };
+    assert_eq!(
+        second_summary.verdict, "aborted",
+        "run 2 stops at ITS check (the command latched run 2's token)"
+    );
+    // MAIN-027's derivation source after both runs: exactly one
+    // success row — run 1's — and run 2's abort beside it.
+    assert_eq!(
+        sync_all_runs(&app),
+        vec![
+            (first_summary.run_id.clone(), "success".to_owned()),
+            (second_summary.run_id.clone(), "aborted".to_owned()),
+        ],
+        "MAIN-027's source: run 1's success row survives run 2's abort"
+    );
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        1,
+        "run 2's cancel stop is the one \"\" spelling; run 1 holds NULL"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn sync_cancel_answers_the_honest_fallback_when_the_slot_is_not_managed() {
+    // The D-037 honest fallback (the `scan_cancel` shape): the slot
+    // is managed by `setup` before anything that could fail, so its
+    // absence is an uninitialized-app bug — the typed refusal naming
+    // the state, not a panic and not a silent Ok that would hide the
+    // wiring gap.
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![crate::sync_cancel::sync_cancel])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(crate::sync_running::SyncRunning::new());
+    let webview = main_webview(&app);
+
+    let error = invoke_sync_cancel(&webview)
+        .expect_err("the missing slot must refuse honestly, not answer");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("SyncCancelSlotMissing"),
+        "the diagnostic names the missing managed state"
+    );
+    drop(app);
+}
+
+#[test]
+fn the_sync_cancel_outcome_tags_serialize_as_the_wire_spellings() {
+    // The three states on the wire, the `SyncPhaseWire` pin's shape:
+    // the generated TS union is literal-typed over these tags, so the
+    // spellings are the frontend's contract.
+    use crate::sync_cancel::SyncCancelOutcome;
+    for (variant, tag) in [
+        (SyncCancelOutcome::Cancelled, "cancelled"),
+        (SyncCancelOutcome::TooLate, "tooLate"),
+        (SyncCancelOutcome::NothingToCancel, "nothingToCancel"),
+    ] {
+        let wire = serde_json::to_value(&variant).expect("the variant must serialize");
+        assert_eq!(wire, serde_json::json!({ "outcome": tag }));
+        let back: SyncCancelOutcome =
+            serde_json::from_value(wire).expect("the wire spelling must round-trip into the DTO");
+        assert_eq!(back, variant);
+    }
+}
+
+#[test]
+fn the_sync_cancel_command_is_registered_with_the_specta_builder() {
+    // The §7.10 Sync-module name, registered exactly once — the
+    // `sync_run` pin's shape (the D-034 wiring-pin rationale: without
+    // this pin, dropping the registration would leave
+    // `export_bindings_are_up_to_date` green while it silently
+    // rewrote the committed bindings without the command).
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("sync_cancel::sync_cancel").count(),
+        1,
+        "lib.rs must register the `sync_cancel` command exactly once (§7.10, T-120)"
+    );
 }
 
 #[test]

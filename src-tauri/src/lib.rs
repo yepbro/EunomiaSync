@@ -141,6 +141,23 @@ pub(crate) mod sync_phase3;
 // stays with the caller's Phase0Outcome (its RAII drop is §9.4
 // phase 4 step 5's reset, D-123/T-118's to own).
 pub(crate) mod sync_phase4;
+
+// The Sync module's `sync_cancel` command (spec §7.10 Sync row,
+// SYS-003, §9.4 phase 2 step 3; T-120, D-210): the consumer of the
+// managed `SyncCancelSlot` D-147 published — the pinned path is
+// `token().cancel()`, latching the same `Arc` the pipeline consults
+// at its ONE check point, so no second cancellation channel exists.
+// The answer is a three-state outcome over the slot's
+// point-of-no-return knowledge latch (marked by `sync_run_with`
+// after the consultation falls through, reset by the lease with the
+// token): `cancelled` (advisory, the run will stop at its check),
+// `tooLate` (certain, the run is past the point §9.4 phase 2 step 3
+// names) and `nothingToCancel` (the converging no-op, the
+// `scan_cancel` mirror). No SYS-005 gate — the command IS the escape
+// hatch for a running sync — and no database access: the slot is the
+// only state read.
+pub(crate) mod sync_cancel;
+
 // The target-file watch service (spec §5.7, SYS-007…009, OUT-014,
 // §7.10's `state://file-changed` event; T-102): the debounced watch
 // over the target files of active, available projects, the SYS-008
@@ -295,7 +312,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // Projects module's `projects_reorder` (T-080), the
         // Projects module's `scan_start`/`scan_cancel`/`scan_commit`
         // (T-076/T-077), the Sync module's `sync_run` (T-118,
-        // D-138) and the Backups module's `backups_list` (T-125,
+        // D-138), the Sync module's `sync_cancel` (T-120, D-210)
+        // and the Backups module's `backups_list` (T-125,
         // D-193 — the project-settings "Backups" tab's read). Every
         // later command task lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
@@ -331,6 +349,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::settings_get::<tauri::Wry>,
             commands::settings_set::<tauri::Wry>,
             commands::sync_run::<tauri::Wry>,
+            sync_cancel::sync_cancel::<tauri::Wry>,
             variants::variant_create::<tauri::Wry>,
             variants::variant_delete::<tauri::Wry>,
             variants::variant_restore::<tauri::Wry>,
@@ -528,14 +547,14 @@ pub fn run() {
             // (no database) and the flag simply stays down.
             app.manage(sync_running::SyncRunning::new());
 
-            // The live run's published cancel token (§7.10's future
+            // The live run's published cancel token (§7.10's
             // `sync_cancel`, §9.4's one cancel point; T-258, D-138's
             // recorded follow-up): `sync_run` publishes the token it
             // drives the pipeline with for the run's lifetime and
             // clears it on every exit (the RAII lease inside
             // `sync_run_with`). Managed beside the flag for the same
-            // reason — infallible, needed in every mode: the future
-            // cancel command must FIND the state, and in recovery
+            // reason — infallible, needed in every mode: the cancel
+            // command (T-120) must FIND the state, and in recovery
             // mode the slot simply stays empty (a sync refuses at
             // phase 0, so there is never a live run to cancel).
             app.manage(commands::SyncCancelSlot::new());

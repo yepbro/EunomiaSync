@@ -324,6 +324,7 @@ scenario-relevant backend commands (`project_add_manual`,
 `project_relink` (T-110),
 `project_update` (T-106),
 `scan_start`/`scan_cancel`/`scan_commit`, `sync_run`,
+`sync_cancel` (T-120),
 `settings_get`/`settings_set`, the library read `library_get`, the
 instruction lifecycle
 `instruction_create`/`instruction_update`/`instruction_hide`/
@@ -723,8 +724,9 @@ Source: spec §8 S7; §9.4; §7.5 OUT-006…020; ALG-031…033; D-24; §10
 
 Pending: "Run sync", the progress region, the summary modal and the
 per-column state icons — spec §16 M3/M5. (The backend `sync_run`, the
-phase modules and the `sync://progress` event (T-119) are registered;
-the panel is not.)
+phase modules, the `sync://progress` event (T-119) and `sync_cancel`
+(T-120) are registered; the panel — including any Cancel control that
+would call `sync_cancel` mid-run — is not.)
 
 **Prepare.** Four projects, each assigned an instruction of its own
 (shared instructions would couple their dirty states): (a) a healthy

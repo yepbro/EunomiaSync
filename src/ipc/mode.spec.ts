@@ -59,6 +59,7 @@ describe('the mock command surface', () => {
       'scanStart',
       'settingsGet',
       'settingsSet',
+      'syncCancel',
       'syncRun',
       'variantCreate',
       'variantDelete',
