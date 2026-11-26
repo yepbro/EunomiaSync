@@ -28779,3 +28779,160 @@ one-transaction discipline plus SEC-008 were re-swept clean.
 The round-2 notes are record-only (the "P3-4 corpse cleanup"
 phrase's opacity in ARCHITECTURE.md was declined by the reviewer
 as not worth a cycle).
+
+### D-224 — T-127: the §15.2 backup rows at run level — T-F1's failing copy through the command's own seam, T-F10's limit-of-three over five real runs, and T-F9's literal made direct — 2026-11-26
+
+Problem: the card ("[Backend] Write backup failure tests T-F1, T-F9,
+T-F10"; spec 15.2's Expected column is the oracle; 15.4's DoD 11/12
+row → "Integration, T-F1", DoD 16 → "T-F10") asks for the three rows
+a release conditioning release checklist leans on. Rule 2 inventory
+first — the layers that already exist: the fs crate's fault-injection
+suite pins the N-th copy failure itself (the partial bytes, the
+cleanup handshake, `eunomia-fs/tests/fault_injection.rs`); the
+phase-2 suite pins the abort contract's DB half over its own seam
+(`sync_phase2_tests.rs` — the envelope's BKP-005 field list, the
+`discarded` records, the row reset, the journal entry, the abort
+stamp); the store's retention suite pins the sweep's semantics over
+seeded records (`tests/backup_retention.rs`, including the five-sync
+acceptance as a seeded process); the ipc census pins the command's
+`E_BACKUP_FAILED` answer and the abort journal over a single-project
+run (`ipc_tests.rs` shape 4); and T-126's pipeline suite already has
+T-F9's whole Expected cell (`a_second_sync_with_no_changes_...`:
+verdict `success`, counters 0/3/0/0, `backup_bytes` per project, the
+bytes and mtimes, the stamps). What NO suite pins is the run-level
+sweep the spec's table actually describes: three REAL projects in the
+three schemes, the files on disk, the copies on disk, and the run row
+the panel would read back — T-F1's "None of the three files is
+changed" is nowhere asserted through the real command, and T-F10's
+"the last 3 copies remain" is nowhere produced by five real runs over
+the setting the production path reads.
+
+Solution: two new tests in `sync_pipeline_tests.rs` (the §15.1
+integration home — its harness, its doc table) plus one literal added
+to the existing T-F9 test.
+
+- **T-F1** (`a_backup_failure_of_the_second_of_three_files_...`): the
+  three-scheme world with all three targets holding old bytes; one
+  prepare run (a success, one pre-run copy per project — the
+  sweep's selectivity gets its own oracle); external edits that make
+  every target differ from both the build and its last copy (no dedup
+  claim, and files an unguarded phase 3 would overwrite); then the
+  run through `sync_run_with` with a `backup` seam that delegates to
+  production and refuses the SECOND of the three calls (ENOSPC 28,
+  the phase-2 suite's shape) — the seam records the path of the copy
+  the FIRST call creates, so the sweep's subject is observed directly
+  (that exact file is gone) and the failing project's identity is
+  asserted from the envelope's own params (`project` = "Project 2",
+  `path` = the second target's canonical path). Asserted: the
+  command answers the typed `E_BACKUP_FAILED` envelope with its OS
+  fact intact (DoD 12's
+  "backup failure blocks writing" is an `Err`, never a summary); all
+  three files keep the external bytes AND their modification times;
+  the created copy's file is deleted while every project's backups
+  stay exactly its pre-run copy (BKP-005's "copies created in this
+  run"); `last_attempt`
+  reads `aborted` with `E_BACKUP_FAILED`; the three project rows are
+  `not_started`; the prepare run's stamps and MAIN-027 overall time
+  are unmoved (OUT-020).
+- **T-F10** (`a_backup_limit_of_three_keeps_exactly_the_last_...`):
+  the same world shape with `backup.retention` stored as 3 through
+  the §6.5 settings writer (the same cell phase 4's transaction
+  reads); five real runs with changes (the initial bytes plus four
+  distinct external edits — distinct so BKP-010's dedup cannot blur
+  the count), each answering `written`×3/`success`; after the fourth
+  run the sweep has already pruned (BKP-003's "after the run
+  finishes" is every run's finish); after the fifth, every pair holds
+  exactly the newest three copies (the edits of rounds 2–4, oldest
+  first) and five records — the two oldest `pruned`, the three newest
+  `ok`, an `ok` row naming a file on disk and a `pruned` row's gone
+  (§6.4, D-122's never-lying mark).
+- **T-F9**: the existing test carried the whole Expected cell already
+  (cited above); the one gap was directness — "All projects
+  `unchanged`" was pinned only through the counter chips. The
+  literal `statuses(&second) == ["unchanged"; 3]` is now asserted in
+  place (the counters and the per-row literals remain two readings of
+  one fact; the literal is the spec's own spelling).
+
+Module docs updated in the same change (the header's scope sentence,
+the "what pins what" table's two new rows, the boundaries paragraph
+naming the second seam substitution); manual-smoke.md's S10 source
+note now points at the automated T-F1 pin while keeping its real-OS
+half (the refused folder, the production retrier, the log line) as
+the manual item's own business.
+
+Mutations (each reverted after the red run): M1 the phase-2 sweep
+reports deletion without deleting → red at the DIRECT created-copy
+assertion ("the copy this run created is deleted", the recorded path
+still on disk and named in the failure message) — and the pre-run-copy
+set equality behind it would fail the same way if reached; M2
+`abort_run`'s §10
+literal swapped to `E_DISK_FULL` → red at the row's `error_code`
+while the envelope stayed `E_BACKUP_FAILED` (the two sites
+discriminated); M3 the command swallows the phase-2 error and
+continues → red at the envelope assertion (the run-continues break);
+M4 `mark_project_unchanged` writes `written` → red at T-F9's counter
+chips FIRST (the counters and the row literals are one fact read two
+ways, so the SQL-level break trips the earlier assertion); M4b — the
+isolating run round 1 asked for — `SyncRunProjectStatus::Unchanged`'s
+`as_str` misspelled (`unchanged2`) → red at the new literal itself
+with the counters still green, proving the added line reads the row
+literals and not the count; M5 the retention's `rn > ?1` → `rn >
+1000` → red at the intermediate `[ok, ok, ok, pruned]`; M6 the
+window's `ORDER BY` → `ASC` → red at `["pruned", "ok", "ok", "ok"]`
+(the newest pruned — the "last 3" direction has teeth); M7 phase 4
+reads `log.max_entries` instead of `backup.retention` → red, proving
+the limit is the production setting, not a test constant. M1 was
+re-run after the fmt/clippy restructuring to confirm the final shape
+still bites.
+
+Checks (synchronous, `CARGO_BUILD_JOBS=2`): `cargo test --no-run -p
+eunomia-sync` green; `cargo nextest run --no-fail-fast
+--test-threads=4` — 1992 passed, 0 skipped; `cargo test --doc
+--workspace` — 98 doc tests green (D-195); `cargo clippy --workspace
+--all-targets -- -D warnings` green (after four `needless_range_loop`
+fixes in the new code); `cargo fmt --all -- --check` green; `cargo
+deny check` green, no new ignores. Frontend untouched — no pnpm
+checks run.
+
+Review round 1 (deepseek-v4.1-flash, report
+`.opencode/reviews/t127-round1-report.md`, VERDICT: APPROVE — 4 × P3,
+no P0/P1/P2): P3-1 (D-224's M4 record named the wrong red assertion —
+the counters fire first) accepted — the record now states the
+counter-chip red and carries M4b, the isolating misspelled-`as_str`
+mutation that turns the new literal itself red with the counters
+green (run, then reverted); P3-2 (the T-F1 comment overclaimed the
+§9.4 phase 2 step 2 reset — in the all-ready fixture phase 1 already
+left the rows `not_started`, so the reset rewrites nothing and the
+assertion is panel-visibility, not reset mechanics) accepted — the
+comment now says exactly that and names the phase-2 suite as the
+reset's own pin; P3-3 ("the second of three files" was not
+IDENTIFIED — a loop-order change would keep the test green) accepted
+— the envelope's own `params` are now asserted (`project` = "Project
+2", `path` = the second target's canonical path), and the pin was
+mutation-verified: rotating the phase-2 eligible list left-by-one
+(the refused call becomes the third project's) turns exactly that
+assertion red; P3-4 ("created copies are deleted" was proven only by
+set equality, which a dedup-shaped break would also satisfy) accepted
+— the seam now records the first call's `BackupOutcome::Created`
+path, the test asserts a creation happened (the sweep had a subject)
+and that exact file is gone, and the re-run of the sweep-disabled
+mutation turns the DIRECT assertion red first (the recorded path,
+still on disk, named in the failure message). The notes are
+record-only (the abort-stamp presence check, the deliberate
+T-F9 literal/counters duality, the doc-claim re-reads).
+
+Review round 2 (hy4-flash-free, report
+`.opencode/reviews/t127-round2-report.md`, over the AMENDED commit,
+VERDICT: APPROVE — 1 × P3, no P0/P1/P2): the P3 (D-224's mutation
+list still named the pre-round-1 set-equality oracle as M1's red
+site, while the round-1 paragraph — and the code — put the direct
+created-copy assertion first; the T-F1 solution bullet likewise
+omitted the recorded-path observation) accepted — the M1 entry now
+names the direct assertion as its first red (with the set equality as
+the same-way failure behind it), and the T-F1 bullet now spells the
+recorded-path observation and the params identification. Record-only,
+no test code change. The round-1 fixes were re-verified as landed
+(the report's own re-read), and the notes stay record-only (the
+abort-stamp presence check, the T-F9 duality, the manual-smoke
+scoping; the worktree's `target/` cache flagged as post-merge
+cleanup, not a finding).

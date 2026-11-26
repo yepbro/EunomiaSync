@@ -2,7 +2,9 @@
 //! in all three schemes (task T-126; spec §15.1's Integration row —
 //! "the sync pipeline on temporary Git repositories in all schemes";
 //! the §15.4 mapping of DoD 7, 13–15 and 17; OUT-005, OUT-011, OUT-012,
-//! OUT-014, OUT-015).
+//! OUT-014, OUT-015 — widened by task T-127 with §15.2's failure rows
+//! T-F1 and T-F10: DoD 11/12's backup refusal and DoD 16's copy limit,
+//! OUT-006/OUT-019 and BKP-003/005/006/009).
 //!
 //! Every test drives the REAL pipeline — [`crate::commands::sync_run`]
 //! over the production seams through the five §9.4 phases, a real
@@ -10,11 +12,14 @@
 //! from [`TempRepos`], and the real `state://file-changed` watch
 //! service live — and judges what the spec makes observable: the
 //! target files on disk, the `backups/` tree, the run summary and the
-//! projects' `last_synced_*` cells. The one exception is the abort
-//! characterization test: it drives
-//! [`crate::commands::sync_run_with`] directly, because its subject
-//! (the abort clock's answer, D-197) is exactly the half the
-//! production seams spell as the real clock.
+//! projects' `last_synced_*` cells. The exceptions are the tests whose
+//! subject is exactly a seam's own half: the abort characterization
+//! test drives [`crate::commands::sync_run_with`] directly because its
+//! subject (the abort clock's answer, D-197) is exactly the half the
+//! production seams spell as the real clock, and the T-F1 failure row
+//! injects its refusing copy through the command's own `backup` seam
+//! (the app layer's honest injector — sync_phase2's docs) while
+//! everything else stays production.
 //!
 //! # The oracles are the spec's literals
 //!
@@ -43,6 +48,8 @@
 //! | `a_second_sync_with_no_changes_leaves_every_file_untouched_and_makes_no_backup` | T-F9, D-24, §9.4 phase 4 step 1, OUT-020 |
 //! | `last_sync_times_follow_only_the_written_and_unchanged_statuses` | DoD 17, OUT-020, DB-024, MAIN-024, MAIN-027 |
 //! | `an_aborted_run_stamps_the_abort_clock_and_never_moves_the_last_success` | §9.4 phase 4 step 4 (MAIN-027), OUT-020, D-131, D-185, D-197 |
+//! | `a_backup_failure_of_the_second_of_three_files_changes_no_file_sweeps_the_created_copies_and_aborts_the_run` | T-F1, §15.4 DoD 11/12, OUT-006, OUT-019, BKP-005/009, §9.4 phase 2 step 2, §10 `E_BACKUP_FAILED`, OUT-020, MAIN-027 |
+//! | `a_backup_limit_of_three_keeps_exactly_the_last_three_copies_after_five_syncs_with_changes` | T-F10, §15.4 DoD 16, BKP-003/006, §6.4, §6.5 `backup.retention`, §9.4 phase 4 step 2 |
 //!
 //! # The "no file observer" clause
 //!
@@ -63,11 +70,12 @@
 //! operations of one test go through the store writers those commands
 //! will call over the same `Db::run` executor — the posture of the
 //! phase-0 suite's mid-run-edit test. The run itself is always the real
-//! command (one test substitutes the command's own write seam for a
-//! refusal, the §15.1 fault-injection row). The harness owns its copies
-//! of the mock-app shape because every sibling suite's helpers are
-//! private to it; the error mappers are the consolidated seams (D-162,
-//! D-171), never a new spelling.
+//! command (two tests substitute the command's own seams for refusals
+//! — the write seam and, for T-F1, the backup copy seam, both §15.1
+//! fault-injection rows). The harness owns its copies of the mock-app
+//! shape because every sibling suite's helpers are private to it; the
+//! error mappers are the consolidated seams (D-162, D-171), never a
+//! new spelling.
 //!
 //! Watch waits are condition polls and the event assertion is a set —
 //! never a pass-count slot. A fixture file written before the service
@@ -90,6 +98,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -99,23 +108,28 @@ use tauri::test::{MockRuntime, mock_builder, mock_context, noop_assets};
 use tauri_specta::Event;
 
 use eunomia_fs::atomic::{AtomicWriteError, WriteFailed, WriteStep, WrittenFile};
+use eunomia_fs::backup::{BackupError, BackupOutcome, BackupTarget};
 use eunomia_fs::temp_repos::{RepoRoot, TempRepos};
+use eunomia_store::backup_records::{BackupRecord, BackupRecordStatus, list_for_project};
 use eunomia_store::library::{
     ItemScope, ItemUpdate, NewAssignment, NewLibraryItem, NewVariant, VariantUpdate, assign,
     create_item, create_variant, hide_item, list_items, move_item, unassign, update_item,
     update_variant,
 };
 use eunomia_store::projects::{AddedVia, NewProject, Project};
-use eunomia_store::settings::{BaseName, ExtraFile, Position, Scheme};
-use eunomia_store::sync_runs::last_success_finished_at;
+use eunomia_store::settings::{BaseName, ExtraFile, Position, Scheme, SettingKey, SettingValue};
+use eunomia_store::sync_runs::{SyncRun, last_attempt, last_success_finished_at, list_projects};
 
 use crate::commands::{
     CancelToken, SyncRunOutcome, SyncRunSeams, SyncRunSummary, projects_store_to_app_error,
+    settings_write_to_app_error,
 };
 use crate::data_dirs;
-use crate::db::{Db, sqlite_error_to_app_error, sync_runs_app_error_for_tests};
+use crate::db::{
+    Db, backup_records_to_app_error, sqlite_error_to_app_error, sync_runs_app_error_for_tests,
+};
 use crate::dirty_recalc::library_seed_error_for_tests;
-use crate::errors::AppError;
+use crate::errors::{AppError, ErrorCode};
 use crate::file_watch::{self, FileChangedEvent, FileWatchState, ProjectFileChange};
 
 // ---- the spec's literals ---------------------------------------------------
@@ -850,6 +864,53 @@ fn last_success(world: &World) -> Option<String> {
         database.run(move |tx| last_success_finished_at(tx).map_err(sync_runs_app_error_for_tests)),
     )
     .expect("reading the last successful sync must work")
+}
+
+/// The newest terminal run row — MAIN-024's "last attempt", the same
+/// read `sync_last_result` serves the panel after a run that refused
+/// to answer a summary.
+fn last_attempt_of(world: &World) -> SyncRun {
+    let database = database_of(world);
+    tauri::async_runtime::block_on(
+        database.run(move |tx| last_attempt(tx).map_err(sync_runs_app_error_for_tests)),
+    )
+    .expect("reading the last attempt must work")
+    .expect("the run under test left a terminal row")
+}
+
+/// One run's per-project status literals, in `sort_order` — the rows
+/// the panel reads back for a run whose command answer was an `Err`.
+fn run_project_statuses(world: &World, run_id: &str) -> Vec<&'static str> {
+    let database = database_of(world);
+    let run_id = run_id.to_owned();
+    let rows = tauri::async_runtime::block_on(
+        database.run(move |tx| list_projects(tx, &run_id).map_err(sync_runs_app_error_for_tests)),
+    )
+    .expect("reading the run's project rows must work");
+    rows.iter().map(|row| row.status.as_str()).collect()
+}
+
+/// Stores one §6.5 setting through the store's own writer — the same
+/// cell the production path reads back (phase 4's transaction reads
+/// `backup.retention` with `settings::get`).
+fn set_setting(world: &World, key: SettingKey, value: SettingValue) {
+    let database = database_of(world);
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::settings::set(tx, key, value.clone()).map_err(settings_write_to_app_error)
+    }))
+    .expect("storing the setting must work");
+}
+
+/// One project's whole `backup_records` history, newest first — the
+/// §6.4 lifecycle rows (BKP-004's Backups tab read).
+fn backup_records_of(world: &World, index: usize) -> Vec<BackupRecord> {
+    let database = database_of(world);
+    let project_id = world.project(index).id.clone();
+    tauri::async_runtime::block_on(
+        database
+            .run(move |tx| list_for_project(tx, &project_id).map_err(backup_records_to_app_error)),
+    )
+    .expect("reading the backup records must work")
 }
 
 /// The library's `(position, title)` rows — the order the build reads.
@@ -2009,6 +2070,15 @@ fn a_second_sync_with_no_changes_leaves_every_file_untouched_and_makes_no_backup
     let second = run_sync(&world, None);
     assert_eq!(second.verdict, "success");
     assert_counters(&second, 3, 0, 3, 0, 0);
+    // The row's own literal, spelled (T-127): the counters above and
+    // the per-row statuses are the same fact read two ways, and the
+    // literal is what the spec's Expected cell says verbatim — "All
+    // projects `unchanged`".
+    assert_eq!(
+        statuses(&second),
+        ["unchanged"; 3],
+        "T-F9: every project's row reads `unchanged`"
+    );
     for index in 0..3 {
         assert_eq!(
             read(&world.project(index).target),
@@ -2302,5 +2372,370 @@ fn an_aborted_run_stamps_the_abort_clock_and_never_moves_the_last_success() {
             *before_run,
             "OUT-020: an aborted run leaves project {index}'s sync state alone"
         );
+    }
+}
+
+// ---- the §15.2 failure rows: a refusing backup, the copy limit (T-127) ----
+
+#[test]
+fn a_backup_failure_of_the_second_of_three_files_changes_no_file_sweeps_the_created_copies_and_aborts_the_run()
+ {
+    // T-F1 — "The backup of the second of three files is not created"
+    // → "None of the three files is changed, created copies are
+    // deleted, run status `aborted`" (§15.2; §15.4's DoD 11/12 row →
+    // "Integration, T-F1"; OUT-006/OUT-019: "An error in even one
+    // backup cancels writing in all projects of the run"; BKP-005/
+    // BKP-009). The N-th-copy failure itself — the partial bytes, the
+    // retrier's cleanup handshake — is the fs crate's own
+    // fault-injection suite's pin (`eunomia-fs/tests/
+    // fault_injection.rs`), and the abort's envelope fields and
+    // journal entry are the phase-2 suite's and the ipc census's;
+    // this test is the RUN-level sweep: three real projects, one
+    // aborted run through the real command, judged by the files and
+    // rows the spec makes observable.
+    let (world, _library, _events) = three_scheme_world(
+        BaseName::AgentsMd,
+        BaseName::ClaudeMd,
+        BaseName::ClaudeMd,
+        Some(B_OLD_BLOCK),
+    );
+    // All three targets hold the user's old bytes, so every project
+    // is eligible for a copy — the premise of "the second of three
+    // files".
+    let a_old = b"Hand-written AGENTS.md of the team.\n".to_vec();
+    let c_old = b"Hand-written project file of the team.\n".to_vec();
+    write(&world.project(0).target, &a_old);
+    write(&world.project(2).target, &c_old);
+
+    // The prepare run: one success, one copy per project — the copies
+    // that PREDATE the failing run (BKP-005: "Copies created in this
+    // run are deleted" — the sweep's selectivity gets its own
+    // assertion below).
+    let prepared = run_sync(&world, None);
+    assert_eq!(prepared.verdict, "success");
+    assert_eq!(statuses(&prepared), ["written", "written", "written"]);
+    let pre_run_copies: Vec<Vec<Vec<u8>>> =
+        (0..3).map(|index| backup_bytes(&world, index)).collect();
+    for (index, copies) in pre_run_copies.iter().enumerate() {
+        assert_eq!(
+            copies.len(),
+            1,
+            "project {index}: the prepare run copied the old bytes"
+        );
+    }
+
+    // The external edits: every target now differs from BOTH the
+    // build and its last copy — no dedup claim, three fresh copies
+    // to make — and the files carry bytes an unguarded phase 3 would
+    // overwrite, which is what "none of the three files is changed"
+    // has teeth against.
+    let a_external = b"Edited by hand before the failing sync.\n".to_vec();
+    let b_external = text_of(&read(&world.project(1).target), "scheme B")
+        .replace("Yak text.", "Yak text, edited by hand.")
+        .into_bytes();
+    let c_external = b"Changed outside before the failing sync.\n".to_vec();
+    write(&world.project(0).target, &a_external);
+    write(&world.project(1).target, &b_external);
+    write(&world.project(2).target, &c_external);
+    let files_before = all_targets(&world);
+    let modified_before: Vec<SystemTime> = world
+        .projects
+        .iter()
+        .map(|project| modified_of(&project.target))
+        .collect();
+    let stamps_before: Vec<Stamps> = (0..3).map(|index| stamps(&world, index)).collect();
+    let overall_before = last_success(&world);
+    assert_eq!(
+        overall_before, prepared.finished_at,
+        "the premise: the prepare run is the last success"
+    );
+
+    // The seam: the copy operation delegates to the production one
+    // and refuses the SECOND of the three calls — the second
+    // project's copy, `ENOSPC` (the out-of-space member of §15.1's
+    // fault-injection family, the phase-2 suite's own shape). The
+    // first copy lands on disk for real — its path is recorded so
+    // the sweep's subject is observed directly, not inferred from
+    // what is absent; the third call never happens (§9.4 phase 2's
+    // loop stops at the first error).
+    let calls = AtomicUsize::new(0);
+    let created = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
+    let created_slot = Arc::clone(&created);
+    let failing_second = Arc::new(
+        move |target: &BackupTarget<'_>| -> Result<BackupOutcome, BackupError> {
+            if calls.fetch_add(1, Ordering::Relaxed) + 1 == 2 {
+                return Err(BackupError::CopyFailed {
+                    path: PathBuf::from("/data/backups/second/x.bak"),
+                    source: std::io::Error::from_raw_os_error(28),
+                    cleanup: None,
+                });
+            }
+            let outcome = eunomia_fs::backup::backup_target_file(target)?;
+            if let BackupOutcome::Created(copy) = &outcome {
+                *created_slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(copy.path.clone());
+            }
+            Ok(outcome)
+        },
+    );
+    let seams = SyncRunSeams {
+        backup: failing_second,
+        write: Arc::new(crate::sync_phase3::production_write),
+        abort_clock: SyncRunSeams::production().abort_clock,
+        progress_clock: SyncRunSeams::production().progress_clock,
+    };
+    let refusal = tauri::async_runtime::block_on(crate::commands::sync_run_with(
+        world.app.handle().clone(),
+        None,
+        CancelToken::new(),
+        seams,
+    ))
+    .expect_err("§9.4 phase 2 step 2: the copy error aborts the run");
+
+    // The refusal is the typed envelope — DoD 12's "backup failure
+    // blocks writing" is the command answering `Err`, never a
+    // summary — and the ORIGINAL error's facts survive the command's
+    // best-effort wrapper (P3-4: the row was already terminal, so
+    // the wrapper hands the error back unchanged).
+    assert_eq!(refusal.code, ErrorCode::BackupFailed);
+    assert_eq!(
+        refusal.details.as_ref().and_then(|facts| facts.os_code),
+        Some(28),
+        "the envelope's OS fact came through the command unchanged"
+    );
+    // WHICH file failed — the envelope's own params (BKP-005's
+    // "project" and "path"): the SECOND project in `sort_order`, the
+    // one whose copy call the seam refused. A copy loop that visited
+    // the projects in any other order fails here.
+    assert_eq!(
+        refusal.params.get("project").map(String::as_str),
+        Some("Project 2"),
+        "the failing copy is the second project's — the copy loop's own order"
+    );
+    let second_target = eunomia_fs::paths::canonicalize(&world.project(1).target)
+        .expect("the target canonicalizes");
+    assert_eq!(
+        refusal.params.get("path").map(String::as_str),
+        Some(second_target.to_str().expect("the canonical path is UTF-8")),
+        "the failing copy's source is the second project's target"
+    );
+
+    // None of the three files is changed: the external bytes — and
+    // their modification times — are exactly what the user left.
+    assert_eq!(
+        all_targets(&world),
+        files_before,
+        "T-F1: none of the three files is changed"
+    );
+    for (index, before) in modified_before.iter().enumerate() {
+        assert_eq!(
+            modified_of(&world.project(index).target),
+            *before,
+            "project {index}: not even rewritten with the same bytes"
+        );
+    }
+
+    // Created copies are deleted; the copies predating the run are
+    // never touched. Project 0's copy of THIS run was made and then
+    // swept — observed directly: the seam recorded the copy the
+    // first call created (a real creation, not a dedup), and that
+    // exact file is gone. Project 1's copy failed before any full
+    // copy existed; project 2's never started.
+    let created_path = created
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    let created_path =
+        created_path.expect("the first call CREATED a copy — the sweep had a subject");
+    assert!(
+        !created_path.is_file(),
+        "the copy this run created is deleted (was at {})",
+        created_path.display()
+    );
+    for (index, before) in pre_run_copies.iter().enumerate() {
+        assert_eq!(
+            backup_bytes(&world, index),
+            *before,
+            "project {index}: this run's copy is swept, the pre-run copy stays"
+        );
+    }
+
+    // The run row: `aborted` with the §10 literal — the newest
+    // terminal attempt, exactly the row the panel would read back.
+    let attempt = last_attempt_of(&world);
+    assert_eq!(
+        attempt.status.as_str(),
+        "aborted",
+        "T-F1: run status `aborted`"
+    );
+    assert_eq!(
+        attempt.error_code.as_deref(),
+        Some("E_BACKUP_FAILED"),
+        "the aborted row carries the §10 code"
+    );
+    assert!(
+        attempt.finished_at.is_some(),
+        "the abort stamped the run's end"
+    );
+
+    // No project claims anything happened: every row reads
+    // `not_started` — no `written`, no `unchanged`, nothing a later
+    // `sync_last_result` could read as a sync. (In this fixture
+    // phase 1 left the three `ready` projects' rows `not_started`
+    // already, so the §9.4 phase 2 step 2 reset rewrites nothing
+    // here — its own rewrite is the phase-2 suite's pin; what THIS
+    // row set proves is the panel-visible outcome of the aborted
+    // run.)
+    assert_eq!(
+        run_project_statuses(&world, &attempt.id),
+        ["not_started"; 3],
+        "no project row claims an outcome"
+    );
+
+    // OUT-020 / MAIN-027: the failure path touches no sync state —
+    // the prepare run's stamps and overall time are exactly where it
+    // left them.
+    for (index, before) in stamps_before.iter().enumerate() {
+        assert_eq!(
+            stamps(&world, index),
+            *before,
+            "project {index}: the aborted run moved no last-sync state"
+        );
+    }
+    assert_eq!(
+        last_success(&world),
+        overall_before,
+        "MAIN-027: the aborted run is nobody's last successful sync"
+    );
+}
+
+#[test]
+fn a_backup_limit_of_three_keeps_exactly_the_last_three_copies_after_five_syncs_with_changes() {
+    // T-F10 — "Backup limit 3 and five syncs with changes: The last
+    // 3 copies remain" (§15.2; §15.4's DoD 16 row → "T-F10";
+    // BKP-003/BKP-006: "Up to N copies are kept per `project and
+    // file` pair (10 by default). The oldest extra ones are deleted
+    // after the run finishes … With N=3, three copies remain after
+    // five syncs"; §6.4: a copy deleted by the limit gets the
+    // `pruned` record). The store's own retention suite pins the
+    // sweep's semantics over seeded records; this test is the
+    // RUN-level flow: the limit is stored through the §6.5 settings
+    // writer — the same `backup.retention` cell phase 4's transaction
+    // reads — and five real runs make real copies and prune for
+    // real.
+    let (world, _library, _events) = three_scheme_world(
+        BaseName::AgentsMd,
+        BaseName::ClaudeMd,
+        BaseName::ClaudeMd,
+        Some(B_OLD_BLOCK),
+    );
+    let a_initial = b"Hand-written AGENTS.md, round zero.\n".to_vec();
+    let c_initial = b"Hand-written project file, round zero.\n".to_vec();
+    write(&world.project(0).target, &a_initial);
+    write(&world.project(2).target, &c_initial);
+    set_setting(&world, SettingKey::BackupRetention, SettingValue::Int(3));
+
+    // Five syncs with changes. The first sync's change is the
+    // initial bytes themselves (every target differs from the
+    // build); each later round's change is an external edit,
+    // distinct from every copy before it, so no dedup claim blurs
+    // the count (BKP-010 — a source equal to its last checked copy
+    // would create nothing).
+    let first = run_sync(&world, None);
+    assert_eq!(first.verdict, "success");
+    assert_eq!(statuses(&first), ["written", "written", "written"]);
+
+    let mut edits: Vec<[Vec<u8>; 3]> = Vec::new();
+    for round in 1..=4 {
+        let a_edit = format!("External edit of AGENTS.md, round {round}.\n").into_bytes();
+        let b_edit = text_of(&read(&world.project(1).target), "scheme B")
+            .replace("Yak text.", &format!("Yak text, round {round}."))
+            .into_bytes();
+        let c_edit = format!("External edit of the project file, round {round}.\n").into_bytes();
+        write(&world.project(0).target, &a_edit);
+        write(&world.project(1).target, &b_edit);
+        write(&world.project(2).target, &c_edit);
+        edits.push([a_edit, b_edit, c_edit]);
+        let summary = run_sync(&world, None);
+        assert_eq!(
+            summary.verdict, "success",
+            "round {round}: a run with changes"
+        );
+        assert_eq!(
+            statuses(&summary),
+            ["written", "written", "written"],
+            "round {round}: the edit is a change, the sync writes all three"
+        );
+        if round == 3 {
+            // BKP-003's "after the run finishes" is every run's
+            // finish, not the last one's: after the fourth sync each
+            // pair already holds exactly the newest three copies,
+            // and the oldest record is already `pruned`.
+            for index in 0..3 {
+                assert_eq!(
+                    backup_records_of(&world, index)
+                        .iter()
+                        .map(|record| record.status.as_str())
+                        .collect::<Vec<_>>(),
+                    ["ok", "ok", "ok", "pruned"],
+                    "project {index}: after four syncs the sweep has already pruned the oldest"
+                );
+                assert_eq!(
+                    backup_bytes(&world, index).len(),
+                    3,
+                    "project {index}: three copies on disk after four syncs"
+                );
+            }
+        }
+    }
+
+    // The last 3 copies remain — the NEWEST three: the copies the
+    // third, fourth and fifth syncs made of the edits rounds 2, 3
+    // and 4 (the first sync's copy of the initial bytes and the
+    // second sync's copy of round 1's edit were pruned), oldest
+    // first — and the pairs' records agree: five rows, the two
+    // oldest `pruned`, the three newest `ok`, and an `ok` row names
+    // a file that is on disk while a `pruned` row's is gone (§6.4's
+    // history, D-122's never-lying mark).
+    let survivors: Vec<[&[u8]; 3]> = (0..3)
+        .map(|index| {
+            [
+                edits[1][index].as_slice(),
+                edits[2][index].as_slice(),
+                edits[3][index].as_slice(),
+            ]
+        })
+        .collect();
+    for (index, expected) in survivors.iter().enumerate() {
+        let what = format!("project {index}");
+        assert_eq!(
+            backup_bytes(&world, index),
+            *expected,
+            "{what}: T-F10 — the last 3 copies remain"
+        );
+        let records = backup_records_of(&world, index);
+        assert_eq!(
+            records.len(),
+            5,
+            "{what}: one record per copy the five syncs made"
+        );
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.status.as_str())
+                .collect::<Vec<_>>(),
+            ["ok", "ok", "ok", "pruned", "pruned"],
+            "{what}: the two oldest records are `pruned`, the three newest `ok`"
+        );
+        for record in &records {
+            let on_disk = world.data_root().join(&record.backup_path).is_file();
+            assert_eq!(
+                on_disk,
+                record.status == BackupRecordStatus::Ok,
+                "{what}: an `ok` record's copy is on disk, a `pruned` record's is gone ({})",
+                record.backup_path
+            );
+        }
     }
 }

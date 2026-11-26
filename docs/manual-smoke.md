@@ -850,8 +850,10 @@ Source: spec §8 S10; §7.5 OUT-006/019; §7.6 BKP-005/009/010; §9.4
 phase 2; §15.2 T-F1; §10 `E_BACKUP_FAILED`.
 
 Pending: the summary's detailed-error presentation — spec §16 M5. (The
-phase-2 abort semantics are landed backend; the mechanics below are
-real-OS.)
+phase-2 abort semantics are landed backend and pinned by the run-level
+T-F1 test in `sync_pipeline_tests.rs` over the injected copy seam,
+T-127; the mechanics below are real-OS — an actually refused folder,
+the production retrier, the log line.)
 
 **Prepare.** Three scheme-A projects sharing one assigned instruction.
 Sync once — it creates the target files, and phase 2 backs up existing
