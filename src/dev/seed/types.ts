@@ -178,6 +178,84 @@ export type PreviewBlock =
   | { readonly kind: 'code'; readonly text: string }
   | { readonly kind: 'list'; readonly items: readonly string[] }
 
+/*
+ * The projects family's shapes (T-366): the scan results, the archived
+ * projects, the exclusions and the Backups-tab rows — all DATA shapes
+ * for the seed only (the real wire types arrive through
+ * src/bindings.ts).
+ */
+
+/** One "New" row of the scan results (a repository to add — PRJ-002). */
+export type ScanNewRow = {
+  readonly name: string
+  /** The row's rendered display path (root-prefixed, like syncedAt). */
+  readonly path: string
+}
+
+/** One "Already added" row (no checkbox — PRJ-002). */
+export type ScanKnownRow = {
+  readonly name: string
+  readonly path: string
+}
+
+/**
+ * The closed skip-reason vocabulary of the scan results (PRJ-002:
+ * excluded, submodule or worktree, no access, non-UTF-8 path, archived
+ * or in exclusions). The reason's badge wording and its fix hint are
+ * catalog copy keyed by this value.
+ */
+export type ScanSkipReason =
+  'excluded' | 'submodule' | 'noAccess' | 'nonUtf8' | 'archived' | 'inExclusions'
+
+/** One "Skipped" row: the path and the reason (PRJ-002, PRJ-007). */
+export type ScanSkipRow = {
+  readonly path: string
+  readonly reason: ScanSkipReason
+}
+
+/**
+ * One archived-project row of the Archived-projects screen (demo
+ * ARCHIVED, app.js ~4164). `origin` drives the same wording the
+ * settings modal's "Added" row uses. `color` is a DB-040 palette hex.
+ */
+export type ArchivedProject = {
+  readonly name: string
+  readonly path: string
+  readonly color: string
+  /** The "Archived <date>" display stamp (the demo's rendered string). */
+  readonly archivedAt: string
+  readonly origin: ProjectOrigin
+}
+
+/** The §6.2 `project_exclusions` reason enum (DDL mirror). */
+export type ExclusionReason = 'removed_scanned' | 'manual'
+
+/** One excluded-path row (demo EXCLUSIONS, DDL shape: path, reason,
+ * created stamp; app.js ~4271). The badge wording is catalog copy
+ * keyed by `reason`. */
+export type ExcludedPath = {
+  readonly path: string
+  readonly reason: ExclusionReason
+  /** The "Added <date>" display stamp. */
+  readonly addedAt: string
+}
+
+/**
+ * One Backups-tab row (BKP-004: date, file, size, sync run number).
+ * The demo builds the rows from the project's syncedAt (app.js
+ * renderBackups, ~3049) — JS is never ported, so the seed stores that
+ * OUTPUT: display strings, plus `date` (the day part the BKP-012
+ * tooltip names beside the file).
+ */
+export type BackupRow = {
+  readonly date: string
+  readonly when: string
+  readonly file: string
+  readonly size: string
+  /** The "#47" run label (display string). */
+  readonly run: string
+}
+
 /** The §6.5 settings defaults (demo SETTINGS; the real app keeps them
  * in the settings table as JSON — D-18). Key names mirror the table. */
 export type Settings = {

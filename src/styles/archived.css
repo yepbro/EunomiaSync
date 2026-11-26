@@ -1,0 +1,57 @@
+/*
+ * Archived projects modal (T-366, D-10, PRJ-013…018): the mock-up's
+ * section (docs/prototype/styles.css 2589–2634) ported with the
+ * theme-token swap applied (the swap table lives in DECISIONS.md,
+ * D-206/D-211; the reference's muted text token maps to
+ * `--ink-muted`; the decorative `--border`, `--radius-sm` keep their
+ * names). The demo's
+ * `#archived-dialog` id selector becomes the compound
+ * `.modal-lg.archived-dialog` class (the D-212 precedent), keeping
+ * the auto height above the generic `.modal-lg form` height rule of
+ * the project-settings section: the list only shrinks, so the dialog
+ * sizes to its content. The rows ride the scan-results row idiom
+ * (`.scan-row`, src/styles/scan.css), the color dot the ported
+ * `.proj-color` (src/styles/matrix-columns.css), the empty state the
+ * history panel's `.hist-empty` (src/styles/library-history.css).
+ *
+ * Rendered by ArchivedProjectsDialog.vue.
+ */
+
+.modal-lg.archived-dialog form {
+  block-size: auto;
+}
+
+.ar-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+/* `hidden` must win over the flex display above (UI-012 empty state) */
+.ar-list[hidden] {
+  display: none;
+}
+
+.ar-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* "Restore <name>" sits at the end of the row */
+.ar-restore {
+  margin-inline-start: auto;
+}
+
+/* "Archived 3 Nov 2026" / "Found by scan": muted, never wraps */
+.ar-meta {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--ink-muted);
+  white-space: nowrap;
+}

@@ -16,8 +16,10 @@
 // below the launcher and opened through `v-model:open` (the dialog
 // contract of T-364…T-367); closing it from inside returns the hash to
 // the shell. The registry holds the shell, the matrix family's five
-// showcases and its two dialogs (T-364) and the library family's
-// editor/ history/dialog screens (T-365); the showcases are not
+// showcases and its two dialogs (T-364), the library family's
+// editor/ history/dialog screens (T-365) and the projects family's
+// scan/ settings/ preview/ archived/ excluded windows plus its three
+// confirmation dialogs (T-366); the showcases are not
 // dialogs and simply ignore the model binding.
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'

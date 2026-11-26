@@ -1,0 +1,29 @@
+/*
+ * File preview modal (T-366, MAIN-033, UI-002): the mock-up's section
+ * (docs/prototype/styles.css 1494–1542) ported with the theme-token
+ * swap applied (the swap table lives in DECISIONS.md, D-206/D-211;
+ * the reference's muted text token maps to `--ink-muted`). Of the
+ * reference's range only the two rules below remain in this slot: the
+ * markdown body styles of the same range (`.ie-warnings`,
+ * `.ie-warnings-list` and the 760px media query) style #edit-dialog's
+ * markup and were ported with the instruction editor (T-365, D-213
+ * point 5), and the `.fp-body` base + the markdown selector groups
+ * ride the same file (src/styles/library-editor.css). The
+ * empty-column note (`.fp-note`, MAIN-033's no-assignments state) is
+ * rendered by FilePreviewDialog.vue.
+ *
+ * The mock-up's class names are kept (the porting rule).
+ */
+
+.modal-lg .fp-path {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.fp-note {
+  color: var(--ink-muted);
+  font-style: italic;
+}

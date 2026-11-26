@@ -56,11 +56,20 @@
 @import '../styles/matrix-states.css';
 
 /* The library family's ported sections (T-365): the instruction
-   editor (UI-003), the history panel (LIB-026/027) and the small
-   confirmation dialogs' slot (no rules of their own — see the file). */
+   editor (UI-003) and the history panel (LIB-026/027). The small
+   confirmation dialogs' slot carried no rules and was removed by
+   T-366 (the shared form idioms land with the project-settings
+   section below). */
 @import '../styles/library-editor.css';
 @import '../styles/library-history.css';
-@import '../styles/library-dialogs.css';
+
+/* The projects family's ported sections (T-366): file preview,
+   project settings, scan, archived and excluded paths. */
+@import '../styles/file-preview.css';
+@import '../styles/project-settings.css';
+@import '../styles/scan.css';
+@import '../styles/archived.css';
+@import '../styles/excluded.css';
 
 /* The frozen mock-up is not a source of utility candidates (see the
    header note above). */

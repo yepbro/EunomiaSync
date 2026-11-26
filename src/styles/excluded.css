@@ -1,0 +1,41 @@
+/*
+ * Excluded paths modal (T-366, D-10, §6.2 project_exclusions): the
+ * mock-up's section (docs/prototype/styles.css 2635–2664) ported with
+ * the theme-token swap applied (the decorative `--accent` and
+ * `--accent-strong` keep their names). The demo's `#exclusions-dialog`
+ * id selector becomes the compound `.modal-lg.excluded-dialog` class
+ * (the D-212 precedent), keeping the auto height above the generic
+ * `.modal-lg form` height rule of the project-settings section: like
+ * the archived list, the demo list only shrinks. The rows reuse the
+ * archived modal's idiom (`.scan-row`, `.ar-list`, `.ar-meta`,
+ * `.chip` — src/styles/scan.css, src/styles/archived.css,
+ * src/styles/matrix-rows.css).
+ *
+ * The badge wording carries the meaning; the tint only supports it:
+ * neutral for "Added manually" (the default .chip look), tinted for
+ * "Removed by archiving" (`.ex-reason--removed_scanned`; the class
+ * mirrors the §6.2 DDL enum value).
+ *
+ * Rendered by ExcludedPathsDialog.vue.
+ */
+
+.modal-lg.excluded-dialog form {
+  block-size: auto;
+}
+
+/* "Remove ~/…" sits at the end of the row */
+.ex-remove {
+  margin-inline-start: auto;
+}
+
+/* Reason badge: neutral for "Added manually" (the default .chip look),
+   tinted for "Removed by archiving" — readable without color either way */
+.ex-reason {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ex-reason--removed_scanned {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}

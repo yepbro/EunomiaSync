@@ -14,6 +14,11 @@
  *
  * The registry titles are launcher data (dev-facing script strings,
  * rendered through interpolation, not template literals).
+ *
+ * The projects family (T-366) rides the same split as the library's:
+ * the data windows through showcases under src/dev/showcases/, the
+ * three confirmation dialogs directly (optional props, the mock-up's
+ * static "Placeholder." fallback).
  */
 import type { Component } from 'vue'
 import MatrixCellStates from './showcases/MatrixCellStates.vue'
@@ -33,6 +38,16 @@ import HeadingShowcase from './showcases/HeadingShowcase.vue'
 import UnsavedChangesDialog from '../components/library/UnsavedChangesDialog.vue'
 import HideInstructionDialog from '../components/library/HideInstructionDialog.vue'
 import HeadingDeleteDialog from '../components/library/HeadingDeleteDialog.vue'
+import ScanShowcase from './showcases/ScanShowcase.vue'
+import SettingsSchemeAShowcase from './showcases/SettingsSchemeAShowcase.vue'
+import SettingsSchemeBShowcase from './showcases/SettingsSchemeBShowcase.vue'
+import SettingsSchemeCShowcase from './showcases/SettingsSchemeCShowcase.vue'
+import FilePreviewShowcase from './showcases/FilePreviewShowcase.vue'
+import ArchivedShowcase from './showcases/ArchivedShowcase.vue'
+import ExcludedShowcase from './showcases/ExcludedShowcase.vue'
+import ArchiveProjectDialog from '../components/projects/ArchiveProjectDialog.vue'
+import RestoreProjectDialog from '../components/projects/RestoreProjectDialog.vue'
+import RemoveExclusionDialog from '../components/projects/RemoveExclusionDialog.vue'
 
 export type Screen = {
   /** Stable id used in the `#screen=<id>` hash. */
@@ -112,5 +127,54 @@ export const screens: readonly Screen[] = [
     id: 'library-heading-delete',
     title: 'Delete section dialog (UI-010)',
     component: HeadingDeleteDialog,
+  },
+  /* The projects family (T-366): the scan window, the settings (one
+     wrapper per scheme so every conditional block is visible), the
+     file preview, the archived and excluded windows. The prop-ful
+     data windows ride one showcase each (the registry stays
+     seed-free, D-212); the three confirmation dialogs register
+     directly — with no props the mock-up's static "Placeholder."
+     stands in (the BulkConfirmDialog precedent). */
+  {
+    id: 'projects-scan',
+    title: 'Scan window (PRJ-002…007, NFR-015)',
+    component: ScanShowcase,
+  },
+  {
+    id: 'projects-settings-a',
+    title: 'Project settings — scheme A (PRJ-008…012, 021)',
+    component: SettingsSchemeAShowcase,
+  },
+  {
+    id: 'projects-settings-b',
+    title: 'Project settings — scheme B (PRJ-008…012, 021)',
+    component: SettingsSchemeBShowcase,
+  },
+  {
+    id: 'projects-settings-c',
+    title: 'Project settings — scheme C (PRJ-008…012, 021)',
+    component: SettingsSchemeCShowcase,
+  },
+  { id: 'projects-preview', title: 'File preview (MAIN-033)', component: FilePreviewShowcase },
+  {
+    id: 'projects-archived',
+    title: 'Archived projects (PRJ-013…018)',
+    component: ArchivedShowcase,
+  },
+  { id: 'projects-excluded', title: 'Excluded paths (PRJ-013…018)', component: ExcludedShowcase },
+  {
+    id: 'projects-archive',
+    title: 'Archive confirmation (UI-010)',
+    component: ArchiveProjectDialog,
+  },
+  {
+    id: 'projects-restore',
+    title: 'Restore project confirmation (UI-010)',
+    component: RestoreProjectDialog,
+  },
+  {
+    id: 'projects-remove-exclusion',
+    title: 'Remove exclusion confirmation (UI-010)',
+    component: RemoveExclusionDialog,
   },
 ]

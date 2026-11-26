@@ -28,7 +28,17 @@
       "variantDelete": "Variant delete confirmation (LIB-023)",
       "variantDeleteHint": "The count is derived from the seed assignments (\"Spanish\" — one project).",
       "heading": "Add/rename section dialog (LIB-030, 031)",
-      "headingHint": "Open prefilled with a seed heading's name; validation is T-185's."
+      "headingHint": "Open prefilled with a seed heading's name; validation is T-185's.",
+      "projectsScan": "Scan window (PRJ-002…007, NFR-015)",
+      "projectsScanHint": "The demo walk's end state; both phases render at rest — the phase switch is the scan card's.",
+      "projectsSettings": "Project settings — scheme {scheme} (PRJ-008…012, 021)",
+      "projectsSettingsHint": "Open on seed project \"{name}\"; the active settings tab is the only local state.",
+      "projectsPreview": "File preview (MAIN-033)",
+      "projectsPreviewHint": "The spec's build text — ALG-020 headings, no instruction names (ALG-022); not the demo's rendering.",
+      "projectsArchived": "Archived projects (PRJ-013…018)",
+      "projectsArchivedHint": "The seed's demo list; Restore is inert — the restore flow is a behavior card's.",
+      "projectsExcluded": "Excluded paths (PRJ-013…018)",
+      "projectsExcludedHint": "The seed's demo list; Remove is inert — the removal flow is a behavior card's."
     }
   }
 }

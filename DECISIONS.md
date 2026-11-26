@@ -26996,6 +26996,217 @@ from the CI path: root 57 with its trailing slash + `.tmpTpxyPs` 10
   assert, the ASCII fixture) — none introduced or worsened by this
   commit.
 
+### D-215 — T-366: the projects skeleton on seed data — the scan window, the project settings with its three tab components, the file preview on the spec's build text, archived and excluded paths, the three confirmation dialogs — 2026-11-26
+
+Problem: the projects family had no screens — the scan window, the
+project settings, the file preview, the Archived/Excluded windows and
+the archive/restore/remove-exclusion confirmations of §7.1, MAIN-033
+and UI-010 did not exist, and the behavior cards behind them (T-158's
+save flow, T-160's scan and copy flows, T-165's type-to-confirm gate,
+T-166/T-167's restore and removal) need the markup to refine. The card
+had to port the reference's eight dialogs as behavior-free Vue
+components on seed data without breaking the seed's DEV-only bundle
+gate, and to land the shared `.ps-*` form idioms the library family's
+markup already uses.
+
+Sources: card T-366 (the acceptance ruling of 2026-11-25: no tests
+written or run, the visual match is checked by code review without
+screenshots); D-206/D-211's porting rules and token swap; the D-212/
+D-213 precedents (id→class selector conversion, the registry's
+seed-free rule, the dist/ proof, the "Placeholder." fallback of
+optional props); spec PRJ-002…021, NFR-015, MAIN-033, BKP-004, BKP-012,
+UI-002, UI-010, UI-023, ALG-020…022; D-203 (5).
+
+1. **Structure.** `src/components/projects/` — ScanDialog.vue (size-lg
+   BaseModal + the `.scan-dialog` class hooking its height override;
+   props root, rootPath, maxDepth, excludeNames, foldersChecked,
+   reposFound, currentPath, newRows, knownRows, skippedRows),
+   ProjectSettingsDialog.vue (props project, palette, baseFiles,
+   backups) with the panels split into SettingsGeneralTab.vue,
+   SettingsSchemeTab.vue and SettingsBackupsTab.vue, FilePreviewDialog.vue
+   (props path, blocks), ArchivedProjectsDialog.vue (props rows),
+   ExcludedPathsDialog.vue (props rows), and the three confirmations
+   ArchiveProjectDialog.vue (optional projectName + origin),
+   RestoreProjectDialog.vue (optional projectName),
+   RemoveExclusionDialog.vue (optional path) — optional with the
+   mock-up's static "Placeholder." fallback, so they register
+   directly in the gallery like T-364's BulkConfirmDialog while the
+   data-ful composition stays prop-driven. Every dialog is on the
+   T-363 contract (BaseModal + `defineModel<boolean>('open')`, title
+   ids from `useId()`); the method="dialog" forms make Cancel/Save/
+   Close/Archive/Restore/Remove the dialogs' own return values. No
+   component imports the seed's DATA or `src/ipc/**` — types ride
+   `import type` from `../../dev/seed`, data only through props. No
+   component template exceeds ~150 lines.
+
+2. **Data-derived states and their sources.** (a) The scan window
+   renders the demo walk's END state from `src/dev/seed/scan.ts` —
+   counters 40/12, current path `~/projects/playground`, and the three
+   result groups (SCAN_NEW/SCAN_KNOWN/SCAN_SKIPPED as full display
+   paths, the demo's rowPath join not ported); both phase blocks
+   render at rest because the demo's phase switching was JS (its
+   `hidden` attributes are the toggles — showing one phase is the
+   scan card's behavior), and the config line interpolates
+   `settings.scan.maxDepth`/`excludeNames`, the same source the demo
+   reads (app.js ~3450). "Add selected" is enabled at rest (the New
+   rows carry the static `checked` — PRJ-006). (b) The settings
+   fields carry the seed project's values; the description counter
+   shows the seed length over 1000 through `n()`; the palette radios
+   render `projectPalette` with the project's color checked; the
+   read-only rows show path, origin wording and the syncedAt stamp;
+   the scheme-conditional blocks render by the project's scheme (the
+   demo's `hidden` toggles become v-if): A the extra files with
+   Include flags and Start/End selects (a select disabled while its
+   flag is off) and the derived `<STEM>.local.md`/`<STEM>.project.md`
+   names following the base file (the demo's stemOf as a computed),
+   B the marker hint, C the D-21 snippet composed around the derived
+   file name; the Backups tab renders the demo builder's OUTPUT from
+   `src/dev/seed/backups.ts` (display strings keyed by project name),
+   ending in the narrow save column with the visually-hidden header
+   and the BKP-012 tooltip naming file + date. (c) The file preview
+   follows the SPEC, not the demo (D-203 (5) — the demo added each
+   instruction's name as a `##` heading and dropped the library's
+   section headings; not followed): `src/dev/seed/file-preview.ts`
+   holds the ALG-020/ALG-022 sample built by hand from the seed
+   library and assignments for EunomiaSync — section headings that
+   have assigned instructions at the library heading's level (depth 0
+   → h2, depth 1 → h3, §9.2's repeat('#', L)), instruction texts
+   only, the "Bug-first" variant's text for the variant cell, the
+   empty "Pre-commit checks" contributing no block (§9.2 appends only
+   non-empty texts), and "Naming conventions" absent (its seed cell is
+   a changed-none). An empty blocks array renders MAIN-033's
+   `.fp-note` instead of an empty document. (d) The archived rows show
+   color dot, name, path, "Archived <date>" and the origin wording
+   (the settings modal's "Manual"/"Found by scan" keys, reused); the
+   excluded rows show path, the reason badge worded per the DDL enum
+   and "Added <date>"; both keep the list and the empty paragraph in
+   the DOM with the mock-up's hidden toggling. (e) The archive
+   explanation composes intro + scan clause (origin === 'scan') + the
+   way-back sentence from three catalog keys (the demo's composition,
+   app.js ~3280), and its confirm button is disabled at rest (the
+   type-to-confirm gate is T-165's).
+
+3. **Local UI state only**: the active settings tab (click switching,
+   the correct tab roles/attributes; the arrow-key roving focus is a
+   feature card's). Everything else is NOT done: no scanning, no
+   cancel, no "Scan again", no field editing or validation, no copy
+   feedback, no restore/remove, no focus management. The owners:
+   T-158's family (settings save/validation), T-160's family (the
+   scan run and its phase switch, the copy feedback), T-165 (the
+   type-to-confirm archive gate), T-166/T-167 (restore and exclusion
+   removal), T-161…T-164 (the file preview command wiring).
+
+4. **The seed extension.** types.ts gained ScanNewRow, ScanKnownRow,
+   ScanSkipRow and the closed ScanSkipReason union (all six spec
+   reasons; the seed carries the demo's five rows), ArchivedProject,
+   ExclusionReason (the DDL pair), ExcludedPath and BackupRow. scan.ts
+   stores the walk's end state; the walk script (SCAN_WALK + the tick
+   timer) stays unported. The skip reason's badge wording, fix hint
+   and tint are presentation: the seed carries the reason alone and
+   the dialog maps it to catalog keys and the `scan-reason--warn`/
+   `--bad` classes (the demo's `tone` field, presentation by nature);
+   the tone of the reason with no demo row (non-UTF-8) is chosen as
+   `--bad` like no-access. The exclusions' wording table
+   (EXCLUSION_REASONS) is catalog copy keyed by the enum, not seed
+   data. All export through seed/index.ts.
+
+5. **CSS sections ported** (theme-token swap applied; one file each,
+   imported from src/assets/main.css after the library family's):
+   File preview 1494–1542 → file-preview.css (only `.fp-path` and
+   `.fp-note` remain in the slot — the markdown groups and the
+   `.ie-*` rules of the range were already ported with the editor,
+   D-213 point 5); Project settings 1543–1915 → project-settings.css
+   (minus the `.modal-lg` width, already in modal.css; the section's
+   `.ps-*` idioms — tabs, fields, inputs, hints, errors, swatches,
+   readonly rows, snippet, backups table, danger zone, the disabled
+   button pair — land here and finally style the library family's
+   editor tabs, heading dialog and editor fields); Scan 2094–2287 →
+   scan.css (`.scan-bar` lands on the native progress; the demo's
+   two-div bar — `.scan-bar-fill`, the keyframes, the reduced-motion
+   override — has no target element and is not ported); Archived
+   2589–2634 → archived.css; Excluded 2635–2664 → excluded.css. The
+   confirmation dialogs' classes (`ps-field`, `ps-input`,
+   `field-label`, `modal-text`, `modal-actions`, `btn`) were found
+   already carried — the archive field's idioms by this very section,
+   the rest by modal.css/buttons.css/toolbar.css — so nothing was
+   added for them. The demo's `#scan-dialog`/`#archived-dialog`/
+   `#exclusions-dialog` id selectors become compound classes
+   (`.modal-lg.scan-dialog`, `.modal-lg.archived-dialog`,
+   `.modal-lg.excluded-dialog` on the BaseModal root via attribute
+   fallthrough), keeping the per-dialog height overrides above the
+   generic `.modal-lg form` rule (the D-212 id→class precedent).
+
+6. **Housekeeping.** `src/styles/library-dialogs.css` — a
+   comment-only file — and its @import in src/assets/main.css are
+   deleted: with the project-settings section landed, the slot it
+   documented has its rules and the file is dead weight (the note it
+   carried is D-213 point 5). The `.ps-*` idioms are ported exactly
+   once, in project-settings.css.
+
+7. **Readings chosen where the brief was open.** (a) The card's
+   "вкладки General / Scheme / Backups" renders as the reference's TWO
+   tabs (General/Backups) — the mock-up is the layout source (D-206
+   ruling 1) and shows the scheme section inside the General panel;
+   the card's third tab reads as the scheme content area, which is
+   the SettingsSchemeTab component composed into the General panel.
+   (b) The brief's "register the dialogs … directly" is satisfied
+   one-entry-per-dialog: the four data windows (scan, preview,
+   archived, excluded) ride one showcase each passing the seed (the
+   registry stays seed-free, D-212; T-365's pattern for prop-ful
+   dialogs), the settings window one wrapper per scheme over a shared
+   scheme-parametrized showcase (A→EunomiaSync, B→yepbro/site,
+   C→docktree), and only the trio registers directly (optional
+   props). (c) The scan indeterminate bar is a native `<progress>`
+   without a value (the brief's explicit reading), replacing the
+   demo's animated two-div bar. (d) The archived `addedVia` and the
+   settings "Added" wording share the origin keys (one wording, two
+   screens). (e) The scan title's tooltip carries the root's expanded
+   form as a seed string (the mock-up's static attribute); the row
+   keys are the display paths; the scheme/swatch radio groups keep
+   the demo's static names `ps-scheme`/`ps-color` (one settings
+   dialog at a time — the D-213 radio-name precedent). (f) The
+   backups tooltip's date rides an explicit `date` field on BackupRow
+   (display strings stay data; no string surgery in the component).
+   (g) The two mixed copy+code strings render through `<i18n-t>`
+   named slots (the vue-i18n component, typed by the installed
+   package's GlobalComponents augmentation): the extra-files hint's
+   two `<code>` terms (the derived local name and `.gitignore` — the
+   file name arrives from its own catalog key, `gitignoreName`), and
+   the scheme-C label's `<code>` around the literal `<STEM>.project.md`
+   placeholder (`schemeCToken`) — the only code element in the three
+   scheme labels, composed with the letter as a slot too.
+
+8. **Checks and proofs.** cargo fmt --check, pnpm lint,
+   format:check, typecheck, build — all exit 0 (no tests written or
+   run, per the acceptance ruling; no existing test file needed a
+   change). The dist/ proof: grep for the seed strings and registry
+   ids that exist only in src/dev/** (`notes-api`, `old-crm`,
+   `wiki-bot`, `vendor-legacy`, `prototype-v0`, `projects-scan`,
+   `projects-settings-a`, `Scan window (PRJ-002`, `scripts-kit`,
+   `landing-new`) — zero matches in dist/, while the production
+   `projects.*` catalog copy (`Removed by archiving`, `Save backup to
+a file`) ships in the bundle, the D-212/D-213 pattern.
+
+9. **Round-1 review fixes** (the review: deepseek-v4.1-flash, verdict
+   NEEDS_FIXES; four findings accepted, one declined — P3, both scan
+   phases rendering at rest: that is the brief's explicit
+   derived-state list, the phase switch is the scan card's behavior,
+   and the reading is recorded in point 2(a)). P1: the preview
+   sample's Git-Workflow blocks were transposed — §9.2 appends in
+   library order, so "Commit messages" precedes "Branch naming"
+   (file-preview.ts). P2: the scheme-C label now carries the
+   reference's `<code>` around the STEM placeholder through
+   `<i18n-t>` slots (`schemeC` with {letter}/{stem}, the literal
+   placeholder as the `schemeCToken` key), and the extra-files
+   hint's `.gitignore` term moved from a script constant to the
+   `gitignoreName` catalog key — both code terms render through
+   `t()`, no raw copy smuggled past the rule. P2: the description
+   counter reads "{count} / 1000" — PRJ-008's literal and the
+   reference's "0 / 1000" (the library editor's 262,144 comma stays,
+   its own spec literal). P3: the scan title's tooltip is the bare
+   expanded path (`rootHint: "{root}"`), the reference's exact
+   attribute. Point 7(g) rewritten for the new shape.
+
 ### D-217 — T-121: the sync panel's two reads — `sync_status` over the flag, MAIN-027's derived time and the dirty cache's count, and `sync_last_result` as the run row's `error_code` first production reader through the D-147 seam — 2026-11-26
 
 The card (§7.10 Sync row's two remaining names, MAIN-024…027/030/031,

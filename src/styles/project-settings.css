@@ -1,0 +1,396 @@
+/*
+ * Project settings modal (T-366, PRJ-008…012, 021, BKP-004, BKP-012,
+ * UI-023's scroll-body insets): the mock-up's section
+ * (docs/prototype/styles.css 1543–1915) ported with the theme-token
+ * swap applied (the swap table lives in DECISIONS.md, D-206/D-211:
+ * the reference's text token to `--ink`, its muted and faint text
+ * tokens to `--ink-muted`, its strong-border token to `--line`, its
+ * focus token to `--focus-ring`; the decorative `--border`,
+ * `--row-hover`, `--radius`, `--radius-sm` keep their names). The
+ * `.modal-lg` width rule of this range (1545–1547) is already
+ * carried by src/styles/modal.css (T-363's header note) and is not
+ * ported twice.
+ *
+ * The swatch check mark keeps the reference's literal #ffffff: it sits
+ * on the swatch's own palette color (the `--c` value), not on a theme
+ * token, and carries the reference's drop shadow for contrast.
+ *
+ * The section's `.ps-*` form idioms are the SHARED classes other
+ * dialogs already use in their markup: the library editor's tabs and
+ * fields (T-365) and the heading dialog were unstyled until this file
+ * landed (the D-212/D-213 precedent: the rules arrive with their own
+ * section's card). Rendered by ProjectSettingsDialog.vue and its three
+ * tab components; used by the archive dialog's type-to-confirm field.
+ *
+ * The mock-up's class names are kept (the porting rule).
+ */
+
+/* Fixed rows + scrolling body: the actions stay visible on short windows */
+.modal-lg form {
+  block-size: min(700px, calc(100dvh - 32px));
+}
+
+.modal-lg h2,
+.modal-lg .ps-tabs,
+.modal-lg .ps-danger,
+.modal-lg .modal-actions {
+  flex: none;
+}
+
+.modal-lg .ps-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  /* Inner side insets: with overlay scrollbars the fields otherwise sit
+     flush against (and partly under) the scrollbar, and the content
+     touches the dialog borders on both sides while scrolling (PRJ-008,
+     UI-023) */
+  padding-inline: 12px;
+}
+
+/* `hidden` must win over the flex display of panels and fields */
+.ps-panel[hidden],
+.ps-field[hidden] {
+  display: none;
+}
+
+/* Tabs: General / Backups (BKP-004) */
+.ps-tabs {
+  display: flex;
+  gap: 4px;
+  border-block-end: 1px solid var(--border);
+}
+
+.ps-tab {
+  appearance: none;
+  font: inherit;
+  font-weight: 600;
+  color: var(--ink-muted);
+  background: transparent;
+  border: 0;
+  border-block-end: 2px solid transparent;
+  margin-block-end: -1px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.ps-tab:hover {
+  color: var(--ink);
+}
+
+.ps-tab[aria-selected='true'] {
+  color: var(--ink);
+  border-block-end-color: var(--accent);
+}
+
+.ps-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ps-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 12px;
+}
+
+.ps-section-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ink-muted);
+}
+
+/* Fields */
+.ps-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.ps-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-inline-size: 0;
+}
+
+.ps-input,
+.ps-textarea {
+  font: inherit;
+  inline-size: 100%;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+}
+
+.ps-select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+}
+
+.ps-textarea {
+  resize: vertical;
+  min-block-size: 64px;
+}
+
+.ps-pos-select {
+  inline-size: 92px;
+  flex: none;
+}
+
+.ps-label-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ps-label-row .ps-input {
+  inline-size: auto;
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+
+.ps-label-chip {
+  text-transform: uppercase;
+  font-weight: 600;
+  flex: none;
+}
+
+.ps-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ink-muted);
+}
+
+.ps-error {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--danger);
+}
+
+.ps-hint code,
+.ps-scheme code,
+.ps-check-row code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+/* Palette fieldset (DB-040): selected = ring + check mark, never color-only */
+.ps-palette,
+.ps-scheme-set {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font: inherit;
+  min-inline-size: 0;
+}
+
+.ps-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-block: 2px;
+}
+
+.ps-swatch {
+  position: relative;
+  display: inline-grid;
+  place-content: center;
+  inline-size: 30px;
+  block-size: 30px;
+  cursor: pointer;
+}
+
+/* The radio itself is transparent but covers the swatch for clicks and
+   keyboard focus; the visual state is drawn on the sibling fill span */
+.ps-swatch input {
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.ps-swatch-fill {
+  display: grid;
+  place-content: center;
+  inline-size: 20px;
+  block-size: 20px;
+  border-radius: 6px;
+  background: var(--c, var(--ink-muted));
+}
+
+.ps-swatch input:checked + .ps-swatch-fill {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.ps-swatch input:checked + .ps-swatch-fill::after {
+  content: '';
+  inline-size: 4px;
+  block-size: 9px;
+  border-inline-end: 2px solid #ffffff;
+  border-block-end: 2px solid #ffffff;
+  transform: rotate(45deg);
+  filter: drop-shadow(0 0 1px rgb(0 0 0 / 0.5));
+}
+
+.ps-swatch input:focus-visible + .ps-swatch-fill {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Schemes (PRJ-012) */
+.ps-schemes {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.ps-scheme {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.ps-scheme input {
+  margin-block-start: 2px;
+  accent-color: var(--accent);
+}
+
+.ps-scheme strong {
+  font-weight: 650;
+}
+
+.ps-extra-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ps-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  cursor: pointer;
+}
+
+/* Read-only project meta (PRJ-009, PRJ-021) */
+.ps-readonly {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.ps-readonly-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-inline-size: 0;
+}
+
+.ps-readonly-key {
+  flex: none;
+  inline-size: 150px;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.ps-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Ready-to-copy blocks: D-19 marker pair, D-21 snippet for scheme C */
+.ps-snippet {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+}
+
+.ps-field > .btn {
+  align-self: flex-start;
+}
+
+/* Backups tab (BKP-004) */
+.ps-backups {
+  border-collapse: collapse;
+  inline-size: 100%;
+  font-size: 12.5px;
+}
+
+.ps-backups th,
+.ps-backups td {
+  text-align: start;
+  padding: 6px 8px;
+  border-block-end: 1px solid var(--border);
+}
+
+.ps-backups th {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+.ps-backup-file {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* Per-row "save to a chosen location" action column (BKP-012: a narrow
+   column with a visually-hidden header label) */
+.ps-backups .ps-backup-save {
+  inline-size: 36px;
+  text-align: center;
+}
+
+/* Danger zone (PRJ-013…018: archive with type-to-confirm) */
+.ps-danger {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 12px;
+}
+
+.ps-danger .ps-hint {
+  min-inline-size: 0;
+}
+
+/* Disabled confirm button (typed name does not match yet — T-165's
+   behavior; the archive dialog renders the disabled state at rest) */
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn-danger:disabled:hover {
+  filter: none;
+}

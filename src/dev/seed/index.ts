@@ -2,8 +2,9 @@
  * The seed bundle (T-363): the one import point for the mock data —
  * only containers may import it (App.vue, DevGallery.vue); components
  * take props. The family cards T-364…T-367 extend the modules here
- * with their screens' data (activity, help, scan results, sync
- * summary, archived, exclusions, about) — do not port those now.
+ * with their screens' data (T-364 matrix, T-365 history/preview,
+ * T-366 scan/archived/exclusions/backups/file-preview; T-367's
+ * activity, help, sync summary and about still to come).
  *
  * The bundle reaches the app through a DEV-only dynamic import
  * (App.vue), so the whole directory is absent from the production
@@ -20,3 +21,11 @@ export * from './settings'
    revisions and the static Preview sample. */
 export * from './history'
 export * from './preview'
+/* The projects family's additions (T-366): the scan walk's end state
+   and its three result groups, the archived projects, the exclusions,
+   the Backups-tab rows and the file-preview sample. */
+export * from './scan'
+export * from './archived'
+export * from './exclusions'
+export * from './backups'
+export * from './file-preview'

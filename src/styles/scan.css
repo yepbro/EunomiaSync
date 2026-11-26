@@ -1,0 +1,188 @@
+/*
+ * Scan modal (T-366, PRJ-002…007, NFR-015): the mock-up's section
+ * (docs/prototype/styles.css 2094–2287) ported with the theme-token
+ * swap applied (the swap table lives in DECISIONS.md, D-206/D-211:
+ * the reference's text token to `--ink`, its muted text token to
+ * `--ink-muted`; the decorative `--border`, `--row-hover`,
+ * `--radius-sm` keep their names). The demo's `#scan-dialog` id
+ * selector becomes the compound
+ * `.modal-lg.scan-dialog` class: a component must be instance-
+ * reusable (the D-212 precedent), and the compound keeps the override
+ * above the generic `.modal-lg form` height rule of the
+ * project-settings section. The badges ride the ported `.chip` base
+ * (src/styles/matrix-rows.css).
+ *
+ * The indeterminate bar is a NATIVE <progress> without a value in the
+ * build (the card's reading): the browser paints and animates its own
+ * indeterminate state on the element, so the reference's two-div bar
+ * (`.scan-bar-fill`, the scan-bar-slide keyframes and their
+ * reduced-motion override) has no target element and is not ported.
+ * The track rules below land on the <progress> element itself.
+ *
+ * Rendered by ScanDialog.vue.
+ */
+
+.modal-lg.scan-dialog form {
+  block-size: min(560px, calc(100dvh - 32px));
+}
+
+/* `hidden` must win over the flex display of the phase blocks and the
+   phase-dependent action buttons (the demo's phase switching is the
+   scan card's behavior; the overrides ride along for it) */
+.scan-dialog .scan-progress[hidden],
+.scan-dialog .scan-results[hidden],
+.scan-dialog .modal-actions .btn[hidden] {
+  display: none;
+}
+
+/* Phase 1: the progress block fills the dialog between header and actions */
+.scan-progress {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
+}
+
+.scan-counters {
+  display: flex;
+  gap: 24px;
+  font-size: 12.5px;
+  color: var(--ink-muted);
+}
+
+.scan-counters strong {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Current path: fixed height + ellipsis — fast path changes do not jitter
+   the layout (PRJ-002) */
+.scan-path {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--ink-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The indeterminate bar's track (a native <progress>, see the header) */
+.scan-bar {
+  block-size: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+/* Phase 2: scrolling results body, like .ps-body / .hist-body */
+.scan-results {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-inline-end: 4px;
+}
+
+.scan-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scan-group h3 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.scan-group-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.scan-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-inline-size: 0;
+  padding: 6px 10px;
+  border-block-end: 1px solid var(--border);
+}
+
+.scan-row:last-child {
+  border-block-end: 0;
+}
+
+label.scan-row {
+  cursor: pointer;
+}
+
+label.scan-row:hover {
+  background: var(--row-hover);
+}
+
+.scan-row-name {
+  flex: none;
+  font-weight: 600;
+}
+
+.scan-row-path {
+  flex: 0 1 auto;
+  min-inline-size: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Already added: muted, no checkboxes (PRJ-002) */
+.scan-row-known .scan-row-name {
+  font-weight: 500;
+  color: var(--ink-muted);
+}
+
+/* Skipped: reason badge (the reason is in the text, not color-only) and
+   an OS-style hint, per UI-11 */
+.scan-reason {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.scan-reason--warn {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+.scan-reason--bad {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+.scan-reason-hint {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  font-size: 11.5px;
+  color: var(--ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

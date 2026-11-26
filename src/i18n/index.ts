@@ -9,7 +9,10 @@
 // time; the base `src/locales/en.json` keeps its T-142 content
 // untouched. When the skeleton phase ends, the per-feature files are
 // merged back into a single `en.json` and this header's note goes
-// away.
+// away. Today: `shell.json` (the main-window shell), `matrix.json`
+// (the matrix family), `library.json` (the library family),
+// `projects.json` (the projects family, T-366) and `dev.json` (the
+// DEV-only gallery).
 // Key convention (UI-020's `project.settings.title` example): a nested
 // namespace per UI feature (`app.*` for the base catalog, `shell.*`
 // for the main-window shell, `dev.*` for the gallery, later
@@ -36,6 +39,7 @@ import en from '../locales/en.json'
 import shell from '../locales/en/shell.json'
 import matrix from '../locales/en/matrix.json'
 import library from '../locales/en/library.json'
+import projects from '../locales/en/projects.json'
 import dev from '../locales/en/dev.json'
 
 // The dev namespace serves only the DEV-only gallery (T-363): the
@@ -45,7 +49,7 @@ import dev from '../locales/en/dev.json'
 const devMessages = import.meta.env.DEV ? dev : {}
 
 /** The merged English catalog: the base file plus the per-feature files. */
-const catalog = { ...en, ...shell, ...matrix, ...library, ...devMessages }
+const catalog = { ...en, ...shell, ...matrix, ...library, ...projects, ...devMessages }
 
 /** The message catalog type: nested feature namespaces, string leaves. */
 export type MessageSchema = typeof catalog
