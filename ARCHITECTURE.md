@@ -102,6 +102,7 @@ src-tauri/
   src/session_paths.rs     # SEC-003 session allowlist + UI path check (working)
   src/single_instance.rs   # Single-instance handoff: restore + focus (SYS-006) (working)
   src/sync_cancel.rs       # sync_cancel command: the slot's token latch + three-state answer (working)
+  src/sync_close.rs        # §9.4 close-during-sync: close seam, sync://close-confirmation, sync_confirm_exit (working)
   src/sync_reads.rs        # sync_status / sync_last_result commands: the panel's two reads (working)
   src/sync_phase0.rs       # Sync phase 0: flag, run record, built content (working)
   src/sync_phase1.rs       # Sync phase 1 preflight: ready/unchanged/skipped (working)
@@ -172,7 +173,7 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is forty-six commands — the §7.10 names that
+   The registered set is forty-seven commands — the §7.10 names that
    are implemented so far, matching the `mode.spec` surface list. It comprises the
    recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
@@ -344,7 +345,25 @@ Rust commands are registered through `tauri-specta`:
    first production reader, D-147's half 3, collapsing the two
    no-code spellings); no terminal run yet answers the `noRuns`
    state. Both commands are reads: no SYS-005 gate, no journal, and
-   the honest `NoDatabase` refusal in recovery mode — and the Library
+   the honest `NoDatabase` refusal in recovery mode — and the Sync
+   module's `sync_confirm_exit` (T-123,
+   `src-tauri/src/sync_close.rs`, DECISIONS.md D-219): the backend
+   half of §9.4's "Closing the window during a sync" — the `main`
+   window's `CloseRequested` routed from `lib.rs`'s
+   `on_window_event` wiring to the `sync_close::on_close_requested`
+   seam (prevented + the `sync://close-confirmation` ask, an EMPTY
+   payload, while the flag is up; untouched while it is down;
+   silently prevented once an exit is confirmed), and this command
+   as the UI's typed answer: the first call latches the
+   `SyncCloseState` exit latch, waits for the current write through
+   the managed `commands::SyncWriteGate` (phase 3's per-project
+   guard announces each §9.5 write unit — the write AND its
+   verdict/stamp transaction — on it; the wait is the condvar under
+   the gate's mutex on the blocking pool, never a poll), then exits
+   through the injected `ConfirmExitSeams::exit` seam (production
+   `AppHandle::exit`); a repeat call converges, a confirm with no
+   run live exits at once, and the command mutates nothing, reads no
+   database and journals nothing — and the Library
    module's `library_get` (T-083, DECISIONS.md D-187): the §7.3
    instruction library's tree — instructions (name, variant count,
    dates, state, the variants inline with LIB-014's emptiness flag

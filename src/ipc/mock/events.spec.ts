@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
   ProjectAvailabilityEventWire,
   ScanProgressEventWire,
+  SyncCloseConfirmationEventWire,
   SyncProgressEventWire,
 } from '../contract'
 import type { FixtureProfile } from '../fixtures/generator'
@@ -201,6 +202,36 @@ describe('mockEvents', () => {
     }
 
     mockEvents.syncProgress.emit(payload)
+
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(mockEventBus.listenerCount()).toBe(0)
+  })
+
+  it('syncCloseConfirmation carries the empty payload over the bus', () => {
+    // T-123's proposed §7.10 event on the mock side (D-219): the
+    // accessor is bound to the wire name `sync://close-confirmation`
+    // with the generated payload shape — the same
+    // subscribe/emit/unsubscribe lifetime pin as the other accessors.
+    // The payload is EMPTY (the unit struct: `null` on the wire, the
+    // generated TS type) — the dialog's content is static
+    // localization and the spec names no dynamic fact it needs. No
+    // mock source drives it (the mock has no window machinery, the
+    // `sync://progress` posture): this pin and the bus registration
+    // are the mock contract.
+    const listener = vi.fn()
+    const payload: SyncCloseConfirmationEventWire = null
+    const stop = mockEvents.syncCloseConfirmation.on(listener)
+    try {
+      mockEvents.syncCloseConfirmation.emit(payload)
+
+      expect(listener).toHaveBeenCalledTimes(1)
+      expect(listener).toHaveBeenCalledWith(payload)
+      expect(mockEventBus.listenerCount()).toBe(1)
+    } finally {
+      stop()
+    }
+
+    mockEvents.syncCloseConfirmation.emit(payload)
 
     expect(listener).toHaveBeenCalledTimes(1)
     expect(mockEventBus.listenerCount()).toBe(0)

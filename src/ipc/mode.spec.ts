@@ -60,6 +60,7 @@ describe('the mock command surface', () => {
       'settingsGet',
       'settingsSet',
       'syncCancel',
+      'syncConfirmExit',
       'syncLastResult',
       'syncRun',
       'syncStatus',

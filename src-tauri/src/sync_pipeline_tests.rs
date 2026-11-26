@@ -519,6 +519,9 @@ fn build(specs: &[WriteSettings]) -> World {
     app.manage(data_dirs::DataRoot(data_root.path().to_path_buf()));
     app.manage(crate::sync_running::SyncRunning::new());
     app.manage(crate::commands::SyncCancelSlot::new());
+    // The write-in-flight gate phase 3's per-project guard reads
+    // (T-123/D-219 — the state `setup` manages beside the slot).
+    app.manage(crate::commands::SyncWriteGate::new());
     app.manage(crate::availability::AvailabilityState::new());
     app.manage(crate::dirty_recalc::DirtyState::new().0);
     let (watch_state, bus) = FileWatchState::new();

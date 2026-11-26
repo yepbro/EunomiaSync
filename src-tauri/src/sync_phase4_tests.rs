@@ -102,6 +102,9 @@ fn phase4_app() -> (
         .expect("failed to build mock app");
     app.manage(database);
     app.manage(crate::sync_running::SyncRunning::new());
+    // The write-in-flight gate phase 3's per-project guard reads
+    // (T-123/D-219 — the state `setup` manages beside the flag).
+    app.manage(crate::commands::SyncWriteGate::new());
     let repos = temp.path().join("repos");
     fs::create_dir(&repos).expect("the repos root must be creatable");
     (temp, app, repos)

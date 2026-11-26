@@ -68,6 +68,17 @@
 //!       committed), and the project's `last_synced_*` cells keep
 //!       their previous values (OUT-020).
 //!
+//!    The whole per-project unit — the §9.5 write AND its verdict
+//!    transaction — is announced on the managed
+//!    [`crate::commands::SyncWriteGate`] (T-123, D-219 point 5): an
+//!    RAII guard opens at the unit's top and drops at its end, so the
+//!    §9.4 "Closing the window during a sync" flow's confirmed exit
+//!    can wait for exactly this unit ("The app finishes the current
+//!    atomic write and then exits"). The gate is read here through
+//!    the panicking `app.state` — `setup` manages it beside the
+//!    cancel slot in every mode, so a missing gate is an
+//!    uninitialized-app bug that must be loud.
+//!
 //! **The §10 code table.** [`write_code`] maps the atomic pipeline's
 //! typed verdicts arm by arm: `WriteFailed`/`NameFailed` →
 //! `E_WRITE_FAILED` (the D-099 fold — a staging-name refusal is a
@@ -116,7 +127,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use jiff::Timestamp;
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 use eunomia_core::assembly_b::splice;
 use eunomia_core::marker_clock::MarkerClock;
@@ -278,9 +289,21 @@ where
     // short transaction; a refusal is a row, never a stop. The write
     // operation rides an `Arc`: every project's `spawn_blocking`
     // closure is `'static`, and the operation must survive them all.
+    // The write-in-flight gate's guard (T-123, D-219 point 5) opens
+    // HERE, at the unit's top: its region is the WHOLE per-project
+    // unit — the blocking-pool §9.5 write AND the verdict/stamp
+    // transaction — the region §9.4's closing paragraph protects
+    // ("The app finishes the current atomic write and then exits";
+    // Rule 7: the guard lives across every `.await` of the unit, and
+    // its drop at the iteration's end is what the confirmed exit's
+    // `SyncWriteGate::wait_quiet` waits for). The gate is managed by
+    // `setup` beside the cancel slot (the panicking lookup: a wiring
+    // bug must be loud).
+    let write_gate = app.state::<crate::commands::SyncWriteGate>();
     let write = std::sync::Arc::new(write);
     let mut results = Vec::with_capacity(ready.len());
     for (project_id, ready_project) in ready {
+        let _write_in_flight = write_gate.enter();
         // The fingerprint this project's stamp will store — the run's
         // own DB-020 value, not a recomputation. The pre-pass above
         // proved it exists; the expect is the reasoned-panic posture

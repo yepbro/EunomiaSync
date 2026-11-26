@@ -157,6 +157,18 @@ export type MockState = {
    * derive from).
    */
   lastSyncSuccessAt: string | null
+  /**
+   * The close-confirmation flow's one-way latch (T-123/D-219): `true`
+   * once a mock `syncConfirmExit` call was accepted. The stand-in's
+   * own memory of the confirm — nothing drives it from the mock side
+   * (the mock has no window machinery to intercept a close), and the
+   * EXIT itself is not model-able in a browser mock (no process to
+   * end — the documented limit `syncConfirmExit` carries); what the
+   * bit gives the dialog's future tests is the "the confirm landed"
+   * fact. A reset clears it (a fresh world is a fresh session, the
+   * latch's own per-process posture).
+   */
+  exitConfirmed: boolean
 }
 
 /** One `library_items` row in the mock store (§6.2 columns the UI can
@@ -665,6 +677,9 @@ export function resetMockState(profile: FixtureProfile): MockState {
     // rows, and the stand-in's memory starts empty with it).
     lastSyncRun: null,
     lastSyncSuccessAt: null,
+    // No close was confirmed in a fresh world (the latch's per-process
+    // posture mirrored: the fresh session starts unconfirmed).
+    exitConfirmed: false,
   }
   // A fresh world is a fresh session: no project has been probed yet, so
   // the availability cache restarts from the D-112 baseline.

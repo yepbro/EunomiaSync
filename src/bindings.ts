@@ -949,6 +949,34 @@ export const commands = {
 	 */
 	syncCancel: (options?: InvokeOptions) => __TAURI_INVOKE<SyncCancelOutcome>("sync_cancel", undefined, options),
 	/**
+	 *  Serves the confirmed exit (§7.10 Sync module `sync_confirm_exit`,
+	 *  §9.4's closing paragraph; T-123): the UI's answer to the
+	 *  [`SyncCloseConfirmationEvent`] ask — wait for the current atomic
+	 *  write, then exit.
+	 * 
+	 *  The three arms (D-219 points 3–7):
+	 * 
+	 *  - **First call** — the latch is taken, the wait runs
+	 *    ([`SyncWriteGate::wait_quiet`] on the blocking pool, SYS-001),
+	 *    and the exit seam fires. The answer is `Ok(())` (the command's
+	 *    contract is one behavior; nothing a consumer would branch on).
+	 *  - **Repeat call** — the latch is already taken: the converging
+	 *    no-op (one exit, never two — the double-click race the
+	 *    idempotence discipline protects).
+	 *  - **No sync running** — the wait is instantly satisfied (nothing
+	 *    is in flight) and the exit proceeds: the confirm answers a
+	 *    dialog that asked "exit after the current write?", and a run
+	 *    ending between the ask and the answer does not cancel the
+	 *    user's exit intent (D-219 point 4 — the standing-intent
+	 *    reading, recorded against the converge alternative).
+	 * 
+	 *  The only `Err` is the honest missing-state fallback (the
+	 *  `sync_cancel` shape: the D-037 fallback with a diagnostic naming
+	 *  the state — an uninitialized-app bug, not a panic, and not a
+	 *  silent `Ok` that would hide the wiring gap).
+	 */
+	syncConfirmExit: (options?: InvokeOptions) => __TAURI_INVOKE<null>("sync_confirm_exit", undefined, options),
+	/**
 	 *  Serves the last attempt's summary (§7.10 Sync module
 	 *  `sync_last_result`, OUT-009/MAIN-031): the newest TERMINAL run
 	 *  row's committed rows read back the `sync_run` answer's way, plus
@@ -1217,6 +1245,7 @@ export const events = {
 	stateDirty: makeEvent<DirtyEvent, DirtyEvent>("state://dirty"),
 	stateFileChanged: makeEvent<FileChangedEvent, FileChangedEvent>("state://file-changed"),
 	stateProjectAvailability: makeEvent<ProjectAvailabilityEvent_Serialize, ProjectAvailabilityEvent_Deserialize>("state://project-availability"),
+	syncCloseConfirmation: makeEvent<SyncCloseConfirmationEvent, SyncCloseConfirmationEvent>("sync://close-confirmation"),
 	syncProgress: makeEvent<SyncProgressEvent, SyncProgressEvent>("sync://progress"),
 };
 
@@ -3802,6 +3831,25 @@ export type SyncCancelOutcome =
  *  written.
  */
 { outcome: "nothingToCancel" };
+
+/**
+ *  The `sync://close-confirmation` event payload (§7.10's events
+ *  line, §9.4's "A confirmation is shown"; T-123, D-219 point 2):
+ *  EMPTY by design — `null` on the wire. §9.4, UI-010 and NFR-021
+ *  make the dialog's content static localization ("a sync is
+ *  running; exit after the current write"), and the spec names NO
+ *  dynamic fact the dialog needs; the UI wave owns the text and may
+ *  widen the payload with a follow-up if a need is ever shown.
+ * 
+ *  The event name is the proposal the card asks for (the spec names
+ *  none): the `sync://` family — the ask exists only because a sync
+ *  runs — and the name §9.4's own sentence shape ("A confirmation is
+ *  shown") read as the close-confirmation moment, avoiding tauri's
+ *  own `ExitRequested` vocabulary. Emitted from Rust only; the
+ *  webview subscribes through the T-246 listen/unlisten grant
+ *  (SEC-001 — the generated `emit`/`emitTo` stay capability-denied).
+ */
+export type SyncCloseConfirmationEvent = null;
 
 /**
  *  The `sync_last_result` command's answer (§7.10 Sync module,

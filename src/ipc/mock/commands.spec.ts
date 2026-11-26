@@ -2295,6 +2295,31 @@ describe('syncStatus / syncLastResult (the mock stand-ins, T-121)', () => {
   })
 })
 
+describe('syncConfirmExit (the mock stand-in, T-123)', () => {
+  it('accepts the confirm and converges on the re-send', async () => {
+    // The stand-in's documented limits, pinned: the mock has no
+    // window machinery (nothing intercepts a close, so no ask ever
+    // fires on the mock bus) and no process to end — the EXIT itself
+    // is not model-able in a browser mock. What the twin serves is
+    // the command's CONTRACT: the call is accepted (the latch
+    // records it — the "the confirm landed" fact the dialog's future
+    // tests read), the converging re-send answers the same `null`
+    // the real double-click arm gives, and nothing else in the mock
+    // store changes (the wait has no mock meaning: the `syncRun`
+    // stand-in is synchronous, no write is ever in flight).
+    expect(mockState().exitConfirmed).toBe(false)
+    const before = structuredClone(mockState().projects)
+
+    await expect(commands.syncConfirmExit()).resolves.toBeNull()
+
+    expect(mockState().exitConfirmed).toBe(true)
+    // Idempotent: the re-send converges.
+    await expect(commands.syncConfirmExit()).resolves.toBeNull()
+    expect(mockState().exitConfirmed).toBe(true)
+    expect(mockState().projects).toEqual(before)
+  })
+})
+
 describe('scanStart / scanCancel', () => {
   /** The fixture world's scan root: every project lives under it. */
   const ROOT = '/home/dev/src'

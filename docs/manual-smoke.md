@@ -325,6 +325,7 @@ scenario-relevant backend commands (`project_add_manual`,
 `project_update` (T-106),
 `scan_start`/`scan_cancel`/`scan_commit`, `sync_run`,
 `sync_cancel` (T-120),
+`sync_confirm_exit` (T-123),
 `sync_status`/`sync_last_result` (T-121),
 `settings_get`/`settings_set`, the library read `library_get`, the
 instruction lifecycle
@@ -728,6 +729,24 @@ per-column state icons — spec §16 M3/M5. (The backend `sync_run`, the
 phase modules, the `sync://progress` event (T-119) and `sync_cancel`
 (T-120) are registered; the panel — including any Cancel control that
 would call `sync_cancel` mid-run — is not.)
+
+**§9.4's "Closing the window during a sync" — the dialog half is the
+pending line (T-123).** The backend half is registered (the
+`sync://close-confirmation` ask, the `sync_confirm_exit` command, the
+write-in-flight wait and the exit); the CONFIRMATION DIALOG the ask
+triggers is the unlanded UI wave's (UI-010's pattern, spec §16). The
+manual check this scenario gains when the dialog lands: start a sync
+over a slow volume (or a large project), close the window mid-run —
+the close is intercepted and the dialog appears; confirm — the app
+exits only after the current project's file and its row are written
+(the run row becomes `interrupted` at the next startup, §9.4's
+recovery paragraph); cancel — the window stays and the run finishes.
+With no sync running, closing the window exits the app as usual (no
+dialog). Until the dialog exists this line is NOT exercisable
+end-to-end (the app exposes no dev-tools event hook —
+`window.__TAURI__` is not injected, `withGlobalTauri` is off), so the
+backend half stays covered by its automated battery and this line
+waits with the UI wave.
 
 **Prepare.** Four projects, each assigned an instruction of its own
 (shared instructions would couple their dirty states): (a) a healthy

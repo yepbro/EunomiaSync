@@ -2714,6 +2714,24 @@ export const mockCommands: IpcCommands = {
     }
   },
 
+  /**
+   * `sync_confirm_exit` (§7.10, §9.4's closing paragraph; T-123): the
+   * mock twin of the confirmed exit — with the documented limit that
+   * the mock has no window machinery (nothing intercepts a close, so
+   * no `sync://close-confirmation` ask ever fires on the mock bus)
+   * and no process to end: the EXIT itself is not model-able in a
+   * browser mock. What the stand-in serves is the command's CONTRACT:
+   * the call is accepted (the latch records it, the converging
+   * re-send answers the same `null` the real double-click arm gives)
+   * and nothing else in the mock store changes — the wait has no
+   * mock meaning (the `syncRun` stand-in is synchronous, no write is
+   * ever in flight).
+   */
+  async syncConfirmExit(): Promise<null> {
+    mockState().exitConfirmed = true
+    return null
+  },
+
   // -------------------------------------------------------------------------
   // The three assignment commands and two history reads (T-331).
   // -------------------------------------------------------------------------

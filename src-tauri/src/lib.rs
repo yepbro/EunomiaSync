@@ -174,6 +174,22 @@ pub(crate) mod sync_cancel;
 // journal; recovery mode answers the honest `NoDatabase`.
 pub(crate) mod sync_reads;
 
+// The §9.4 "Closing the window during a sync" machinery (spec §9.4's
+// closing paragraph, §7.10's events line and Sync row; T-123, D-219):
+// the `main` window's `CloseRequested` interception (the
+// `on_close_requested` seam this file's `on_window_event` wiring
+// routes to — prevented while the flag is up, untouched while it is
+// down, silent once an exit is pending), the `sync://close-
+// confirmation` ask (empty payload — the dialog is the unlanded UI
+// wave's half), and the `sync_confirm_exit` command: latch, wait for
+// the current write unit through the managed `commands::
+// SyncWriteGate` (phase 3's per-project guard announces each unit),
+// then exit through the event-loop path. The mock runtime drives no
+// real window events and its `request_exit` is unimplemented, so the
+// wiring is pinned by source scans and the seam is tested directly —
+// the D-025 posture.
+pub(crate) mod sync_close;
+
 // The target-file watch service (spec §5.7, SYS-007…009, OUT-014,
 // §7.10's `state://file-changed` event; T-102): the debounced watch
 // over the target files of active, available projects, the SYS-008
@@ -329,6 +345,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // Projects module's `scan_start`/`scan_cancel`/`scan_commit`
         // (T-076/T-077), the Sync module's `sync_run` (T-118,
         // D-138), the Sync module's `sync_cancel` (T-120, D-210),
+        // the Sync module's `sync_confirm_exit` (T-123, D-219),
         // the Sync module's `sync_status`/`sync_last_result` (T-121,
         // D-217) and the Backups module's `backups_list` (T-125,
         // D-193 — the project-settings "Backups" tab's read). Every
@@ -367,6 +384,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::settings_set::<tauri::Wry>,
             commands::sync_run::<tauri::Wry>,
             sync_cancel::sync_cancel::<tauri::Wry>,
+            sync_close::sync_confirm_exit::<tauri::Wry>,
             sync_reads::sync_last_result::<tauri::Wry>,
             sync_reads::sync_status::<tauri::Wry>,
             variants::variant_create::<tauri::Wry>,
@@ -388,29 +406,37 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // The registered §7.10 events: `state://project-availability`
         // (T-079, D-09/DB-032), `state://dirty` (T-101,
         // DB-021/DB-022), `state://file-changed` (T-102, §5.7
-        // SYS-007…009), `scan://progress` (T-076, SYS-003/ALG-053)
-        // and `sync://progress` (T-119, SYS-003/MAIN-026, D-202)
-        // — the events the builder carries, emitted by
+        // SYS-007…009), `scan://progress` (T-076, SYS-003/ALG-053),
+        // `sync://progress` (T-119, SYS-003/MAIN-026, D-202) and
+        // `sync://close-confirmation` (T-123, §9.4's closing
+        // paragraph, D-219 — the proposed name, the spec naming no
+        // event) — the events the builder carries, emitted by
         // `availability::recheck_and_emit` at DB-032's three check
         // points, by `dirty_recalc::recalc_and_emit` at DB-022's
         // three recalculation points, by `file_watch`'s service
         // at §5.7's watch points, by the scan command's walk
-        // callback through its throttled seam, and by the sync
+        // callback through its throttled seam, by the sync
         // pipeline's `sync_run_with` through the rate-bounded
-        // `commands::SyncProgressReporter`. The wire names are
-        // the spec's literal `state://…`/`scan://…`/`sync://…`
-        // spellings (pinned by the manual `Event` implementations in
-        // `availability.rs`, `dirty_recalc.rs`, `file_watch.rs`,
-        // `scan.rs` and `commands.rs`); the generated TypeScript
-        // accessors are their camelCase forms
-        // (`stateProjectAvailability`, `stateDirty`,
-        // `stateFileChanged`, `scanProgress`, `syncProgress`).
+        // `commands::SyncProgressReporter`, and by the close
+        // interception (`sync_close::on_close_requested`, this
+        // file's `on_window_event` wiring's route) when a sync holds
+        // the flag. The wire names are the spec's literal
+        // `state://…`/`scan://…`/`sync://…` spellings (pinned by
+        // the manual `Event` implementations in `availability.rs`,
+        // `dirty_recalc.rs`, `file_watch.rs`, `scan.rs` and
+        // `commands.rs`, plus the proposed `sync://close-
+        // confirmation` pinned the same way in `sync_close.rs`);
+        // the generated TypeScript accessors are their camelCase
+        // forms (`stateProjectAvailability`, `stateDirty`,
+        // `stateFileChanged`, `scanProgress`, `syncProgress`,
+        // `syncCloseConfirmation`).
         .events(collect_events![
             availability::ProjectAvailabilityEvent,
             commands::SyncProgressEvent,
             dirty_recalc::DirtyEvent,
             file_watch::FileChangedEvent,
             scan::ScanProgressEvent,
+            sync_close::SyncCloseConfirmationEvent,
         ])
         // `AppError` (§7.10: every command returns `Result<T, AppError>`)
         // is registered directly instead of through a command
@@ -496,12 +522,32 @@ pub fn run() {
     // routes through the availability trigger — a focus gain
     // (`Focused(true)`, which is also how "the window opened" is
     // delivered) rechecks all active projects in a fire-and-forget
-    // task behind the in-flight slot; everything else is ignored.
-    // Routed through the `on_window_event` seam (not per-window
-    // listeners) so every window of the app qualifies, present and
-    // future, and the handler never blocks the event loop's thread
-    // (SYS-001 — the probes run on the spawned task's blocking pool).
+    // task behind the in-flight slot; everything else is ignored by
+    // the availability half. §9.4's "Closing the window during a
+    // sync" (T-123, D-219) rides the SAME closure: a
+    // `CloseRequested` on the `main` window is routed to the
+    // `sync_close::on_close_requested` seam, and every decision but
+    // `Proceed` — a live sync's ask, or an already-confirmed exit's
+    // silent hold — calls `api.prevent_close()` (the process must
+    // survive to finish the current write; the ask's emission happens
+    // inside the seam, and a non-`main` window's close is the seam's
+    // own `Proceed`). Routed through the `on_window_event` seam (not
+    // per-window listeners) so every window of the app qualifies,
+    // present and future, and neither handler blocks the event
+    // loop's thread (SYS-001 — the probes run on the spawned task's
+    // blocking pool, and the close decision is two atomic loads and
+    // at most one event emit).
     let tauri_builder = tauri_builder.on_window_event(|window, event| {
+        // The let-chain spelling the edition's clippy demands (the
+        // D-202 emission-site note): the close is prevented for every
+        // non-`Proceed` decision — the ask, or the confirmed exit's
+        // silent hold.
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event
+            && sync_close::on_close_requested(window.app_handle(), window.label())
+                != sync_close::CloseDecision::Proceed
+        {
+            api.prevent_close();
+        }
         if let availability::WindowEventReaction::Recheck(_pass) =
             availability::on_window_event(window.app_handle(), event)
         {
@@ -577,6 +623,25 @@ pub fn run() {
             // mode the slot simply stays empty (a sync refuses at
             // phase 0, so there is never a live run to cancel).
             app.manage(commands::SyncCancelSlot::new());
+
+            // The write-in-flight gate (§9.4's closing paragraph,
+            // T-123/D-219): phase 3's per-project guard announces each
+            // §9.5 write unit (the write AND its verdict/stamp
+            // transaction) on it, and the `sync_confirm_exit` command
+            // waits on it before the exit. Managed beside the slot
+            // for the same reason — infallible, needed in every mode:
+            // the phase and the command must FIND the state, and in
+            // recovery mode it simply stays quiet (no sync can run).
+            app.manage(commands::SyncWriteGate::new());
+
+            // The close-confirmation flow's one-way latch (T-123,
+            // D-219): set by the first `sync_confirm_exit`, read by
+            // the close interception. Managed beside the gate for
+            // the same reason — infallible, needed in every mode (the
+            // interception must FIND the state before the event loop
+            // can serve a close; in recovery mode it simply stays
+            // down — no dialog exists to confirm).
+            app.manage(sync_close::SyncCloseState::new());
 
             // The live scan's published cancel token (§7.10's
             // `scan_cancel`, T-076): `scan_start` publishes the token

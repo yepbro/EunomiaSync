@@ -26402,3 +26402,468 @@ and the declined ipc-only arm: "the D-217 addendum's reasoning is
 sound and I found no new verified evidence"). No findings at any
 level; the review phase is complete after the second round (no
 third round).
+
+### D-219 — T-123: closing the window during a sync — the `main` close intercepted by label, the `sync://close-confirmation` ask (empty payload), the `sync_confirm_exit` command over a write-in-flight gate, and the exit through an injected seam — 2026-11-26
+
+The card (§9.4's "Closing the window during a sync" paragraph,
+§9.4 phase 3, §9.5, §7.10, §10's own pointer, UI-010's pattern; the
+DoD "выход происходит только после завершения текущей записи") lands
+the backend half of the window-close flow: the interception, the ask,
+the confirmed wait-and-exit. The pinned card comment (project review
+2026-11-23, P2-4) is verified true by grep before any reliance
+(Rule 2): `CloseRequested`/`ExitRequested`/`prevent_close` occur in
+NEITHER `src-tauri/src` NOR `src` — the only window-event handling
+today is the `Focused(true)` recheck routed through
+`availability::on_window_event` from `lib.rs`'s single
+`on_window_event` closure. The card's named dependency (the global
+`sync_running` flag, T-105) is landed (`sync_running.rs`, managed by
+`setup`). API facts verified against the installed crates before
+design (Rule 2): tauri 2.12.6 `app.rs:118-121` —
+`WindowEvent::CloseRequested { api: CloseRequestApi }`,
+`app.rs:101-106` — `prevent_close()`; tauri 2.12.6 `app.rs:581-587` —
+`AppHandle::exit` routes through `runtime_handle.request_exit` (the
+event-loop exit path, never a direct `std::process::exit` on the happy
+path); tauri 2.12.6 `test/mock_runtime.rs:150` — the mock runtime's
+`request_exit` is `unimplemented!()`, so a real `app.exit` under the
+harness PANICS (the exit must be observable through a seam, never
+really fired in a test); the mock runtime delivers no real window
+events either (the D-025 posture — the availability suite's ruling on
+CONSTRUCTED events is the shape here, and `CloseRequested` itself
+cannot even be constructed outside tauri: its `CloseRequestApi`
+field is private, so the seam is label-driven and the event MATCHING
+plus `prevent_close` stay in the wiring, marker-pinned); specta
+2.0.0-rc.28 `datatype/fields.rs:11-14` — a unit struct payload is
+`null` in TypeScript, and the generated `makeEvent`'s
+`EventEmitTo<T>` handles the `[T] extends [null]` arm (bindings.ts
+line 4417) — an EMPTY event payload is a first-class shape.
+
+Ten readings were open; the chosen readings were written here BEFORE
+the implementation (the rule-1 discipline).
+
+1. **The interception — the `main` window's `CloseRequested`, BY
+   LABEL (the D-025 posture), through the one `on_window_event`
+   closure `lib.rs` already registers.** §9.4's "Closing the window
+   during a sync" is about the app's window — `main`, declared in
+   `tauri.conf.json` from start (UI-001), the only window today.
+   While a sync runs every `main` close attempt is PREVENTED, so
+   `main` stays open for the whole run and no other window can become
+   the last one during it — a non-`main` label (future UI-002
+   windows) is returned untouched by the seam, the honest scope given
+   `main` is pinned. The no-sync case: §9.4's paragraph begins
+   "during a sync", so with the flag down the close proceeds
+   UNTOUCHED (no prevent, no event, no wait — the default close is
+   exactly what the user asked for). The decision logic lives in the
+   seam `sync_close::on_close_requested(app, label)` returning a
+   `CloseDecision` (`Proceed` / `ConfirmationRequested` /
+   `ExitPending`), the `availability::on_window_event` shape: the
+   reaction value plus the emitted event are the observable seam
+   (D-025's own argument — the mock runtime drives no real close
+   events), the ask's EVENT EMISSION happens inside the seam, and the
+   wiring does the two things only it can: match
+   `WindowEvent::CloseRequested` and call `api.prevent_close()` for
+   every non-`Proceed` decision. The wiring is marker-pinned by
+   source scans (the D-034 census shape: `CloseRequested`,
+   `prevent_close` and `on_close_requested` each exactly once in
+   `lib.rs`); the seam is behavior-tested on the mock app with label
+   literals (`"main"`/`"preview"` — never the constant, the D-025
+   mutation discipline). The seam's state lookups use the panicking
+   `app.state` (the `spawn_recheck` posture — a wiring bug must be
+   loud, and both states are managed by `setup` before the event loop
+   can serve a close). The label constant is this module's own
+   `MAIN_WINDOW_LABEL` twin of `single_instance.rs`'s (that module is
+   `cfg(desktop)`; the close machinery must register on every
+   platform) — two constants naming the same `tauri.conf.json`
+   declaration, each pinned by its own literal-driven tests.
+2. **The ask — the event `sync://close-confirmation`, EMPTY payload.**
+   The spec names no event (the card: "предложить"); the family
+   chosen is `sync://` (the ask exists only because a sync runs —
+   `state://` members are state facts, `scan://` is scan progress),
+   and the name is §9.4's own sentence shape ("A confirmation is
+   shown") read as the close-confirmation moment, avoiding tauri's
+   own `ExitRequested` vocabulary. The payload is the UNIT (`null` on
+   the wire): §9.4, UI-010 and NFR-021 make the dialog's content
+   static localization ("a sync is running; exit after the current
+   write"), the spec names NO dynamic fact the dialog needs, and
+   carrying run facts (a k-of-N, say) would speculate beyond the spec
+   — the UI wave owns the dialog's text and may widen the payload
+   with a follow-up if a need is ever shown. The manual `Event`
+   implementation (the D-112 `://` ruling), registered in
+   `collect_events!`, generated accessor `syncCloseConfirmation`, the
+   mock twin is the `IpcEventMap` member plus the typed accessor with
+   NO mock source driving it (the `sync://progress` posture, D-202:
+   the mock has no window machinery — the accessor and the bus
+   registration are the mock contract). The emission failure on the
+   real runtime is display-only degradation, logged through the ONE
+   new facade edge `sync_close_confirmation_emit_failed` (warn — the
+   `sync_progress_emit_failed` twin; the window stays open and the
+   user retries the close; the tauri error is the whole payload,
+   class-only, SEC-008).
+3. **The answer — a TYPED COMMAND `sync_confirm_exit` (#47,
+   46→47).** Commands are the only UI→Rust channel (SEC-001: §7.10
+   events cross as Rust-emitted notifications; the webview's
+   capabilities carry listen/unlisten only) — "the UI emits an event
+   back" and "close the window again" are both declined: an event
+   back would need an emit grant the security posture denies, and a
+   second close re-enters the interception (the ask again) rather
+   than answering it. No SYS-005 gate (the command mutates no
+   project data — the exit is window machinery, the `sync_cancel`
+   posture) and no database access (the only states read are the
+   latch and the write gate). The answer is `Ok(())`: one behavior
+   (accept the confirm; the app exits), no state to report — a
+   double-confirm converges and the no-sync confirm exits, so no
+   consumer ever branches on the answer; the `Err` arm is the
+   missing-state fallback alone (the `sync_cancel` shape:
+   `try_state` + the honest typed refusal naming the state, the
+   D-037 fallback — the loud `app.state` stays in the seam where the
+   event loop has no error channel, the fallback stays in the command
+   where the wire has one).
+4. **The no-sync confirm — EXIT (the standing intent), recorded
+   against the converge alternative.** The confirm answers a dialog
+   that asked "exit after the current write?"; a run ending between
+   the ask and the answer does not cancel the user's exit intent —
+   with no write in flight the wait is instant and the exit proceeds
+   (the window is still open: the close was prevented when the ask
+   went out). D-210's `nothingToCancel` converges because a CANCEL
+   with nothing live is a no-op by nature; an EXIT with nothing to
+   wait for is still an exit — converging would silently drop the
+   user's close attempt. The indistinguishable spurious call (no
+   dialog ever shown, a UI bug — the IPC surface is this app's own
+   webview) exits too: the same trust every destructive command
+   holds (`db_recreate` trusts its caller). Recovery mode: no sync
+   can run there (phase 0 refuses without a database), so no dialog
+   exists to confirm; a confirm arriving anyway is that same UI-bug
+   class, and the command works (both states are managed in every
+   mode — the `SessionPaths` posture; the wait is instant, the exit
+   proceeds).
+5. **The wait — a write-in-flight GATE whose region is phase 3's
+   whole per-project unit: the §9.5 write AND its verdict/stamp
+   transaction (§9.4 phase 3 step 2), not the file write alone.** The
+   DoD's completion observable is "the file stamped/verdict
+   recorded" — a write whose row has not committed is not finished
+   in the app's bookkeeping, and an exit landing between the file
+   write and the verdict transaction would leave a NEW file over a
+   `not_started` row (recoverable, but the stronger region makes the
+   state at exit exact). The mechanism: the managed
+   `commands::SyncWriteGate` — a `Mutex<usize>` in-flight count plus
+   a `Condvar`; phase 3's per-project loop takes an RAII
+   `WriteInFlightGuard` BEFORE the blocking-pool write and drops it
+   AFTER the verdict transaction (Rule 7: the guard lives across the
+   WHOLE region — the `spawn_blocking().await` and the
+   `database.run().await` both inside it; a take-and-immediately-drop
+   shape is the bug the rule exists for). The confirm command waits
+   through `wait_quiet` — the condvar under the mutex, so no wakeup
+   can be missed and NO polling or fixed sleep exists anywhere near
+   it (D-140) — inside `tauri::async_runtime::spawn_blocking`
+   (SYS-001: a blocking wait belongs off the async threads; the wait
+   is bounded by one write's duration, §9.5's own bounded retries).
+   The gate lives in `commands.rs` beside `SyncCancelSlot` (the
+   pipeline-resident posture — phase 3 already imports
+   `crate::commands` for `managed_db`, so the pipeline→command-region
+   dependency exists; `sync_close` reads it as a sibling consumer).
+   Two honest boundaries, recorded: (a) the wait covers the write in
+   flight WHEN THE WAIT BEGINS — a write STARTING after the quiet
+   observation races the process death, and that arm is carried by
+   exactly the machinery §9.4 itself defines for a mid-write death:
+   §9.5's old-or-new atomicity plus the startup `interrupted` sweep
+   (D-147). A "freeze new writes" gate would need a pipeline stop
+   §9.4 phase 2 step 3 forbids past the point of no return. (b) The
+   gate covers PHASE 3's writes only — §9.4's "atomic write" is §9.5's
+   unit, phase 2's backup copies are not target writes, and the
+   spec's sentence names the atomic unit, not every file operation.
+6. **The exit — `AppHandle::exit(0)` through an INJECTED seam (the
+   `sync_run_with` split).** Production: `app.exit(0)` — the
+   event-loop exit path (verified above; the loop's own
+   `RunEvent::Exit` cleanup runs, never a direct process kill). Under
+   the harness the real call is impossible (the mock's
+   `request_exit` panics — verified above), so the command's body is
+   `sync_confirm_exit_with(app, seams)` with
+   `ConfirmExitSeams { exit: Arc<dyn Fn(&AppHandle<R>)> }`: the tests
+   inject a recorder (the exit observed through the seam, never a
+   real exit under the harness), the public command constructs the
+   production seam — the `SyncRunSeams`/`dialog_pick_folder_with`
+   house pattern, and the `WriteOp`/`AbortClock` object-safety shape
+   (generic over the runtime, `Send + Sync`).
+7. **The repeat handling — ONE latch, converging.** The managed
+   `sync_close::SyncCloseState` carries an `AtomicBool` exit latch
+   taken by the first confirm (`swap`, the flag seam's Release/
+   Acquire pair — no other memory is published through it): a repeat
+   confirm converges (answers `Ok` without a second wait or exit —
+   the idempotence discipline: run twice, ONE exit), and a second
+   `CloseRequested` while the wait is pending reads
+   `CloseDecision::ExitPending` — the wiring STILL prevents the
+   close (the last window's close would exit the process mid-wait,
+   defeating the wait) but SILENTLY: no second event, no second
+   dialog — the pending exit owns the ending. The latch never resets:
+   once confirmed the app is exiting, and the state dies with the
+   process (a fresh app starts unlatched — the flag's own posture).
+   The CANCEL arm needs NO backend state: the dialog's cancel is
+   UI-side (nothing calls the command), the interception is stateless
+   per event (flag up → ask again on the next close — the re-ask is
+   correct: the user cancelled and tried again), and a close after
+   the run finishes proceeds because the flag is down — recorded as
+   the answer to "converge or re-ask".
+8. **Module shape — `src-tauri/src/sync_close.rs`, the battery in
+   `ipc_tests.rs`'s sync section.** The D-204/D-205/D-208/D-210
+   family precedent: one command, one module (commands.rs's sync
+   region stays at its landed size); the module owns the seam, the
+   event DTO, the latch state, the command and its seams. The
+   write gate stays in `commands.rs` (reading 5's pipeline-resident
+   reason — the D-210 split: the command went to its module, the
+   slot the pipeline writes stayed). The battery lands beside the
+   sync-run lifecycle tests (the D-210/D-217 ruling verbatim: the
+   tests are lifecycle-shaped and every fixture they need —
+   `sync_app`, the parked-write seam, `run_sync_with`,
+   `count_empty_run_error_codes` — already lives there).
+9. **Registration census.** `collect_commands!` gains
+   `sync_close::sync_confirm_exit::<tauri::Wry>` (command #47,
+   between `sync_cancel` and `sync_reads::sync_last_result` — the
+   path-prefix order);
+   `collect_events!` gains `sync_close::SyncCloseConfirmationEvent`;
+   `src/bindings.ts` regenerates through the export pin
+   (`syncConfirmExit` over the unit answer, the `sync://close-
+confirmation` event); the mock twin `syncConfirmExit` records the
+   confirmed bit (idempotent re-send) and answers `Ok` — the EXIT
+   itself is not model-able in a browser mock (no process to end),
+   documented beside the mock's other sync limits; the
+   `IpcEventMap`/`mockEvents.syncCloseConfirmation` twin follows the
+   scan-twin posture (no mock source drives it); `mode.spec.ts`'s
+   surface pin moves to the 47-name list; ARCHITECTURE.md's module
+   table and count sentence say forty-seven; manual-smoke.md's
+   registered-command list names it plus the PENDING manual line
+   (the real window close → dialog → confirm flow — the dialog
+   itself is the unlanded UI wave, exactly the half automation
+   cannot prove); spec §7.10: the Sync row gains `sync_confirm_exit`,
+   the events line gains `sync://close-confirmation`, and the
+   command-notes paragraph gains the sentence (additions only —
+   §9.4's own paragraph already states the behavior and stays
+   as-is). No journal entry, no DB write (the §7.7 action vocabulary
+   has no member for an exit — nothing is recorded), and TWO logging
+   edges: the ask's emit refusal (reading 2) and the command's own
+   failure line `sync_confirm_exit_failed` (the `sync_cancel_failed`
+   family shape — every command's `Err` path gets a facade line; the
+   only reachable class here is the missing-state fallback).
+10. **Determinism.** No polling, no fixed sleeps (D-140): every wait
+    in the battery is a channel rendezvous — the parked write seam's
+    entry signal, the `DatabaseGate`'s held/release transaction pair,
+    and the condvar gate itself (the wait's RETURN is the
+    rendezvous; nothing ever samples a clock). The mock twin's tests
+    are synchronous.
+
+Two design facts sharpened during the test work (both landed in
+this change, recorded here because the planned-tests paragraph above
+drafted weaker shapes):
+
+- _The wait is an INJECTED SEAM (`ConfirmExitSeams::wait`), not a
+  direct `wait_quiet` call._ The DoD battery's rendezvous needs to
+  prove the confirm REACHED its wait while the write is still
+  parked: the test's wait closure signals arrival before waiting,
+  and the test receives the signal before releasing the write — the
+  D-089 injector pattern applied to the wait (production is
+  `wait_quiet` verbatim). Without the interlock the "exit never
+  precedes the write" ordering assert is a scheduler race for the
+  no-wait mutation: the confirm task sometimes completes its exit
+  before the test releases the parked write and sometimes after.
+- _The M3 pin lives at the PHASE level._ `sync_phase3_tests` gained
+  `the_write_unit_is_announced_on_the_gate_while_it_is_in_flight`:
+  the parked write seam's ENTRY proves the guard was taken (the
+  enter precedes the `spawn_blocking`), so `is_quiet() == false` at
+  the entry signal is deterministic, and the phase's completion
+  proves the drop. The ipc DoD battery alone cannot catch a never-
+  taken guard deterministically (the exit's timing relative to the
+  test's own release is a race); the phase-level probe is the
+  discriminating pin, the same split D-210 made for the knowledge
+  mark's bounds.
+
+Tests, as landed: `commands.rs`'s inline suite — the gate's RAII
+counting (one unit per guard, a panic's unwind releases), and the
+blocking wait's ordered-log pin (`["held", "waiting", "dropped",
+"returned"]` — "dropped" is logged strictly before the guard's
+decrement, so a wait that returns early logs "returned" ahead of
+"dropped" and fails; no sleep, no poll). `sync_close.rs`'s own suite
+— the wire-name literal, the empty-payload round-trip (`null`), the
+decision table (no-sync → `Proceed` with nothing emitted; mid-sync →
+`ConfirmationRequested` with exactly one event, and a cancel-then-
+retry asks again — stateless per event; non-`main` label →
+`Proceed`; latch set → `ExitPending` silently; the fresh-latch
+per-app pin). `sync_phase3_tests` — the gate probe above.
+`logging.rs` — the two new edges' pins (the emit-refusal WARN line
+with the error's Display; the command-failure ERROR line with the
+§10 code and the `SyncCloseStateMissing` diagnostic).
+`ipc_tests.rs`'s sync section — THE DoD
+(`confirming_the_close_waits_for_the_current_write_and_exits_after_
+it`: the parked write + the gated verdict transaction; the ask goes
+out while parked; the confirm's wait arrives (the seam interlock);
+the write is released; the verdict transaction is STILL parked on
+the gated connection; the gate releases; the verdict commits; the
+guard drops; the wait returns; the exit recorder fires — the
+ordered log `["write-done", "exit"]`, the recorder's OWN capture of
+the verdict row read through a FRESH WAL connection at exit time
+(`written` — only a guard covering the verdict transaction can
+produce it; the managed `Db`'s executor is the very thing a parked
+verdict blocks on, so a fresh reader is the only deterministic
+observer), the file's new bytes, the `written` row, BOTH stamps, and
+the run's `success` answer), the no-sync arms (the close proceeds
+with nothing emitted; the confirm exits at once — the standing-
+intent reading pinned), the close-then-cancel arm (the run finishes
+`success`; a close after it proceeds), the repeat arm (TWO confirm
+tasks — the latch makes the order irrelevant — exactly ONE exit
+marker; the late close afterwards is absorbed as `ExitPending`),
+the recovery-mode arm (no `Db` managed: the confirm succeeds and
+exits — the claim structural through the `_with` body, the IPC
+invoke itself being impossible under the harness), and the
+registration census (the command, the event, the seam route,
+`prevent_close` and the `CloseRequested` match each exactly once in
+`lib.rs`). The mock battery — `commands.spec.ts` (the twin records
+the latch and converges on the re-send, the store unchanged),
+`events.spec.ts` (the `syncCloseConfirmation` accessor twin over the
+empty payload), `mode.spec.ts` (the 47-name surface).
+
+Mutation groups, red-then-reverted (the surgical edit/undo — never
+`git checkout`, the D-202 process note): M1 the wait never entered
+(the seam's spawn dropped) → the DoD's arrival rendezvous itself
+fails (no signal — deterministic, 0.08 s); M2 the guard dropped
+right after the write's `.await` (before the verdict transaction) →
+**the honest boundary, recorded**: NOT deterministically pinnable —
+the mutated world's early exit races the test's own gate release,
+and catching it would mean waiting for an event that never occurs in
+the correct world (a timeout — the D-140-forbidden shape); the
+recorder's row capture keeps a probabilistic catch (a correct run
+can never fail it), and the D-210 M3 posture applies — the window
+between the write await's resolution and the verdict's queueing
+admits no injectable park. The residual harm is bounded by §9.5's
+old-or-new atomicity plus the startup `interrupted` sweep — exactly
+the crash-recovery machinery §9.4 itself defines; M3 the guard never
+taken → the phase-level probe red (`is_quiet()` true at the entry
+signal) — the ipc DoD battery's own catch under it is only
+probabilistic (the recorder's exit races the test's gate release;
+the pre-interlock measurement had the battery flat GREEN, and the
+arrival interlock narrows but does not close that race — the
+phase-level pin is the deterministic discriminator, the split
+recorded above); M4 the seam's flag check dropped →
+both no-sync arms red (a close with no sync asks); M5 the wiring's
+`prevent_close` dropped → the census red; M6 the latch never
+consulted (every confirm proceeds) → the convergence tests red (the
+repeat-confirm pin and the ipc two-confirm test); the INVERTED swap
+(swap's raw value) is count-symmetric — every pair still produces
+exactly one exit — and is not a discriminating mutation, recorded
+here so nobody re-runs it expecting red; M7 the pending-exit arm
+re-asks → the silent-prevent unit pin red; M8 the command
+registration dropped → the census red (and the export pin's
+regeneration rewrites the bindings without it, the D-034 mechanic);
+M9 the event name mutated → the wire literal pin red; M10 the wait
+returns immediately → the ordered-log unit pin red
+(`["held","waiting","returned","dropped"]` — a NEAR-CERTAINTY, not a
+proof: the waiter's "returned" marker races the release chain's
+"dropped" by scheduling, so the mutation check's red is the weighted
+outcome, not a causal guarantee; the correct world can never fail
+the pin); TM1 the mock twin
+diverges → the mock spec red. M1, M3 and M10 were each re-run red
+after their shape's final refactor (the wait seam, the phase probe).
+
+Checks (final, after the round-1 fixes): `CARGO_BUILD_JOBS=2 cargo
+fmt --check` green (after one `cargo fmt` pass over the new code);
+`cargo clippy --workspace --all-targets -- -D warnings` green (after
+the `ExitOp`/`WaitOp` aliases and the let-chain wiring spelling —
+clippy's own demands, the D-202 note); `cargo nextest run --workspace
+--test-threads=4` — 1982/1982; `cargo test --doc --workspace`
+(86 + 12, the D-195 ruling); `pnpm test` (399/399), `pnpm run
+format:check`, `pnpm run lint`, `pnpm run typecheck` — all green on
+real exit codes; `src/bindings.ts` regenerated through the export pin
+(first run red — the D-034 mechanic — the regenerated file committed:
+`syncConfirmExit` over the `null` answer, the `sync://close-
+confirmation` event, and `export type SyncCloseConfirmationEvent =
+null` — the unit-struct → `null` rule verified against specta
+2.0.0-rc.28's own docs).
+
+Round-1 review addendum (D-219, same task; report
+`.opencode/reviews/t123-round1-report.md`, deepseek-v4.1-flash —
+VERDICT: REQUEST CHANGES; 2×P2, 4×P3): findings processed here —
+all six taken:
+
+- P2-1 (taken): the command's only `Err` class — the
+  missing-`SyncCloseState` fallback — had NO test (every harness
+  managed the state), and the logging pin built its own twin error
+  (a formatter pin, not a command pin). Closed by
+  `sync_confirm_exit_answers_the_honest_fallback_when_the_state_is_
+not_managed` (the `sync_cancel` mirror): a mock app with the
+  command registered and NO close state, the REAL IPC invoke (safe —
+  the `Err` returns before the latch, the wait and the exit seam, so
+  the production exit never fires), asserting `E_DB_LOCKED` +
+  `SyncCloseStateMissing`. The invoke helper's doc records why the
+  success path alone cannot go through the IPC (the mock's
+  `request_exit` panics).
+- P2-2 (taken): the census did not pin the two new `setup` manage
+  lines — dropping either crashes production (the seam's and phase
+  3's panicking `app.state`) while every suite stays green (each
+  harness manages its own). Closed by two census pins
+  (`commands::SyncWriteGate::new()` and
+  `sync_close::SyncCloseState::new()` each exactly once in `lib.rs`,
+  the `sync_running`/`file_watch` manage-pin precedent).
+- P3-1 (taken): the manual-smoke pending line's dev-tools recipe
+  named `window.__TAURI__` — an API this app does not expose
+  (`withGlobalTauri` off, verified by the reviewer's grep). Reworded
+  to the honest "not exercisable end-to-end until the dialog lands".
+- P3-2 (taken): the phase-3 probe's comment overclaimed M2-class
+  discrimination (the probe reads `is_quiet()` at the write's ENTRY
+  and at the phase's end — a mid-region drop passes both). The
+  comment now names what the probe pins (never-taken /
+  before-the-write drops) and points at this entry's M2 boundary
+  paragraph for the window it does not cover.
+- P3-3 (taken): the census pinned `prevent_close`'s presence, not
+  its condition. Closed by a third source-scan pin
+  (`!= sync_close::CloseDecision::Proceed` exactly once — an
+  unconditional prevent would wedge every healthy close).
+- P3-4 (taken): this entry's registration parenthetical said "after
+  `sync_reads::sync_status`" where the code registers between
+  `sync_cancel` and `sync_reads::sync_last_result` — corrected.
+
+Two record corrections from the round's notes, folded into the
+mutation paragraph above: the M3 note's "the ipc battery stayed
+GREEN" was the PRE-interlock measurement (the arrival interlock
+narrows that race but does not close it — the phase-level pin is the
+deterministic discriminator, and the paragraph now says so), and
+M10's red is a near-certainty, not a causal guarantee (the waiter's
+"returned" marker races the release chain; the correct world can
+never fail the pin). The round's remaining notes, recorded for the
+orchestrator: macOS Cmd+Q (`RunEvent::ExitRequested`) bypasses the
+`CloseRequested` interception entirely — out of this card's scope
+(the card names the window close), follow-up material; the pre-dialog
+UX (a close during a sync is prevented with nothing shown until the
+UI wave's dialog lands) is the manual line's own pending text; the
+gate's panicking `app.state` AFTER the latch (the round's last note)
+stays as landed — a wiring bug is loud, and the P2-2 census pin now
+guards the line it depends on.
+
+Round-2 review addendum (D-219, same task; report
+`.opencode/reviews/t123-round2-report.md`, opencode-go/
+hy4-flash-free — **APPROVE, 0 findings** — the review phase closes
+with no second amend). The round verified the commit `f564eb9`
+whole: Rule 7 clean (the guard lives from the loop's top through
+both verdict transactions, no early drop), D-140 clean (the
+condvar re-check loop, `notify_all`, no new sleep or poll in the
+commit's hunks), the wiring's let-chain sound with the census's
+stripped-comment counts confirmed discriminating (the raw
+`prevent_close`/`on_close_requested` excesses all sit in comments
+`strip_comments` removes), and the surface consistent end to end
+(47 commands, the mock twin, the wire types, the generated
+bindings). It verified every round-1 fix present AND discriminating
+at its anchor (the fallback test's independent §10-literal oracle;
+the two manage pins' raw counts; the manual-smoke wording now
+naming `window.__TAURI__` only as the reason it is NOT exercisable;
+the probe comment's disclaimer; the condition pin's token; the
+registration parenthetical), answered the four test-audit checks
+explicitly (all pass — the assertions pin concrete literals, the
+diff is addition-only for tests, the 30 s `recv_timeout`s are
+failure ceilings, never sleep-based expectations), and confirmed
+both recorded boundaries (the M2 window, the post-quiet race)
+without re-opening them — its own reasoning matched the record's:
+the DoD test releases the database gate right after the write's
+release, so the M2 early-exit races that release and a
+deterministic pin would need a signal at the "verdict parked"
+point (none exists) or a timeout. The round's notes keep the two
+follow-ups where round 1 left them (the macOS Cmd+Q bypass, the
+pre-dialog UX pending line) — orchestrator material, not defects.
+The full chain was re-run green after the round-1 fixes and stands
+for the commit; this addendum is the commit's only delta after it
+(doc-only, the pre-commit hook's four checks re-run green on the
+amend).

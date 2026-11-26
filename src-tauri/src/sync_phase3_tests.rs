@@ -37,6 +37,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::SystemTime;
 
 use tauri::Manager;
@@ -100,6 +101,9 @@ fn phase3_app() -> (
         .expect("failed to build mock app");
     app.manage(database);
     app.manage(SyncRunning::new());
+    // The write-in-flight gate phase 3's per-project guard reads
+    // (T-123/D-219 — the state `setup` manages beside the flag).
+    app.manage(crate::commands::SyncWriteGate::new());
     let repos = temp.path().join("repos");
     fs::create_dir(&repos).expect("the repos root must be creatable");
     (temp, app, repos)
@@ -411,6 +415,90 @@ fn fingerprints_of(
 }
 
 // ---- the success path -------------------------------------------------
+
+#[test]
+fn the_write_unit_is_announced_on_the_gate_while_it_is_in_flight() {
+    // T-123/D-219 point 5, at the phase's own level: the per-project
+    // write unit is IN FLIGHT on the managed gate from before the
+    // §9.5 write runs until after the verdict transaction — the
+    // region §9.4's confirmed exit waits on. The parked write seam is
+    // the deterministic rendezvous: the seam's ENTRY proves the guard
+    // was taken (the enter precedes the spawn_blocking), and the
+    // phase's completion proves it dropped (the verdict transaction
+    // is the unit's last step before the loop ends). A phase that
+    // never takes the guard, or drops it before the write even runs,
+    // leaves the gate quiet at the probe. A guard dropped between
+    // the write's `.await` and the verdict transaction (the M2-class
+    // boundary) passes this probe — that window is recorded as NOT
+    // deterministically pinnable in D-219's mutation paragraph (no
+    // injectable park exists there, and catching it would need a
+    // timeout), and this probe claims no coverage of it.
+    let (temp, app, repos) = phase3_app();
+    let (project, _repo) = seed_repo_project(
+        &app,
+        &repos,
+        9,
+        eunomia_store::settings::Scheme::A,
+        BaseName::AgentsMd,
+    );
+    seed_assigned_instruction(&app, &project, "Be brief.");
+    let phase1 = preflight_ok(&app);
+    run_phase2(&app, &phase1, temp.path());
+
+    // The parked write seam: signal entry, hold until released, then
+    // run the REAL §9.5 write.
+    let (entered_tx, entered_rx) = mpsc::channel::<PathBuf>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let parked_write = move |target: &Path, contents: &[u8]| {
+        entered_tx
+            .send(target.to_path_buf())
+            .expect("the test must live to receive the entry signal");
+        release_rx
+            .lock()
+            .expect("the release lock must not be poisoned")
+            .recv()
+            .expect("the test must live to release the parked write");
+        sync_phase3::production_write(target, contents)
+    };
+    let handle = app.app_handle().clone();
+    let running = tauri::async_runtime::spawn(async move {
+        sync_phase3::run(
+            &handle,
+            &phase1,
+            parked_write,
+            fixed_marker_clock,
+            fixed_now(),
+        )
+        .await
+    });
+    let _parked = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("phase 3 must reach its write");
+
+    // THE probe: the unit is in flight — the guard was taken BEFORE
+    // the write's entry signal, and only the unit's end drops it.
+    assert!(
+        !app.state::<crate::commands::SyncWriteGate>().is_quiet(),
+        "the write unit is in flight on the gate while the §9.5 write runs"
+    );
+
+    release_tx
+        .send(())
+        .expect("the parked write must be released");
+    let outcome = tauri::async_runtime::block_on(running)
+        .expect("the phase task must join")
+        .expect("the phase must succeed");
+    assert_eq!(outcome.results.len(), 1, "the one project was written");
+    // The unit's end dropped the guard: the gate is quiet again —
+    // the next confirm would not wait.
+    assert!(
+        app.state::<crate::commands::SyncWriteGate>().is_quiet(),
+        "the gate quieted with the unit's completion (the verdict transaction included)"
+    );
+    drop(app);
+    drop(temp);
+}
 
 #[test]
 fn ready_projects_are_written_with_the_run_s_one_marker_and_stamped() {

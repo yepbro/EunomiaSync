@@ -1051,6 +1051,148 @@ impl<R: Runtime> Drop for CancelLease<R> {
 }
 
 // ---------------------------------------------------------------------------
+// The write-in-flight gate (T-123, §9.4's "Closing the window during
+// a sync" — "The app finishes the current atomic write and then
+// exits"; D-219 point 5): the one fact the confirmed exit waits on.
+// ---------------------------------------------------------------------------
+
+/// The write-in-flight gate — the one fact §9.4's closing paragraph
+/// makes load-bearing: which phase-3 per-project write unit is in
+/// flight RIGHT NOW. Phase 3's loop takes a [`WriteInFlightGuard`]
+/// per project (before the blocking-pool §9.5 write) and drops it
+/// after the verdict/stamp transaction (§9.4 phase 3 step 2) — the
+/// guard's region IS the per-project unit, the DoD's "the file
+/// stamped/verdict recorded" moment — and the `sync_confirm_exit`
+/// command waits on [`SyncWriteGate::wait_quiet`] before it exits
+/// (T-123, D-219).
+///
+/// The region covers phase 3's writes only, by the recorded reading:
+/// §9.4's "atomic write" is §9.5's unit, and phase 2's backup copies
+/// are not target writes. The honest boundary (D-219 point 5a): the
+/// wait covers the write in flight WHEN THE WAIT BEGINS — a write
+/// STARTING after the quiet observation races the process death, and
+/// that arm is carried by exactly the machinery §9.4 itself defines
+/// for a mid-write death: §9.5's old-or-new atomicity plus the
+/// startup `interrupted` sweep (D-147). A "freeze new writes" gate
+/// would need a pipeline stop §9.4 phase 2 step 3 forbids past the
+/// point of no return.
+///
+/// Managed by `setup` in every mode beside [`SyncCancelSlot`] (the
+/// pipeline-resident posture: phase 3 — a `crate::commands` importer
+/// already — takes the guards, `sync_close` reads the wait as a
+/// sibling consumer). [`Clone`] because the confirm command moves a
+/// share into its blocking wait (the `Arc` behind it is the whole
+/// cost).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SyncWriteGate {
+    inner: std::sync::Arc<SyncWriteGateInner>,
+}
+
+/// The gate's shared half: the in-flight count under the mutex the
+/// condvar pairs with — the count is the fact, the condvar is the
+/// wakeup, and both live under ONE lock so no wakeup can be missed
+/// (the `while` re-check under the mutex is the miss-proof shape).
+#[derive(Debug, Default)]
+struct SyncWriteGateInner {
+    in_flight: std::sync::Mutex<usize>,
+    write_finished: std::sync::Condvar,
+}
+
+impl SyncWriteGate {
+    /// The quiet gate a fresh app starts from — the state `setup`
+    /// manages before anything that could fail. Deliberately not
+    /// `Default` in the caller: the constructor names the fresh state
+    /// in the setup code.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enters one write's region: counts the caller's unit as in
+    /// flight. Called by phase 3's per-project loop (the guard's
+    /// placement there is Rule 7's whole-region rule — the guard
+    /// lives across the `spawn_blocking` write AND the verdict
+    /// transaction's `.await`).
+    pub(crate) fn enter(&self) -> WriteInFlightGuard {
+        let mut in_flight = self
+            .inner
+            .in_flight
+            .lock()
+            .expect("the write gate must not be poisoned");
+        *in_flight += 1;
+        WriteInFlightGuard {
+            inner: std::sync::Arc::clone(&self.inner),
+        }
+    }
+
+    /// Waits until no write unit is in flight — the confirmed exit's
+    /// wait (§9.4: "The app finishes the current atomic write and
+    /// then exits"). BLOCKING by design: the condvar's `wait` parks
+    /// the calling thread until a guard's drop notifies it, so the
+    /// caller runs this on the blocking pool (SYS-001; the confirm
+    /// command's `spawn_blocking`) and NO polling or fixed sleep
+    /// exists anywhere near the wait (D-140 — the wait's return IS
+    /// the rendezvous). Bounded by one write unit's duration (§9.5's
+    /// own bounded retries).
+    pub(crate) fn wait_quiet(&self) {
+        let mut in_flight = self
+            .inner
+            .in_flight
+            .lock()
+            .expect("the write gate must not be poisoned");
+        while *in_flight > 0 {
+            in_flight = self
+                .inner
+                .write_finished
+                .wait(in_flight)
+                .expect("the write gate must not be poisoned");
+        }
+    }
+
+    /// Whether no write unit is in flight — the moment-of-read
+    /// observability seam the gate's own suite uses. No production
+    /// caller consults it (the confirm command WAITS, it never
+    /// polls), so it exists only under `cfg(test)` (the
+    /// `Db::set_busy_timeout_for_tests` shape).
+    #[cfg(test)]
+    pub(crate) fn is_quiet(&self) -> bool {
+        *self
+            .inner
+            .in_flight
+            .lock()
+            .expect("the write gate must not be poisoned")
+            == 0
+    }
+}
+
+/// One write unit's in-flight lease (the [`sync_running::SyncGuard`]
+/// RAII shape): counted in on [`SyncWriteGate::enter`], counted out
+/// and announced in `Drop` — the notify wakes exactly the waiter the
+/// count's return to zero matters to. `Send + Sync` by construction
+/// (an `Arc`), so phase 3's loop holds it across the write's and the
+/// verdict transaction's `.await`s — the whole region the gate
+/// protects (Rule 7: a take-and-immediately-drop is the bug the
+/// rule exists for).
+pub(crate) struct WriteInFlightGuard {
+    inner: std::sync::Arc<SyncWriteGateInner>,
+}
+
+impl Drop for WriteInFlightGuard {
+    fn drop(&mut self) {
+        let mut in_flight = self
+            .inner
+            .in_flight
+            .lock()
+            .expect("the write gate must not be poisoned");
+        *in_flight = in_flight
+            .checked_sub(1)
+            .expect("a write guard only ever drops on a counted unit");
+        // notify_all, not notify_one: every waiter re-checks under
+        // the mutex, so the shape needs no wakeup accounting.
+        self.inner.write_finished.notify_all();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The `sync://progress` event (T-119, §7.10's events line, SYS-003,
 // MAIN-026, §9.4): the run's live "k of N" and the current phase,
 // emitted no more than ten times per second. D-202 holds the readings.
@@ -7433,5 +7575,127 @@ mod tests {
                 from.duration_since(start)
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The write-in-flight gate (T-123, D-219 point 5): the pure RAII and
+    // the blocking wait, over the gate's own interface. The ipc-level
+    // halves — phase 3's guard placement and the confirmed exit's
+    // wait-then-exit ordering — live in `ipc_tests.rs` (the mock-app
+    // harness with a real run).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_write_gate_counts_one_unit_per_guard() {
+        // The RAII counting seam: enter counts, drop uncounts, and the
+        // gate is quiet exactly when no guard lives. A panic's unwind
+        // releases the same way (the SyncGuard reasoning).
+        let gate = SyncWriteGate::new();
+        assert!(gate.is_quiet(), "a fresh gate is quiet");
+
+        let first = gate.enter();
+        assert!(!gate.is_quiet(), "one unit is in flight");
+        let second = gate.enter();
+        assert!(
+            !gate.is_quiet(),
+            "two units are in flight (no interleave assumption)"
+        );
+        drop(second);
+        assert!(!gate.is_quiet(), "the first unit is still in flight");
+        drop(first);
+        assert!(gate.is_quiet(), "the last guard's drop quieted the gate");
+    }
+
+    #[test]
+    fn a_panicking_write_unit_releases_the_gate() {
+        // The RAII half: the unwind drops the guard, so a panicking
+        // write unit cannot wedge the confirmed exit's wait forever.
+        let gate = SyncWriteGate::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _in_flight = gate.enter();
+            panic!("the write unit died mid-flight");
+        }));
+        assert!(result.is_err(), "the scenario itself must have panicked");
+        assert!(gate.is_quiet(), "the unwinding unit released the gate");
+    }
+
+    #[test]
+    fn wait_quiet_blocks_until_the_in_flight_unit_completes() {
+        // The DoD's mechanism, isolated: `wait_quiet` called on a HELD
+        // gate returns only after the unit's guard drops. The oracle
+        // is an ORDERED shared log, not a timing sample: "dropped" is
+        // logged strictly BEFORE the guard's decrement, and
+        // "returned" is logged strictly after `wait_quiet` returns —
+        // which can only be after the count reaches zero — so a
+        // correct wait can never log "returned" before "dropped",
+        // and a wait that returns early (the mutation this test
+        // exists for) logs it immediately after "waiting". No sleep,
+        // no poll: the causal order is the assertion.
+        let gate = SyncWriteGate::new();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let gate = gate.clone();
+            let log = std::sync::Arc::clone(&log);
+            std::thread::spawn(move || {
+                let in_flight = gate.enter();
+                log.lock()
+                    .expect("the log must not be poisoned")
+                    .push("held");
+                held_tx
+                    .send(())
+                    .expect("the test waits for the guard to be held");
+                release_rx
+                    .recv()
+                    .expect("the test releases the holder before joining");
+                // Strictly BEFORE the guard's decrement, so a correct
+                // wait can never log "returned" ahead of "dropped".
+                log.lock()
+                    .expect("the log must not be poisoned")
+                    .push("dropped");
+                drop(in_flight);
+            })
+        };
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the holder must signal its held guard");
+        assert!(!gate.is_quiet(), "the unit is in flight");
+
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel::<()>();
+        let waiter = {
+            let gate = gate.clone();
+            let log = std::sync::Arc::clone(&log);
+            let waiting_tx = waiting_tx.clone();
+            std::thread::spawn(move || {
+                log.lock()
+                    .expect("the log must not be poisoned")
+                    .push("waiting");
+                waiting_tx
+                    .send(())
+                    .expect("the test waits for the waiter to reach the wait");
+                gate.wait_quiet();
+                log.lock()
+                    .expect("the log must not be poisoned")
+                    .push("returned");
+            })
+        };
+        drop(waiting_tx);
+        waiting_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the waiter must reach its wait while the unit is held");
+        // Only now — with the waiter inside `wait_quiet` over a held
+        // gate — does the in-flight unit complete.
+        release_tx
+            .send(())
+            .expect("the holder waits for this release");
+        holder.join().expect("the holder must not panic");
+        waiter.join().expect("the waiter must not panic");
+        assert_eq!(
+            *log.lock().expect("the log must not be poisoned"),
+            ["held", "waiting", "dropped", "returned"],
+            "the wait returned only after the in-flight unit completed"
+        );
+        assert!(gate.is_quiet(), "the wait observed the unit's completion");
     }
 }

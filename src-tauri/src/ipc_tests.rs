@@ -10298,6 +10298,7 @@ fn sync_watch_app() -> (
             crate::commands::sync_run,
             crate::commands::projects_list,
             crate::sync_cancel::sync_cancel,
+            crate::sync_close::sync_confirm_exit,
             crate::sync_reads::sync_status,
             crate::sync_reads::sync_last_result
         ])
@@ -10307,6 +10308,15 @@ fn sync_watch_app() -> (
     app.manage(data_dirs::DataRoot(temp.path().to_path_buf()));
     app.manage(crate::sync_running::SyncRunning::new());
     app.manage(crate::commands::SyncCancelSlot::new());
+    // The write-in-flight gate phase 3's per-project guard announces
+    // each write unit on, the close-confirmation latch
+    // `sync_confirm_exit` takes, and the ask event mounted the way
+    // the wiring's builder mounts it (T-123/D-219 — the states
+    // `setup` manages beside the slot, plus the event the close seam
+    // emits; an unmounted event's emit PANICS on the mock runtime,
+    // the D-202-verified fact).
+    app.manage(crate::commands::SyncWriteGate::new());
+    app.manage(crate::sync_close::SyncCloseState::new());
     app.manage(crate::availability::AvailabilityState::new());
     app.manage(crate::dirty_recalc::DirtyState::new().0);
     let (watch_state, commands) = crate::file_watch::FileWatchState::new();
@@ -10317,6 +10327,7 @@ fn sync_watch_app() -> (
             crate::commands::SyncProgressEvent,
             crate::dirty_recalc::DirtyEvent,
             crate::file_watch::FileChangedEvent,
+            crate::sync_close::SyncCloseConfirmationEvent,
         ])
         .mount_events(&app);
     (temp, app, commands)
@@ -13323,6 +13334,719 @@ fn the_sync_read_commands_are_registered_with_the_specta_builder() {
         1,
         "lib.rs must register the `sync_last_result` command exactly once (§7.10, T-121)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The §9.4 "Closing the window during a sync" machinery (T-123,
+// §7.10's `sync://close-confirmation` event and `sync_confirm_exit`
+// command, D-219): the close seam's decision table over the real
+// sync states, and the confirmed exit's wait-and-exit ordering. The
+// close seam itself is label-driven (the mock runtime cannot
+// construct a `CloseRequested` — its `CloseRequestApi` field is
+// private, D-219 point 1), the confirm command is driven through its
+// `_with` body with a RECORDING exit seam (the mock runtime's
+// `request_exit` is `unimplemented!()` — a real exit under the
+// harness panics), and the wait's rendezvous is the parked-write
+// seam plus the gated verdict transaction, never a sleep (D-140).
+// ---------------------------------------------------------------------------
+
+/// Subscribes the typed listener the frontend's generated
+/// `events.syncCloseConfirmation` mirrors (the `listen_sync_progress`
+/// shape): delivery to Rust listeners is synchronous inside `emit`,
+/// so the receiver holds every payload the moment the emitter
+/// returns — the ask assertions are deterministic.
+fn listen_sync_close_confirmation(
+    app: &tauri::App<tauri::test::MockRuntime>,
+) -> std::sync::mpsc::Receiver<crate::sync_close::SyncCloseConfirmationEvent> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    tauri_specta::Event::listen(app, move |event| {
+        let _ = sender.send(event.payload);
+    });
+    receiver
+}
+
+/// The confirm body's recording exit seam: pushes `marker` into the
+/// shared ordered log instead of exiting — the observable the DoD's
+/// ordering assert reads (a real exit is impossible under the mock
+/// harness, D-219 point 6). The wait is the production condvar wait.
+fn recording_exit_seams(
+    log: &std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+) -> crate::sync_close::ConfirmExitSeams<tauri::test::MockRuntime> {
+    let log = std::sync::Arc::clone(log);
+    crate::sync_close::ConfirmExitSeams {
+        exit: std::sync::Arc::new(move |_app: &tauri::AppHandle<tauri::test::MockRuntime>| {
+            log.lock()
+                .expect("the log must not be poisoned")
+                .push("exit");
+        }),
+        wait: std::sync::Arc::new(|gate: &crate::commands::SyncWriteGate| gate.wait_quiet()),
+    }
+}
+
+/// Drives the confirm body with the caller's seams (the
+/// `run_sync_with` shape: the public command's production exit seam
+/// is impossible under the harness).
+async fn run_sync_confirm_exit_with(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    seams: crate::sync_close::ConfirmExitSeams<tauri::test::MockRuntime>,
+) -> Result<(), crate::errors::AppError> {
+    crate::sync_close::sync_confirm_exit_with(app.app_handle().clone(), seams).await
+}
+
+/// Invokes `sync_confirm_exit` over the real IPC envelope; the
+/// command's ONE `Err` class (the missing-state fallback) returns
+/// BEFORE the latch, the wait and the exit seam, so the invoke is
+/// safe under the harness — the success path is not (the production
+/// exit would panic on the mock runtime's `request_exit`), which is
+/// why every other confirm test drives the `_with` body.
+fn invoke_sync_confirm_exit(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+) -> Result<(), serde_json::Value> {
+    match tauri::test::get_ipc_response(
+        webview,
+        invoke_request("sync_confirm_exit", serde_json::json!({})),
+    ) {
+        Ok(payload) => {
+            payload
+                .deserialize::<()>()
+                .expect("the success payload must deserialize into the unit");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[test]
+fn sync_confirm_exit_answers_the_honest_fallback_when_the_state_is_not_managed() {
+    // The D-037 honest fallback (the `sync_cancel` mirror): the close
+    // state is managed by `setup` before anything that could fail,
+    // so its absence is an uninitialized-app bug — the typed refusal
+    // naming the state, not a panic and not a silent `Ok` that would
+    // hide the wiring gap. The refusal is also the command's ONLY
+    // `Err` class: it returns before the latch is taken, so the
+    // repeat-arm semantics are untouched by the missing state.
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            crate::sync_close::sync_confirm_exit
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    let webview = main_webview(&app);
+
+    let error = invoke_sync_confirm_exit(&webview)
+        .expect_err("the missing close state must refuse honestly, not answer");
+    assert_eq!(error["code"], serde_json::json!("E_DB_LOCKED"));
+    assert_eq!(
+        error["details"]["os_kind"],
+        serde_json::json!("SyncCloseStateMissing"),
+        "the diagnostic names the missing managed state"
+    );
+    drop(app);
+}
+
+#[test]
+fn confirming_the_close_waits_for_the_current_write_and_exits_after_it() {
+    // THE card's DoD: "выход происходит только после завершения
+    // текущей записи" — the exit happens only after the current
+    // write completes, where "completes" is the WHOLE per-project
+    // unit: the §9.5 file write AND the `written` verdict plus the
+    // project's stamps (§9.4 phase 3 step 2). The run is parked
+    // inside the write seam AND its verdict transaction is parked on
+    // the gated database connection, so every step of the ordering is
+    // a rendezvous, never a race: the ask goes out while the write is
+    // parked; the confirm's wait is blocked by phase 3's guard (the
+    // write seam's entry signal proves the guard was taken); the
+    // write is released (the file written, "write-done" logged inside
+    // the seam); the verdict transaction still cannot commit (the
+    // database gate holds it), and the exit still has not happened —
+    // then the gate releases, the verdict commits, the guard drops,
+    // the wait returns, and the exit seam fires. The ordered log
+    // ["write-done", "exit"] and the committed row/stamps are the
+    // proof; a dropped wait or a guard that leaves the region early
+    // logs "exit" ahead of "write-done" or finds a `not_started` row.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, repo) = sync_repo_project(
+        &app,
+        &repos,
+        30,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let target = repo.join("AGENTS.md");
+    std::fs::write(&target, b"old bytes").expect("the fixture must be writable");
+    let asks = listen_sync_close_confirmation(&app);
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+
+    // The parked write seam: signal entry, hold until released, run
+    // the REAL §9.5 write, then log its completion — the marker the
+    // ordering assert discriminates on. The release receiver rides a
+    // Mutex because the seam must be `Sync`.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let write_log = std::sync::Arc::clone(&log);
+    let seams = crate::commands::SyncRunSeams {
+        backup: crate::commands::SyncRunSeams::production().backup,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
+        write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
+            entered_tx
+                .send(target.to_path_buf())
+                .expect("the test must live to receive the entry signal");
+            release_rx
+                .lock()
+                .expect("the release lock must not be poisoned")
+                .recv()
+                .expect("the test must live to release the parked write");
+            let outcome = crate::sync_phase3::production_write(target, contents);
+            write_log
+                .lock()
+                .expect("the log must not be poisoned")
+                .push("write-done");
+            outcome
+        }),
+    };
+    let handle = app.app_handle().clone();
+    let running = tauri::async_runtime::spawn(async move {
+        crate::commands::sync_run_with(handle, None, crate::commands::CancelToken::new(), seams)
+            .await
+    });
+    let parked = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the pipeline must reach its write phase");
+
+    // THE ask: the close arrives while the write is parked (the flag
+    // is up, phase 3 holds the guard), and the UI is asked exactly
+    // once — the decision names the intercepted state and the event
+    // carries the empty payload.
+    assert_eq!(
+        crate::sync_close::on_close_requested(app.handle(), "main"),
+        crate::sync_close::CloseDecision::ConfirmationRequested,
+        "§9.4: a sync runs — the close is prevented and the ask emitted"
+    );
+    assert_eq!(
+        asks.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the ask must be delivered"),
+        crate::sync_close::SyncCloseConfirmationEvent,
+        "the ask carries the empty payload"
+    );
+
+    // The run row exists from phase 0 (the write park is phase 3), so
+    // the exit recorder can pin the verdict row's state AT EXIT
+    // TIME — the M2 discriminator: the recorder reads through a FRESH
+    // WAL connection (the managed `Db`'s executor is the very thing
+    // the verdict transaction is parked on, and a fresh reader sees
+    // the last COMMITTED snapshot without touching that mutex).
+    let run_id = first_run_id(&app);
+    let db_path = data_dirs::db_file_path(temp.path());
+
+    // The user confirms WHILE the write is in flight: the wait blocks
+    // on phase 3's guard — the write has not run yet, so the exit
+    // cannot have happened. The wait seam's arrival signal is the
+    // deterministic rendezvous: the confirm task HAS reached its
+    // wait (the blocking-pool closure below) while the write is
+    // still parked, so releasing the write afterwards observes
+    // exactly the "confirm during the write" ordering — a dropped
+    // wait never signals and the rendezvous itself fails.
+    let exit_row_status = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let (wait_arrived_tx, wait_arrived_rx) = std::sync::mpsc::channel::<()>();
+    let confirm = {
+        let app = app.app_handle().clone();
+        let log = std::sync::Arc::clone(&log);
+        let exit_row_status = std::sync::Arc::clone(&exit_row_status);
+        let run_id = run_id.clone();
+        let db_path = db_path.clone();
+        let seams = crate::sync_close::ConfirmExitSeams {
+            exit: std::sync::Arc::new(move |_app: &tauri::AppHandle<tauri::test::MockRuntime>| {
+                // The verdict row's state at the exit's own
+                // moment: `written` iff the guard covered the
+                // verdict transaction too — read through a FRESH
+                // WAL connection (the managed `Db`'s executor is
+                // the very thing a parked verdict blocks on; a
+                // fresh reader sees the last committed snapshot
+                // without touching that mutex).
+                let connection =
+                    rusqlite::Connection::open(&db_path).expect("the fresh WAL read must open");
+                let status: String = connection
+                    .query_row(
+                        "SELECT status FROM sync_run_projects WHERE sync_run_id = ?1",
+                        rusqlite::params![run_id],
+                        |row| row.get(0),
+                    )
+                    .expect("the verdict row must be readable at exit time");
+                *exit_row_status
+                    .lock()
+                    .expect("the status capture must not be poisoned") = Some(status);
+                log.lock()
+                    .expect("the log must not be poisoned")
+                    .push("exit");
+            }),
+            wait: std::sync::Arc::new(move |gate: &crate::commands::SyncWriteGate| {
+                wait_arrived_tx
+                    .send(())
+                    .expect("the test must live to receive the wait's arrival");
+                gate.wait_quiet();
+            }),
+        };
+        tauri::async_runtime::spawn(async move {
+            crate::sync_close::sync_confirm_exit_with(app, seams).await
+        })
+    };
+    // The rendezvous: the confirm is inside its wait NOW — the write
+    // is still parked, phase 3's guard is provably up, and the wait
+    // is provably blocked (its arrival is the only signal it can
+    // give; its return is the exit's precondition).
+    wait_arrived_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the confirm must reach its wait while the write is parked");
+
+    // The write is released: the REAL §9.5 write runs (the file holds
+    // the new bytes), and phase 3's verdict transaction parks on the
+    // gated database — the write unit is still in flight (the guard
+    // covers the verdict too), so the exit STILL has not happened.
+    let gate = DatabaseGate::hold(&app);
+    release_tx
+        .send(())
+        .expect("the parked write must be released");
+    assert_eq!(
+        parked, target,
+        "the parked write is the project's own §9.5 target"
+    );
+
+    // The gate releases: the verdict transaction commits (`written`
+    // plus the stamps), the guard drops, the wait returns, and ONLY
+    // THEN the exit seam fires.
+    gate.release();
+
+    let outcome = tauri::async_runtime::block_on(running)
+        .expect("the parked run must join")
+        .expect("the parked run must finish");
+    assert!(
+        matches!(
+            outcome,
+            crate::commands::SyncRunOutcome::Completed { ref summary } if summary.verdict == "success"
+        ),
+        "the run finished cleanly, got {outcome:?}"
+    );
+    assert!(
+        tauri::async_runtime::block_on(confirm)
+            .expect("the confirm task must join")
+            .is_ok(),
+        "the confirm answers Ok"
+    );
+    // The exit never preceded the write: the ordered log is the
+    // proof, and the write unit's completion is on disk and in the
+    // rows — the file, the `written` verdict and BOTH stamps. The
+    // recorder's own capture is the verdict-coverage discriminator:
+    // the row it read AT EXIT TIME was already `written`, which only
+    // a guard covering the verdict transaction (not just the §9.5
+    // file write) can produce.
+    assert_eq!(
+        *log.lock().expect("the log must not be poisoned"),
+        ["write-done", "exit"],
+        "the exit seam fired only after the current write completed"
+    );
+    assert_eq!(
+        *exit_row_status
+            .lock()
+            .expect("the status capture must not be poisoned"),
+        Some("written".to_owned()),
+        "the verdict row was already committed when the exit fired — the guard \
+         covered the whole per-project unit"
+    );
+    let written = std::fs::read_to_string(&target).expect("the target must be readable");
+    assert!(
+        written.starts_with("Be brief.\n\n") && written.contains("<!-- Created by EunomiaSync "),
+        "the §9.5 write completed — the file holds the new content (the body first, \
+         ALG-032's marker line at the end), not the old bytes; got {written:?}"
+    );
+    let rows = sync_run_rows(&app, &first_run_id(&app));
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.status.as_str())
+            .collect::<Vec<_>>(),
+        ["written"],
+        "the verdict row committed before the exit"
+    );
+    let (stamped_at, stamped_hash) = sync_project_stamps(&app, &project);
+    assert!(stamped_at.is_some(), "the project's stamp committed");
+    assert!(stamped_hash.is_some());
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_close_with_no_sync_proceeds_and_a_confirm_without_a_sync_exits_at_once() {
+    // The no-sync arms: §9.4's paragraph begins "during a sync", so
+    // with the flag down the close is UNTOUCHED (no ask, the seam's
+    // `Proceed`) — and a confirm arriving with nothing in flight is
+    // the standing-intent reading (D-219 point 4): the wait is
+    // instantly satisfied and the exit proceeds, because the dialog
+    // the user answered asked "exit after the current write" and no
+    // write exists to wait for.
+    let (temp, app) = sync_app();
+    let asks = listen_sync_close_confirmation(&app);
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+
+    assert_eq!(
+        crate::sync_close::on_close_requested(app.handle(), "main"),
+        crate::sync_close::CloseDecision::Proceed,
+        "no sync runs — the close proceeds untouched"
+    );
+    assert!(
+        asks.try_recv().is_err(),
+        "no confirmation was requested, so no event exists"
+    );
+
+    tauri::async_runtime::block_on(run_sync_confirm_exit_with(&app, recording_exit_seams(&log)))
+        .expect("the no-sync confirm answers Ok");
+    assert_eq!(
+        *log.lock().expect("the log must not be poisoned"),
+        ["exit"],
+        "the exit fired at once — nothing was in flight to wait for"
+    );
+    assert_eq!(
+        count_empty_run_error_codes(&app),
+        0,
+        "no run rows exist at all"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_cancelled_close_asks_again_and_a_close_after_the_run_proceeds() {
+    // The cancel arm: the user cancels the dialog (UI-side — nothing
+    // calls the command), the run continues to its `success`, and the
+    // interception is stateless per event: a close DURING the run
+    // asks again (the user cancelled and tried again), while a close
+    // AFTER the run proceeds — the flag is down and nothing lingers.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, _repo) = sync_repo_project(
+        &app,
+        &repos,
+        31,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let asks = listen_sync_close_confirmation(&app);
+
+    // Park the run inside its write, ask, "cancel" (no command call),
+    // ask again — the retry re-asks (nothing latched).
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let seams = crate::commands::SyncRunSeams {
+        backup: crate::commands::SyncRunSeams::production().backup,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
+        write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
+            entered_tx
+                .send(target.to_path_buf())
+                .expect("the test must live to receive the entry signal");
+            release_rx
+                .lock()
+                .expect("the release lock must not be poisoned")
+                .recv()
+                .expect("the test must live to release the parked write");
+            crate::sync_phase3::production_write(target, contents)
+        }),
+    };
+    let handle = app.app_handle().clone();
+    let running = tauri::async_runtime::spawn(async move {
+        crate::commands::sync_run_with(handle, None, crate::commands::CancelToken::new(), seams)
+            .await
+    });
+    let _ = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the pipeline must reach its write phase");
+    assert_eq!(
+        crate::sync_close::on_close_requested(app.handle(), "main"),
+        crate::sync_close::CloseDecision::ConfirmationRequested
+    );
+    assert!(
+        asks.recv_timeout(std::time::Duration::from_secs(30))
+            .is_ok(),
+        "the ask went out"
+    );
+    // The cancel: no backend call exists (the dialog's cancel is
+    // UI-side) — the next close re-asks.
+    assert_eq!(
+        crate::sync_close::on_close_requested(app.handle(), "main"),
+        crate::sync_close::CloseDecision::ConfirmationRequested,
+        "a cancelled ask does not latch — the retry asks again"
+    );
+    assert!(
+        asks.recv_timeout(std::time::Duration::from_secs(30))
+            .is_ok(),
+        "the retry's ask went out"
+    );
+
+    // The run finishes on its own (the user's cancel kept it alive).
+    release_tx
+        .send(())
+        .expect("the parked write must be released");
+    let outcome = tauri::async_runtime::block_on(running)
+        .expect("the parked run must join")
+        .expect("the parked run must finish");
+    assert!(
+        matches!(
+            outcome,
+            crate::commands::SyncRunOutcome::Completed { ref summary } if summary.verdict == "success"
+        ),
+        "the run the user kept alive finished, got {outcome:?}"
+    );
+    // A close after the run: the flag is down — it proceeds.
+    assert_eq!(
+        crate::sync_close::on_close_requested(app.handle(), "main"),
+        crate::sync_close::CloseDecision::Proceed,
+        "the run answered — the close is the user's again"
+    );
+    assert!(
+        asks.try_recv().is_err(),
+        "no further ask exists after the run"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn a_second_close_and_confirm_while_the_exit_waits_converge() {
+    // The repeat arms (D-219 point 7): TWO confirm calls (the
+    // double-click race) produce exactly ONE exit — the latch makes
+    // the convergence symmetric (whichever task runs first takes it,
+    // the other converges immediately), so the observable is
+    // race-free: one "exit" marker, both calls answering Ok. The
+    // late close afterwards is ABSORBED: the latch never resets (the
+    // app is exiting), so `on_close_requested` answers `ExitPending`
+    // and never asks again. The MID-wait close decision (a close
+    // arriving between the latch and the exit) is pinned
+    // deterministically by the seam's own suite
+    // (`a_close_after_a_confirmed_exit_is_prevented_silently` — the
+    // latch taken directly); here the flow proves the same latch is
+    // the one the real command takes.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (project, _repo) = sync_repo_project(
+        &app,
+        &repos,
+        32,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &project, "Be brief.");
+    let asks = listen_sync_close_confirmation(&app);
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let seams = crate::commands::SyncRunSeams {
+        backup: crate::commands::SyncRunSeams::production().backup,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
+        write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
+            entered_tx
+                .send(target.to_path_buf())
+                .expect("the test must live to receive the entry signal");
+            release_rx
+                .lock()
+                .expect("the release lock must not be poisoned")
+                .recv()
+                .expect("the test must live to release the parked write");
+            crate::sync_phase3::production_write(target, contents)
+        }),
+    };
+    let handle = app.app_handle().clone();
+    let running = tauri::async_runtime::spawn(async move {
+        crate::commands::sync_run_with(handle, None, crate::commands::CancelToken::new(), seams)
+            .await
+    });
+    let _ = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the pipeline must reach its write phase");
+
+    // The close asks; the event carries the empty payload.
+    assert_eq!(
+        crate::sync_close::on_close_requested(app.handle(), "main"),
+        crate::sync_close::CloseDecision::ConfirmationRequested
+    );
+    assert!(
+        asks.recv_timeout(std::time::Duration::from_secs(30))
+            .is_ok(),
+        "the ask went out"
+    );
+
+    // The double-click: two confirms, one shared recorder. The latch
+    // makes the order irrelevant — the first to run waits, the other
+    // converges — so exactly one "exit" lands in the log.
+    let confirm_tasks: Vec<_> = (0..2)
+        .map(|_| {
+            let app = app.app_handle().clone();
+            let seams = recording_exit_seams(&log);
+            tauri::async_runtime::spawn(async move {
+                crate::sync_close::sync_confirm_exit_with(app, seams).await
+            })
+        })
+        .collect();
+
+    // The write releases; the run finishes; the ONE exit fires.
+    release_tx
+        .send(())
+        .expect("the parked write must be released");
+    let outcome = tauri::async_runtime::block_on(running)
+        .expect("the parked run must join")
+        .expect("the parked run must finish");
+    assert!(
+        matches!(
+            outcome,
+            crate::commands::SyncRunOutcome::Completed { ref summary } if summary.verdict == "success"
+        ),
+        "the run finished cleanly, got {outcome:?}"
+    );
+    for task in confirm_tasks {
+        assert!(
+            tauri::async_runtime::block_on(task)
+                .expect("a confirm task must join")
+                .is_ok(),
+            "every confirm call answers Ok — one by waiting, one by converging"
+        );
+    }
+    assert_eq!(
+        *log.lock().expect("the log must not be poisoned"),
+        ["exit"],
+        "the exit seam fired exactly once — the double-click converged"
+    );
+    // The late close: the latch never resets — absorbed, silent.
+    assert_eq!(
+        crate::sync_close::on_close_requested(app.handle(), "main"),
+        crate::sync_close::CloseDecision::ExitPending,
+        "the confirmed exit outlives the wait — a late close is absorbed"
+    );
+    assert!(
+        asks.try_recv().is_err(),
+        "no second ask exists for the confirmed exit"
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn sync_confirm_exit_works_without_a_database() {
+    // The recovery-mode arm (the D-210 P3-2 mirror): the command owns
+    // no database access — its only state reads are the latch and the
+    // write gate, both managed by `setup` in EVERY mode — so a
+    // database-less app (the recovery state) confirms and exits. The
+    // claim is structural: the body never touches a `Db`. The IPC
+    // invoke itself cannot be driven under the harness (the
+    // production exit seam would panic on the mock runtime's
+    // `request_exit`), so the body with the recording seam carries
+    // the proof — the D-219 point 6 posture, recorded honestly.
+    let app = mock_builder()
+        .invoke_handler(tauri::generate_handler![
+            crate::sync_close::sync_confirm_exit
+        ])
+        .build(mock_context(noop_assets()))
+        .expect("failed to build mock app");
+    app.manage(crate::sync_close::SyncCloseState::new());
+    app.manage(crate::commands::SyncWriteGate::new());
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+
+    tauri::async_runtime::block_on(run_sync_confirm_exit_with(&app, recording_exit_seams(&log)))
+        .expect("a database-less app confirms its exit");
+    assert_eq!(
+        *log.lock().expect("the log must not be poisoned"),
+        ["exit"],
+        "the exit fired — nothing was in flight to wait for"
+    );
+    drop(app);
+}
+
+#[test]
+fn the_sync_close_machinery_is_registered_and_wired() {
+    // The registration census (the D-034 wiring-pin rationale):
+    // without these pins, dropping the command's or the event's
+    // registration, or unwiring the close route, would leave
+    // `export_bindings_are_up_to_date` green while it silently
+    // rewrote the committed bindings — and every seam test green
+    // (they drive the seams, not `lib.rs`'s call sites). The wiring
+    // pins are the marker-pin posture the mock runtime forces
+    // (D-219 point 1): `CloseRequested` itself cannot be constructed
+    // outside tauri, so the match, the seam route and the
+    // `prevent_close` call are pinned as source scans.
+    let lib = crate::config_tests::strip_comments(include_str!("lib.rs"));
+    assert_eq!(
+        lib.matches("sync_close::sync_confirm_exit").count(),
+        1,
+        "lib.rs must register the `sync_confirm_exit` command exactly once (§7.10, T-123)"
+    );
+    assert_eq!(
+        lib.matches("sync_close::SyncCloseConfirmationEvent")
+            .count(),
+        1,
+        "lib.rs must register the `sync://close-confirmation` event exactly once (§7.10, T-123)"
+    );
+    assert_eq!(
+        lib.matches("sync_close::on_close_requested").count(),
+        1,
+        "lib.rs must route the close request to the seam exactly once (§9.4, T-123)"
+    );
+    assert_eq!(
+        lib.matches("api.prevent_close()").count(),
+        1,
+        "lib.rs must prevent the close for every non-Proceed decision exactly once (§9.4, T-123)"
+    );
+    // The prevent's CONDITION, not just its presence: the close is
+    // prevented only for a non-`Proceed` decision (an unconditional
+    // prevent would wedge every close of a healthy app behind a
+    // dialog it never owed — the mock runtime cannot deliver the
+    // event, so the condition is pinned as a source scan beside the
+    // call).
+    assert_eq!(
+        lib.matches("!= sync_close::CloseDecision::Proceed").count(),
+        1,
+        "the prevent must sit behind the non-Proceed decision (§9.4, T-123)"
+    );
+    assert_eq!(
+        lib.matches("WindowEvent::CloseRequested").count(),
+        1,
+        "lib.rs must match the CloseRequested event exactly once (§9.4, T-123)"
+    );
+    // The two managed states the close path reads with the panicking
+    // `app.state` (the round-1 P2-2 fix): dropping either `setup`
+    // manage line leaves every suite green here — each test app
+    // manages its own — while production crashes on the first close
+    // (the latch) or the first sync's phase 3 (the gate). The
+    // `sync_running`/`file_watch` manage pins are the precedent.
+    assert_eq!(
+        lib.matches("commands::SyncWriteGate::new()").count(),
+        1,
+        "lib.rs must manage the write gate at setup — phase 3 and the confirm \
+         command read it with the panicking `app.state`"
+    );
+    assert_eq!(
+        lib.matches("sync_close::SyncCloseState::new()").count(),
+        1,
+        "lib.rs must manage the close latch at setup — the close seam and the \
+         confirm command read it"
+    );
+}
+
+/// The id of the FIRST (only) run row — the DoD battery's one-run
+/// world.
+fn first_run_id(app: &tauri::App<tauri::test::MockRuntime>) -> String {
+    sync_all_runs(app)
+        .first()
+        .expect("the run row must exist")
+        .0
+        .clone()
 }
 
 // ---------------------------------------------------------------------------

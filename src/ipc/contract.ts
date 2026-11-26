@@ -71,6 +71,7 @@ export type {
   ScannedRepository,
   SettingChange,
   SettingItem,
+  SyncCloseConfirmationEvent as SyncCloseConfirmationEventWire,
   SyncPhaseWire,
   SyncProgressEvent as SyncProgressEventWire,
   VariantRecord_Serialize as VariantRecordWire,

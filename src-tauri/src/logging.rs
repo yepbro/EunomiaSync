@@ -1816,6 +1816,43 @@ pub(crate) fn sync_progress_emit_failed(error: &tauri::Error) {
     );
 }
 
+/// Emitting the `sync://close-confirmation` ask failed (T-123, §9.4's
+/// "Closing the window during a sync"; D-219 point 2): the close was
+/// still PREVENTED (a sync runs — the process must survive to finish
+/// the current write), but the UI never learns it should ask, so the
+/// user sees the window stay open with no dialog and can retry the
+/// close. `warn`, not `error`, for the same reason as the progress
+/// twin: a missed UI update, not lost state — the run itself is
+/// unaffected and the retry re-asks. The tauri error is the whole
+/// payload — it carries no user paths (SEC-008's class-only
+/// posture).
+pub(crate) fn sync_close_confirmation_emit_failed(error: &tauri::Error) {
+    tracing::warn!(
+        target: "eunomia::sync",
+        error = %error,
+        "emitting the sync close-confirmation ask failed; the close stays prevented"
+    );
+}
+
+/// The `sync_confirm_exit` command's failure edge (T-123, D-219):
+/// the only reachable class is the honest missing-state fallback of
+/// the managed close state (an uninitialized-app bug — the command
+/// owns no database access, so no store refusal can reach the wire
+/// through it). Every ANSWER the command gives is a state or the
+/// exit itself, and logs nothing. The `sync_cancel_failed` family
+/// shape: `error` level, the §10 code and the class-only diagnostic
+/// fields.
+pub(crate) fn sync_confirm_exit_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::sync",
+        code = error.code.as_str(),
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "confirming the sync close exit failed"
+    );
+}
+
 /// The crash-recovery sweep's record line (§9.4's "recovery after a
 /// crash", T-258): N run rows a dead process left `running` were
 /// marked `interrupted`. Emitted at the TWO moments no run can be
@@ -4350,6 +4387,84 @@ mod tests {
              got: {log}"
         );
         drop(temp);
+    }
+
+    #[test]
+    fn the_close_confirmation_emit_degradation_line_carries_the_error_display() {
+        // The close twin (T-123, D-219 point 2): a refused
+        // `sync://close-confirmation` ask is a missed UI update, not
+        // lost state — the close stays PREVENTED (a sync runs), the
+        // window stays open, and the user's retry re-asks. WARN on
+        // purpose, the tauri error's Display form whole (no user
+        // paths).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Warn)
+            .expect("building the subscriber must work");
+        let error = tauri::Error::WindowLabelAlreadyExists("main".to_owned());
+
+        tracing::subscriber::with_default(subscriber, || {
+            sync_close_confirmation_emit_failed(&error);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains(" WARN ")
+                && log.contains(
+                    "emitting the sync close-confirmation ask failed; the close stays prevented"
+                )
+                && log.contains("a window with label `main` already exists"),
+            "the degraded line is WARN and carries its message and the error's Display form, \
+             got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_sync_confirm_exit_failure_line_carries_the_code_and_diagnostic() {
+        // The confirm command's §10 edge (T-123), in the cancel
+        // command's shape: the one reachable class is the honest
+        // missing-state fallback of the managed close state
+        // (E_DB_LOCKED with the `SyncCloseStateMissing` diagnostic —
+        // an uninitialized-app bug; the command owns no database
+        // access, so no store refusal can reach the wire through
+        // it). Every ANSWER the command gives is a state or the exit
+        // itself, and logs nothing — those halves are structural (no
+        // tracing call exists on the answer paths).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Warn)
+            .expect("building the subscriber must work");
+
+        tracing::subscriber::with_default(subscriber, || {
+            let error = sync_confirm_exit_missing_state_for_tests();
+            sync_confirm_exit_failed(&error);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains(" ERROR ")
+                && log.contains("confirming the sync close exit failed")
+                && log.contains("E_DB_LOCKED")
+                && log.contains("SyncCloseStateMissing"),
+            "the failure line is ERROR and carries its message, the §10 code and the \
+             class-only diagnostic, got: {log}"
+        );
+        drop(temp);
+    }
+
+    /// The missing-state fallback the confirm command's failure pin
+    /// drives (the `sync_close::sync_confirm_exit` shape, built here
+    /// so the logging suite stays independent of the command module's
+    /// internals).
+    fn sync_confirm_exit_missing_state_for_tests() -> crate::errors::AppError {
+        let mut error = crate::errors::AppError::new(crate::errors::ErrorCode::DbLocked);
+        error.details = Some(crate::errors::ErrorDetails {
+            os_code: None,
+            os_kind: Some("SyncCloseStateMissing".to_owned()),
+            os_message: Some("the sync close state was not managed at startup".to_owned()),
+        });
+        error
     }
 
     #[test]
