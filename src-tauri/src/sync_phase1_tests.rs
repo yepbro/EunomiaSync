@@ -510,6 +510,58 @@ fn a_free_space_shortage_aborts_the_run_with_e_disk_full() {
         fs::read(&target).expect("reading the target back must work"),
         fixture
     );
+
+    // The journal (T-124/D-223): the abort transaction writes the
+    // `sync.run_aborted` entry — §10's field list, honestly
+    // partial: the code literal rides, and no path, project or OS
+    // code does (a space comparison is about the VOLUME, not one
+    // project, and no syscall produced it). Phase 0's start bracket
+    // sits beside it; nothing else.
+    let database = database_of(&app);
+    let run_id = phase0.run.id.clone();
+    let journal = tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::action_log::recent(tx, 100).map_err(|error| {
+            crate::db::sqlite_error_to_app_error(match error {
+                eunomia_store::storage::StorageError::Sql(sql) => sql,
+                other => rusqlite::Error::InvalidParameterName(other.to_string()),
+            })
+        })
+    }))
+    .expect("reading the journal must work")
+    .into_iter()
+    .filter(|record| record.sync_run_id.as_deref() == Some(run_id.as_str()))
+    .collect::<Vec<_>>();
+    assert_eq!(
+        journal
+            .iter()
+            .map(|record| (record.action, record.level, record.result))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                eunomia_store::action_log::Action::SyncRunAborted,
+                eunomia_store::action_log::Level::Error,
+                eunomia_store::action_log::Outcome::Error
+            ),
+            (
+                eunomia_store::action_log::Action::SyncRunStarted,
+                eunomia_store::action_log::Level::Info,
+                eunomia_store::action_log::Outcome::Ok
+            ),
+        ],
+        "the free-space abort's journal: the start bracket and the abort entry"
+    );
+    assert_eq!(
+        journal[0].details,
+        Some(serde_json::json!({ "code": "E_DISK_FULL" })),
+        "the code literal; no path, no project, no OS code — none exist for this error"
+    );
+    assert_eq!(journal[0].project_id, None);
+    // LOG-005's pin (round-2's finding): the abort entry is the
+    // Activity window's own data — `user`, never `diagnostic`.
+    assert_eq!(
+        journal[0].visibility,
+        eunomia_store::action_log::Visibility::User
+    );
 }
 
 #[test]

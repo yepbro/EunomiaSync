@@ -1993,7 +1993,7 @@ export const mockCommands: IpcCommands = {
    * `activity_list` (§7.10/§7.7): the boundary validates exactly like the
    * real command (`validated_activity_query`): limit 1..=500 (default 50),
    * offset ≥ 0, DB-002-shaped date bounds, a non-inverted range, actions
-   * within the closed 22-member vocabulary, result within {ok, error,
+   * within the closed 24-member vocabulary, result within {ok, error,
    * skipped} — every rejection is `E_VALIDATION` naming field/value/reason.
    * Then: every filter combines with AND; LOG-005 keeps diagnostics out
    * unless `include_diagnostic` explicitly opts in; newest first (`ts`
@@ -2563,16 +2563,26 @@ export const mockCommands: IpcCommands = {
    * §5.7 watch markings clear and `lastSyncedAt` stamps, readable
    * back through `projectsList` — the mock twin of the backend's
    * after-sync pass), every UNAVAILABLE one skips with `E_PROJECT_UNAVAILABLE` (D-09:
-   * skipped, never stopping the run), and the run journals one
+   * skipped, never stopping the run), and the run journals the
+   * `sync.run_started` bracket opener (T-124/D-223), one
    * `sync.project_result` per project plus the `sync.run_finished`
-   * summary (the helper's `sync_run_id` stays null — the mock journal
-   * has no run link, a documented approximation). The D-25
+   * summary (the helper's `sync_run_id` stays null and its entries name
+   * no entity — the mock journal has no run link, a documented
+   * approximation; the backend's backup-creation and abort entries are
+   * likewise not modelled — the stand-in's follow-up class). The D-25
    * `needsConfirmation` arm and the `E_SYNC_RUNNING` refusal are not
    * modelled (no builds, no flag state): the `confirmEmpty` argument
    * is accepted and ignored (hence no named parameter).
    */
   async syncRun(): Promise<SyncRunOutcome_Serialize> {
     const state = mockState()
+    // The run's start bracket (T-124/D-223): the real backend journals
+    // `sync.run_started` in phase 0's record transaction — the mock
+    // mirrors the member here so the Activity data the mock serves
+    // shows the run beginning. The stand-in's documented limits stand
+    // (no `sync_run_id` on its entries, no backup or abort shapes —
+    // its own follow-up class).
+    journal('sync.run_started')
     const rows = [...state.projects]
       .filter((row) => row.state === 'active')
       .sort((a, b) => a.sortOrder - b.sortOrder)

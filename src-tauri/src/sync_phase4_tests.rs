@@ -164,6 +164,26 @@ fn journal_of(
     .collect()
 }
 
+/// The run's journal entries as full records (newest first, filtered
+/// to the run) — the details-level oracle (`journal_of`'s shape twin
+/// for the assertions that read payloads).
+fn journal_records_of(app: &tauri::App<tauri::test::MockRuntime>, run_id: &str) -> Vec<LogRecord> {
+    let database = database_of(app);
+    let run_id = run_id.to_owned();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::action_log::recent(tx, 100).map_err(|error| {
+            crate::db::sqlite_error_to_app_error(match error {
+                eunomia_store::storage::StorageError::Sql(sql) => sql,
+                other => rusqlite::Error::InvalidParameterName(other.to_string()),
+            })
+        })
+    }))
+    .expect("reading the journal must work")
+    .into_iter()
+    .filter(|record: &LogRecord| record.sync_run_id.as_deref() == Some(run_id.as_str()))
+    .collect()
+}
+
 /// Creates a real repository folder (`repos/repo-<n>` with a `.git`
 /// directory) and seeds its project row — the phase-3 harness shape.
 /// Returns `(project_id, repo_path)`.
@@ -324,6 +344,7 @@ fn first_finish_instant() -> jiff::Timestamp {
 #[allow(clippy::type_complexity)]
 fn run_phase4_counting(
     app: &tauri::App<tauri::test::MockRuntime>,
+    phase1: &Phase1Outcome,
     phase3_run_id: &str,
     data_dir: &Path,
     now: jiff::Timestamp,
@@ -344,6 +365,7 @@ fn run_phase4_counting(
     let seam_run_id = phase3_run_id.to_owned();
     let outcome = tauri::async_runtime::block_on(sync_phase4::run(
         app.handle(),
+        phase1,
         &phase3,
         data_dir,
         now,
@@ -491,7 +513,7 @@ fn the_success_run_stamps_finishes_journals_and_recalculates() {
         "the fixture's premise: exactly one unchanged project"
     );
     let (outcome, dirty_calls, seam_saw) =
-        run_phase4_counting(&app, &run_id, temp.path(), first_finish_instant());
+        run_phase4_counting(&app, &phase1, &run_id, temp.path(), first_finish_instant());
 
     // §9.4 phase 4 step 3: the verdict, the counters, the finish.
     let row = run_row_of(&app, &run_id);
@@ -555,6 +577,9 @@ fn the_success_run_stamps_finishes_journals_and_recalculates() {
             (Action::SyncRunFinished, Level::Info, Outcome::Ok),
             (Action::SyncProjectResult, Level::Info, Outcome::Ok),
             (Action::SyncProjectResult, Level::Info, Outcome::Ok),
+            // T-124/D-223: phase 0 opened the run's bracket in its
+            // own record transaction; newest-first, it reads last.
+            (Action::SyncRunStarted, Level::Info, Outcome::Ok),
         ]
     );
 
@@ -590,7 +615,7 @@ fn retention_applies_the_settings_limit_inside_the_finish() {
     fs::write(repo.join("AGENTS.md"), old_sync_file("Old text."))
         .expect("pre-writing the target must work");
 
-    let (run_id, _phase1) = chain_through_phase3(&app, temp.path());
+    let (run_id, phase1) = chain_through_phase3(&app, temp.path());
     // The two older copies: real files in the §5.5 tree, records
     // through the store writer, `created_at` older than the run's
     // (the real copy's) instant — distinct stamps and digests so the
@@ -678,7 +703,7 @@ fn retention_applies_the_settings_limit_inside_the_finish() {
     assert_eq!(every_bak(temp.path()).len(), 3);
 
     let (outcome, _dirty_calls, _seam_saw) =
-        run_phase4_counting(&app, &run_id, temp.path(), first_finish_instant());
+        run_phase4_counting(&app, &phase1, &run_id, temp.path(), first_finish_instant());
 
     // Exactly the newest two copies survive; the oldest is gone from
     // the disk and `pruned` in the records — and the verdict carries
@@ -733,7 +758,7 @@ fn a_retention_refusal_is_reported_and_never_changes_the_verdict() {
     fs::write(repo.join("AGENTS.md"), old_sync_file("Old text."))
         .expect("pre-writing the target must work");
 
-    let (run_id, _phase1) = chain_through_phase3(&app, temp.path());
+    let (run_id, phase1) = chain_through_phase3(&app, temp.path());
     let source_path = {
         let database = database_of(&app);
         let run_id = run_id.clone();
@@ -804,7 +829,7 @@ fn a_retention_refusal_is_reported_and_never_changes_the_verdict() {
     set_retention(&app, 1);
 
     let (outcome, _dirty_calls, _seam_saw) =
-        run_phase4_counting(&app, &run_id, temp.path(), first_finish_instant());
+        run_phase4_counting(&app, &phase1, &run_id, temp.path(), first_finish_instant());
 
     // The refusal is a report line, the record keeps `ok`, the
     // directory is still there — and the verdict is `success`.
@@ -850,9 +875,14 @@ fn a_partial_run_keeps_the_overall_success_time_and_restamps_the_unchanged() {
     seed_assigned_instruction(&app, &second_id, "Second body.");
 
     // Run 1: both written, finished at the first instant.
-    let (first_run, _phase1) = chain_through_phase3(&app, temp.path());
-    let (first_outcome, first_dirty, _first_seam_saw) =
-        run_phase4_counting(&app, &first_run, temp.path(), first_finish_instant());
+    let (first_run, first_phase1) = chain_through_phase3(&app, temp.path());
+    let (first_outcome, first_dirty, _first_seam_saw) = run_phase4_counting(
+        &app,
+        &first_phase1,
+        &first_run,
+        temp.path(),
+        first_finish_instant(),
+    );
     assert_eq!(first_outcome.run.status, SyncRunStatus::Success);
     assert_eq!(first_dirty, 1);
     let first_fingerprints = fingerprints_of(&app, &first_run);
@@ -879,6 +909,7 @@ fn a_partial_run_keeps_the_overall_success_time_and_restamps_the_unchanged() {
     const SECOND_FINISH_AT: &str = "2026-11-21T12:15:00.789Z";
     let (second_outcome, second_dirty, second_seam_saw) = run_phase4_counting(
         &app,
+        &second_phase1,
         &second_run,
         temp.path(),
         SECOND_FINISH_AT
@@ -946,8 +977,72 @@ fn a_partial_run_keeps_the_overall_success_time_and_restamps_the_unchanged() {
             (Action::SyncRunFinished, Level::Warn, Outcome::Skipped),
             (Action::SyncProjectResult, Level::Warn, Outcome::Skipped),
             (Action::SyncProjectResult, Level::Info, Outcome::Ok),
+            (Action::SyncRunStarted, Level::Info, Outcome::Ok),
         ]
     );
+    // §10's field list on the error row (T-124/D-223): the SKIPPED
+    // project's entry carries its §10 code, the project (its own
+    // column) and — this task's reading — the row's own target path
+    // (phase 0 froze it for every project; it is the honest "path"
+    // of an error about that project's target). The OS code RIDES:
+    // an unavailable folder IS an OS-call failure (the availability
+    // probe's stat over the deleted folder), so reading 6's "sourced
+    // from the outcomes" hands the entry the captured errno — the
+    // expected fact is read off the phase-1 outcome (the parametric
+    // oracle for "the journal copies the outcome's fact", platform-
+    // independent by construction the T-110 way; the ipc battery
+    // pins an injected errno 32 as the independent literal). The OK
+    // entry needs no payload (an unchanged verdict claims no file).
+    let records = journal_records_of(&app, &second_run);
+    let skipped_entry = records
+        .iter()
+        .find(|record| {
+            record.action == Action::SyncProjectResult
+                && record.project_id.as_deref() == Some(second_id.as_str())
+        })
+        .expect("the skipped project's entry exists");
+    let skipped_target = {
+        let database = database_of(&app);
+        let run_id = second_run.clone();
+        tauri::async_runtime::block_on(database.run(move |tx| {
+            eunomia_store::sync_runs::list_projects(tx, &run_id)
+                .map_err(sync_runs_app_error_for_tests)
+        }))
+        .expect("reading the run's rows must work")
+        .into_iter()
+        .find(|row| row.project_id == second_id)
+        .expect("the skipped project's row exists")
+        .target_path
+        .expect("phase 0 froze the target path")
+    };
+    let skipped_os_code = second_phase1
+        .projects
+        .iter()
+        .find(|(project_id, _)| project_id == &second_id)
+        .and_then(|(_, verdict)| match verdict {
+            crate::sync_phase1::PreflightVerdict::Skipped { details, .. } => {
+                details.as_ref().and_then(|facts| facts.os_code)
+            }
+            _ => None,
+        })
+        .expect("the unavailable-folder skip carries its OS fact");
+    assert_eq!(
+        skipped_entry.details,
+        Some(serde_json::json!({
+            "code": "E_PROJECT_UNAVAILABLE",
+            "path": skipped_target,
+            "os_code": skipped_os_code,
+        })),
+        "§10's fields on a skip: the code, the row's own target path, the OS code"
+    );
+    let ok_entry = records
+        .iter()
+        .find(|record| {
+            record.action == Action::SyncProjectResult
+                && record.project_id.as_deref() == Some(first_id.as_str())
+        })
+        .expect("the unchanged project's entry exists");
+    assert_eq!(ok_entry.details, None);
 }
 
 #[test]
@@ -1008,8 +1103,13 @@ fn a_run_where_nobody_was_written_or_unchanged_fails() {
     .expect("phase 3 must walk past the refusals");
     drop(phase0);
 
-    let (outcome, _dirty_calls, seam_saw) =
-        run_phase4_counting(&app, &phase3.run_id, temp.path(), first_finish_instant());
+    let (outcome, _dirty_calls, seam_saw) = run_phase4_counting(
+        &app,
+        &phase1,
+        &phase3.run_id,
+        temp.path(),
+        first_finish_instant(),
+    );
 
     let row = run_row_of(&app, &phase3.run_id);
     assert_eq!(outcome.run.status, SyncRunStatus::Failed);
@@ -1039,6 +1139,7 @@ fn a_run_where_nobody_was_written_or_unchanged_fails() {
             (Action::SyncRunFinished, Level::Error, Outcome::Error),
             (Action::SyncProjectResult, Level::Error, Outcome::Error),
             (Action::SyncProjectResult, Level::Error, Outcome::Error),
+            (Action::SyncRunStarted, Level::Info, Outcome::Ok),
         ]
     );
 }
@@ -1053,9 +1154,9 @@ fn the_empty_run_finishes_success_with_the_message() {
     // exactly the run summary (no projects to report), and the dirty
     // seam still runs (§9.4 phase 4 step 5 has no "unless empty").
     let (temp, app, _repos) = phase4_app();
-    let (run_id, _phase1) = chain_through_phase3(&app, temp.path());
+    let (run_id, phase1) = chain_through_phase3(&app, temp.path());
     let (outcome, dirty_calls, seam_saw) =
-        run_phase4_counting(&app, &run_id, temp.path(), first_finish_instant());
+        run_phase4_counting(&app, &phase1, &run_id, temp.path(), first_finish_instant());
 
     let row = run_row_of(&app, &run_id);
     assert_eq!(outcome.run.status, SyncRunStatus::Success);
@@ -1069,7 +1170,10 @@ fn the_empty_run_finishes_success_with_the_message() {
     assert_eq!(last_success_of(&app).as_deref(), Some(FIRST_FINISH_AT));
     assert_eq!(
         journal_of(&app, &run_id),
-        vec![(Action::SyncRunFinished, Level::Info, Outcome::Ok)]
+        vec![
+            (Action::SyncRunFinished, Level::Info, Outcome::Ok),
+            (Action::SyncRunStarted, Level::Info, Outcome::Ok),
+        ]
     );
     assert_eq!(outcome.journal.written, 1);
     assert_eq!(dirty_calls, 1);
@@ -1117,8 +1221,13 @@ fn a_run_with_an_unsettled_row_refuses_and_stays_running() {
         run_id: run_id.clone(),
         results: Vec::new(),
     };
+    let phase1 = Phase1Outcome {
+        run_id: run_id.clone(),
+        projects: Vec::new(),
+    };
     let error = tauri::async_runtime::block_on(sync_phase4::run(
         app.handle(),
+        &phase1,
         &phase3,
         temp.path(),
         first_finish_instant(),
@@ -1131,9 +1240,13 @@ fn a_run_with_an_unsettled_row_refuses_and_stays_running() {
     let row = run_row_of(&app, &run_id);
     assert_eq!(row.status, SyncRunStatus::Running, "the run stays running");
     assert_eq!(row.finished_at, None);
-    assert!(
-        journal_of(&app, &run_id).is_empty(),
-        "a refused finish journals nothing"
+    // Phase 4 journaled nothing OF ITS OWN: the run's journal holds
+    // exactly phase 0's start bracket (T-124/D-223) — the refused
+    // finish added no per-project entries and no summary.
+    assert_eq!(
+        journal_of(&app, &run_id),
+        vec![(Action::SyncRunStarted, Level::Info, Outcome::Ok)],
+        "a refused finish journals nothing of its own"
     );
     assert_eq!(last_success_of(&app), None);
 }
@@ -1175,8 +1288,13 @@ fn an_unchanged_row_without_a_fingerprint_refuses() {
         run_id: run_id.clone(),
         results: Vec::new(),
     };
+    let phase1 = Phase1Outcome {
+        run_id: run_id.clone(),
+        projects: Vec::new(),
+    };
     let error = tauri::async_runtime::block_on(sync_phase4::run(
         app.handle(),
+        &phase1,
         &phase3,
         temp.path(),
         first_finish_instant(),
@@ -1193,9 +1311,11 @@ fn an_unchanged_row_without_a_fingerprint_refuses() {
     // committed in its own short transaction before this phase —
     // a phase-4 refusal does not touch it (§9.4 phase 3 step 2).
     assert_eq!(project_of(&app, &second_id).last_synced_at, None);
-    assert!(
-        journal_of(&app, &run_id).is_empty(),
-        "a refused finish journals nothing"
+    // Phase 4 journaled nothing of its own — the start bracket alone.
+    assert_eq!(
+        journal_of(&app, &run_id),
+        vec![(Action::SyncRunStarted, Level::Info, Outcome::Ok)],
+        "a refused finish journals nothing of its own"
     );
 }
 
@@ -1216,7 +1336,7 @@ fn a_retention_service_refusal_is_swallowed_into_the_report() {
     fs::write(repo.join("AGENTS.md"), old_sync_file("Old text."))
         .expect("pre-writing the target must work");
 
-    let (run_id, _phase1) = chain_through_phase3(&app, temp.path());
+    let (run_id, phase1) = chain_through_phase3(&app, temp.path());
     let source_path = {
         let database = database_of(&app);
         let run_id = run_id.clone();
@@ -1302,7 +1422,7 @@ fn a_retention_service_refusal_is_swallowed_into_the_report() {
     }
 
     let (outcome, _dirty_calls, seam_saw) =
-        run_phase4_counting(&app, &run_id, temp.path(), first_finish_instant());
+        run_phase4_counting(&app, &phase1, &run_id, temp.path(), first_finish_instant());
 
     assert_eq!(
         outcome.run.status,
@@ -1358,21 +1478,30 @@ fn a_second_finish_of_one_run_refuses_before_any_stamp_or_prune() {
     seed_assigned_instruction(&app, &project_id, "Be finished once.");
 
     // The finished case: one full chain, finished once.
-    let (run_id, _phase1) = chain_through_phase3(&app, temp.path());
+    let (run_id, phase1) = chain_through_phase3(&app, temp.path());
     let (_outcome, _dirty, _seam_saw) =
-        run_phase4_counting(&app, &run_id, temp.path(), first_finish_instant());
+        run_phase4_counting(&app, &phase1, &run_id, temp.path(), first_finish_instant());
     let first_row = run_row_of(&app, &run_id);
     let first_journal = journal_of(&app, &run_id);
     assert_eq!(first_row.status, SyncRunStatus::Success);
-    assert_eq!(first_journal.len(), 2, "one project entry plus the summary");
+    assert_eq!(
+        first_journal.len(),
+        3,
+        "the start bracket, one project entry and the summary"
+    );
 
     // The second finish of the same run.
     let phase3 = Phase3Outcome {
         run_id: run_id.clone(),
         results: Vec::new(),
     };
+    let no_facts = Phase1Outcome {
+        run_id: run_id.clone(),
+        projects: Vec::new(),
+    };
     let error = tauri::async_runtime::block_on(sync_phase4::run(
         app.handle(),
+        &no_facts,
         &phase3,
         temp.path(),
         first_finish_instant(),
@@ -1394,7 +1523,7 @@ fn a_second_finish_of_one_run_refuses_before_any_stamp_or_prune() {
 
     // The aborted case: a fresh run, aborted by the phase-1 tail rule
     // through the store's own writer, then handed to phase 4.
-    let (aborted_id, _phase1) = chain_through_phase3(&app, temp.path());
+    let (aborted_id, aborted_phase1) = chain_through_phase3(&app, temp.path());
     {
         let database = database_of(&app);
         let aborted_id = aborted_id.clone();
@@ -1416,6 +1545,7 @@ fn a_second_finish_of_one_run_refuses_before_any_stamp_or_prune() {
     };
     let error = tauri::async_runtime::block_on(sync_phase4::run(
         app.handle(),
+        &aborted_phase1,
         &phase3,
         temp.path(),
         first_finish_instant(),
@@ -1429,9 +1559,14 @@ fn a_second_finish_of_one_run_refuses_before_any_stamp_or_prune() {
         SyncRunStatus::Aborted,
         "the abort's verdict stays"
     );
-    assert!(
-        journal_of(&app, &aborted_id).is_empty(),
-        "the aborted run keeps its phase-0 silence in the journal"
+    // The aborted run keeps phase 0's start bracket alone: phase 4
+    // added nothing (a store-writer abort — this test's shortcut —
+    // journals no cancel entry of its own; the app-layer abort paths
+    // do, in their own transactions).
+    assert_eq!(
+        journal_of(&app, &aborted_id),
+        vec![(Action::SyncRunStarted, Level::Info, Outcome::Ok)],
+        "the aborted run keeps phase 0's bracket and nothing more"
     );
 }
 
@@ -1446,7 +1581,7 @@ fn an_unreadable_retention_setting_is_swallowed_into_the_report() {
     let (project_id, _repo) = seed_repo_project(&app, &repos, 1);
     seed_assigned_instruction(&app, &project_id, "Be written.");
 
-    let (run_id, _phase1) = chain_through_phase3(&app, temp.path());
+    let (run_id, phase1) = chain_through_phase3(&app, temp.path());
     {
         let database = database_of(&app);
         tauri::async_runtime::block_on(database.run(|tx| {
@@ -1462,7 +1597,7 @@ fn an_unreadable_retention_setting_is_swallowed_into_the_report() {
     }
 
     let (outcome, _dirty_calls, _seam_saw) =
-        run_phase4_counting(&app, &run_id, temp.path(), first_finish_instant());
+        run_phase4_counting(&app, &phase1, &run_id, temp.path(), first_finish_instant());
 
     assert_eq!(
         outcome.run.status,

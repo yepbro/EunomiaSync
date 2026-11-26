@@ -340,10 +340,20 @@ pub enum Action {
     HeadingChanged,
     /// A heading was deleted (physical delete, §6.4).
     HeadingDeleted,
-    // LOG-001…004: "sync runs and their results per project" — two
-    /// entries: the run's own summary and one per project.
+    // LOG-001…004: "sync runs and their results per project" — the
+    // run's own lifecycle entries (start, finish, abort — T-124/D-223
+    // added the start and the abort beside D-051's finish) plus one
+    // entry per project.
+    /// A sync run started (§9.4 phase 0's record; the run-level
+    /// bracket's opening half).
+    SyncRunStarted,
     /// A sync run finished (the run-level summary).
     SyncRunFinished,
+    /// A sync run aborted before finishing — the §10-coded stops
+    /// (the backup failure's cancellation, S10's "cancel entry"; a
+    /// pipeline error's terminal row), never the user-shaped stops
+    /// (§10 names no code for those).
+    SyncRunAborted,
     /// One project's outcome inside a sync run.
     SyncProjectResult,
     /// LOG-001…004: "backup creation" (BKP target-file copies; the
@@ -371,7 +381,7 @@ pub enum Action {
 
 impl Action {
     /// Every member, in the order the module docs group them.
-    pub const ALL: [Action; 22] = [
+    pub const ALL: [Action; 24] = [
         Action::ProjectAdded,
         Action::ProjectChanged,
         Action::ProjectArchived,
@@ -389,7 +399,9 @@ impl Action {
         Action::HeadingCreated,
         Action::HeadingChanged,
         Action::HeadingDeleted,
+        Action::SyncRunStarted,
         Action::SyncRunFinished,
+        Action::SyncRunAborted,
         Action::SyncProjectResult,
         Action::BackupCreated,
         Action::ErrorReported,
@@ -417,7 +429,9 @@ impl Action {
             Action::HeadingCreated => "heading.created",
             Action::HeadingChanged => "heading.changed",
             Action::HeadingDeleted => "heading.deleted",
+            Action::SyncRunStarted => "sync.run_started",
             Action::SyncRunFinished => "sync.run_finished",
+            Action::SyncRunAborted => "sync.run_aborted",
             Action::SyncProjectResult => "sync.project_result",
             Action::BackupCreated => "backup.created",
             Action::ErrorReported => "error.reported",
@@ -456,7 +470,9 @@ impl Action {
             "heading.created" => Ok(Action::HeadingCreated),
             "heading.changed" => Ok(Action::HeadingChanged),
             "heading.deleted" => Ok(Action::HeadingDeleted),
+            "sync.run_started" => Ok(Action::SyncRunStarted),
             "sync.run_finished" => Ok(Action::SyncRunFinished),
+            "sync.run_aborted" => Ok(Action::SyncRunAborted),
             "sync.project_result" => Ok(Action::SyncProjectResult),
             "backup.created" => Ok(Action::BackupCreated),
             "error.reported" => Ok(Action::ErrorReported),
@@ -567,21 +583,33 @@ pub enum Details {
         /// The file's path.
         path: PathBuf,
     },
-    /// Why an operation failed: its §10 error code, and optionally
-    /// the path the failure is about (§10: "every error is written
-    /// to the log with its code … path").
+    /// Why an operation failed: its §10 error code, optionally the
+    /// path the failure is about (§10: "every error is written to
+    /// the log with its code … path"), and optionally the raw OS
+    /// error code when an OS call produced the failure (§10's
+    /// fourth field, T-124/D-223 — a plain number, SEC-008's
+    /// numeric facts; `None` for failures no syscall backs, and
+    /// omitted from the JSON then, so rows written before the field
+    /// existed parse unchanged).
     Failure {
         /// The §10 registry code of the failure.
         code: FailureCode,
         /// The path involved in the failure, when one is.
         path: Option<PathBuf>,
+        /// The OS error code behind the failure (`errno` /
+        /// `GetLastError`), when an OS call produced it.
+        os_code: Option<i32>,
     },
 }
 
 impl Details {
     /// The canonical JSON form stored in the `details` column:
-    /// `{"changed":3}`, `{"path":"…"}`, `{"code":"E_…","path":"…"}`
-    /// (the path of [`Details::Failure`] is omitted when absent).
+    /// `{"changed":3}`, `{"path":"…"}`,
+    /// `{"code":"E_…","path":"…","os_code":5}` (the path and the
+    /// OS code of [`Details::Failure`] are omitted when absent;
+    /// member order in these examples is presentation — serde_json's
+    /// default map sorts the keys, and nothing consumes the order:
+    /// the read side parses the cell as a raw `Value`).
     ///
     /// Paths are stored in their `Display` form, which is lossy for a
     /// non-UTF-8 path (each unrepresentable byte becomes U+FFFD) —
@@ -595,13 +623,28 @@ impl Details {
             Details::File { path } => serde_json::json!({
                 "path": path.display().to_string(),
             }),
-            Details::Failure { code, path } => match path {
-                Some(path) => serde_json::json!({
-                    "code": code.as_str(),
-                    "path": path.display().to_string(),
-                }),
-                None => serde_json::json!({ "code": code.as_str() }),
-            },
+            Details::Failure {
+                code,
+                path,
+                os_code,
+            } => {
+                // Each absent member omitted (a legacy row's parser
+                // reads absence, not a null, so old and new spellings
+                // stay one shape); the map is serde_json's default
+                // (key-sorted), the same as every other details cell.
+                let mut json = serde_json::Map::new();
+                json.insert("code".to_owned(), serde_json::json!(code.as_str()));
+                if let Some(path) = path {
+                    json.insert(
+                        "path".to_owned(),
+                        serde_json::json!(path.display().to_string()),
+                    );
+                }
+                if let Some(os_code) = os_code {
+                    json.insert("os_code".to_owned(), serde_json::json!(os_code));
+                }
+                serde_json::Value::Object(json)
+            }
         }
     }
 }
@@ -1462,7 +1505,14 @@ mod tests {
                     Action::HeadingDeleted,
                 ],
             ),
-            ("sync runs", &[Action::SyncRunFinished]),
+            (
+                "sync runs (their lifecycle: started, finished, aborted)",
+                &[
+                    Action::SyncRunStarted,
+                    Action::SyncRunFinished,
+                    Action::SyncRunAborted,
+                ],
+            ),
             ("sync results per project", &[Action::SyncProjectResult]),
             ("backup creation", &[Action::BackupCreated]),
             (
@@ -1577,6 +1627,43 @@ mod tests {
         }
     }
 
+    /// The sync-run lifecycle members (T-124/D-223): both new
+    /// spellings round-trip, and near misses — the verb-only forms,
+    /// the cancelled synonym, a merged word — stay outside the
+    /// vocabulary, so the extension did not open it.
+    #[test]
+    fn the_sync_run_members_round_trip_and_reject_near_misses() {
+        // as_str → from_member → as_str is the identity for both new
+        // members; the spellings come from §9.4's own status words
+        // ("the run gets the `aborted` status") and the card's own
+        // "Запуск" over LOG-001…004's "sync runs".
+        for (member, spelling) in [
+            (Action::SyncRunStarted, "sync.run_started"),
+            (Action::SyncRunAborted, "sync.run_aborted"),
+        ] {
+            assert_eq!(
+                Action::from_member(member.as_str()).expect("the stored spelling must parse"),
+                member
+            );
+            assert_eq!(member.as_str(), spelling);
+        }
+        // Near misses stay outside the vocabulary.
+        for rejected in [
+            "sync.run_start",
+            "sync.run_cancelled",
+            "sync.runaborted",
+            "sync.run_started_by_user",
+        ] {
+            match Action::from_member(rejected) {
+                Err(ActionLogError::Member { column, found }) => {
+                    assert_eq!(column, "action");
+                    assert_eq!(found, rejected);
+                }
+                other => panic!("{rejected:?} must be rejected, got {other:?}"),
+            }
+        }
+    }
+
     /// The §10 registry shape: every code of the spec's §10 table
     /// passes; everything instruction-shaped fails (SEC-008's boundary
     /// for the code field).
@@ -1668,6 +1755,7 @@ mod tests {
             Details::Failure {
                 code: FailureCode::new("E_SYNC_RUNNING").unwrap(),
                 path: None,
+                os_code: None,
             }
             .to_json(),
             serde_json::json!({ "code": "E_SYNC_RUNNING" })
@@ -1676,9 +1764,36 @@ mod tests {
             Details::Failure {
                 code: FailureCode::new("E_NO_WRITE_ACCESS").unwrap(),
                 path: Some(PathBuf::from("/repo/AGENTS.md")),
+                os_code: None,
             }
             .to_json(),
             serde_json::json!({ "code": "E_NO_WRITE_ACCESS", "path": "/repo/AGENTS.md" })
+        );
+        // §10's fourth field (T-124/D-223): the OS code rides when an
+        // OS call produced the error, as a plain number (SEC-008's
+        // numeric facts), and is omitted when it did not — the
+        // legacy no-`os_code` rows parse unchanged on the read side.
+        assert_eq!(
+            Details::Failure {
+                code: FailureCode::new("E_FILE_LOCKED").unwrap(),
+                path: Some(PathBuf::from("/repo/AGENTS.md")),
+                os_code: Some(32),
+            }
+            .to_json(),
+            serde_json::json!({
+                "code": "E_FILE_LOCKED",
+                "path": "/repo/AGENTS.md",
+                "os_code": 32
+            })
+        );
+        assert_eq!(
+            Details::Failure {
+                code: FailureCode::new("E_BACKUP_FAILED").unwrap(),
+                path: None,
+                os_code: Some(13),
+            }
+            .to_json(),
+            serde_json::json!({ "code": "E_BACKUP_FAILED", "os_code": 13 })
         );
     }
 
@@ -1707,6 +1822,7 @@ mod tests {
             details: Some(Details::Failure {
                 code: FailureCode::new("E_CONTENT_RESERVED").unwrap(),
                 path: Some(PathBuf::from("/repo/AGENTS.md")),
+                os_code: None,
             }),
         };
         let json = entry.details.expect("the entry has details").to_json();

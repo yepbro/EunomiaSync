@@ -3344,6 +3344,7 @@ mod tests {
             error_entry.details = Some(Details::Failure {
                 code: FailureCode::new("E_CONTENT_RESERVED").unwrap(),
                 path: Some(temp.path().join("repo").join("AGENTS.md")),
+                os_code: None,
             });
             // The forgotten-pairing case: a failure written at info.
             let info_failure = LogEntry::new(

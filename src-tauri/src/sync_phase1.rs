@@ -101,7 +101,13 @@
 //! `E_DISK_FULL` (criterion 2), per-project rows keep the verdicts
 //! phase 1 already wrote (nothing claims a write that did not
 //! happen), and the phase answers the typed `E_DISK_FULL` envelope
-//! with the free/required numbers in its details. A **failed probe**
+//! with the free/required numbers in its details. The abort
+//! transaction also writes the run's `sync.run_aborted` journal
+//! entry (T-124/D-223): error/error, the `E_DISK_FULL` literal in
+//! `Details::Failure` and nothing else — no path, project or OS
+//! code, because a space comparison is about the volume, not one
+//! project, and no syscall produced it (§10's fields ride when they
+//! exist). A **failed probe**
 //! is not a shortage: like `atomic`'s write-time check, it does not
 //! block — phase 2's own backup failure (`E_BACKUP_FAILED`) is the
 //! honest reporter of a volume that cannot take the copies. An empty
@@ -483,7 +489,41 @@ where
                     ErrorCode::DiskFull.as_str(),
                     &abort_details,
                 )
-                .map_err(sync_runs_to_app_error)
+                .map_err(sync_runs_to_app_error)?;
+                // The journal's cancel entry (T-124/D-223, reading 4a):
+                // the same transaction that aborts the row claims the
+                // abort — error/error, the §10 literal in details, and
+                // the honest partial field list (a space comparison
+                // offers no path, project or OS code). The D-051
+                // call-once mirror fires inside the closure.
+                let mut entry = eunomia_store::action_log::LogEntry::new(
+                    eunomia_store::action_log::Action::SyncRunAborted,
+                    eunomia_store::action_log::Level::Error,
+                    eunomia_store::action_log::Visibility::User,
+                    eunomia_store::action_log::Outcome::Error,
+                );
+                entry.entity = Some(eunomia_store::action_log::Entity {
+                    kind: eunomia_store::action_log::EntityType::SyncRun,
+                    id: abort_run_id.as_str(),
+                });
+                entry.sync_run_id = Some(abort_run_id.as_str());
+                // The degraded `.ok()` posture the wrapper's and
+                // phase 4's entries document: a literal outside the
+                // §10 registry shape (only tampering — the literal is
+                // compile-time and registry-pinned by the errors
+                // suite) keeps the entry at the cost of the details.
+                entry.details =
+                    eunomia_store::action_log::FailureCode::new(ErrorCode::DiskFull.as_str())
+                        .ok()
+                        .map(|code| eunomia_store::action_log::Details::Failure {
+                            code,
+                            path: None,
+                            os_code: None,
+                        });
+                eunomia_store::action_log::insert(transaction, &entry)
+                    .map_err(crate::commands::activity_log_to_app_error)?;
+                crate::logging::action_logged(&entry);
+                Ok(())
             })
             .await?;
         let mut error = AppError::new(ErrorCode::DiskFull);

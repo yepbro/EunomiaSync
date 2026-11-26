@@ -73,8 +73,14 @@
 //!    `created_at` for the whole run (D-061: the run's instant is a
 //!    parameter, resolved once into the `BackupTime` the copy names
 //!    carry and the DB-002 stamp the records carry — record and name
-//!    cannot disagree). Dedup decisions write no row (the module
-//!    docs' UNIQUE ruling).
+//!    cannot disagree). The same transaction journals one
+//!    `backup.created` entry per CREATED record (T-124/D-223:
+//!    LOG-001…004's "backup creation" gains its first producer — the
+//!    entity is the record's UUIDv7 id, the project column names the
+//!    project, and `Details::File` carries the copy's on-disk path,
+//!    D-119's own convention note). Dedup decisions write no row and
+//!    no entry (the module docs' UNIQUE ruling — no copy was
+//!    created; the existing row already documents the pair).
 //!
 //! **The abort path (§9.4 phase 2 step 2, BKP-005/009).** Any copy or
 //! verify error:
@@ -104,7 +110,15 @@
 //!   returns every non-`skipped` verdict to `not_started`
 //!   ("the last sync of every project stays unchanged" is OUT-020's
 //!   `last_synced_at`/`last_synced_hash`, which no code path here
-//!   touches — the reset keeps the run's OWN rows honest);
+//!   touches — the reset keeps the run's OWN rows honest). The same
+//!   transaction journals the run's `sync.run_aborted` entry (S10's
+//!   "cancel entry", T-124/D-223): error/error, the `sync_run`
+//!   entity, the FAILING project in the project column, and
+//!   `Details::Failure` with §10's complete field list — the code,
+//!   the failed copy's source path, the OS code
+//!   (`BackupError::os_code`). No creation entries on this path:
+//!   the copies were swept before any record committed, and an entry
+//!   claiming a created backup for a born-deleted copy would lie;
 //! * the caller hears the typed `E_BACKUP_FAILED` envelope whose
 //!   `details` carry BKP-005's field list: the project NAME (the one
 //!   §10 message the spec explicitly demands it in — the ruling this
@@ -148,12 +162,16 @@ use tauri::{AppHandle, Runtime};
 use eunomia_core::backup_name::{BackupTime, backup_dir_name};
 use eunomia_core::project::{BaseName, ProjectId, Scheme};
 use eunomia_fs::backup::{BackupCopy, BackupError, BackupOutcome, BackupTarget};
+use eunomia_store::action_log::{
+    Action, Details, Entity, EntityType, FailureCode, Level, LogEntry, Outcome, Visibility,
+    insert as insert_journal_entry,
+};
 use eunomia_store::backup_records::{
     BackupRecordStatus, CheckedCopy, NewBackupRecord, insert as insert_record, last_checked,
 };
 use eunomia_store::sync_runs::{abort_run, reset_projects_not_started};
 
-use crate::commands::{managed_db, projects_store_to_app_error};
+use crate::commands::{activity_log_to_app_error, managed_db, projects_store_to_app_error};
 use crate::db::{backup_records_to_app_error, join_failure_to_app_error, sync_runs_to_app_error};
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use crate::sync_phase1::{Phase1Outcome, PreflightVerdict};
@@ -402,9 +420,13 @@ where
             // Step D — ONE write transaction: every CREATED copy's
             // record lands `ok` (the BKP-010 check passed inside the
             // fs operation; dedup decisions write no row — the module
-            // docs' UNIQUE ruling). The orphan list is taken before
-            // the move: a failed transaction must still be able to
-            // clean the copies up.
+            // docs' UNIQUE ruling), and one `backup.created` journal
+            // entry per record rides the same transaction
+            // (T-124/D-223: LOG-001…004's "backup creation", the
+            // entity naming the record, `Details::File` carrying the
+            // copy's on-disk path — D-119's BackupCreated convention).
+            // The orphan list is taken before the move: a failed
+            // transaction must still be able to clean the copies up.
             let orphan_copies = records
                 .iter()
                 .filter_map(|record| record.copy_path.clone())
@@ -413,11 +435,36 @@ where
             let written = database
                 .run(move |transaction| {
                     for record in &records {
-                        insert_record(
+                        let record_id = insert_record(
                             transaction,
                             &record_input(record, &run_id, BackupRecordStatus::Ok),
                         )
                         .map_err(backup_records_to_app_error)?;
+                        // The creation entry beside the record it
+                        // describes — same transaction, so a refused
+                        // journal insert rolls the record back with
+                        // it. `copy_path` is `Some` for every record
+                        // the pass made (dedup claims never reach
+                        // this list); the D-051 call-once mirror
+                        // fires inside the closure.
+                        let mut entry = LogEntry::new(
+                            Action::BackupCreated,
+                            Level::Info,
+                            Visibility::User,
+                            Outcome::Ok,
+                        );
+                        entry.entity = Some(Entity {
+                            kind: EntityType::Backup,
+                            id: record_id.as_str(),
+                        });
+                        entry.project_id = Some(record.project_id.as_str());
+                        entry.sync_run_id = Some(run_id.as_str());
+                        entry.details = record.copy_path.as_deref().map(|copy| Details::File {
+                            path: copy.to_path_buf(),
+                        });
+                        insert_journal_entry(transaction, &entry)
+                            .map_err(activity_log_to_app_error)?;
+                        crate::logging::action_logged(&entry);
                     }
                     Ok(())
                 })
@@ -500,6 +547,14 @@ where
             // too, so a sweep riding §9.5's ladder (up to 1.3 s per
             // copy) is inside the stamp by the same rule.
             let finished_at = db002_stamp(abort_clock());
+            // The cancel entry's §10 facts (T-124/D-223, reading 3),
+            // cloned out before the `'static` closure: the failing
+            // project, the failed copy's source path, and the OS code
+            // behind the failure — §10's complete field list, the
+            // one the envelope's `details` half also carries.
+            let failed_project = failed.project_id.to_string();
+            let failed_source = failed.source.clone();
+            let failed_os_code = error.os_code();
             let aborted = database
                 .run(move |transaction| {
                     for record in &made {
@@ -529,6 +584,46 @@ where
                     .map_err(sync_runs_to_app_error)?;
                     reset_projects_not_started(transaction, &run_id)
                         .map_err(sync_runs_to_app_error)?;
+                    // S10's cancel entry (T-124/D-223): the aborted
+                    // row, the discarded history and the journal
+                    // claim commit as one set — error/error, the
+                    // sync_run entity, the FAILING project in the
+                    // project column (§10's "project", BKP-005's
+                    // attributable cause), and `Details::Failure`
+                    // with §10's complete field list. NO creation
+                    // entries on this path: this run's copies were
+                    // deleted before any record committed, and an
+                    // entry saying "backup created" for a copy
+                    // born-deleted would lie. The D-051 call-once
+                    // mirror fires inside the closure.
+                    let mut entry = LogEntry::new(
+                        Action::SyncRunAborted,
+                        Level::Error,
+                        Visibility::User,
+                        Outcome::Error,
+                    );
+                    entry.entity = Some(Entity {
+                        kind: EntityType::SyncRun,
+                        id: run_id.as_str(),
+                    });
+                    entry.project_id = Some(failed_project.as_str());
+                    entry.sync_run_id = Some(run_id.as_str());
+                    // The degraded `.ok()` posture the wrapper's and
+                    // phase 4's entries document: a literal outside
+                    // the §10 registry shape (only tampering — the
+                    // literal is compile-time and registry-pinned by
+                    // the errors suite) keeps the entry at the cost
+                    // of the details.
+                    entry.details =
+                        FailureCode::new(ErrorCode::BackupFailed.as_str())
+                            .ok()
+                            .map(|code| Details::Failure {
+                                code,
+                                path: Some(failed_source.clone()),
+                                os_code: failed_os_code,
+                            });
+                    insert_journal_entry(transaction, &entry).map_err(activity_log_to_app_error)?;
+                    crate::logging::action_logged(&entry);
                     Ok(())
                 })
                 .await;

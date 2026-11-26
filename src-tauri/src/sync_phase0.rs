@@ -39,7 +39,12 @@
 //!    `not_started` `sync_run_projects` row per project, each
 //!    carrying the target path and build hash of step 3 — the
 //!    fingerprint phases 1–4 and the DB-024 writer read instead of
-//!    rebuilding.
+//!    rebuilding. The same transaction opens the run's journal
+//!    bracket (T-124/D-223): one `sync.run_started` entry, info/
+//!    user/ok, no details, riding the row's own insert — a run row
+//!    that never committed never claimed a start, and a refused
+//!    journal insert rolls the whole record back (the D-194/D-205
+//!    one-transaction shape, trigger-proven in the behavior suite).
 //!
 //! **The exit is a hand-off, not a finish.** Phase 0 writes no final
 //! status: the run row stays `running`, its counters at its zeros,
@@ -257,6 +262,14 @@ pub(crate) fn build_projects(snapshot: &BuildSnapshot) -> Vec<PreparedProject> {
 /// `inputs` are the owned `(project_id, target_path, build_hash)`
 /// triples — the executor's closure is `'static`, so the borrowed
 /// store inputs are built inside it.
+///
+/// The run's journal bracket opener (T-124/D-223) rides the same
+/// transaction: one `sync.run_started` entry — info/user/ok, the
+/// entity naming the run row, no project attribution and no details
+/// (the run row itself carries `started_at` and the counts;
+/// LOG-001…004's time/operation/object/result quadruple is the whole
+/// entry). A refused insert fails the transaction wholesale, so a
+/// start entry cannot exist for a run row that does not.
 pub(crate) async fn record_run<R: Runtime>(
     app: &AppHandle<R>,
     started_at: String,
@@ -273,8 +286,27 @@ pub(crate) async fn record_run<R: Runtime>(
                     build_hash,
                 })
                 .collect::<Vec<_>>();
-            eunomia_store::sync_runs::create_running(transaction, &started_at, &rows)
-                .map_err(sync_runs_to_app_error)
+            let run = eunomia_store::sync_runs::create_running(transaction, &started_at, &rows)
+                .map_err(sync_runs_to_app_error)?;
+            // The bracket opener, after the row it describes: the
+            // D-051 call-once mirror fires inside the closure (the
+            // phase-4 posture), and the info/user/ok shape is the
+            // unmirrored one — no file-log line per run start.
+            let mut entry = eunomia_store::action_log::LogEntry::new(
+                eunomia_store::action_log::Action::SyncRunStarted,
+                eunomia_store::action_log::Level::Info,
+                eunomia_store::action_log::Visibility::User,
+                eunomia_store::action_log::Outcome::Ok,
+            );
+            entry.entity = Some(eunomia_store::action_log::Entity {
+                kind: eunomia_store::action_log::EntityType::SyncRun,
+                id: run.id.as_str(),
+            });
+            entry.sync_run_id = Some(run.id.as_str());
+            eunomia_store::action_log::insert(transaction, &entry)
+                .map_err(crate::commands::activity_log_to_app_error)?;
+            crate::logging::action_logged(&entry);
+            Ok(run)
         })
         .await
 }

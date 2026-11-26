@@ -142,6 +142,75 @@ fn insert_then_recent_round_trips_every_field() {
 }
 
 #[test]
+fn a_failure_entry_round_trips_the_os_code_and_legacy_rows_parse() {
+    // §10's fourth field (T-124/D-223): an OS-produced failure
+    // carries its raw OS code in the details cell, and a row
+    // written before the field existed (a hand-INSERTed legacy
+    // literal, the D-119 compatibility pattern — SQL, not a current
+    // producer's output) still reads back: the read parses the
+    // `details` JSON as a raw value, so a missing member is
+    // absence, not corruption.
+    let (conn, dir) = journal_db("oscode");
+
+    let mut entry = LogEntry::new(
+        Action::SyncRunAborted,
+        Level::Error,
+        Visibility::User,
+        Outcome::Error,
+    );
+    entry.entity = Some(Entity {
+        kind: EntityType::SyncRun,
+        id: "0193a2cc-2222-7333-9c6d-1a2b3c4d5e6f",
+    });
+    entry.project_id = Some("0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f");
+    entry.sync_run_id = Some("0193a2cc-2222-7333-9c6d-1a2b3c4d5e6f");
+    entry.details = Some(Details::Failure {
+        code: FailureCode::new("E_BACKUP_FAILED").expect("the registry shape holds"),
+        path: Some(PathBuf::from("/repo/AGENTS.md")),
+        os_code: Some(13),
+    });
+    insert(&conn, &entry).expect("insert should succeed");
+
+    // The pre-field legacy shape, verbatim as an older app wrote it.
+    conn.execute(
+        "INSERT INTO action_log (
+             ts, level, visibility, action, entity_type, entity_id,
+             project_id, sync_run_id, result, details
+         ) VALUES (
+             '2026-11-20T09:00:00.000Z', 'error', 'user',
+             'sync.run_aborted', 'sync_run', '0193a2cc-3333-7333-9c6d-1a2b3c4d5e6f',
+             NULL, '0193a2cc-3333-7333-9c6d-1a2b3c4d5e6f', 'error',
+             '{\"code\":\"E_DISK_FULL\"}'
+         )",
+        [],
+    )
+    .expect("the legacy row must be insertable");
+
+    let records = read_recent(&conn, 10);
+    assert_eq!(records.len(), 2);
+    // `recent` orders newest-first by DESCENDING id: the legacy row
+    // was hand-INSERTed second, so it reads first.
+    assert_eq!(records[0].action, Action::SyncRunAborted);
+    assert_eq!(
+        records[0].details,
+        Some(serde_json::json!({ "code": "E_DISK_FULL" })),
+        "the legacy no-os_code row reads back unchanged"
+    );
+    assert_eq!(records[1].action, Action::SyncRunAborted);
+    assert_eq!(records[1].result, Outcome::Error);
+    assert_eq!(
+        records[1].details,
+        Some(serde_json::json!({
+            "code": "E_BACKUP_FAILED",
+            "path": "/repo/AGENTS.md",
+            "os_code": 13
+        })),
+        "the OS code round-trips as a plain number"
+    );
+    teardown(conn, dir);
+}
+
+#[test]
 fn a_minimal_entry_stores_null_optional_columns() {
     let (conn, dir) = journal_db("minimal");
 
@@ -291,6 +360,7 @@ fn the_fail_then_log_error_entry_survives_the_rolled_back_operation() {
     entry.details = Some(Details::Failure {
         code: FailureCode::new("E_VALIDATION").expect("the registry shape holds"),
         path: None,
+        os_code: None,
     });
     insert(&conn, &entry).expect("the fail-then-log entry should be written");
 
@@ -531,6 +601,7 @@ fn a_details_cell_built_beside_instruction_text_carries_none_of_it() {
     entry.details = Some(Details::Failure {
         code: FailureCode::new("E_CONTENT_RESERVED").expect("the registry shape holds"),
         path: Some(PathBuf::from("/repo/AGENTS.md")),
+        os_code: None,
     });
     insert(&conn, &entry).expect("insert should succeed");
     let _ = instruction_text;

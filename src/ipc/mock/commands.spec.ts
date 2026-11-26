@@ -2129,6 +2129,26 @@ describe('markdownPreview', () => {
 })
 
 describe('syncRun (the mock stand-in, T-118/D-144)', () => {
+  it('opens the run journal bracket the real backend opens (T-124/D-223)', async () => {
+    // The honest mirror: the real `sync_run` writes a
+    // `sync.run_started` entry in phase 0's record transaction before
+    // anything else of the run exists, so the mock stand-in journals
+    // the member first too. The stand-in's other journal rows
+    // (per-project + summary) are T-118's shape; the entry order is
+    // the mirror's own fact — the Activity window reads newest
+    // first, so the start bracket lands at the tail.
+    const before = mockState().activity.length
+    await commands.syncRun(null)
+    const entries = mockState().activity.slice(before)
+    expect(entries.map((entry) => entry.action)).toContain('sync.run_started')
+    const startEntry = entries.find((entry) => entry.action === 'sync.run_started')
+    expect(startEntry?.level).toBe('info')
+    expect(startEntry?.result).toBe('ok')
+    // The start bracket is the run's FIRST row in append order (the
+    // per-project and summary rows follow it).
+    expect(entries[0]?.action).toBe('sync.run_started')
+  })
+
   it("clears a written row's §5.7 markings and dirty flag with the sync", async () => {
     // Round-1 P2-3's fix, made falsifiable (round-2's P2-1): the
     // mock's post-sync row update models the backend's after-sync

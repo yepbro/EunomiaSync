@@ -204,6 +204,7 @@ fn run_rows_of(
 
 /// One `backup_records` row, read straight back.
 struct RecordRow {
+    id: String,
     project_id: String,
     source_path: String,
     backup_path: String,
@@ -221,7 +222,7 @@ fn records_of(app: &tauri::App<tauri::test::MockRuntime>, run_id: &str) -> Vec<R
     tauri::async_runtime::block_on(database.run(move |tx| {
         let mut statement = tx
             .prepare(
-                "SELECT project_id, source_path, backup_path, size_bytes, sha256, \
+                "SELECT id, project_id, source_path, backup_path, size_bytes, sha256, \
                         status, created_at \
                    FROM backup_records WHERE sync_run_id = ?1 ORDER BY created_at, id",
             )
@@ -229,13 +230,14 @@ fn records_of(app: &tauri::App<tauri::test::MockRuntime>, run_id: &str) -> Vec<R
         let rows = statement
             .query_map([&run_id], |row| {
                 Ok(RecordRow {
-                    project_id: row.get(0)?,
-                    source_path: row.get(1)?,
-                    backup_path: row.get(2)?,
-                    size_bytes: row.get(3)?,
-                    sha256: row.get(4)?,
-                    status: row.get(5)?,
-                    created_at: row.get(6)?,
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    source_path: row.get(2)?,
+                    backup_path: row.get(3)?,
+                    size_bytes: row.get(4)?,
+                    sha256: row.get(5)?,
+                    status: row.get(6)?,
+                    created_at: row.get(7)?,
                 })
             })
             .map_err(crate::db::sqlite_error_to_app_error)?
@@ -446,6 +448,29 @@ fn every_copy(data_dir: &Path) -> Vec<PathBuf> {
     copies
 }
 
+/// The run's journal entries, newest first, filtered to the run —
+/// the assertion-side read over the real repository (the phase-4
+/// suite's `journal_of` shape).
+fn journal_of(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    run_id: &str,
+) -> Vec<eunomia_store::action_log::LogRecord> {
+    let database = database_of(app);
+    let run_id = run_id.to_owned();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::action_log::recent(tx, 100).map_err(|error| {
+            crate::db::sqlite_error_to_app_error(match error {
+                eunomia_store::storage::StorageError::Sql(sql) => sql,
+                other => rusqlite::Error::InvalidParameterName(other.to_string()),
+            })
+        })
+    }))
+    .expect("reading the journal must work")
+    .into_iter()
+    .filter(|record| record.sync_run_id.as_deref() == Some(run_id.as_str()))
+    .collect()
+}
+
 // ---- the success path -------------------------------------------------
 
 #[test]
@@ -543,6 +568,96 @@ fn ready_projects_with_files_get_verified_copies_and_ok_records() {
         fs::read(&second_target).expect("reading the target back must work"),
         b"abc"
     );
+
+    // The journal (LOG-001…004's "backup creation", T-124/D-223): one
+    // `backup.created` entry per CREATED copy, riding the records'
+    // own transaction — the entity is the backup record itself
+    // (its UUIDv7 id), the entry's project column names the
+    // project, and `Details::File` carries the copy's on-disk path
+    // (D-119's BackupCreated convention). Beside them, phase 0's
+    // `sync.run_started` bracket opener (the newest-first order:
+    // started first, then the two creations in sort_order).
+    let journal = journal_of(&app, &phase1.run_id);
+    assert_eq!(
+        journal
+            .iter()
+            .map(|record| (
+                record.action,
+                record.level,
+                record.result,
+                record.project_id.as_deref()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                eunomia_store::action_log::Action::BackupCreated,
+                eunomia_store::action_log::Level::Info,
+                eunomia_store::action_log::Outcome::Ok,
+                Some(second.as_str())
+            ),
+            (
+                eunomia_store::action_log::Action::BackupCreated,
+                eunomia_store::action_log::Level::Info,
+                eunomia_store::action_log::Outcome::Ok,
+                Some(first.as_str())
+            ),
+            (
+                eunomia_store::action_log::Action::SyncRunStarted,
+                eunomia_store::action_log::Level::Info,
+                eunomia_store::action_log::Outcome::Ok,
+                None
+            ),
+        ],
+        "the run's journal: the start bracket plus one entry per copy"
+    );
+    // The entities name the backup records, and `Details::File`
+    // carries each copy's on-disk path — the absolute fact, parallel
+    // to the target-file entries' paths. Pairing by the project
+    // column (the newest-first journal order is the reverse of the
+    // records' insert order).
+    let records = records_of(&app, &phase1.run_id);
+    let copies_by_project = [
+        (first.as_str(), &first_copy),
+        (second.as_str(), &second_copy),
+    ];
+    for entry in journal.iter().take(2) {
+        // LOG-005's pin (round-2's finding): a creation is the
+        // Activity window's own data — `user`, never `diagnostic`.
+        assert_eq!(
+            entry.visibility,
+            eunomia_store::action_log::Visibility::User
+        );
+        let project_id = entry
+            .project_id
+            .as_deref()
+            .expect("the entry names its project");
+        let record = records
+            .iter()
+            .find(|record| record.project_id == project_id)
+            .expect("the record of the entry's project exists");
+        assert_eq!(
+            entry.entity,
+            Some((
+                eunomia_store::action_log::EntityType::Backup,
+                record.id.clone()
+            )),
+            "the entity is the backup record the entry rode with"
+        );
+        let details = entry.details.as_ref().expect("the entry carries the path");
+        let copy_path = copies_by_project
+            .iter()
+            .find(|(id, _)| *id == project_id)
+            .expect("the project's copy path is known")
+            .1;
+        assert_eq!(
+            details
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .expect("the path is a string"),
+            copy_path.display().to_string(),
+            "Details::File carries the copy's on-disk path"
+        );
+    }
 }
 
 #[test]
@@ -681,6 +796,17 @@ fn a_source_matching_the_last_copy_dedups_into_the_existing_record() {
     assert!(
         records_of(&app, &phase1.run_id).is_empty(),
         "a dedup decision writes no record"
+    );
+    // And no `backup.created` journal entry either (T-124/D-223): no
+    // copy was created — the run's journal holds only phase 0's
+    // start bracket (the existing row already documents the pair).
+    assert_eq!(
+        journal_of(&app, &phase1.run_id)
+            .iter()
+            .map(|record| record.action)
+            .collect::<Vec<_>>(),
+        vec![eunomia_store::action_log::Action::SyncRunStarted],
+        "a dedup decision journals no creation"
     );
     let still_checked = tauri::async_runtime::block_on(database_of(&app).run({
         let project = project.clone();
@@ -946,6 +1072,66 @@ fn a_copy_error_aborts_the_run_sweeps_the_copies_and_resets_the_rows() {
     );
     assert_eq!(rows[3].status, SyncRunProjectStatus::NotStarted);
 
+    // S10's cancel entry (T-124/D-223): the abort transaction writes
+    // the `sync.run_aborted` journal entry — error/error, the
+    // sync_run entity, the FAILING project's id in the project
+    // column (§10's "project"), and `Details::Failure` carrying
+    // §10's complete field list: the code, the path (the failing
+    // copy's source), and the OS code (errno 28). NO creation
+    // entries: this run's copies were deleted before any record
+    // committed, and an entry claiming a created backup for a
+    // born-deleted copy would lie (the `discarded` record row is
+    // the DB's history of the sweep).
+    let journal = journal_of(&app, &phase1.run_id);
+    assert_eq!(
+        journal
+            .iter()
+            .map(|record| (
+                record.action,
+                record.level,
+                record.result,
+                record.project_id.as_deref()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                eunomia_store::action_log::Action::SyncRunAborted,
+                eunomia_store::action_log::Level::Error,
+                eunomia_store::action_log::Outcome::Error,
+                Some(failing.as_str())
+            ),
+            (
+                eunomia_store::action_log::Action::SyncRunStarted,
+                eunomia_store::action_log::Level::Info,
+                eunomia_store::action_log::Outcome::Ok,
+                None
+            ),
+        ],
+        "the aborted run's journal: the start bracket and the cancel entry, nothing else"
+    );
+    assert_eq!(
+        journal[0].entity,
+        Some((
+            eunomia_store::action_log::EntityType::SyncRun,
+            phase1.run_id.clone()
+        ))
+    );
+    assert_eq!(
+        journal[0].details,
+        Some(serde_json::json!({
+            "code": "E_BACKUP_FAILED",
+            "path": failing_source.display().to_string(),
+            "os_code": 28
+        })),
+        "§10's field list: code, path, OS code"
+    );
+    // LOG-005's pin (round-2's finding): the cancel entry is the
+    // Activity window's own data — `user`, never `diagnostic`.
+    assert_eq!(
+        journal[0].visibility,
+        eunomia_store::action_log::Visibility::User
+    );
+
     // OUT-020: the last-sync facts of every project stay untouched,
     // and no target byte moved.
     for (project, target, bytes) in [
@@ -983,6 +1169,187 @@ fn a_copy_error_aborts_the_run_sweeps_the_copies_and_resets_the_rows() {
             "the last sync of every project stays unchanged"
         );
     }
+}
+
+#[test]
+fn a_refused_creation_journal_insert_rolls_the_records_back_and_sweeps_the_copies() {
+    // The D-194 one-transaction proof for the creation entries
+    // (T-124/D-223): the `backup.created` insert rides Step D's
+    // records transaction, so a refused insert (the
+    // reject-every-journal-entry trigger, the assignments suite's
+    // proof shape) leaves NO record row, and the orphan sweep deletes
+    // the copies a rolled-back transaction must not leave
+    // unreferenced (the D-091 posture). Phase 0's start bracket is
+    // the only journal row the run keeps, and the run row stays
+    // `running` — the crash-recovery rule's case.
+    let (temp, app, repos) = phase2_app();
+    let (first, first_repo) = seed_repo_project(
+        &app,
+        &repos,
+        1,
+        eunomia_store::settings::Scheme::A,
+        BaseName::AgentsMd,
+    );
+    let (second, second_repo) = seed_repo_project(
+        &app,
+        &repos,
+        2,
+        eunomia_store::settings::Scheme::C,
+        BaseName::ClaudeMd,
+    );
+    seed_assigned_instruction(&app, &first, "Be brief.");
+    seed_assigned_instruction(&app, &second, "Also be kind.");
+    fs::write(first_repo.join("AGENTS.md"), b"abc").expect("writing the fixture must work");
+    fs::write(second_repo.join("CLAUDE.project.md"), b"abc")
+        .expect("writing the fixture must work");
+
+    let phase1 = preflight_ok(&app);
+    // The trigger is planted AFTER phases 0/1 (their transactions are
+    // done and committed); it rejects every action_log insert.
+    let database = database_of(&app);
+    tauri::async_runtime::block_on(database.run(|tx| {
+        tx.execute(
+            "CREATE TRIGGER reject_creation_journal BEFORE INSERT ON action_log
+             BEGIN SELECT RAISE(ABORT, 'test: reject the creation entries'); END;",
+            [],
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("planting the rejection trigger must work");
+
+    let error = run_phase2(&app, &phase1, temp.path())
+        .expect_err("a refused journal insert must fail the records transaction");
+    // RAISE(ABORT) → SQLITE_CONSTRAINT → the shared base classifier's
+    // E_VALIDATION (the phase-0 proof's classification).
+    assert_eq!(error.code, ErrorCode::Validation);
+
+    // No record survived the rollback, and the sweep removed the
+    // copies (no orphaned bytes behind a refused transaction).
+    assert!(
+        records_of(&app, &phase1.run_id).is_empty(),
+        "no backup record survived the refused journal insert"
+    );
+    assert!(
+        every_copy(temp.path()).is_empty(),
+        "the orphan sweep removed the copies the rolled-back records left"
+    );
+    // The run's journal holds exactly phase 0's bracket, and the run
+    // row stays `running` — the honest crash-window posture.
+    assert_eq!(
+        journal_of(&app, &phase1.run_id)
+            .iter()
+            .map(|record| record.action)
+            .collect::<Vec<_>>(),
+        vec![eunomia_store::action_log::Action::SyncRunStarted],
+        "no creation entry survived the refused insert"
+    );
+    assert_eq!(
+        run_row_of(&app, &phase1.run_id).status,
+        SyncRunStatus::Running,
+        "the run row stays running (the crash-recovery rule's case)"
+    );
+}
+
+#[test]
+fn a_refused_cancel_entry_rolls_the_whole_abort_verdict_back() {
+    // The D-194 one-transaction proof for the abort path (T-124/D-223,
+    // reading 3's own words: "the aborted row, the discarded history
+    // and the journal claim commit or vanish as one set"): a refused
+    // cancel entry rolls the aborted row, the discarded records and
+    // the per-project reset back with it — the run row stays
+    // `running`, the records never landed, and the phase's answer is
+    // the insert's refusal (not the E_BACKUP_FAILED envelope, whose
+    // row never committed).
+    let (temp, app, repos) = phase2_app();
+    let (healthy, healthy_repo) = seed_repo_project(
+        &app,
+        &repos,
+        1,
+        eunomia_store::settings::Scheme::A,
+        BaseName::AgentsMd,
+    );
+    let (failing, failing_repo) = seed_repo_project(
+        &app,
+        &repos,
+        2,
+        eunomia_store::settings::Scheme::A,
+        BaseName::AgentsMd,
+    );
+    seed_assigned_instruction(&app, &healthy, "Be brief.");
+    seed_assigned_instruction(&app, &failing, "Be terse.");
+    let healthy_target = healthy_repo.join("AGENTS.md");
+    let failing_target = failing_repo.join("AGENTS.md");
+    fs::write(&healthy_target, b"old healthy bytes").expect("writing the fixture must work");
+    fs::write(&failing_target, b"old failing bytes").expect("writing the fixture must work");
+
+    let phase1 = preflight_ok(&app);
+    // The trigger is planted after phases 0/1; the copies are made on
+    // the blocking pool (the trigger cannot touch them), and the
+    // abort transaction's journal insert is what it refuses.
+    let database = database_of(&app);
+    tauri::async_runtime::block_on(database.run(|tx| {
+        tx.execute(
+            "CREATE TRIGGER reject_cancel_journal BEFORE INSERT ON action_log
+             BEGIN SELECT RAISE(ABORT, 'test: reject the cancel entry'); END;",
+            [],
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("planting the rejection trigger must work");
+
+    // The injection: the SECOND eligible copy fails (the failing
+    // project's), so the healthy copy was already made — the debris
+    // the sweep must still remove.
+    let injection = injected_backup(
+        2,
+        BackupError::CopyFailed {
+            path: PathBuf::from("/data/backups/failing/x.bak"),
+            source: std::io::Error::from_raw_os_error(28),
+            cleanup: None,
+        },
+        None,
+    );
+    let error = tauri::async_runtime::block_on(sync_phase2::run_with_abort_clock(
+        app.handle(),
+        &phase1,
+        temp.path(),
+        injection,
+        fixed_now(),
+        fixed_abort_now,
+    ))
+    .expect_err("a refused cancel entry must fail the abort transaction");
+
+    // The refusal is the INSERT's (E_VALIDATION), not the backup
+    // envelope: the aborted row the envelope describes never
+    // committed — the one-transaction rule working in reverse.
+    assert_eq!(
+        error.code,
+        ErrorCode::Validation,
+        "the journal insert's refusal is the answer, not the uncommitted envelope"
+    );
+    // The whole verdict vanished: no discarded history, the run row
+    // still `running`, the journal exactly phase 0's bracket.
+    assert!(
+        records_of(&app, &phase1.run_id).is_empty(),
+        "no discarded record survived the refused cancel entry"
+    );
+    assert!(
+        every_copy(temp.path()).is_empty(),
+        "the sweep still removed this run's copies"
+    );
+    assert_eq!(
+        journal_of(&app, &phase1.run_id)
+            .iter()
+            .map(|record| record.action)
+            .collect::<Vec<_>>(),
+        vec![eunomia_store::action_log::Action::SyncRunStarted],
+        "no cancel entry survived the refused insert"
+    );
+    assert_eq!(
+        run_row_of(&app, &phase1.run_id).status,
+        SyncRunStatus::Running,
+        "the run row stays running — the abort vanished with its journal claim"
+    );
 }
 
 #[test]

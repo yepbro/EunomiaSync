@@ -1704,6 +1704,7 @@ fn activity_list_serves_a_filtered_page_over_ipc() {
             entry.details = Some(Details::Failure {
                 code: FailureCode::new("E_SYNC_RUNNING").expect("the registry shape holds"),
                 path: None,
+                os_code: None,
             });
             let id = insert(tx, &entry).map_err(crate::commands::activity_log_to_app_error)?;
             tx.execute(
@@ -11691,14 +11692,17 @@ fn sync_run_completes_over_the_real_phases_and_serves_the_summary() {
         std::fs::read(&backups[0]).expect("the copy must be readable"),
         b"stale bytes"
     );
-    // OUT-020 stamps, the §7.7 journal (two project results + the
-    // summary), and the free flag.
+    // OUT-020 stamps, the §7.7 journal, and the free flag. The
+    // journal's count is the T-124 dictionary over this run's shape:
+    // phase 0's start bracket, phase 2's creation entry (only the
+    // overwritten file was backed up), the two per-project entries,
+    // and the run summary (D-051's dictionary + D-223's halves).
     assert!(sync_project_stamps(&app, &alpha).0.is_some());
     assert!(sync_project_stamps(&app, &gamma).0.is_some());
     assert_eq!(
         sync_journal_count(&app, &summary.run_id),
-        3,
-        "D-051's per-project entries plus the run summary"
+        5,
+        "the start bracket, one creation, two project entries and the summary"
     );
     assert!(
         !app.state::<crate::sync_running::SyncRunning>().is_running(),
@@ -11896,6 +11900,34 @@ fn a_phase_three_store_failure_aborts_the_run_and_a_retry_converges() {
         Some("E_DB_LOCKED"),
         "the wrapper aborts with the error's own §10 literal"
     );
+    // The journal (T-124/D-223): the error abort's own entry rides
+    // the wrapper's abort transaction — fail-then-log, the error's
+    // §10 literal in details — beside phase 0's bracket and the copy
+    // phase 2 made (the target pre-existed, so the run reached the
+    // write phase with a backup behind it).
+    let journal = sync_journal_of(&app, &runs[0].0);
+    assert_eq!(
+        journal
+            .iter()
+            .map(|record| (
+                record.action.as_str(),
+                record.level.as_str(),
+                record.result.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("sync.run_aborted", "error", "error"),
+            ("backup.created", "info", "ok"),
+            ("sync.run_started", "info", "ok"),
+        ],
+        "the error abort's members: the bracket, the copy, the abort entry"
+    );
+    assert_eq!(
+        journal[0].details,
+        Some(serde_json::json!({ "code": "E_DB_LOCKED" })),
+        "the error abort's entry carries the error's own §10 literal; \
+         no path, no OS code — the store error offers neither"
+    );
     let written = std::fs::read_to_string(&target).expect("the written file stays");
     assert!(
         written.starts_with("Be brief.\n\n<!-- Created by EunomiaSync "),
@@ -11954,12 +11986,22 @@ fn a_classifier_shaped_disk_full_error_still_aborts_the_running_row() {
     assert_eq!(sync_run_row(&app, &run_id).status.as_str(), "running");
 
     // The classifier-shaped tail look-alike over a running row: the
-    // abort MUST land (the first cut returned it untouched).
+    // abort MUST land (the first cut returned it untouched). The
+    // error carries an OS fact (errno 32) so the wrapper's os_code
+    // leg has a real discriminator — the journaled entry must carry
+    // the ORIGINAL error's code AND its OS code (T-124/D-223,
+    // reading 4b).
+    let mut disk_full = crate::errors::AppError::new(crate::errors::ErrorCode::DiskFull);
+    disk_full.details = Some(crate::errors::ErrorDetails {
+        os_code: Some(32),
+        os_kind: None,
+        os_message: None,
+    });
     let answered = tauri::async_runtime::block_on(crate::commands::pipeline_refusal(
         app.handle(),
         &run_id,
         "the write phase",
-        crate::errors::AppError::new(crate::errors::ErrorCode::DiskFull),
+        disk_full,
     ));
     assert_eq!(
         answered.code.as_str(),
@@ -11976,6 +12018,34 @@ fn a_classifier_shaped_disk_full_error_still_aborts_the_running_row() {
         "the class-only stage line, got: {:?}",
         row.details
     );
+    // The abort entry beside phase 0's bracket, newest first — and
+    // its details carry §10's code plus the error's own OS code, no
+    // path (a pipeline-level stop is about the run, not one file —
+    // D-223 reading 4b's recorded spelling).
+    let journal = sync_journal_of(&app, &run_id);
+    assert_eq!(
+        journal
+            .iter()
+            .map(|record| (
+                record.action.as_str(),
+                record.level.as_str(),
+                record.result.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("sync.run_aborted", "error", "error"),
+            ("sync.run_started", "info", "ok"),
+        ],
+        "the wrapper's abort entry lands beside the run's bracket"
+    );
+    assert_eq!(
+        journal[0].details,
+        Some(serde_json::json!({ "code": "E_DISK_FULL", "os_code": 32 })),
+        "the original error's §10 code and OS code ride the entry"
+    );
+    // LOG-005's pin (round-2's finding): the abort entry is the
+    // Activity window's own data — `user`, never `diagnostic`.
+    assert_eq!(journal[0].visibility.as_str(), "user");
 
     // The same wrapper over the now-terminal row: a no-op — the row
     // keeps the FIRST verdict (this is how phase 1's in-phase tail and
@@ -12001,6 +12071,15 @@ fn a_classifier_shaped_disk_full_error_still_aborts_the_running_row() {
             first.finished_at
         ),
         "the terminal row is never rewritten"
+    );
+    // And the no-op journaled nothing: the run's journal still holds
+    // exactly the one abort entry beside the bracket (the "no double
+    // entry" half of reading 4b — a row already terminal answers
+    // `Ok(false)` with its journal untouched).
+    assert_eq!(
+        sync_journal_of(&app, &run_id).len(),
+        2,
+        "the terminal row's no-op added no journal entry"
     );
     drop(app);
     drop(temp);
@@ -12093,6 +12172,461 @@ fn the_summary_carries_the_skip_and_failure_codes_by_name() {
     );
     drop(app);
     drop(temp);
+}
+
+// ---------------------------------------------------------------------------
+// The sync journal (T-124, LOG-001…004, §10, S10, D-223): the run's
+// bracket (start/finish), the per-project entries with §10's full
+// field list, the backup-creation entries, and the cancel entry of a
+// backup-failure abort. The battery here drives the REAL command; the
+// phase suites pin each producer's own transaction discipline.
+// ---------------------------------------------------------------------------
+
+/// The run's journal entries as full records (newest first, filtered
+/// to the run) — the assertion-side read over the real repository.
+fn sync_journal_of(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    run_id: &str,
+) -> Vec<eunomia_store::action_log::LogRecord> {
+    let database = sync_database_of(app);
+    let run_id = run_id.to_owned();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::action_log::recent(tx, 200).map_err(|error| {
+            crate::db::sqlite_error_to_app_error(match error {
+                eunomia_store::storage::StorageError::Sql(sql) => sql,
+                other => rusqlite::Error::InvalidParameterName(other.to_string()),
+            })
+        })
+    }))
+    .expect("reading the journal must work")
+    .into_iter()
+    .filter(|record| record.sync_run_id.as_deref() == Some(run_id.as_str()))
+    .collect()
+}
+
+#[test]
+fn a_run_with_one_error_journals_every_project_and_the_error_facts() {
+    // The card's DoD, verbatim: "после запуска с одной ошибкой в
+    // журнале есть записи по всем проектам и ошибка с кодом" — after
+    // a run with one error, the journal holds an entry for EVERY
+    // project and the error with its code. The fixture is the
+    // by-name battery's shape widened by a third, healthy project:
+    // one written (its target pre-exists, so phase 2 backs it up),
+    // one skipped (scheme B without markers, `E_MARKERS_INVALID`),
+    // one failed (the refused write, `E_FILE_LOCKED` with the
+    // injected OS code 32). §10's full field list rides the two
+    // error rows: the code, the project (the entry's own column),
+    // the path, and the OS code.
+    let (temp, app) = sync_app();
+    let repos = temp.path().join("repos");
+    std::fs::create_dir(&repos).expect("the repos root must be creatable");
+    let (healthy, healthy_repo) = sync_repo_project(
+        &app,
+        &repos,
+        21,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &healthy, "Be healthy.");
+    std::fs::write(healthy_repo.join("AGENTS.md"), b"old healthy bytes")
+        .expect("the fixture must be writable");
+    let (skipped, skipped_repo) = sync_repo_project(
+        &app,
+        &repos,
+        22,
+        eunomia_store::settings::Scheme::B,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &skipped, "Be brief.");
+    std::fs::write(skipped_repo.join("AGENTS.md"), b"no markers at all\n")
+        .expect("the markerless fixture must be writable");
+    let (failed, failed_repo) = sync_repo_project(
+        &app,
+        &repos,
+        23,
+        eunomia_store::settings::Scheme::A,
+        eunomia_store::settings::BaseName::AgentsMd,
+    );
+    sync_seed_instruction(&app, &failed, "Be terse.");
+    let failed_target = failed_repo.join("AGENTS.md");
+    std::fs::write(&failed_target, b"old failing bytes").expect("the fixture must be writable");
+    // The failing write is injected for the FAILED project's target
+    // alone (errno 32, §10's locked file): the healthy project rides
+    // the production write, so the run's verdict is `partial` — one
+    // written beside the skip and the failure — the shape the card's
+    // DoD names. The comparison target is the resolved spelling phase
+    // 1 hands the seam (the canonicalized target, the shape-4 census
+    // test's own convention).
+    let failed_resolved = eunomia_fs::paths::canonicalize(&failed_target)
+        .expect("the fixture target must canonicalize");
+    let production_write = crate::commands::SyncRunSeams::production().write;
+    let seams = crate::commands::SyncRunSeams {
+        backup: crate::commands::SyncRunSeams::production().backup,
+        abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+        progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
+        write: std::sync::Arc::new(move |target: &std::path::Path, contents: &[u8]| {
+            if target == failed_resolved.as_path() {
+                Err::<eunomia_fs::atomic::WrittenFile, _>(
+                    eunomia_fs::atomic::AtomicWriteError::FileLocked(
+                        eunomia_fs::atomic::FileLockedFailure {
+                            step: eunomia_fs::atomic::WriteStep::Replace,
+                            path: target.to_path_buf(),
+                            retries: 3,
+                            source: std::io::Error::from_raw_os_error(32),
+                            cleanup: None,
+                        },
+                    ),
+                )
+            } else {
+                production_write(target, contents)
+            }
+        }),
+    };
+
+    let outcome = run_sync_with(&app, None, crate::commands::CancelToken::new(), seams)
+        .expect("a run with per-project refusals still completes");
+    let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+        panic!("the run completed over its rows");
+    };
+    assert_eq!(
+        summary.verdict, "partial",
+        "one written, one skipped, one failed"
+    );
+
+    let journal = sync_journal_of(&app, &summary.run_id);
+    // The census of this run's shape (the D-147 posture: a future
+    // writer losing or inventing a member fails the count): the
+    // summary, one entry per project, one entry per surviving backup
+    // copy, and the start bracket. Newest first.
+    assert_eq!(
+        journal
+            .iter()
+            .map(|record| (
+                record.action.as_str(),
+                record.level.as_str(),
+                record.result.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("sync.run_finished", "warn", "skipped"),
+            ("sync.project_result", "error", "error"),
+            ("sync.project_result", "warn", "skipped"),
+            ("sync.project_result", "info", "ok"),
+            ("backup.created", "info", "ok"),
+            ("backup.created", "info", "ok"),
+            ("sync.run_started", "info", "ok"),
+        ],
+        "the run's journal: bracket, copies, every project, summary"
+    );
+    // Every project has its entry (the DoD's first half).
+    for (project, code) in [
+        (&healthy, None),
+        (&skipped, Some("E_MARKERS_INVALID")),
+        (&failed, Some("E_FILE_LOCKED")),
+    ] {
+        let entry = journal
+            .iter()
+            .find(|record| {
+                record.action.as_str() == "sync.project_result"
+                    && record.project_id.as_deref() == Some(project.as_str())
+            })
+            .unwrap_or_else(|| panic!("the project {project} has its entry"));
+        assert_eq!(
+            entry
+                .details
+                .as_ref()
+                .and_then(|details| details.get("code")),
+            code.map(|code| serde_json::json!(code)).as_ref(),
+            "the entry of {project} carries its code {code:?}"
+        );
+    }
+    // The error with its code — §10's full field list (the DoD's
+    // second half): the failed entry carries the code, the project
+    // (its own column), the path, and the OS code; the skipped entry
+    // the code and the path, and no OS member (a content check backs
+    // it — the member is absent, not null). The paths are the ROWS'
+    // own frozen target paths (D-134's read-the-rows posture), read
+    // back as the independent oracle.
+    let rows = sync_run_rows(&app, &summary.run_id);
+    let row_path_of = |project: &str| {
+        rows.iter()
+            .find(|row| row.project_id == project)
+            .unwrap_or_else(|| panic!("the row of {project} exists"))
+            .target_path
+            .clone()
+            .expect("phase 0 froze the target path")
+    };
+    let failed_entry = journal
+        .iter()
+        .find(|record| {
+            record.action.as_str() == "sync.project_result"
+                && record.project_id.as_deref() == Some(failed.as_str())
+        })
+        .expect("the failed project's entry exists");
+    assert_eq!(
+        failed_entry.details,
+        Some(serde_json::json!({
+            "code": "E_FILE_LOCKED",
+            "path": row_path_of(&failed),
+            "os_code": 32
+        })),
+        "§10's fields: code, project, path, OS code"
+    );
+    let skipped_entry = journal
+        .iter()
+        .find(|record| {
+            record.action.as_str() == "sync.project_result"
+                && record.project_id.as_deref() == Some(skipped.as_str())
+        })
+        .expect("the skipped project's entry exists");
+    assert_eq!(
+        skipped_entry.details,
+        Some(serde_json::json!({
+            "code": "E_MARKERS_INVALID",
+            "path": row_path_of(&skipped),
+        })),
+        "the skip's code and the row's own frozen target path"
+    );
+    assert_eq!(
+        skipped_entry
+            .details
+            .as_ref()
+            .and_then(|details| details.get("os_code")),
+        None,
+        "no OS code — the member is absent for a content-check refusal"
+    );
+    // The surviving copies: the healthy and the failed projects'
+    // targets pre-existed (the skipped project never reaches phase
+    // 2), so exactly two `backup.created` entries name them.
+    let backup_entries: Vec<_> = journal
+        .iter()
+        .filter(|record| record.action.as_str() == "backup.created")
+        .collect();
+    assert_eq!(backup_entries.len(), 2);
+    assert_eq!(
+        backup_entries[0].project_id.as_deref(),
+        Some(failed.as_str()),
+        "newest first: the failed project's copy (sort order 3) reads first"
+    );
+    assert_eq!(
+        backup_entries[1].project_id.as_deref(),
+        Some(healthy.as_str())
+    );
+    for entry in backup_entries {
+        assert_eq!(
+            entry.entity.as_ref().map(|(kind, _)| kind.as_str()),
+            Some("backup"),
+            "the entity is the backup record"
+        );
+        assert!(
+            entry
+                .details
+                .as_ref()
+                .and_then(|details| details.get("path"))
+                .is_some_and(serde_json::Value::is_string),
+            "the copy's path rides Details::File"
+        );
+    }
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn the_sync_journal_member_census_per_run_shape() {
+    // The D-147 census posture over the journal: every run shape the
+    // command can produce holds its exact member multiset — a future
+    // writer losing a member (or inventing one) fails the count. The
+    // shapes: the success run, the D-25 gate stop, the user cancel
+    // stop, and the backup-failure abort (S10's cancel entry). The
+    // phase-1 free-space abort and the error abort are pinned by
+    // their own suites (the free-space probe is not a command seam;
+    // the error abort rides the store-failure test).
+    // Shape 1 — the success run: bracket + one copy + the project +
+    // the summary.
+    {
+        let (temp, app) = sync_app();
+        let repos = temp.path().join("repos");
+        std::fs::create_dir(&repos).expect("the repos root must be creatable");
+        let (project, repo) = sync_repo_project(
+            &app,
+            &repos,
+            31,
+            eunomia_store::settings::Scheme::A,
+            eunomia_store::settings::BaseName::AgentsMd,
+        );
+        sync_seed_instruction(&app, &project, "Be written.");
+        std::fs::write(repo.join("AGENTS.md"), b"old bytes").expect("the fixture must be writable");
+        let outcome = run_sync_with(
+            &app,
+            None,
+            crate::commands::CancelToken::new(),
+            crate::commands::SyncRunSeams::production(),
+        )
+        .expect("the healthy run completes");
+        let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+            panic!("the healthy run completed");
+        };
+        assert_eq!(
+            sync_journal_of(&app, &summary.run_id)
+                .iter()
+                .map(|record| record.action.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "sync.run_finished",
+                "sync.project_result",
+                "backup.created",
+                "sync.run_started",
+            ],
+            "the success run's members"
+        );
+        drop(app);
+        drop(temp);
+    }
+    // Shape 2 — the D-25 gate stop: the start bracket alone (the
+    // user's decision is no journal category — D-223's reading 5;
+    // the row is the queryable truth `sync_last_result` serves).
+    {
+        let (temp, app) = sync_app();
+        let repos = temp.path().join("repos");
+        std::fs::create_dir(&repos).expect("the repos root must be creatable");
+        let (_project, repo) = sync_repo_project(
+            &app,
+            &repos,
+            32,
+            eunomia_store::settings::Scheme::A,
+            eunomia_store::settings::BaseName::AgentsMd,
+        );
+        // No assignment — the empty build over a non-empty file.
+        std::fs::write(repo.join("AGENTS.md"), b"precious old bytes")
+            .expect("the fixture must be writable");
+        let outcome = run_sync_with(
+            &app,
+            None,
+            crate::commands::CancelToken::new(),
+            crate::commands::SyncRunSeams::production(),
+        )
+        .expect("the gate answers, not fails");
+        let crate::commands::SyncRunOutcome::NeedsConfirmation { .. } = outcome else {
+            panic!("the unconfirmed call must ask");
+        };
+        let runs = sync_all_runs(&app);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            sync_journal_of(&app, &runs[0].0)
+                .iter()
+                .map(|record| record.action.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sync.run_started"],
+            "the gate stop's members: the bracket alone"
+        );
+        drop(app);
+        drop(temp);
+    }
+    // Shape 3 — the user's cancel (a token latched before the run):
+    // the bracket alone, for the same reading.
+    {
+        let (temp, app) = sync_app();
+        let repos = temp.path().join("repos");
+        std::fs::create_dir(&repos).expect("the repos root must be creatable");
+        let (project, repo) = sync_repo_project(
+            &app,
+            &repos,
+            33,
+            eunomia_store::settings::Scheme::A,
+            eunomia_store::settings::BaseName::AgentsMd,
+        );
+        sync_seed_instruction(&app, &project, "Be brief.");
+        std::fs::write(repo.join("AGENTS.md"), b"old bytes").expect("the fixture must be writable");
+        let cancelled = crate::commands::CancelToken::new();
+        cancelled.cancel();
+        let outcome = run_sync_with(
+            &app,
+            None,
+            cancelled,
+            crate::commands::SyncRunSeams::production(),
+        )
+        .expect("the cancelled run answers its summary");
+        let crate::commands::SyncRunOutcome::Completed { summary } = outcome else {
+            panic!("the cancelled run answered its aborted summary");
+        };
+        assert_eq!(summary.verdict, "aborted");
+        assert_eq!(
+            sync_journal_of(&app, &summary.run_id)
+                .iter()
+                .map(|record| record.action.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sync.run_started"],
+            "the cancel stop's members: the bracket alone"
+        );
+        drop(app);
+        drop(temp);
+    }
+    // Shape 4 — the backup failure (S10): the bracket plus the cancel
+    // entry, and NO creation entries (the copies were swept before
+    // any record committed — an entry claiming a created backup for
+    // a born-deleted copy would lie).
+    {
+        let (temp, app) = sync_app();
+        let repos = temp.path().join("repos");
+        std::fs::create_dir(&repos).expect("the repos root must be creatable");
+        let (project, repo) = sync_repo_project(
+            &app,
+            &repos,
+            34,
+            eunomia_store::settings::Scheme::A,
+            eunomia_store::settings::BaseName::AgentsMd,
+        );
+        sync_seed_instruction(&app, &project, "Be brief.");
+        let target = repo.join("AGENTS.md");
+        std::fs::write(&target, b"old bytes").expect("the fixture must be writable");
+        let source =
+            eunomia_fs::paths::canonicalize(&target).expect("the fixture target must canonicalize");
+        let seams = crate::commands::SyncRunSeams {
+            backup: std::sync::Arc::new(|_target: &eunomia_fs::backup::BackupTarget<'_>| {
+                Err(eunomia_fs::backup::BackupError::CopyFailed {
+                    path: std::path::PathBuf::from("/data/backups/x/x.bak"),
+                    source: std::io::Error::from_raw_os_error(28),
+                    cleanup: None,
+                })
+            }),
+            abort_clock: crate::commands::SyncRunSeams::production().abort_clock,
+            progress_clock: crate::commands::SyncRunSeams::production().progress_clock,
+            write: crate::commands::SyncRunSeams::production().write,
+        };
+        let error = run_sync_with(&app, None, crate::commands::CancelToken::new(), seams)
+            .expect_err("the copy error must abort the run");
+        assert_eq!(error.code.as_str(), "E_BACKUP_FAILED");
+        let runs = sync_all_runs(&app);
+        assert_eq!(runs.len(), 1);
+        let journal = sync_journal_of(&app, &runs[0].0);
+        assert_eq!(
+            journal
+                .iter()
+                .map(|record| (
+                    record.action.as_str(),
+                    record.level.as_str(),
+                    record.result.as_str(),
+                    record.project_id.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("sync.run_aborted", "error", "error", Some(project.as_str())),
+                ("sync.run_started", "info", "ok", None),
+            ],
+            "the backup abort's members: the bracket and the cancel entry"
+        );
+        assert_eq!(
+            journal[0].details,
+            Some(serde_json::json!({
+                "code": "E_BACKUP_FAILED",
+                "path": source.display().to_string(),
+                "os_code": 28
+            })),
+            "S10's cancel entry carries §10's field list"
+        );
+        drop(app);
+        drop(temp);
+    }
 }
 
 #[test]

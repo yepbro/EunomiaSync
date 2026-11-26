@@ -734,3 +734,133 @@ fn a_failed_start_releases_the_flag() {
         "the failed start must release the flag"
     );
 }
+
+// ---- the run-start journal (T-124, D-223) --------------------------------
+
+/// The run's journal entries, filtered to the run — the assertion-side
+/// read over the real repository (the phase-4 suite's `journal_of`
+/// shape).
+fn run_journal_of(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    run_id: &str,
+) -> Vec<eunomia_store::action_log::LogRecord> {
+    let database = database_of(app);
+    let run_id = run_id.to_owned();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        eunomia_store::action_log::recent(tx, 100).map_err(|error| {
+            crate::db::sqlite_error_to_app_error(match error {
+                eunomia_store::storage::StorageError::Sql(sql) => sql,
+                other => rusqlite::Error::InvalidParameterName(other.to_string()),
+            })
+        })
+    }))
+    .expect("reading the journal must work")
+    .into_iter()
+    .filter(|record| record.sync_run_id.as_deref() == Some(run_id.as_str()))
+    .collect()
+}
+
+#[test]
+fn the_recorded_run_opens_its_journal_bracket() {
+    // LOG-001…004's "sync runs" (the card's "Запуск"): the same
+    // transaction that records the `running` row writes ONE
+    // `sync.run_started` entry — info/user/ok, the `sync_run` entity
+    // naming the row, no details (the run row carries `started_at`
+    // and the counts) and no project attribution (the entry is the
+    // run's, not a project's).
+    let (_temp, app, _db_path) = phase0_app();
+    let first = seed_project(&app, 1, eunomia_store::settings::Scheme::A);
+    let (instruction, variant) = seed_instruction(&app, "Be brief", "Be brief.");
+    seed_assignment(&app, first, instruction, variant);
+
+    let outcome = tauri::async_runtime::block_on(sync_phase0::run(app.handle()))
+        .expect("phase 0 must run over the seeded database");
+    let run_id = outcome.run.id.clone();
+
+    let journal = run_journal_of(&app, &run_id);
+    assert_eq!(journal.len(), 1, "exactly one entry: the run's start");
+    assert_eq!(
+        journal[0].action,
+        eunomia_store::action_log::Action::SyncRunStarted
+    );
+    assert_eq!(
+        (journal[0].level, journal[0].result),
+        (
+            eunomia_store::action_log::Level::Info,
+            eunomia_store::action_log::Outcome::Ok
+        )
+    );
+    // LOG-005's pin (round-2's finding): the entry is the Activity
+    // window's own data — a `diagnostic` regression would hide every
+    // run's start from the window (§7.7's user view), so the census
+    // pins the visibility member too.
+    assert_eq!(
+        journal[0].visibility,
+        eunomia_store::action_log::Visibility::User
+    );
+    assert_eq!(
+        journal[0].entity,
+        Some((
+            eunomia_store::action_log::EntityType::SyncRun,
+            run_id.clone()
+        ))
+    );
+    assert_eq!(journal[0].project_id, None);
+    assert_eq!(journal[0].details, None);
+    drop(outcome);
+}
+
+#[test]
+fn a_refused_run_start_journal_insert_rolls_the_run_row_back() {
+    // The D-194/D-051 one-transaction shape: the journal insert rides
+    // `create_running`'s own transaction, so a refused insert (a
+    // RAISE(ABORT) trigger, the assignments suite's proof shape)
+    // leaves NO run row and no `not_started` rows — the bracket
+    // cannot open for a run that never was.
+    let (_temp, app, _db_path) = phase0_app();
+    let first = seed_project(&app, 1, eunomia_store::settings::Scheme::A);
+    let (instruction, variant) = seed_instruction(&app, "Be brief", "Be brief.");
+    seed_assignment(&app, first, instruction, variant);
+
+    let database = database_of(&app);
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.execute(
+            "CREATE TRIGGER reject_run_start_journal BEFORE INSERT ON action_log
+             BEGIN SELECT RAISE(ABORT, 'test: reject the run-start entry'); END;",
+            [],
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("planting the rejection trigger must work");
+
+    let error = tauri::async_runtime::block_on(sync_phase0::run(app.handle()))
+        .expect_err("a refused journal insert must fail the phase");
+    // RAISE(ABORT) → SQLITE_CONSTRAINT → the shared base
+    // classifier's E_VALIDATION with the SQLite facts in details —
+    // the same spelling every journal-refusal proof in the suites
+    // pins (the assignments suite's shape).
+    assert_eq!(error.code, crate::errors::ErrorCode::Validation);
+
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        let runs: i64 = tx
+            .query_row("SELECT COUNT(*) FROM sync_runs", [], |row| row.get(0))
+            .map_err(crate::db::sqlite_error_to_app_error)?;
+        let rows: i64 = tx
+            .query_row("SELECT COUNT(*) FROM sync_run_projects", [], |row| {
+                row.get(0)
+            })
+            .map_err(crate::db::sqlite_error_to_app_error)?;
+        let journal: i64 = tx
+            .query_row("SELECT COUNT(*) FROM action_log", [], |row| row.get(0))
+            .map_err(crate::db::sqlite_error_to_app_error)?;
+        assert_eq!(runs, 0, "no run row survived the refusal");
+        assert_eq!(rows, 0, "no per-project row survived");
+        assert_eq!(journal, 0, "no journal entry survived");
+        Ok(())
+    }))
+    .expect("the raw-row census must work");
+    assert!(
+        !app.state::<SyncRunning>().is_running(),
+        "the failed start released the flag (the guard's RAII drop)"
+    );
+}

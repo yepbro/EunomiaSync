@@ -104,11 +104,11 @@ src-tauri/
   src/sync_cancel.rs       # sync_cancel command: the slot's token latch + three-state answer (working)
   src/sync_close.rs        # §9.4 close-during-sync: close seam, sync://close-confirmation, sync_confirm_exit (working)
   src/sync_reads.rs        # sync_status / sync_last_result commands: the panel's two reads (working)
-  src/sync_phase0.rs       # Sync phase 0: flag, run record, built content (working)
-  src/sync_phase1.rs       # Sync phase 1 preflight: ready/unchanged/skipped (working)
-  src/sync_phase2.rs       # Sync phase 2: §7.6 backups + records (working)
+  src/sync_phase0.rs       # Sync phase 0: flag, run record, built content, the run-start journal (working)
+  src/sync_phase1.rs       # Sync phase 1 preflight: ready/unchanged/skipped, the free-space abort + its journal entry (working)
+  src/sync_phase2.rs       # Sync phase 2: §7.6 backups + records + the creation and cancel journal entries (working)
   src/sync_phase3.rs       # Sync phase 3: the §9.5 atomic writes (working)
-  src/sync_phase4.rs       # Sync phase 4 finish: stamps, retention, verdict, journal (working)
+  src/sync_phase4.rs       # Sync phase 4 finish: stamps, retention, verdict, the §7.7 journal with §10's field list (working)
   src/sync_running.rs      # The global sync_running flag (SYS-004) (working)
   src/variants.rs          # variant_* commands: the Library save surface (working)
   src/headings.rs          # heading lifecycle + items_move: Library structure (working)
@@ -347,9 +347,10 @@ Rust commands are registered through `tauri-specta`:
    emissions per second by the `SyncRunSeams.progress_clock` seam
    (D-197's clock-injection pattern). A post-phase-0 `Err` whose run
    row is still `running` gets that row a terminal `aborted` status
-   with the error's own §10 code, decided by the row's state inside
-   one transaction (D-138's wrapper) — and the Sync module's two
-   reads `sync_status`/`sync_last_result` (T-121,
+   with the error's own §10 code and OS facts journaled as the run's
+   `sync.run_aborted` entry, decided by the row's state inside
+   one transaction (D-138's wrapper, T-124/D-223) — and the Sync
+   module's two reads `sync_status`/`sync_last_result` (T-121,
    `src-tauri/src/sync_reads.rs`, DECISIONS.md D-217): the panel's
    cold-start facts (the SYS-004 flag's plain load, MAIN-027's
    derived last-success time, the "last attempt partial" fact over
@@ -948,7 +949,13 @@ writes its entry inside the operation's own transaction (the
 `settings::set` shape — a rolled-back operation leaves no entry), and
 a failed operation's entry is written **after** the rollback, in the
 next transaction (fail-then-log: the error entry must survive the
-transaction it describes). Reads come in two seams with two
+transaction it describes). The sync pipeline's abort entries are this
+rule's named family (T-124/D-223): phase 1's free-space tail, phase
+2's backup abort and the P3-4 wrapper's corpse cleanup journal the
+run's `sync.run_aborted` INSIDE the abort transaction that commits —
+the aborting transaction IS the "next transaction" the failed
+phase's error claim lands in, so the two rules are one rule, not
+opposites. Reads come in two seams with two
 orderings: `recent` (newest by insert order — journal replay) and
 `list` (the Activity window's query, T-027: filters by inclusive
 DB-002 date range, project, actions, result and visibility, paginated

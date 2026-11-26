@@ -821,6 +821,7 @@ fn the_page_round_trips_every_column_of_a_full_entry() {
     entry.details = Some(Details::Failure {
         code: FailureCode::new("E_SYNC_RUNNING").expect("the registry shape holds"),
         path: None,
+        os_code: None,
     });
     let id = insert(&conn, &entry).expect("insert should succeed");
 

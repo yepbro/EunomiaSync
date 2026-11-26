@@ -28543,3 +28543,239 @@ false"`): the result of the 35 method="dialog" buttons was never
    exclusive-slot invariant; T-179 owns the column order behavior
    behind the two new menu items; T-190 owns the only allowed v-html
    (backend-sanitized HTML in MarkdownPreview.vue, SEC-005).
+
+### D-223 — T-124: the sync journal's missing halves — `sync.run_started` and `sync.run_aborted` join the vocabulary, `backup.created` gets its first producer, and §10's OS code reaches the per-project rows — 2026-11-26
+
+Problem: the card ("Запуск и итог по каждому проекту, создание копий,
+отмена при ошибке копии; каждая ошибка — с кодом, проектом, путём и
+кодом ОС"; LOG-001…004, §10, S10; the DoD "после запуска с одной
+ошибкой в журнале есть записи по всем проектам и ошибка с кодом")
+names the journal rows the sync's write side owes the Activity
+window. Rule 2 inventory first (nothing invented twice): phase 4
+already journals ONE `sync.project_result` per project plus the
+`sync.run_finished` summary inside the one finish transaction
+(D-134), the per-project error rows carry the §10 code and (failed
+rows only) the path — but NO OS code, and skipped rows carry no
+path; phase 0, phase 1's free-space abort, phase 2 (both the
+records and the backup abort), the D-25 gate, the cancel stop and
+the `pipeline_refusal` error abort write NO journal rows at all
+(`Action::BackupCreated` has no producer in the app), and
+manual-smoke.md's S10 entry records the drift verbatim ("the spec's
+S10 wording — 'the log has a cancel entry' — is ahead of the landed
+journal … the Activity window shows nothing for this run"). The
+gaps ARE the card. Eight readings were open; the chosen readings
+were written here BEFORE the implementation (the rule-1
+discipline).
+
+1. **The run's start — a new `Action::SyncRunStarted` →
+   `"sync.run_started"`** (LOG-001…004's "sync runs"; the card's own
+   "Запуск"), info/user/ok, entity `(sync_run, id)`, `sync_run_id`
+   set, no details (the run row carries `started_at` and the
+   counts; LOG-001…004's time/operation/object/result quadruple is
+   the whole entry), inserted INSIDE phase 0's `record_run`
+   transaction right after `create_running` — the D-194/D-205
+   shape: the journal insert rides the same transaction as the row
+   it describes, so a run row that never committed never claimed a
+   start. The info/user/ok shape is D-051's unmirrored one (the
+   Activity window's own data; no file-log noise per run start).
+2. **`backup.created` gets its first producer** — one entry per
+   copy that lands `ok` in phase 2's Step D records transaction:
+   entity `(backup, record_id)` (the UUIDv7 the record insert
+   returns — `EntityType::Backup`'s intended member since D-051),
+   `project_id` + `sync_run_id` columns, `Details::File { path }`
+   over the copy's on-disk path (LOG-001…004's "backup creation";
+   D-119's own convention note: "BackupCreated carries its path in
+   `Details::File`"). Dedup writes no row (no copy was created —
+   the module's UNIQUE ruling; the existing row already documents
+   the pair), and the ABORT path writes no creation entries: its
+   copies were deleted before any record committed, and an entry
+   saying "backup created" for a copy born-deleted would lie —
+   S10's demanded journal fact is the cancel entry, and the
+   `discarded` record rows are the DB's own history of the sweep.
+3. **The backup-error cancellation — a new
+   `Action::SyncRunAborted` → `"sync.run_aborted"`** (§9.4 phase 2
+   step 2's own status word; S10's "cancel entry"), error/error,
+   entity `(sync_run, id)`, `project_id` = the FAILING project
+   (§10's "project" — BKP-005's attributable cause), `sync_run_id`
+   set, `Details::Failure { code: E_BACKUP_FAILED, path: the
+failed copy's source path, os_code: BackupError::os_code() }` —
+   §10's complete field list, inserted inside phase 2's Step E
+   abort transaction (the same one-transaction rule: the aborted
+   row, the discarded history and the journal claim commit or
+   vanish as one set).
+4. **The run-level error stops journal the same member.**
+   (a) Phase 1's free-space tail (§9.4's closing rule): the abort
+   transaction gains the `sync.run_aborted` entry with
+   `E_DISK_FULL`, no path, no OS code (the space comparison is not
+   an OS error — §10's fields ride when they exist). (b) The
+   `pipeline_refusal` wrapper (D-138's P3-4 terminal row): when
+   `stop_run_if_running` actually performs the abort (`Ok(true)`),
+   its transaction gains the entry with the ORIGINAL error's §10
+   code and OS facts — D-051's fail-then-log read over the
+   pipeline: the failed phase's transaction rolled back, and the
+   abort transaction IS the "next transaction" where the error's
+   durable claim lands. A row already terminal (phase 1's or
+   phase 2's own in-phase abort wrote both the row and its entry)
+   answers `Ok(false)` untouched — no double entry; a refused
+   abort leaves the row `running` and journals nothing (no claim
+   of an outcome that never landed — the crash-recovery rule's
+   case, D-138's degraded line already carrying the refusal).
+5. **The user-shaped stops write NOTHING** (the D-25 gate, the
+   cancel point): LOG-001…004's categories name sync runs,
+   per-project results, backup creation and errors — a user
+   decision is none of them; D-138's own ruling ("no §10 code
+   names a user decision", the `""` literal) and D-210's (§10 has
+   no member for a declined cancel) are the vocabulary's verdict.
+   The run row (`aborted`, `error_code ""`, class-only details) is
+   the queryable truth `sync_last_result` serves (D-217); the
+   confirm re-call is a FULL new run with its own start entry; and
+   the card's cancellation demand is explicitly "отмена при ошибке
+   копии" — the ERROR cancellation. The journal's bracket for a
+   user-stopped run stays open by design, recorded here.
+6. **§10's field list on the per-project rows** (phase 4, D-134's
+   shape and placement unchanged — the finish transaction): the
+   skipped entries' `Details::Failure` gains the row's own
+   `target_path` (phase 0 froze it for EVERY project; D-134's
+   `path: None` was the pre-§10 reading — the card's "путём" names
+   the path of the project the error is about), and BOTH the
+   skipped and failed entries gain `os_code`, sourced from the
+   outcomes: phase 1's `PreflightVerdict::Skipped { details }` and
+   phase 3's `WriteOutcome::Failed { details }` — the structured
+   OS facts D-131's round-1 P3-5 added to the outcomes for exactly
+   this consumption class ("the store row has no column for
+   them"; T-118's log lines were the first reader, the journal is
+   the second). Phase 4's signature therefore gains
+   `&Phase1Outcome` (the command holds phase 1 through phase 3's
+   call; the phase's own tests' chain already returns it). The
+   committed row stays the authority for code, path and project
+   (D-134's read-the-rows posture); the outcome supplies only the
+   one fact the schema cannot store.
+7. **`Details::Failure` gains `os_code: Option<i32>`** (matching
+   `ErrorDetails.os_code`): §10's fourth field, a number, inside
+   the closed enum SEC-008 already guards — the canonical JSON
+   gains `"os_code": N` and omits the member when absent; the read
+   path parses `details` as a raw JSON value (D-051's shape), so
+   pre-existing rows parse unchanged and the extension is
+   write-side-only.
+8. **Wire surface: none.** No new commands (`collect_commands!`
+   stays 47), no `bindings.ts` regeneration (action strings ride
+   the wire as plain `String`s; the generated types carry no
+   Action enum). The frontend diff is the D-108 mirror the
+   vocabulary change demands: `ACTION_MEMBERS` 22 → 24 with the
+   generator spec's length pin, and the mock's `syncRun` journals
+   one `sync.run_started` entry before its per-project rows (the
+   honest mirror of the new real shape; the mock's stand-in
+   limits — no `sync_run_id` on its entries, no backup modeling —
+   stay as documented, its own follow-up class).
+
+The one-transaction discipline (reading 7's family): every NEW
+insert rides the transaction of the rows it describes and a
+refusal fails that transaction wholesale — the D-194 shape,
+pinned by reject-every-journal-entry trigger proofs for phase
+0's start entry, phase 2's creation entries (a refused insert
+rolls the records back and the orphan sweep still removes the
+copies) and phase 2's abort set (a refused cancel entry rolls
+the aborted row, the discarded history and the reset back with
+it — reading 3's "commit or vanish as one set", the vanish half
+proven); phase 1's free-space tail and the command wrapper's
+abort are in-transaction by the same construction, their insert
+failures propagating through `?`.
+Phase 4 keeps D-134's documented exception (`JournalReport`:
+the verdict outranks the entry at the finish) — the one place the
+swallow lives, unchanged.
+
+Scope boundary (the orchestrator's note): T-324 — the action-log
+FILE mirror writing before the transaction commits — is a
+SEPARATE card and deliberately untouched here; the new call sites
+call `logging::action_logged` exactly where D-051's call-once
+rule puts it (after a successful insert, inside the transaction
+closure — the existing phase-4 posture), and any mirror-ordering
+concern belongs to T-324's diff, not this one.
+
+Tests: store — the mapping table's "sync runs" category carries
+the three members in enum order, `ALL` = 24, the two spellings
+pinned with near-miss rejection (`sync.run_start`,
+`sync.run_cancelled`, `sync.runaborted`), the canonical
+`Failure` JSON with and without `os_code`, and the round-trip
+integration over a real database. src-tauri — phase 0: the
+run-start entry's shape and the trigger-based rollback proof
+(a refused journal insert leaves no run row); phase 1: the
+free-space abort's entry; phase 2: the creation entries (entity
+`(backup, id)`, the copy path, the project column; dedup writes
+none; the abort path writes none) and the cancel entry's full
+§10 field list; phase 4: the dictionary grows `run_started`
+(the existing pins updated — the task's own demand), the
+skipped path, the `os_code` wiring; ipc_tests — the DoD battery
+(one written, one skipped, one failed project over the real
+command: entries for ALL projects, the failed entry carrying
+code + path + OS code + project, the run bracketing them) and
+the per-shape member census (success / D-25 gate / cancel /
+backup abort / error abort / partial-with-failure — a future
+writer losing or inventing a member fails the count). Mutation
+groups: M1 the phase-0 insert dropped · M2 the phase-2 creation
+inserts dropped · M3 the phase-2 abort insert dropped · M4 the
+phase-4 path/OS wiring dropped · M5 the wrapper's insert
+dropped · M6 the phase-1 insert dropped · M7 `to_json`'s
+`os_code` dropped.
+
+Follow-ups for the board (the orchestrator cards them): the
+mock's `syncRun` still journals no `sync_run_id` and models no
+backups (its documented stand-in limits, now one entry wider);
+the Activity window's type-group RENDERING of the two new
+members is the M6 UI wave's business, not this card's.
+
+Review round 1 (deepseek-v4.1-flash, report
+`.opencode/reviews/t124-round1-report.md`, VERDICT: APPROVE —
+4 × P3, no P0/P1/P2): P3-1 (the D-108 mirror's two "22 members"
+docstrings) accepted — both updated to 24, the mock's limits
+note widened to name the null entity columns too; P3-2 (the
+canonical-JSON field-order claim — serde_json's default map is
+key-sorted) accepted — the comment and the `to_json` doc now
+state the sorted order and that nothing consumes it; P3-3 (the
+wrapper's `os_code` leg had no discriminator) accepted — the
+classifier-shaped driver now builds its error with
+`os_code: Some(32)` and pins the journaled `sync.run_aborted`
+details to `{"code":"E_DISK_FULL","os_code":32}` plus the
+no-double-entry half at the terminal-row call; P3-4 (the
+"trigger proofs" plural) accepted — two new proofs (a refused
+creation insert rolls the records back and the sweep still
+removes the copies; a refused cancel entry rolls the whole
+abort verdict back — reading 3's vanish half) and the
+one-transaction sentence above now names exactly which
+producers are trigger-proven. The notes' doc nits are folded in
+(the fail-then-log paragraph in ARCHITECTURE.md now names the
+abort-entry family as the rule's own "next transaction"; the
+phase-1/2 `.ok()` posture comments); the note-level observations
+(the entry `ts` is the insert time, the DoD-vs-S10 abort-shape
+distinction, the wrapper's `path: None` upheld, the Step-D
+`copy_path` invariant) are record-only, no code change.
+
+Rebase onto `main@3feed1b` (the orchestrator's order, between
+the rounds): the branch replayed cleanly except DECISIONS.md —
+the tails union (main's D-221/D-222 keep their order, D-223
+becomes the tail after them; no D-223 collision on main's side);
+ARCHITECTURE.md auto-merged (the four phase rows and the two
+paragraphs over main's skeleton rows — the diff vs main is
+exactly the task's own sentences). No other file overlaps: main
+never touched the src-tauri, ipc-mock, fixtures or bindings
+families since the task's base. The full chain was re-run green
+on the rebased tree before round 2.
+
+Review round 2 (hy4-flash-free, report
+`.opencode/reviews/t124-round2-report.md`, over the REBASED
+commit, VERDICT: APPROVE — 1 × P3, no P0/P1/P2): the P3 (no
+`visibility` pin anywhere in the new censuses — a LOG-005
+regression to `diagnostic` would hide the entries from the
+Activity window, the task's whole consumer, with the suite
+green) accepted — five per-producer pins landed (phase 0's
+start, phase 1's tail, phase 2's creation loop and its abort
+entry, the ipc classifier driver's wrapper entry), and the pin's
+own falsifiability was mutation-verified (phase 0's `User` →
+`Diagnostic` goes red, then reverted). The round-1 fixes were
+re-verified as landed (the report's own re-read), the rebase
+union was re-checked (exactly the 21 task files; the
+ARCHITECTURE/DECISIONS deltas are the task's own), and the
+one-transaction discipline plus SEC-008 were re-swept clean.
+The round-2 notes are record-only (the "P3-4 corpse cleanup"
+phrase's opacity in ARCHITECTURE.md was declined by the reviewer
+as not worth a cycle).

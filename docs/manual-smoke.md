@@ -897,12 +897,15 @@ second of three).
 - The file log carries the failure: `<data dir>/logs/eunomiasync.<date>.log`
   has an `error` line with code `E_BACKUP_FAILED`, the project's
   params and the OS code/kind/message (§10: every error is written to
-  the log with its code, project, path, and OS code). The spec's S10
-  wording — "the log has a cancel entry" — is ahead of the landed
-  journal: an aborted run never reaches phase 4's journaling and the
-  action vocabulary has no cancel member (D-138), so the Activity
-  window shows nothing for this run; the file log is the checkable
-  half today.
+  the log with its code, project, path, and OS code).
+- The journal carries the spec's S10 "cancel entry" (T-124/D-223):
+  the Activity window shows this run's bracket — the
+  `sync.run_started` entry (info, ok) and the `sync.run_aborted`
+  entry (error, error) naming the failing project, its Details
+  carrying the code `E_BACKUP_FAILED`, the failed copy's source path
+  and the OS code. No `backup.created` entries for this run — the
+  swept copies never committed a record (an entry claiming a created
+  backup for a born-deleted copy would lie).
 - After step 4: all three `written`, one new copy per project named
   `AGENTS.md.<UTC YYYYMMDDTHHMMSSmmmZ>.<hash8>.bak` (BKP-001).
 

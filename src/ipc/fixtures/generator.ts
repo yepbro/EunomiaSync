@@ -176,7 +176,7 @@ const ACTION_WORDS: readonly string[] = [
 /**
  * The closed `action_log.action` vocabulary in its stored spellings — a
  * deliberate mirror of `Action::as_str` in
- * `crates/eunomia-store/src/action_log.rs` (22 members; the generator
+ * `crates/eunomia-store/src/action_log.rs` (24 members; the generator
  * samples a subset, the mock's `activity_list` validates against the full
  * set). When a task adds a member, this list grows with it.
  */
@@ -198,7 +198,9 @@ export const ACTION_MEMBERS: readonly string[] = [
   'heading.created',
   'heading.changed',
   'heading.deleted',
+  'sync.run_started',
   'sync.run_finished',
+  'sync.run_aborted',
   'sync.project_result',
   'backup.created',
   'error.reported',

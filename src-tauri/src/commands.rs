@@ -1845,13 +1845,24 @@ pub(crate) async fn sync_run_with<R: Runtime>(
         let app = app.clone();
         async move { crate::sync_phase4::production_dirty(&app).await }
     };
-    let phase4 =
-        match sync_phase4::run(&app, &phase3, &data_dir, Timestamp::now(), dirty_seam).await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                return Err(pipeline_refusal(&app, &run_id, "the finish", error).await);
-            }
-        };
+    // Phase 1's outcome rides along (T-124/D-223): phase 4 reads the
+    // skipped verdicts' OS facts from it — the one §10 field the
+    // committed rows cannot store.
+    let phase4 = match sync_phase4::run(
+        &app,
+        &phase1,
+        &phase3,
+        &data_dir,
+        Timestamp::now(),
+        dirty_seam,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Err(pipeline_refusal(&app, &run_id, "the finish", error).await);
+        }
+    };
 
     // §9.4 phase 4 step 5's reset happens HERE, at the run's own end:
     // the guard leaves the pipeline before the never-fatal aftermath
@@ -1895,6 +1906,18 @@ pub(crate) async fn sync_run_with<R: Runtime>(
 /// refusal of the abort itself is reported, never swapped in (the
 /// first error names the cause; the second only compounds it).
 ///
+/// When the abort lands (T-124/D-223, reading 4b), the same
+/// transaction journals the run's `sync.run_aborted` entry —
+/// fail-then-log, D-051's read over this pipeline: the failed
+/// phase's own transaction rolled back, so the abort transaction IS
+/// where the error's durable journal claim lands, carrying the
+/// ORIGINAL error's §10 code and OS code (its `details` half; a
+/// refusal no OS fact backs journals the code alone). A row already
+/// terminal answers `Ok(false)` with no second entry (the phase's
+/// own in-phase abort already wrote both the row and its entry); a
+/// refused abort leaves the row `running` and journals nothing — no
+/// claim of an outcome that never landed.
+///
 /// **The decision is the row's state, never the error's code** (the
 /// round-1 P1 fix): a code like `E_DISK_FULL` proves nothing about the
 /// row — the shared SQL classifier maps `SQLITE_FULL` to it from ANY
@@ -1912,11 +1935,13 @@ pub(crate) async fn pipeline_refusal<R: Runtime>(
     error: AppError,
 ) -> AppError {
     let code = error.code.as_str();
+    let os_code = error.details.as_ref().and_then(|facts| facts.os_code);
     match stop_run_if_running(
         app,
         run_id,
         code,
         &format!("the run stopped at {stage}: {code}"),
+        os_code,
     )
     .await
     {
@@ -1976,11 +2001,25 @@ async fn stop_run<R: Runtime>(
 /// `running` (a phase's own in-phase abort, a finish that raced)
 /// answers `Ok(false)` untouched; only a still-`running` corpse is
 /// aborted. Returns whether the abort landed.
+///
+/// When it lands, the same transaction journals the run's
+/// `sync.run_aborted` entry (T-124/D-223, reading 4b): error/error,
+/// the `sync_run` entity, and `Details::Failure` with the ORIGINAL
+/// error's §10 code and OS code — the `code`/`os_code` pair
+/// [`pipeline_refusal`] extracted from it (fail-then-log: the failed
+/// phase's transaction rolled back, and this abort transaction is
+/// where the error's durable journal claim lands). No path: §10
+/// names the path "of the file the failure is about", and a
+/// pipeline-level stop is about the run, not one file (the failed
+/// phase's own per-project entries carry their paths when they
+/// exist). `os_code` is the error's own fact — `None` for a store
+/// error or any refusal no syscall backs, absent from the JSON then.
 async fn stop_run_if_running<R: Runtime>(
     app: &AppHandle<R>,
     run_id: &str,
     code: &str,
     details: &str,
+    os_code: Option<i32>,
 ) -> Result<bool, AppError> {
     let run_id = run_id.to_owned();
     let code = code.to_owned();
@@ -1996,6 +2035,34 @@ async fn stop_run_if_running<R: Runtime>(
             }
             abort_run(tx, &run_id, &finished_at, &code, &details)
                 .map_err(db::sync_runs_to_app_error)?;
+            // The error abort's journal claim (T-124/D-223): inside
+            // the abort's own transaction, after the row it
+            // describes — the `code`/`os_code` pair is the original
+            // error's, and the shape failure of a non-§10 `code`
+            // (tampering only — every `ErrorCode` literal is registry
+            // shaped, pinned by the errors suite) keeps the entry at
+            // the cost of the payload. The D-051 call-once mirror
+            // fires inside the closure.
+            let mut entry = eunomia_store::action_log::LogEntry::new(
+                eunomia_store::action_log::Action::SyncRunAborted,
+                eunomia_store::action_log::Level::Error,
+                eunomia_store::action_log::Visibility::User,
+                eunomia_store::action_log::Outcome::Error,
+            );
+            entry.entity = Some(eunomia_store::action_log::Entity {
+                kind: eunomia_store::action_log::EntityType::SyncRun,
+                id: run_id.as_str(),
+            });
+            entry.sync_run_id = Some(run_id.as_str());
+            entry.details = eunomia_store::action_log::FailureCode::new(code.as_str())
+                .ok()
+                .map(|failure_code| eunomia_store::action_log::Details::Failure {
+                    code: failure_code,
+                    path: None,
+                    os_code,
+                });
+            eunomia_store::action_log::insert(tx, &entry).map_err(activity_log_to_app_error)?;
+            logging::action_logged(&entry);
             Ok(true)
         })
         .await

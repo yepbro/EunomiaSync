@@ -95,22 +95,31 @@
 //! message in the row's `details` cell — the one free-text home the
 //! schema offers, spelled by the store.
 //!
-//! **The journal dictionary** (D-051): LOG-001…004's "sync runs and
-//! their results per project" is TWO members — one
-//! `sync.run_finished` summary (entity `sync_run`, result by
-//! verdict) and one `sync.project_result` per project (the entry's
-//! own `project_id`/`sync_run_id` columns, result by the row's
-//! status). The level/result mapping is this module's ruling over
-//! the closed vocabularies: `written`/`unchanged` → info/ok (a
-//! written project carries its target path in
+//! **The journal dictionary** (D-051, widened by T-124/D-223):
+//! LOG-001…004's "sync runs and their results per project" is THREE
+//! members — phase 0 opens the run's bracket with one
+//! `sync.run_started` entry (info/user/ok, in its own record
+//! transaction), one `sync.run_finished` summary (entity `sync_run`,
+//! result by verdict) and one `sync.project_result` per project (the
+//! entry's own `project_id`/`sync_run_id` columns, result by the
+//! row's status) close it. The level/result mapping is this module's
+//! ruling over the closed vocabularies: `written`/`unchanged` →
+//! info/ok (a written project carries its target path in
 //! [`Details::File`](action_log::Details::File), LOG-001…004's "for
 //! file writes, the project and path"); `skipped` → warn/skipped
-//! with the §10 code in [`Details::Failure`]; `failed` → error/error
-//! with the code and the refused path; the run summary follows its
+//! with the §10 code in [`Details::Failure`] and — the T-124 reading
+//! — the row's own frozen target path; `failed` → error/error with
+//! the code and the refused path; the run summary follows its
 //! verdict — success info/ok, partial warn/skipped (the nearest
 //! member of the closed `result` vocabulary for "completed, not
 //! fully good" — the per-project entries carry the precise
-//! outcomes), failed error/error. Every entry is
+//! outcomes), failed error/error. §10's fourth field rides both
+//! error shapes: the `os_code` behind a `skipped`/`failed` verdict
+//! comes from the OUTCOME that produced it (phase 1's `Skipped`
+//! details, phase 3's `Failed` details — the structured facts the
+//! committed rows have no column for, handed in through [`run`]'s
+//! `phase1`/`phase3` parameters), absent from the JSON when no
+//! syscall backs the refusal. Every entry is
 //! [`Visibility::User`] (§7.7's Activity window groups Sync), and
 //! each successfully inserted entry is mirrored once through
 //! [`logging::action_logged`] (D-051's call-once rule).
@@ -138,7 +147,8 @@ use crate::commands::{managed_db, projects_store_to_app_error};
 use crate::db::sync_runs_to_app_error;
 use crate::dirty_recalc::ProjectDirtyChange;
 use crate::errors::{AppError, ErrorCode, ErrorDetails};
-use crate::sync_phase3::Phase3Outcome;
+use crate::sync_phase1::{Phase1Outcome, PreflightVerdict};
+use crate::sync_phase3::{Phase3Outcome, WriteOutcome};
 
 /// What phase 4 hands the pipeline: the finished run row and the
 /// three never-fatal reports (retention, journal, dirty) T-118's log
@@ -210,9 +220,20 @@ pub(crate) struct DirtyReport {
     pub(crate) failure: Option<String>,
 }
 
-/// Runs §9.4 phase 4 end to end over phase 3's outcome: ONE write
-/// transaction (unchanged stamps, retention, the counted verdict,
-/// the journal), then the `state://dirty` seam after the commit.
+/// Runs §9.4 phase 4 end to end over phase 1's and phase 3's
+/// outcomes: ONE write transaction (unchanged stamps, retention, the
+/// counted verdict, the journal), then the `state://dirty` seam after
+/// the commit.
+///
+/// `phase1` is the run's preflight outcome (T-124/D-223): the command
+/// holds it through phase 3's call, and this phase reads exactly one
+/// fact from it — the `skipped` verdicts' structured OS facts, the
+/// one §10 field the committed rows cannot store (the store row has
+/// no `os_code` column; D-131's round-1 P3-5 added the details to the
+/// outcomes for exactly this consumption class). `phase3` is the
+/// write phase's outcome, supplying the `failed` outcomes' OS facts
+/// the same way. The committed row stays the authority for the code,
+/// the path and the project (D-134's read-the-rows posture).
 ///
 /// `data_dir` is the data-directory root the retention sweep joins
 /// its §5.5 layout paths under (the phase-2 shape; production passes
@@ -241,6 +262,7 @@ pub(crate) struct DirtyReport {
 ///   docs' ruling, with the fatal-class carve-out above).
 pub(crate) async fn run<R, D, F>(
     app: &AppHandle<R>,
+    phase1: &Phase1Outcome,
     phase3: &Phase3Outcome,
     data_dir: &Path,
     now: Timestamp,
@@ -253,6 +275,33 @@ where
 {
     let database = managed_db(app)?;
     let finished_at = db002_stamp(now);
+
+    // §10's fourth field, harvested before the transaction (the
+    // executor closure is `'static`): the OS code behind every
+    // `skipped` (phase 1) and `failed` (phase 3) verdict, keyed by
+    // project — `None` for refusals no syscall backs (a marker check,
+    // a shape validation), and absent for a project neither phase
+    // reported. The map is the outcomes' OWN facts, never a guess: a
+    // row whose project has no entry journals no OS code.
+    let mut os_codes = std::collections::HashMap::new();
+    for (project_id, verdict) in &phase1.projects {
+        if let PreflightVerdict::Skipped {
+            details: Some(facts),
+            ..
+        } = verdict
+        {
+            os_codes.insert(project_id.clone(), facts.os_code);
+        }
+    }
+    for (project_id, outcome) in &phase3.results {
+        if let WriteOutcome::Failed {
+            details: Some(facts),
+            ..
+        } = outcome
+        {
+            os_codes.insert(project_id.clone(), facts.os_code);
+        }
+    }
 
     // Steps 1–4 — one transaction. The owned inputs ride the
     // `'static` executor closure (the phase-0 `record_run` shape).
@@ -384,7 +433,10 @@ where
                 });
                 entry.project_id = Some(row.project_id.as_str());
                 entry.sync_run_id = Some(run_id.as_str());
-                entry.details = project_entry_details(row);
+                entry.details = project_entry_details(
+                    row,
+                    os_codes.get(row.project_id.as_str()).copied().flatten(),
+                );
                 match action_log::insert(tx, &entry) {
                     Ok(_) => {
                         journal.written += 1;
@@ -497,7 +549,20 @@ fn project_entry_shape(status: SyncRunProjectStatus) -> (Level, Outcome) {
 /// verdict needs no payload, and a code cell that fails the §10
 /// shape check (only tampering produces one) keeps its entry at the
 /// cost of the details, never the entry.
-fn project_entry_details(row: &eunomia_store::sync_runs::SyncRunProject) -> Option<Details> {
+///
+/// `os_code` is §10's fourth field (T-124/D-223), supplied by the
+/// caller from the verdict's own outcome — phase 1's `Skipped`
+/// details or phase 3's `Failed` details — because the committed row
+/// has no column for it. It rides whatever row it was given, absent
+/// from the JSON when `None`, so pre-field rows stay one shape. The
+/// `skipped` path is this task's reading: phase 0 froze the target
+/// path for EVERY project, and it is the honest "path" of an error
+/// about that project's target (D-134's `path: None` was the pre-§10
+/// reading).
+fn project_entry_details(
+    row: &eunomia_store::sync_runs::SyncRunProject,
+    os_code: Option<i32>,
+) -> Option<Details> {
     match row.status {
         SyncRunProjectStatus::Written => row.target_path.as_deref().map(|path| Details::File {
             path: std::path::PathBuf::from(path),
@@ -507,14 +572,22 @@ fn project_entry_details(row: &eunomia_store::sync_runs::SyncRunProject) -> Opti
             .error_code
             .as_deref()
             .and_then(|code| FailureCode::new(code).ok())
-            .map(|code| Details::Failure { code, path: None }),
+            .map(|code| Details::Failure {
+                code,
+                path: row.target_path.as_deref().map(std::path::PathBuf::from),
+                os_code,
+            }),
         SyncRunProjectStatus::Failed => {
             let code = row
                 .error_code
                 .as_deref()
                 .and_then(|code| FailureCode::new(code).ok())?;
             let path = row.target_path.as_deref().map(std::path::PathBuf::from);
-            Some(Details::Failure { code, path })
+            Some(Details::Failure {
+                code,
+                path,
+                os_code,
+            })
         }
         SyncRunProjectStatus::NotStarted => None,
     }
@@ -699,10 +772,12 @@ mod tests {
     }
 
     /// The details table: a written row carries its target path, a
-    /// skipped row its §10 code, a failed row code and path, an
-    /// unchanged row nothing — and a code outside the §10 shape
-    /// (tampering) keeps the entry at the cost of the payload, and a
-    /// written row without a path (no writer produces one) the same.
+    /// skipped row its §10 code and (T-124/D-223) its own frozen
+    /// target path plus the caller-supplied OS code, a failed row
+    /// code, path and OS code, an unchanged row nothing — and a code
+    /// outside the §10 shape (tampering) keeps the entry at the cost
+    /// of the payload, and a written row without a path (no writer
+    /// produces one) the same.
     #[test]
     fn the_project_journal_details_table() {
         fn row(
@@ -722,60 +797,92 @@ mod tests {
         }
 
         assert_eq!(
-            project_entry_details(&row(
-                SyncRunProjectStatus::Written,
-                Some("/repos/r/AGENTS.md"),
+            project_entry_details(
+                &row(
+                    SyncRunProjectStatus::Written,
+                    Some("/repos/r/AGENTS.md"),
+                    None
+                ),
                 None
-            )),
+            ),
             Some(Details::File {
                 path: std::path::PathBuf::from("/repos/r/AGENTS.md")
             })
         );
         assert_eq!(
-            project_entry_details(&row(
-                SyncRunProjectStatus::Unchanged,
-                Some("/r/AGENTS.md"),
+            project_entry_details(
+                &row(SyncRunProjectStatus::Unchanged, Some("/r/AGENTS.md"), None),
                 None
-            )),
+            ),
             None
         );
-        let skipped = project_entry_details(&row(
-            SyncRunProjectStatus::Skipped,
-            Some("/r/AGENTS.md"),
-            Some("E_PROJECT_UNAVAILABLE"),
-        ));
+        // A skip: §10's code, the row's own frozen target path (the
+        // T-124 reading — an error about the project's target), and
+        // the OS code riding only when the refusal's outcome carried
+        // one (a marker check backs E_MARKERS_INVALID with no
+        // syscall: the member is absent, not null).
         assert_eq!(
-            skipped,
+            project_entry_details(
+                &row(
+                    SyncRunProjectStatus::Skipped,
+                    Some("/r/AGENTS.md"),
+                    Some("E_PROJECT_UNAVAILABLE")
+                ),
+                None
+            ),
             Some(Details::Failure {
                 code: FailureCode::new("E_PROJECT_UNAVAILABLE")
                     .expect("the §10 literal must parse"),
-                path: None,
+                path: Some(std::path::PathBuf::from("/r/AGENTS.md")),
+                os_code: None,
             })
         );
-        let failed = project_entry_details(&row(
-            SyncRunProjectStatus::Failed,
-            Some("/r/AGENTS.md"),
-            Some("E_FILE_LOCKED"),
-        ));
+        assert_eq!(
+            project_entry_details(
+                &row(
+                    SyncRunProjectStatus::Skipped,
+                    Some("/r/AGENTS.md"),
+                    Some("E_NO_WRITE_ACCESS")
+                ),
+                Some(13)
+            ),
+            Some(Details::Failure {
+                code: FailureCode::new("E_NO_WRITE_ACCESS").expect("the §10 literal must parse"),
+                path: Some(std::path::PathBuf::from("/r/AGENTS.md")),
+                os_code: Some(13),
+            })
+        );
+        let failed = project_entry_details(
+            &row(
+                SyncRunProjectStatus::Failed,
+                Some("/r/AGENTS.md"),
+                Some("E_FILE_LOCKED"),
+            ),
+            Some(32),
+        );
         assert_eq!(
             failed,
             Some(Details::Failure {
                 code: FailureCode::new("E_FILE_LOCKED").expect("the §10 literal must parse"),
                 path: Some(std::path::PathBuf::from("/r/AGENTS.md")),
+                os_code: Some(32),
             })
         );
         // The degraded shapes: a non-§10 code and a missing path keep
         // the entry alive without the payload.
         assert_eq!(
-            project_entry_details(&row(
-                SyncRunProjectStatus::Failed,
-                Some("/r/AGENTS.md"),
-                Some("not a code")
-            )),
+            project_entry_details(
+                &row(
+                    SyncRunProjectStatus::Failed,
+                    Some("/r/AGENTS.md"),
+                    Some("not a code")
+                ),
+                None
+            ),
             None
         );
         assert_eq!(
-            project_entry_details(&row(SyncRunProjectStatus::Written, None, None)),
+            project_entry_details(&row(SyncRunProjectStatus::Written, None, None), None),
             None
         );
     }
