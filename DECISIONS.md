@@ -25883,3 +25883,201 @@ will stop at its check") follows the normal-case-sentence-plus-
 ADVISORY-qualifier reading while the DTO doc carries the full
 honesty — judged consistent with round 1's accepted widening. No
 tree change from this round; the one commit stands as amended.
+
+### D-214 — CI 45782298320: T-110's DB-015 echo oracle was platform-blind — the macOS temp root pushed the picked path over D-115's cap; the fixture is deliberately over-cap on every platform now and the expectation is computed from the documented arithmetic — 2026-11-26
+
+Problem: CI run 45782298320 (push of `3b800ca`, T-120's landing) was
+red on BOTH macOS legs — macos-15 and macos-15-intel — and only
+there (windows-latest, ubuntu-24.04, the deny job, both builds and
+e2e green; the known watcher flake did not fire this run),
+deterministically on one test:
+`project_relink_tests::a_path_key_collision_with_an_active_project_is_refused`
+panicked at project_relink_tests.rs:655 —
+`assert_eq!(error["params"]["value"], json!(picked))` with left
+`"/private/var/folders/9d/l02zfgrs7c16twd3wbpdmhkc0000gn/T/.tmpTpx
+(+12 more code points)"`, right the verbatim 76-code-point picked
+path (848 passed, 1 failed — the same single failure on both legs).
+
+The verified diagnosis (every claim re-checked against the code
+before this entry, Rule 2):
+
+1. **The production code is correct.** `bounded_echo`
+   (src-tauri/src/commands.rs:5762-5771) caps the echo at 64 code
+   points and names the rest — D-115's ruling. The DB-015 refusal
+   (src-tauri/src/project_relink.rs:234-242) echoes
+   `bounded_echo(&path)` — the caller's raw path — exactly as D-208
+   point 5 pins the contract ("the caller's path echoed bounded",
+   DECISIONS.md:25373-25392, both arms sharing the one call site).
+   The macOS CI observed the SPECIFIED behavior; nothing in
+   production changes.
+2. **The test's oracle was platform-dependent.** It asserted the
+   echo equals the verbatim fixture path under the recorded
+   assumption "short here, verbatim" — true on Linux
+   (`/tmp/.tmpXXXXXX/new-repo` ≈ 25 code points, under the cap),
+   false on macOS: the system temp root alone
+   (`/private/var/folders/9d/…/T/` = 56 code points) plus
+   tempfile's `.tmpTpxyPs` (11) plus `/new-repo` (9) = 76 code
+   points — 12 over the cap, hence "(+12 more code points)". The
+   T-110 executor ran the suite on Linux only: D-181's class
+   (macOS-only breakage invisible on the dev machine), with a
+   deterministic arithmetic cause this time rather than a race.
+
+The sibling sweep (the whole suite grepped for `params"]["value"]`
+and `params"]["path"]` oracles — 26 + 9 sites, every one read):
+**no other test compares a `bounded_echo`-shaped value against a
+verbatim path built under a system temp root.**
+
+- `bounded_echo` is the ONLY bounded seam a PATH rides in
+  production (project_relink.rs:236); every other call site
+  (commands.rs:5778/5844/5849/5888/5892/6007, project_archive.rs:111,
+  project_restore.rs:142, project_update.rs:241/247/275/320/423/440/457,
+  project_relink.rs:209) receives ids, names, labels or literals.
+- The tests over those seams ARE the healthy precedent:
+  deliberately-sized strings with independently computed
+  expectations (project_update_tests.rs:556/1222/2000,
+  project_restore_tests.rs:908, project_relink_tests.rs:1035 (in
+  `project_relink_refuses_an_unknown_id_with_the_typed_envelope`) —
+  the
+  T-106/T-109 `"x"`×70 → `"x"`×64 + "(+6 more code points)" pins;
+  the TS mock twin's spec pins at
+  src/ipc/mock/commands.spec.ts:732/902/1001/1232/1454/1601) or
+  short closed-vocabulary literals ("ABCDEFG", "purple", "middle",
+  "BETA", `\u{7}REPO`, "no-such-row").
+- Every other path-echo oracle compares a VERBATIM seam against
+  the same verbatim string on both sides (no cap involved, so no
+  platform's temp-root length can flip it): the scan commit's
+  `rejected_unreported_path` (scan.rs:1400-1406) and
+  `field_rejection_of` (scan.rs:1411-1421), the D-086
+  `rejected_non_utf8_path` (commands.rs:3844-3851),
+  `repo_lookup_failed`'s `params.path` (commands.rs:3869-3887,
+  SEC-008's "paths may ride params"), and the DB-init/recovery
+  wires (recovery_tests.rs, db_tests.rs).
+- The mock spec's DB-015 batteries (commands.spec.ts:1058/1082)
+  assert no `value` at all — code/field/reason/offer id only; the
+  TS fixtures are synthetic in-memory paths, no OS temp root.
+- Empirical cross-check: both macOS legs failed exactly ONE test
+  each (848/1), deterministic — no second sibling fired anywhere
+  in the matrix.
+
+Solution (the service commit, referencing T-110): the oracle is now
+platform-independent BY CONSTRUCTION, the healthy precedent's
+shape, in `project_relink_tests.rs`:
+
+1. **The fixture's name is deliberately 64 code points long**
+   (`"new-repo-with-a-name-that-puts-the-picked-path-over-the-echo-cap"`),
+   so every ABSOLUTE picked path is over D-115's cap by construction:
+   the name alone IS the cap, and any temp root contributes at least
+   the separator before the name. The prefixes including that
+   separator: Linux `/tmp/.tmpXXXXXX/` = 16 (80 total, 16 over —
+   measured locally, "(+16 more code points)"); the macOS runner's
+   canonical `/private/var/folders/…/T/.tmpXXXXXX/` = 68 (132
+   total); Windows `%TEMP%\.tmpXXXXXX\` ≈ 50 (≈ 114 total). The
+   echo always takes the bounded arm, and a `total > ECHO_CAP`
+   precondition assert fails LOUDLY on any unforeseen platform
+   instead of silently passing the verbatim arm.
+2. **The expectation is computed from the documented arithmetic
+   ALONE** — D-115's 64-code-point cap and the "(+N more code
+   points)" suffix, applied with the test's own
+   `chars().take(64)` / `count() - 64` — never a call to
+   `bounded_echo` (a circular oracle would mirror the
+   implementation instead of testing it). A cap change, a suffix
+   change, or an unbounded regression reddens the assertion.
+3. **Mutations verified (Rule 4), each reverted byte-for-byte.**
+   M1: reverting the oracle to verbatim (`json!(picked)`) — the
+   original bug's shape — fails locally on LINUX with left
+   `/tmp/.tmpXXXX/new-repo-… (+16 more code points)` vs right the
+   verbatim path: the original blindness (green on Linux whatever
+   the oracle) is removed, the failure now reproduces on the dev
+   machine. M2: removing the cap in `bounded_echo` (verbatim echo)
+   fails the FIXED test — the oracle pins the BOUNDING itself, not
+   the input's shape.
+
+Checks (the full chain, real exit codes, `CARGO_BUILD_JOBS=2`):
+`cargo fmt --check` 0; `cargo clippy --workspace --all-targets --
+-D warnings` 0; `cargo nextest run --workspace --test-threads=4`
+1953/1953; `cargo test --doc --workspace` 86+12, 0 failed (D-195);
+`pnpm test` 395/395; `pnpm run format:check` 0; `pnpm run lint` 0;
+`pnpm run typecheck` 0. Honest boundary: the local machine is
+Linux-only — the macOS proof rides CI (the next push's run), which
+the construction no longer depends on: the test pins the bounded
+arm everywhere rather than wherever the temp root happens to be
+long. No follow-up cards: the production shape was never wrong, and
+the sibling sweep found nothing to card.
+
+**Round-1 review addendum (same task, 2026-11-26; model
+`opencode-go/deepseek-v4.1-flash`, report
+`.opencode/reviews/fixt110-round1-report.md`: APPROVE — 0×P0/P1/P2,
+2×P3, both taken in the amend).** The round verified the commit
+changes exactly two files (no production code), re-derived the CI
+arithmetic independently (76 = 67 + 9; the first 64 code points are
+`…/.tmpTpx`; 76 − 64 = 12 — matching the CI `left` string byte for
+byte), confirmed the oracle is not circular (the file's only
+`bounded_echo` mention is a comment; the expectation rebuilds from
+the literal 64 and the literal suffix), and re-ran the sibling sweep
+itself: the 26 + 9 oracle counts exact, every `bounded_echo` call
+site read, no missed sibling (it additionally enumerated the
+verbatim `params.path` seams — db.rs, recovery.rs,
+session_paths.rs — all both-sides-verbatim). The two P3s, both
+taken:
+
+- _P3-1 (the per-platform path arithmetic mixed bases)._ The test
+  comment and this entry stated Linux's 16 WITH the trailing
+  separator but macOS's 67 WITHOUT it (the canonical prefix is 68 →
+  132 total, not 131) and Windows at ≈ 48 (the runner's real prefix
+  is ≈ 50 → ≈ 114). Both texts now lead with the construction that
+  makes the numbers redundant — the name alone IS the cap, so any
+  absolute path is over it by at least the separator — and give the
+  three prefixes on one explicit basis (including the separator).
+- _P3-2 (this entry cited its own commit's moved line)._ The
+  healthy-precedent pin citation `project_relink_tests.rs:1006` was
+  the PARENT tree's line; this commit's insertions shift it. Now
+  cited at the committed tree's :1035 with the enclosing test's
+  name, the anchor style that survives later edits.
+  Record-only notes from the round: the test cannot distinguish
+  "echoes the caller's raw string" from "echoes the canonical root"
+  because `picked` is already canonical (the picker canonicalizes; a
+  pre-existing property of the parent's oracle, and a non-canonical
+  spelling is refused earlier by SEC-003 — not cheaply fixable here);
+  the archived-collision sibling asserts no `value` at all
+  (pre-existing, the shared call site covers that arm); the
+  path-is-ASCII limit (a code-point-vs-byte truncation regression
+  would not redden this test — true of the unit test and the healthy
+  precedent too); CI-only claims (848/1 per macOS leg, 1953/1953,
+  395/395, the M1/M2 transcripts) taken as reported — the read-only
+  rule forbade re-running suites — and checked for internal
+  consistency against the quoted CI output.
+
+**Round-2 review addendum (same task, 2026-11-26; model
+`opencode-go/hy4-flash-free`, report
+`.opencode/reviews/fixt110-round2-report.md`: APPROVE — 0×P0/P1/P2,
+0×P3, the review phase closes with no second amend).** The round
+read the round-1 diff (`759cccf..18e5710`) in full and verified both
+P3 fixes genuinely in place and DISCRIMINATING — the arithmetic now
+one explicit basis (it independently recomputed the macOS prefix
+from the CI path: root 57 with its trailing slash + `.tmpTpxyPs` 10
+
+- separator 1 = 68, 68 + 64 = 132; Linux 16; the GitHub Windows
+  runner 51), the citation re-anchored at the committed tree's :1035
+  inside `project_relink_refuses_an_unknown_id_with_the_typed_envelope`
+  (the old :1006 confirmed to be unrelated journal-seeding code in
+  this tree) — then reviewed the whole commit afresh: the scope
+  (exactly two files, no production change), the diagnosis confirmed
+  against commands.rs:5762-5771 and project_relink.rs:234-242 (both
+  arms sharing the one call site), the construction (the name is
+  exactly 64 code points joined to an absolute temp path, so
+  total ≥ 65 everywhere; the precondition precedes the subtraction,
+  no underflow path), the non-circular oracle (the file's only
+  `bounded_echo` mention is the comment; no TS twin reference), its
+  own re-run of the sibling grep (26 + 9 counts exact, the call-site
+  enumeration matching, samples read verbatim-vs-verbatim), and the
+  four test-audit checks (all pass). No findings at any level. Its
+  record-only notes: the CI-only claims (848/1, 1953/1953, 395/395,
+  the M1/M2 transcripts, the "measured locally" +16) taken as
+  reported under the read-only rule and checked for internal
+  consistency against the quoted CI `left` string; D-214's original
+  decomposition of the macOS path (56 + 11 + 9) and the addendum's
+  (57 + 10 + 9) differ only in which component owns the separator
+  and both sum to 76 — no action; the pre-existing limits already
+  recorded (canonical `picked`, the archived sibling's absent `value`
+  assert, the ASCII fixture) — none introduced or worsened by this
+  commit.

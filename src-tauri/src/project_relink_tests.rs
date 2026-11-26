@@ -635,7 +635,21 @@ fn a_path_key_collision_with_an_active_project_is_refused() {
         &old_repo.display().to_string(),
         "/mover-key",
     );
-    let new_repo = repo_with_agents_md(temp.path(), "new-repo");
+    // The fixture's name is deliberately 64 code points long — the
+    // echo cap itself (D-115) — so every ABSOLUTE picked path is over
+    // the cap by construction: any temp root contributes at least the
+    // separator before the name (the prefixes including it: Linux
+    // /tmp/.tmpXXXXXX/ = 16, the macOS runner's canonical
+    // /private/var/folders/…/T/.tmpXXXXXX/ = 68, Windows
+    // %TEMP%\.tmpXXXXXX/ ≈ 50). CI run 45782298320 failed exactly on
+    // the old oracle's dependence on that prefix: the macOS legs'
+    // 76-code-point picked paths bounded (76 - 64 = 12), the Linux
+    // 25-code-point ones stayed verbatim, so "short here, verbatim"
+    // was green only where the platform's temp root was short.
+    let new_repo = repo_with_agents_md(
+        temp.path(),
+        "new-repo-with-a-name-that-puts-the-picked-path-over-the-echo-cap",
+    );
     let new_key = eunomia_fs::paths::canonical_path_key(&new_repo)
         .expect("the freshly created repository folder must canonicalize");
     let occupier = seed_project(&database, AddedVia::Manual, "/elsewhere/occupier", &new_key);
@@ -652,10 +666,27 @@ fn a_path_key_collision_with_an_active_project_is_refused() {
         serde_json::json!("path"),
         "{error}"
     );
+    // D-115's cap on the caller's path (D-208 point 5), pinned the
+    // healthy-precedent way (T-106/T-109's deliberately-sized echo
+    // pins): the fixture is over the cap on every platform, so the
+    // echo always takes the bounded arm and the oracle cannot ride
+    // any platform's temp-root length. The expectation is computed
+    // from the documented arithmetic alone — the 64-code-point cap
+    // and the "(+N more code points)" suffix — never from
+    // `bounded_echo` itself: calling the production helper would
+    // mirror the implementation instead of testing it.
+    const ECHO_CAP: usize = 64;
+    let total = picked.chars().count();
+    assert!(
+        total > ECHO_CAP,
+        "the fixture must exceed the echo cap on this platform too (got {total} code points)"
+    );
+    let bounded: String = picked.chars().take(ECHO_CAP).collect();
+    let expected = format!("{bounded} (+{} more code points)", total - ECHO_CAP);
     assert_eq!(
         error["params"]["value"],
-        serde_json::json!(picked),
-        "the caller's path echoes bounded (short here, verbatim)"
+        serde_json::json!(expected),
+        "the caller's path echoes bounded (deliberately over the cap here)"
     );
     assert_eq!(
         error["params"]["reason"],
