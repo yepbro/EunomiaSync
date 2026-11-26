@@ -26128,6 +26128,235 @@ ADVISORY-qualifier reading while the DTO doc carries the full
 honesty — judged consistent with round 1's accepted widening. No
 tree change from this round; the one commit stands as amended.
 
+### D-211 — T-363: the main-window shell on seed data — the port split, the BaseModal contract, the DEV-only gallery and its build proof, the decorative tokens, and the range deviations — 2026-11-25
+
+Problem: the approved mock-up (docs/prototype/) and the spec (UI-001,
+UI-002, UI-012, MAIN-010, MAIN-025, §11.1) describe the main window,
+but the app still renders the Tauri/Vite placeholder. The skeleton
+task had to port the reference's markup and styles into Vue
+components without porting its demo JS, on mock data only (no IPC),
+with the seed and the dev gallery excluded from the production build,
+and several brief line-ranges that do not line up with the elements
+the range demands.
+
+Sources: card T-363 (absorbing T-148); the owner acceptance ruling of
+2026-11-25 (no tests written or run; the visual match is checked by
+code review, no screenshots); D-207 ruling 3 (the per-feature
+catalog); D-209 ruling 3 (decorative values out of theme.css).
+
+1. **Structure.** `src/components/ui/` — BaseModal.vue and
+   useDialog.ts (the dialog contract, see ruling 2);
+   `src/components/shell/` — AppToolbar.vue, MatrixFrame.vue,
+   SyncPanel.vue (the window's three regions; MatrixFrame exposes the
+   `#rows` slot the family cards fill — until a parent fills it, the
+   frame shows the UI-012 no-instructions empty state, keyed off
+   `$slots.rows`); `src/styles/` — one file per ported stylesheet
+   section (ruling 5); `src/dev/seed/` — types.ts, projects.ts,
+   library.ts, assignments.ts, settings.ts, index.ts (no component
+   imports the seed's runtime values — the only runtime importer is
+   App.vue, dynamically behind the DEV guard; the shell components
+   take props, whose types come from the seed through `import type`,
+   erased at build, so the dist gate holds — a recorded dependency
+   direction, so a later card does not turn it into a runtime import);
+   `src/dev/screens.ts` and
+   `src/dev/DevGallery.vue` (the registry and the DEV-only gallery,
+   ruling 3). App.vue is the one shell container: it imports no IPC
+   module (App.spec.ts pins that with a raw-source scan, the
+   i18n.spec.ts pattern), keeps useOsTheme() (UI-021), and adds a
+   visually hidden `<h1>` as the window's accessible level-1 name —
+   the visible brand stays the toolbar's `div.brand`, the reference
+   element unchanged (the smoke test's `toBeVisible` became
+   `toBeAttached` for that reason).
+
+2. **The dialog contract and BaseModal.** BaseModal wraps a native
+   `<dialog>` carrying the reference's `.modal` markup and classes;
+   `defineModel<boolean>('open', { default: false })`; a watcher maps
+   model → methods with both guards (showModal() throws on an open
+   dialog, close() throws on a closed one), and the same guarded sync
+   runs on mount — a parent may mount the dialog already open (the
+   gallery does), a sequence a change-only watcher would miss; the
+   dialog's `close` event
+   writes the model back to false, so Esc and programmatic close both
+   stay truthful. Props: `size` (`md` = bare `.modal`, `lg`/`xl` = the
+   reference's width modifiers), and the accessible name (NFR-019):
+   `labelledBy` (an id of a title inside the slot) or `label` rendered
+   as a visually hidden `<h2>`. What the native element gives for free
+   and is deliberately NOT reimplemented (focus trapping, full ARIA
+   and tests are T-149's): Esc closes; focus moves inside on open and
+   returns to the trigger on close; everything outside an open modal
+   dialog is inert; `::backdrop`. Future dialogs wrap BaseModal and
+   expose `defineModel<boolean>('open')`; useDialog() hands them the
+   state ref.
+
+3. **The registry and the DEV-only gallery, with the build proof.**
+   `src/dev/screens.ts` holds `screens: Array<{ id, title, component }>`
+   (starts with the shell only — `component: null` means the running
+   app itself; selecting it clears the hash); family cards append their
+   dialogs there. DevGallery.vue reads `#screen=<id>` on mount and on
+   `hashchange`, mounts a screen's component with `v-model:open`, and
+   clears the hash when the screen closes from inside. App.vue mounts
+   it through `import.meta.env.DEV ? defineAsyncComponent(...) : null`
+   — the same statically-replaced guard guards the seed import in
+   App.vue (`if (!import.meta.env.DEV) return` before a dynamic
+   `import('./dev/seed')`) and, added this round, the dev namespace of
+   the catalog (ruling 6). The proof, `pnpm run build` then grep
+   `dist/`: `dev.gallery.launcherLabel` (a gallery-only key literal),
+   `Dev screens` (a dev-catalog value), `Measure before optimizing`
+   (a seed instruction text), `ef4444` (a seed-only palette color),
+   `Responde siempre` (a seed variant text), and the names
+   `dev/seed`, `DevGallery`, `hiddenInstructionCount` — all absent;
+   the production bundle is one 140 kB JS chunk. The gallery's own
+   styling is a scoped `<style>` block, not Tailwind utilities:
+   Tailwind's source detection would otherwise emit the launcher's
+   utility classes into the production CSS while the component's JS
+   stayed excluded — component styles ride the same dead import
+   branch, so nothing of the gallery reaches the CSS either (round-1
+   review finding, fixed).
+
+4. **Where the decorative values live, and the token-swap table.**
+   src/styles/base.css declares, once, the decorative custom
+   properties of the mock-up's palette block (styles.css 24–82) that
+   the ported rules draw with: `--border` (#e2e8f0 light / #2b3a58
+   dark), `--row-hover` (#f1f5f9 / #22304e) in the theme.css
+   three-block pattern (light, `[data-theme='dark']`, the
+   `:root:not([data-theme='light'])` media fallback), and the
+   theme-independent `--radius`/`--radius-sm` (6px/4px) and
+   `--w-check`/`--w-name`/`--w-proj` (40/300/150px) in the light block
+   only (reading: the brief's "same three-block pattern" governs the
+   values that change with the theme; constants are declared once).
+   The reference's own palette block is not ported — colors live only
+   in theme.css. The swap applied to every ported rule:
+   `--text`→`--ink`, `--text-muted`→`--ink-muted`,
+   `--text-faint`→`--ink-muted` (the D-209 contrast ruling: as text it
+   failed AA, as a dashed border it stays ≥3:1), `--bg`→`--page`,
+   `--border-strong`→`--line`, `--focus`→`--focus-ring`,
+   `--surface`/`--surface-2` unchanged, and accent-as-button-background
+   → `--accent-strong` with `--on-accent` text (3.77:1 → 5.48:1).
+   Reading kept verbatim: `.btn-primary:hover { background:
+var(--accent-strong) }` — the mock-up's hover token maps to the
+   same name, so the hover is a no-op under the swapped palette; a
+   darker hover shade would be a new color (an owner decision, not
+   this card's).
+
+5. **CSS sections ported, and those left to T-364…T-367.** Ported:
+   Base 83–136 → base.css; Toolbar 137–237 → toolbar.css; Buttons
+   238–281 → buttons.css; the matrix frame 282–381 (table, colgroup,
+   the pinned header row and first columns — the row-hover rule keeps
+   its inert `.c-cell`/`.c-fill` selectors so the section stays
+   verbatim) → matrix.css; Sync panel 899–949 → sync-panel.css; Modal
+   base 1099–1159 → modal.css; Motion 3126–3136 → motion.css; all
+   imported from src/assets/main.css right after theme.css, and the
+   placeholder-era `main { min-height: 100vh }` rule removed (it
+   would push the sync panel below the fold — the `.app` column owns
+   the fill now). Not ported, with ranges: 382–898 (row/cell/column-
+   header internals — T-364's rows and headers), 950–1098 (T-364's
+   chip/caret/tooltip styles), 1160–3125 (the 23 dialogs, T-364…T-367),
+   minus three forced rides-along in ruling 7. Markup ported: the
+   toolbar (index.html 67–158), the matrix frame (159–365), the sync
+   panel (2509–2548); rows, cells, column-header internals, every
+   dialog and the demo's ICONS-driven glyph injection stay with the
+   family cards — the Activity/Settings glyphs are inlined in
+   AppToolbar as the ICONS markup facts (app.js ~2590), plain template
+   SVG.
+
+6. **The per-feature catalog mechanics.** `src/locales/en.json` is
+   untouched (the i18n.spec.ts assertions on it stay true); the
+   shell's copy lives in `src/locales/en/shell.json` under `shell.*`,
+   the gallery's in `src/locales/en/dev.json` under `dev.*`;
+   i18n/index.ts merges them into one catalog at load time with
+   explicit imports and a plain spread (the namespaces do not overlap)
+   and keeps `MessageSchema` = the merged type. The catalog-coverage
+   test keeps working unchanged: it scans `.vue` sources for
+   `t('…')` literals and resolves them against the MERGED catalog
+   instance. The dev namespace's merge sits behind the same
+   statically-replaced DEV guard as the gallery (ruling 3), so the dev
+   strings stay out of the production bundle. The files are temporary
+   (D-207 ruling 3): merged back into one `en.json` when the skeleton
+   phase ends.
+
+7. **The three range deviations the brief's lines forced, and every
+   reading chosen.** (a) `.toggle-count` (styles.css 1083–1090) and
+   `.empty-state` (1093–1097) are visible at rest in the shell but sit
+   inside the excluded 950–1098 — both rules are ported verbatim with
+   a file-header note; the REST of the range (`.selected-chip` among
+   them) stays with T-364…T-367 (the chip renders `hidden` at rest:
+   no selection state exists in the skeleton — UI-010 is the matrix
+   card's). (b) `.modal-lg`/`.modal-xl` width rules (styles.css
+   1167–1169 and 1545–1547) sit inside the excluded 1160–3125 but are
+   the BaseModal size props' widths — the two `inline-size` rules are
+   ported into modal.css; the per-dialog layout rules around them are
+   not. (c) The sync-progress element (index.html 2515–2521) ports
+   hidden with an empty text span and no styles (they live at
+   styles.css 2297+ with the sync-behavior card); the add-section
+   `.hbtn` button is not rendered (its styles are at 576+, its glyph
+   JS-injected — header internals, T-364). Readings chosen: the
+   project filter options render the seed project names (data) with
+   the copy option through i18n; the "Show hidden" count is the
+   seed-derived concealed-row count (2 — the static markup's 0 is the
+   demo's pre-JS value; app.js counts the same rows); the sync
+   counter derives from the seed statuses (4, matching the mock-up's
+   hardcoded footer); `lastSuccessfulSync` is an explicit seed fact —
+   the stamps are display strings, not comparable dates; assignment
+   cells of an `unavailable` project are not marked disabled in the
+   seed — the rendering card derives it from `status`; the demo's
+   "empty variant assigned" cell is seeded as a plain `main`
+   assignment of a text-less instruction; the "1 variant" chips are
+   seeded as `Variant 1` entries carrying the main text (the demo
+   materializes them lazily, app.js ~2354), so every displayed count
+   is data.
+
+7a. **The round-1 review's corrections and remaining readings (same
+commit, amended).** (a) The seed's `dirty` cells are the demo's
+EIGHT "(changed)" cells, not three: `data-initial` records the
+checkbox's initial checked state, so a cell is changed when its
+current state differs from it — three assigned→not-assigned cells
+(`data-initial="true"` unchecked) and five not-assigned→assigned
+cells (`data-initial="false"` checked: Response tone/docktree,
+Comment style/task-id-mcp, Unit tests/moli, Coverage targets/moli,
+Bundle size budget/EunomiaSync); the first seed carried only the
+three. (b) The badge's and the danger button's text swap the
+reference's literal #ffffff for the palette's on-accent token:
+white on the dark-theme warning is 2.15:1 and on the dark danger
+2.77:1 (AA needs 4.5), on-accent is 6.88 and 5.35, and in the
+light theme on-accent IS white, so the light look is the
+reference's; a dedicated on-warning/on-danger token pair stays a
+palette-owner follow-up. (c) The toolbar's right cluster keeps the
+mock-up's order (Activity, Settings, Add project, New instruction,
+?) although UI-001's enumeration and the §11.1 sketch list Add
+project and New instruction first — the brief ports markup from
+the reference, the buttons carry no behavior yet, and the owner
+picks the order when they are wired. (d) The UI-012 empty state's
+markup is composed (message + "New instruction" button, per
+UI-012), not ported — the reference's `.empty-state` div is its
+empty-SEARCH state with no button; only the CSS rule is the
+reference's. (e) MatrixFrame drops the reference's
+`role="region"` on the `<main>`: an explicit role would strip the
+element of its implicit main landmark; the aria-label alone names
+it (the one element-semantic deviation, like the visually hidden
+h1). (f) `openScreen` special-cases the shell entry (component
+null) to clear the hash — the comment's claim, previously only the
+effect.
+
+8. **Consistency edits to the two test files (none run, none skipped
+   or deleted — the owner acceptance ruling).** App.spec.ts rewritten
+   to the shell truth: the three regions render, the level-1 heading,
+   the seed-fed filter (9 options), the hidden count (2), the sync
+   facts (stamp + badge 4), the selection cluster hidden at zero, the
+   UI-012 empty state while `#rows` is unfilled, and the no-IPC-import
+   source scan; the old placeholder assertions (version line, tracked-
+   projects plural, logo alts) are gone with the placeholder — T-212
+   restores the IPC round-trip assertions when it wires app_info into
+   this window. e2e/smoke.spec.ts: "app shell renders" keeps its
+   title, heading text and toolbar/syncbar visibility, with
+   `toBeVisible` → `toBeAttached` for the now visually hidden h1 (the
+   reason in a comment); the app_info test honestly states the
+   skeleton truth — the shell renders its seed content (filter count,
+   stamp, counter) — and its comment names T-212 as the card that
+   restores the version assertion. Both theme tests stay byte-
+   identical (the shell's `main` is `.matrix-wrap`, still
+   `var(--page)`); i18n.spec.ts needed no edit (it resolves against
+   the merged catalog).
+
 ### D-214 — CI 45782298320: T-110's DB-015 echo oracle was platform-blind — the macOS temp root pushed the picked path over D-115's cap; the fixture is deliberately over-cap on every platform now and the expectation is computed from the documented arithmetic — 2026-11-26
 
 Problem: CI run 45782298320 (push of `3b800ca`, T-120's landing) was

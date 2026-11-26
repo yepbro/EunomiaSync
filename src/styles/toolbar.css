@@ -1,0 +1,121 @@
+/*
+ * Toolbar (T-363): the mock-up's Toolbar section
+ * (docs/prototype/styles.css 137–237) ported verbatim with the
+ * theme-token swap applied. One addition outside the section's range:
+ * `.toggle-count` (styles.css 1083–1090) — the hidden-instructions
+ * counter is visible at rest in the shell, so its rule rides along;
+ * the rest of styles.css 950–1098 stays with the cards T-364…T-367.
+ */
+
+/* ----- Toolbar (D-14, UI: search + project filter + "Show hidden") ----- */
+/* Sized so the right cluster fits the UI-001 minimum width of 960px:
+   Activity and Settings are compact icon buttons (28px, glyphs inline
+   in the template, accessible names kept), the gap is tightened to 8px,
+   and the search input is the flex victim — it may shrink to its small
+   floor at the minimum width. */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap; /* the "Assign to projects…" button + chip may exceed the
+                       960px minimum width with a large selection: the right
+                       cluster wraps instead of clipping */
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border-block-end: 1px solid var(--border);
+  flex: none;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.brand-mark {
+  inline-size: 12px;
+  block-size: 12px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, #10b981, #0ea5e9);
+}
+
+.toolbar input[type='search'],
+.toolbar select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  min-block-size: 28px;
+}
+
+.toolbar input[type='search'] {
+  /* Small base + growth: the base sizes drive the flex-wrap line break, so
+     a large basis would wrap the toolbar whenever the "Assign to
+     projects…" button and the selection chip are visible. The search
+     grows into the free space instead. */
+  flex: 1 1 120px;
+  min-inline-size: 110px;
+  max-inline-size: 300px;
+}
+
+.toolbar select {
+  max-inline-size: 180px;
+}
+
+/* Toolbar buttons keep their labels on one line (the two add buttons)
+   and never compress below their text */
+.toolbar .btn {
+  white-space: nowrap;
+  flex: none;
+  padding-inline: 8px;
+}
+
+/* Icon-only toolbar buttons (Activity, Settings): square ghost buttons
+   with the cell-icon 14px glyph. The accessible name is the aria-label,
+   the tooltip is the title attribute — no visible text is needed. */
+.toolbar .btn-icon {
+  inline-size: 28px;
+  block-size: 28px;
+  min-inline-size: 0;
+  padding: 0;
+  justify-content: center;
+  gap: 0;
+}
+
+.toolbar .btn-icon svg {
+  inline-size: 14px;
+  block-size: 14px;
+  fill: currentColor;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink-muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap; /* the label must not stack at the 960px minimum */
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+/* Hidden-instruction counter next to the "Show hidden" toggle: dashed
+   border echoes the "hidden" chip on the rows (styles.css 1083–1090,
+   ported early — see the file header). */
+.toggle-count {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--ink-muted);
+  border: 1px dashed var(--ink-muted);
+  border-radius: 999px;
+  padding: 2px 7px;
+}

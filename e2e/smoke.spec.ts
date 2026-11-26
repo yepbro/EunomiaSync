@@ -6,19 +6,27 @@ import { expect, test } from '@playwright/test'
 test('app shell renders', async ({ page }) => {
   await page.goto('/')
   await expect(page).toHaveTitle('EunomiaSync')
+  // The window's level-1 heading is visually hidden (T-363): the
+  // accessible name of the window; the visible brand is the toolbar's.
   const heading = page.getByRole('heading', { level: 1 })
-  await expect(heading).toBeVisible()
+  await expect(heading).toBeAttached()
   await expect(heading).toHaveText('EunomiaSync')
+  await expect(page.locator('header.toolbar')).toBeVisible()
+  await expect(page.locator('footer.syncbar')).toBeVisible()
 })
 
-test('the mock IPC backend answers app_info (T-141)', async ({ page }) => {
+test('the shell renders its seed content (skeleton phase)', async ({ page }) => {
+  // T-363: the main window renders on the seed (src/dev/seed) with no
+  // IPC round-trip — the project filter carries the tracked projects
+  // and the sync panel shows the seed's facts. The old assertion here
+  // read the `app_info` version line; T-212 (the About window card)
+  // wires app_info into the shell and restores it.
   await page.goto('/')
-  // The version line only renders after `ipc.commands.appInfo()` resolves
-  // — a real facade round-trip, which without the mock backend cannot
-  // happen in a plain browser.
-  const version = page.locator('.version')
-  await expect(version).toBeVisible()
-  await expect(version).toHaveText(/^v\d+\.\d+\.\d+/)
+  const options = page.locator('select.filter option')
+  await expect(options).toHaveCount(9) // "All projects" + the seed's 8
+  await expect(options.filter({ hasText: 'EunomiaSync' }).first()).toBeAttached()
+  await expect(page.locator('.sync-last strong')).toHaveText('19 Nov 2026, 14:32 (UTC+3)')
+  await expect(page.locator('.sync-counter')).toContainText('4 projects with unsynced changes')
 })
 
 // UI-021 (T-145): the theme follows the OS setting and switches LIVE —

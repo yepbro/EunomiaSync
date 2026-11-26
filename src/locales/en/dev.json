@@ -1,0 +1,10 @@
+{
+  "dev": {
+    "gallery": {
+      "launcherLabel": "Screens",
+      "panelTitle": "Dev screens",
+      "openScreen": "Open screen: {title}",
+      "hint": "#screen=<id> opens a screen; only in DEV builds."
+    }
+  }
+}

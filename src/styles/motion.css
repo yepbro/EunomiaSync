@@ -1,0 +1,18 @@
+/*
+ * Motion (T-363): the mock-up's Motion section
+ * (docs/prototype/styles.css 3126–3136) ported verbatim — honor the OS
+ * "reduce motion" setting (UI-022) for every animation and transition
+ * the app defines.
+ */
+
+/* ----- Motion (UI-022: honor the OS "reduce motion" setting) ------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

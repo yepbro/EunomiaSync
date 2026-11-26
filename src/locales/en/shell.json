@@ -1,0 +1,41 @@
+{
+  "shell": {
+    "toolbar": {
+      "searchLabel": "Search by instruction name",
+      "searchPlaceholder": "Search instructions…",
+      "searchTitle": "Search instructions (Ctrl+F)",
+      "filterLabel": "Project filter",
+      "filterAll": "All projects",
+      "showHidden": "Show hidden",
+      "hiddenCountTitle": "Hidden instructions",
+      "selectedChip": "no rows selected | {count} row selected | {count} rows selected",
+      "bulkAssign": "Assign to projects…",
+      "activityTitle": "Activity",
+      "activityLabel": "Activity",
+      "settingsTitle": "Settings (Ctrl+,)",
+      "settingsLabel": "Settings",
+      "addProject": "+ Add project",
+      "addProjectTitle": "Add project (Ctrl+Shift+N)",
+      "newInstruction": "+ New instruction",
+      "newInstructionTitle": "New instruction (Ctrl+N)",
+      "help": "?",
+      "helpTitle": "Help (F1)",
+      "helpLabel": "Help"
+    },
+    "matrix": {
+      "regionLabel": "Assignment matrix",
+      "caption": "Assignment matrix: instructions by project",
+      "selectAll": "Select all rows",
+      "instructionHeader": "Instruction",
+      "emptyMessage": "No instructions yet.",
+      "emptyAction": "New instruction"
+    },
+    "sync": {
+      "runSync": "Run sync",
+      "runSyncTitle": "Run sync (Ctrl+Shift+Enter)",
+      "lastSyncLabel": "Last successful sync:",
+      "counterTitle": "Projects with unsynced changes — click for the list",
+      "counter": "no projects with unsynced changes | {count} project with unsynced changes | {count} projects with unsynced changes"
+    }
+  }
+}

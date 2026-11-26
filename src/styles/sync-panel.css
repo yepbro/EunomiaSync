@@ -1,0 +1,67 @@
+/*
+ * Sync panel (T-363): the mock-up's Sync panel section
+ * (docs/prototype/styles.css 899–949) ported verbatim with the
+ * theme-token swap applied. The panel is `flex: none` inside the
+ * `.app` column (base.css), so it stays pinned below the scroll area
+ * at every window size (MAIN-025; T-148's absorbed criterion). The
+ * run-progress styles (styles.css 2297+) belong to the sync-behavior
+ * card — the progress element renders `hidden` in this skeleton.
+ *
+ * One swap beyond the token table: the badge's text is the palette's
+ * on-accent token, not the reference's literal #ffffff — white on the
+ * dark-theme warning is 2.15:1 (AA needs 4.5), on-accent is 6.88, and
+ * in the light theme on-accent IS white, so the light look is the
+ * reference's. A dedicated on-warning/on-danger token pair remains a
+ * palette-owner follow-up (D-211).
+ */
+
+/* ----- Sync panel (MAIN-024…027: pinned below the scroll area) ---------- */
+
+.syncbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border-block-start: 1px solid var(--border);
+  flex: none;
+}
+
+.sync-last {
+  color: var(--ink-muted);
+}
+
+.sync-last strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.sync-counter {
+  appearance: none;
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 12px;
+  min-block-size: 28px;
+  cursor: pointer;
+}
+
+.sync-counter:hover {
+  color: var(--ink);
+  border-color: var(--ink-muted);
+}
+
+.badge {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--on-accent);
+  background: var(--warning);
+  border-radius: 999px;
+  padding: 3px 7px;
+}

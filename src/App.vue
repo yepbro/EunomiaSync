@@ -1,70 +1,73 @@
 <script setup lang="ts">
-// All IPC goes through the `src/ipc` facade (D-003: the tauri-specta
-// `commands` live in src/bindings.ts; no component calls invoke()
-// directly). The mock backend — same facade, fixture data, no Rust — is
-// one flag away: VITE_IPC_MOCK=1 (README → "Development without Rust").
+// The main-window shell (T-363, UI-001/MAIN-010/MAIN-025): the toolbar,
+// the matrix frame and the sync panel, laid out as the mock-up's
+// `.app` column — toolbar and syncbar `flex: none`, the matrix region
+// scrolling between them, so the sync panel is visible at every window
+// size (MAIN-025; T-148's absorbed criterion).
 //
-// All user-visible strings come from the i18n catalog (`src/locales/`,
-// UI-020): `t('app.title')` etc., with the pluralized project count as
-// the working pipe-plural example (`app.trackedProjects`). The
-// `eunomia/no-raw-ui-text` lint rule keeps raw copy out of templates.
-// The UI-021 theme bridge: the shell wires the OS light/dark setting to
-// <html data-theme> on boot and keeps it in step with live OS changes —
-// the palette lives in src/assets/theme.css (T-145).
-import { onMounted, ref } from 'vue'
+// No IPC here: the skeleton phase renders on mock data, and the seed
+// (src/dev/seed) reaches the shell ONLY through the DEV-guarded
+// dynamic import below — in a production build the guard is statically
+// false, the import is dead code, and the whole src/dev/ tree stays
+// out of the bundle (the build's dist/ grep is the standing proof;
+// T-212 wires the real `app_info`/`projects_list` data later).
+//
+// All user-visible strings come from the i18n catalog (UI-020); the
+// shell's copy lives in src/locales/en/shell.json (the temporary
+// per-feature split, D-207 ruling 3). The UI-021 theme bridge stays:
+// useOsTheme() wires the OS light/dark setting to <html data-theme>.
+import { defineAsyncComponent, onMounted, ref, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useOsTheme } from './assets/theme'
-import { ipc } from './ipc'
+import AppToolbar from './components/shell/AppToolbar.vue'
+import MatrixFrame from './components/shell/MatrixFrame.vue'
+import SyncPanel from './components/shell/SyncPanel.vue'
+import type { Project } from './dev/seed'
 
-const { t, n } = useI18n()
+// The DEV-only gallery: dynamic import + the static DEV guard keep it
+// (and its registry) out of the production bundle.
+const DevGallery = import.meta.env.DEV
+  ? defineAsyncComponent(() => import('./dev/DevGallery.vue'))
+  : null
 
 useOsTheme()
 
-// The About-window facts (§7.10 `app_info`); the version line proves the
-// IPC chain end to end — facade → backend → typed wire DTO.
-const version = ref<string | null>(null)
+const { t } = useI18n()
 
-// Active projects (§7.10 `projects_list`) — drives the pluralized count
-// line. `null` while unanswered (or no backend): the line stays hidden.
-const projectCount = ref<number | null>(null)
+/** The tracked projects (the filter options; the columns per seed). */
+const projects = shallowRef<readonly Project[]>([])
+/** The concealed instructions (LIB-005…007) next to "Show hidden". */
+const hiddenCount = ref(0)
+/** The sync panel's last-sync stamp and unsynced-changes counter. */
+const lastSyncAt = ref('')
+const dirtyProjects = ref(0)
 
 onMounted(async () => {
-  try {
-    version.value = (await ipc.commands.appInfo()).version
-  } catch {
-    // No backend answer (e.g. a plain browser without the mock flag):
-    // keep the shell rendered rather than half-crashed.
-    version.value = null
-  }
-  try {
-    projectCount.value = (await ipc.commands.projectsList(false)).length
-  } catch {
-    projectCount.value = null
-  }
+  if (!import.meta.env.DEV) return
+  const seed = await import('./dev/seed')
+  projects.value = seed.projects
+  hiddenCount.value = seed.hiddenInstructionCount
+  lastSyncAt.value = seed.lastSuccessfulSync
+  dirtyProjects.value = seed.dirtyProjectCount
 })
+
+// Row selection is the matrix card's behavior (bulk assignment, UI-010);
+// the skeleton renders the toolbar's selection cluster hidden at rest.
+const SELECTED_ROWS = 0
 </script>
 
 <template>
-  <main class="flex flex-col items-center justify-center bg-page px-6 py-12 text-center text-ink">
-    <h1 class="text-3xl font-semibold tracking-tight">{{ t('app.title') }}</h1>
-    <p v-if="version" class="version mt-2 text-ink-muted">
-      {{ t('app.versionLine', { version }) }}
-    </p>
-    <p v-if="projectCount !== null" class="projects text-ink-muted">
-      {{ t('app.trackedProjects', { count: n(projectCount) }, projectCount) }}
-    </p>
+  <div class="app">
+    <h1 class="visually-hidden">{{ t('app.title') }}</h1>
 
-    <div class="mt-6 flex items-center justify-center gap-6">
-      <a href="https://vite.dev" target="_blank">
-        <img src="/vite.svg" class="size-24 p-3" :alt="t('app.logoAlt.vite')" />
-      </a>
-      <a href="https://tauri.app" target="_blank">
-        <img src="/tauri.svg" class="size-24 p-3" :alt="t('app.logoAlt.tauri')" />
-      </a>
-      <a href="https://vuejs.org/" target="_blank">
-        <img src="./assets/vue.svg" class="size-24 p-3" :alt="t('app.logoAlt.vue')" />
-      </a>
-    </div>
-    <p class="mt-6 max-w-prose text-ink-muted">{{ t('app.tagline') }}</p>
-  </main>
+    <AppToolbar :projects="projects" :hidden-count="hiddenCount" :selected-count="SELECTED_ROWS" />
+
+    <!-- The rows slot stays unfilled: T-364 fills it, so the frame
+         shows the UI-012 no-instructions empty state in this phase. -->
+    <MatrixFrame :projects="projects" />
+
+    <SyncPanel :last-sync-at="lastSyncAt" :dirty-projects="dirtyProjects" />
+
+    <DevGallery v-if="DevGallery !== null" />
+  </div>
 </template>

@@ -1,0 +1,135 @@
+/*
+ * Seed types (T-363): the shape of the mock data the shell and the dev
+ * gallery render. Ported from the frozen prototype's demo data — the
+ * markup of docs/prototype/index.html (the matrix rows and assignment
+ * cells) and the demo objects of docs/prototype/app.js (PROJECTS,
+ * VARIANTS, SETTINGS). These are DATA shapes for the seed only; the
+ * real wire types arrive through src/bindings.ts (tauri-specta) and
+ * are never derived from this file.
+ *
+ * Family cards (T-364…T-367) extend this module with the shapes their
+ * screens need (activity entries, help articles, scan results, sync
+ * summary rows, archived projects, exclusions) — leave room, do not
+ * reshape what is here without checking their cards.
+ */
+
+/** Where a project came from (demo `addedVia` values). */
+export type ProjectOrigin = 'manual' | 'scan'
+
+/** The managed-block scheme (spec 5.x; demo `scheme`). */
+export type ProjectScheme = 'A' | 'B' | 'C'
+
+/**
+ * Which position an extra file takes in the built document (demo
+ * `extraLocalPos`/`extraProjectPos`).
+ */
+export type ExtraFilePosition = 'start' | 'end'
+
+/**
+ * The per-project column state the mock-up header shows as a sub-line:
+ * ok (the short last-sync date), dirty (unsynced changes), external
+ * (modified outside the app), unavailable (folder unreachable), deleted
+ * (target file gone). Derived from the mock-up's header markup; cells
+ * of an unavailable project render disabled.
+ */
+export type ProjectStatus = 'ok' | 'dirty' | 'external' | 'unavailable' | 'deleted'
+
+/** A tracked project (demo PROJECTS entry + the header's status line). */
+export type Project = {
+  readonly name: string
+  /** The short uppercase column label (demo `label`). */
+  readonly label: string
+  /** The column color chip, 6-digit hex (demo `color` / PS_PALETTE). */
+  readonly color: string
+  readonly description: string
+  /** Absolute path of the target repository (demo data). */
+  readonly path: string
+  readonly origin: ProjectOrigin
+  readonly scheme: ProjectScheme
+  readonly baseFile: string
+  readonly extraLocal: boolean
+  readonly extraLocalPos: ExtraFilePosition
+  readonly extraProject: boolean
+  readonly extraProjectPos: ExtraFilePosition
+  /** The long last-sync stamp the header tooltip shows (demo `syncedAt`). */
+  readonly syncedAt: string
+  readonly runs: number
+  readonly status: ProjectStatus
+}
+
+/** An alternative variant of an instruction (demo VARIANTS entries). */
+export type Variant = {
+  readonly name: string
+  readonly text: string
+}
+
+/**
+ * One library-tree heading row (`## General`, `### Communication` —
+ * demo `row-heading`). `depth` is the tree indent the mock-up renders
+ * via `--depth`: 0 is a top-level section, 1 a nested one.
+ */
+export type LibraryHeading = {
+  readonly kind: 'heading'
+  readonly name: string
+  readonly depth: 0 | 1
+}
+
+/**
+ * One instruction row (demo rows with `.name`). `depth` follows the
+ * parent heading (1 under a top-level section, 2 under a nested one).
+ * `text: null` is the empty instruction (MAIN-009: the text is not
+ * written yet — the mock-up dims the name). `hidden` is LIB-005…007.
+ * `variants` lists the ALTERNATIVE variants; the main variant is
+ * implicit. The demo materializes `Variant 1` with the main text for
+ * its "1 variant" rows (app.js builds it lazily) — the seed stores it
+ * explicitly so every displayed count is data, not a rule.
+ */
+export type LibraryInstruction = {
+  readonly kind: 'instruction'
+  readonly name: string
+  readonly depth: 1 | 2
+  readonly text: string | null
+  readonly hidden: boolean
+  readonly variants: readonly Variant[]
+}
+
+/** A library row in document order: a heading or an instruction. */
+export type LibraryRow = LibraryHeading | LibraryInstruction
+
+/**
+ * One matrix cell: the assignment of an instruction to a project.
+ * A discriminated union on `state`: only the `variant` state carries a
+ * variant name, so an unnameable "variant assignment" cannot be built.
+ * `dirty` marks a change made in the app that the next sync writes
+ * (the mock-up's "(changed)" cells).
+ */
+export type Assignment =
+  | { readonly state: 'none'; readonly dirty: boolean }
+  | { readonly state: 'main'; readonly dirty: boolean }
+  | { readonly state: 'variant'; readonly variant: string; readonly dirty: boolean }
+
+/** Assignments keyed by instruction name, then by project name. */
+export type AssignmentMatrix = Readonly<Record<string, Readonly<Record<string, Assignment>>>>
+
+/** The §6.5 settings defaults (demo SETTINGS; the real app keeps them
+ * in the settings table as JSON — D-18). Key names mirror the table. */
+export type Settings = {
+  readonly default: {
+    readonly scheme: ProjectScheme
+    readonly baseName: string
+    readonly extraLocal: boolean
+    readonly extraLocalPos: ExtraFilePosition
+    readonly extraProject: boolean
+    readonly extraProjectPos: ExtraFilePosition
+  }
+  readonly backup: { readonly retention: number }
+  readonly sync: { readonly skipIdentical: boolean }
+  readonly scan: {
+    readonly maxDepth: number
+    readonly excludeNames: readonly string[]
+  }
+  readonly history: { readonly maxRevisions: number }
+  readonly log: { readonly maxEntries: number; readonly maxDays: number }
+  readonly ui: { readonly language: string }
+  readonly update: { readonly checkOnStart: boolean }
+}

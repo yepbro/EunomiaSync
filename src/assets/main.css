@@ -25,6 +25,13 @@
  *    directory of the file carrying it (this file), not the project
  *    root — tailwindcss 4.3.5 builds each source's base from the
  *    containing stylesheet — hence the two levels up.
+ *  - The shell's ported stylesheets (T-363) live in src/styles/, one
+ *    file per section of the frozen mock-up's stylesheet
+ *    (docs/prototype/styles.css): base, toolbar, buttons, matrix,
+ *    sync-panel, modal, motion. They are plain global stylesheets —
+ *    the reference's rules are structural (position:sticky offsets,
+ *    ::backdrop) and do not survive scoping — imported right after
+ *    theme.css because CSS @import rules must precede other statements.
  *  - @layer base carries the app-wide accessibility norms: a visible
  *    theme-aware focus ring (UI-021) and the >=24px minimum for
  *    interactive controls (NFR-022). Component styles may override the
@@ -33,6 +40,13 @@
  */
 @import 'tailwindcss';
 @import './theme.css';
+@import '../styles/base.css';
+@import '../styles/toolbar.css';
+@import '../styles/buttons.css';
+@import '../styles/matrix.css';
+@import '../styles/sync-panel.css';
+@import '../styles/modal.css';
+@import '../styles/motion.css';
 
 /* The frozen mock-up is not a source of utility candidates (see the
    header note above). */
@@ -71,15 +85,13 @@
     accent-color: var(--accent);
   }
 
-  /* The app shell fills the window. vh first, dvh as progressive
-     enhancement: dvh needs Safari 15.4 (macOS 12.3) — exactly the
-     NFR-001 floor. History: while the floor was macOS 12, the shell
-     stopped filling the window on 12.0–12.2 without the vh line; the
-     fallback stays as defense in depth. */
-  main {
-    min-height: 100vh;
-    min-height: 100dvh;
-  }
+  /* The app shell fills the window: the `.app` column in
+     src/styles/base.css (T-363, the mock-up's Base section) owns the
+     fill — block-size 100dvh with the toolbar and the sync panel as
+     `flex: none` around the scrolling matrix region (MAIN-025). The
+     old placeholder rule that forced `min-height: 100vh` on every
+     <main> is gone: it would push the sync panel below the fold in
+     the real shell, and the matrix region is a <main> element too. */
 
   a {
     color: var(--accent);

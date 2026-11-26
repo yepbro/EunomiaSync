@@ -1,0 +1,106 @@
+/*
+ * Base (T-363): the mock-up's Base section (docs/prototype/styles.css
+ * 83–136) ported verbatim with the theme-token swap applied (the
+ * reference's text/background/focus tokens map to the theme.css names —
+ * the swap table lives in DECISIONS.md, T-363 entry). Plain global
+ * rules on purpose: the sticky matrix offsets and the visually-hidden
+ * utility must work from any template, not from a scoped subtree.
+ *
+ * The mock-up's own palette block (styles.css 24–82) is NOT ported —
+ * colors live only in src/assets/theme.css. What IS carried here are
+ * the decorative values with no contrast story (the header divider,
+ * the row-hover tint, the radii, the column widths): plain custom
+ * properties, declared once, following theme.css's three-block pattern
+ * for the two that change with the theme; the radii and the column
+ * widths are theme-independent and live in the light block only.
+ *
+ * Reference class names are kept (the porting rule): `.app`,
+ * `.visually-hidden`, `.matrix-wrap` … are the mock-up's names.
+ */
+
+/* Decorative custom properties (mock-up styles.css 24–82, decorative
+   subset only; D-209 ruling 3 keeps them out of the contrast test). */
+:root {
+  /* The soft divider between panels and rows (no contrast role). */
+  --border: #e2e8f0;
+  /* The row-hover tint (sticky cells need a solid background). */
+  --row-hover: #f1f5f9;
+  /* Corner radii. */
+  --radius: 6px;
+  --radius-sm: 4px;
+  /* Column widths (MAIN-010). */
+  --w-check: 40px;
+  --w-name: 300px;
+  --w-proj: 150px;
+}
+
+[data-theme='dark'] {
+  --border: #2b3a58;
+  --row-hover: #22304e;
+}
+
+/* The pre-JS paint and the no-JS world — same values as the attribute
+   block above, the theme.css pattern. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --border: #2b3a58;
+    --row-hover: #22304e;
+  }
+}
+
+/* ----- Base (mock-up styles.css 83–136) --------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  block-size: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink);
+  background: var(--page);
+}
+
+/* One main window, minimum 960×600 (UI-001). The toolbar and the sync
+   panel are `flex: none` and the matrix region scrolls between them, so
+   the sync panel is visible at every window size (MAIN-025; T-148's
+   absorbed criterion). */
+.app {
+  display: flex;
+  flex-direction: column;
+  block-size: 100dvh;
+  min-inline-size: 960px;
+  min-block-size: 600px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Screen-reader-only text (accessible names for icon-only controls) */
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}

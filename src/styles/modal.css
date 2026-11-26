@@ -1,0 +1,80 @@
+/*
+ * Modal base (T-363): the mock-up's Modal base section
+ * (docs/prototype/styles.css 1099–1159) ported verbatim with the
+ * theme-token swap applied — shared by every dialog the app opens
+ * (UI-002). Two size modifiers ride along from the per-dialog sections
+ * (styles.css 1167–1169 and 1545–1547): `.modal-xl` and `.modal-lg`
+ * are the BaseModal size props' widths, not dialog layout; the rest of
+ * styles.css 1160–3125 belongs to the cards T-364…T-367.
+ */
+
+/* ----- Modal base (native <dialog>: focus management, inert background,
+   Esc-close; shared by every modal in the file) ---------------------------- */
+
+.modal {
+  inline-size: min(520px, calc(100vw - 32px));
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0;
+}
+
+.modal::backdrop {
+  background: rgb(15 23 42 / 0.5);
+}
+
+.modal form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 22px;
+}
+
+.modal h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.modal-text {
+  margin: 0;
+  color: var(--ink-muted);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+/* Shared field label + monospace editor text (UI-003; also used by the
+   project settings modal) */
+.field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+.edit-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  resize: vertical;
+  min-block-size: 110px;
+}
+
+/* Size modifiers (BaseModal's `size` prop; styles.css 1167–1169 and
+   1545–1547 — the widths only, see the file header). */
+.modal-lg {
+  inline-size: min(680px, calc(100vw - 32px));
+}
+
+.modal-xl {
+  inline-size: min(920px, calc(100vw - 32px));
+}

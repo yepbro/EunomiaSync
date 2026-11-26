@@ -1,0 +1,124 @@
+/*
+ * Matrix region (T-363): the mock-up's matrix-frame section
+ * (docs/prototype/styles.css 282–381) ported verbatim with the
+ * theme-token swap applied — the frame only: the scroll region, the
+ * fixed table layout, the pinned header row (MAIN-010) and the pinned
+ * first columns. The row/cell/column-header internals (styles.css
+ * 382–898) belong to the cards T-364…T-367; the row-hover rule keeps
+ * its .c-cell/.c-fill selectors from the reference (inert until those
+ * cards render the classes — check (f) pins the section verbatim).
+ *
+ * One addition outside the section's range: `.empty-state`
+ * (styles.css 1093–1097) — the UI-012 no-instructions empty state is
+ * visible in this task's skeleton, so its rule rides along; the rest
+ * of styles.css 950–1098 stays with the cards T-364…T-367.
+ */
+
+/* ----- Matrix region (MAIN-010: pinned header row and first columns) ---- */
+
+.matrix-wrap {
+  flex: 1 1 auto;
+  min-block-size: 0; /* allow the flex item to shrink so the table scrolls */
+  overflow: auto;
+  background: var(--page);
+}
+
+.matrix-wrap:focus-visible {
+  outline-offset: -2px;
+}
+
+.matrix {
+  table-layout: fixed;
+  inline-size: max-content;
+  min-inline-size: 100%;
+  border-collapse: separate; /* required for position:sticky cells */
+  border-spacing: 0;
+}
+
+.matrix .col-check {
+  width: var(--w-check);
+}
+.matrix .col-name {
+  width: var(--w-name);
+}
+.matrix .col-proj {
+  width: var(--w-proj);
+}
+
+.matrix th,
+.matrix td {
+  padding: 3px 10px;
+  font-weight: inherit;
+  text-align: start;
+}
+
+/* Header row: pinned to the top */
+.matrix thead th {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 20;
+  background: var(--surface-2);
+  border-block-end: 1px solid var(--line);
+}
+
+/* Body cells */
+.matrix tbody th,
+.matrix tbody td {
+  border-block-end: 1px solid var(--border);
+}
+
+/* First columns: pinned to the left (checkbox + instruction name) */
+.matrix .c-check {
+  inset-inline-start: 0;
+}
+
+.matrix .c-name {
+  inset-inline-start: var(--w-check);
+}
+
+.matrix tbody .c-check,
+.matrix tbody .c-name {
+  position: sticky;
+  z-index: 10;
+  background: var(--surface);
+  border-inline-end: 1px solid var(--border);
+}
+
+.matrix thead .c-check {
+  z-index: 32;
+  border-inline-end: 1px solid var(--border);
+}
+
+.matrix thead .c-name {
+  z-index: 31;
+  border-inline-end: 1px solid var(--border);
+}
+
+/* Visible divider between adjacent project column headers: the header
+   clusters (color + label + edit/menu icons) otherwise blend together */
+.matrix thead .c-proj + .c-proj {
+  border-inline-start: 1px solid var(--line);
+}
+
+/* Row hover (sticky cells need a solid background to cover scrolled text) */
+.matrix tbody tr:hover .c-check,
+.matrix tbody tr:hover .c-name,
+.matrix tbody tr:hover .c-cell,
+.matrix tbody tr:hover .c-fill {
+  background-color: var(--row-hover);
+}
+
+/* Row height: at least 28 px (MAIN-010) */
+.matrix tbody th,
+.matrix tbody td {
+  block-size: 28px;
+}
+
+/* Empty state (UI-012; styles.css 1093–1097, ported early — see the
+   file header). The reference comment names the empty-search state; the
+   skeleton reuses the same box for the no-instructions state. */
+.empty-state {
+  padding: 72px 24px;
+  text-align: center;
+  color: var(--ink-muted);
+}

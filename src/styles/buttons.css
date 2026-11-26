@@ -1,0 +1,56 @@
+/*
+ * Buttons (T-363): the mock-up's Buttons section
+ * (docs/prototype/styles.css 238–281) ported verbatim with the
+ * theme-token swap applied. The swap table (DECISIONS.md, T-363 entry)
+ * maps the reference's accent-as-button-background to the palette's
+ * accent-strong with on-accent text, because white on the mock-up's
+ * accent is below AA (3.77:1) while on-accent on accent-strong is
+ * 5.48:1 (T-362's measured pairs). The same contrast ruling moves the
+ * danger button's text from the reference's literal #ffffff to
+ * on-accent: white on the dark danger is 2.77:1, on-accent 5.35; in
+ * the light theme on-accent is white, so the light look is unchanged.
+ */
+
+/* ----- Buttons ---------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-weight: 600;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  padding: 5px 12px;
+  min-block-size: 28px;
+  cursor: pointer;
+}
+
+.btn-primary {
+  background: var(--accent-strong);
+  color: var(--on-accent);
+}
+
+.btn-primary:hover {
+  background: var(--accent-strong);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--ink-muted);
+  border-color: var(--line);
+}
+
+.btn-ghost:hover {
+  color: var(--ink);
+  border-color: var(--ink-muted);
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: var(--on-accent);
+}
+
+.btn-danger:hover {
+  filter: brightness(0.92);
+}
