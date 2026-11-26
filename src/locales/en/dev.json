@@ -38,7 +38,21 @@
       "projectsArchived": "Archived projects (PRJ-013…018)",
       "projectsArchivedHint": "The seed's demo list; Restore is inert — the restore flow is a behavior card's.",
       "projectsExcluded": "Excluded paths (PRJ-013…018)",
-      "projectsExcludedHint": "The seed's demo list; Remove is inert — the removal flow is a behavior card's."
+      "projectsExcludedHint": "The seed's demo list; Remove is inert — the removal flow is a behavior card's.",
+      "syncSummary": "Sync summary (MAIN-024…031, OUT-009)",
+      "syncSummaryHint": "The demo run's end state; the outcome badge and the four counter chips derive from the rows.",
+      "syncPending": "Unsynced changes (MAIN-026)",
+      "syncPendingHint": "The seed's dirty projects; Run sync is inert — the run is the sync card's.",
+      "settings": "Settings (DEF-001…005)",
+      "settingsHint": "The §6.5 seed values; the Backups field shows the demo's range-error state. Nothing applies — the settings card's.",
+      "activity": "Activity (LOG-001…006)",
+      "activityHint": "The seed's demo entries, newest first; the filters are inert — the combining query is the activity card's.",
+      "help": "Help (HLP-001…005)",
+      "helpHint": "Two full articles seeded, the rest two paragraphs; the article selection is local state, the search input is inert.",
+      "helpQuery": "Help — search query (HLP-001…004)",
+      "helpQueryHint": "The query prop \"sync\": matching titles and body texts highlight, the counter shows; clear it to nothing for the empty state.",
+      "about": "About (UPD-005, REL-004)",
+      "aboutHint": "The product rows, the channel line and the collapsible licenses; the check button is inert — the update card's."
     }
   }
 }

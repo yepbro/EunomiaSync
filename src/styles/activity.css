@@ -1,0 +1,111 @@
+/*
+ * Activity modal (T-367, LOG-001…006): the mock-up's section
+ * (docs/prototype/styles.css 2665–2769) ported with the theme-token
+ * swap applied (the swap table lives in DECISIONS.md, D-206/D-211;
+ * the reference's muted and faint text tokens both map to
+ * `--ink-muted`, its strong-border token to `--line`). The table
+ * reuses the ported `.hist-table` idiom and the result badges extend
+ * the `.hist-op` idiom (src/styles/library-history.css, T-365's
+ * section); the empty state rides the ported `.hist-empty`. The
+ * `#act-rows`/`#act-empty` id selectors of the markup are JS handles
+ * and carry no rules here.
+ *
+ * The mock-up's class names are kept (the porting rule).
+ */
+
+.act-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* The toolbar-select idiom, repeated outside .toolbar */
+.act-filters select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  min-block-size: 28px;
+  max-inline-size: 180px;
+}
+
+/* Everything but the scrolling body stays fixed in the modal-lg form */
+.modal-lg .act-subtitle,
+.modal-lg .act-filters,
+.modal-lg .act-limits {
+  flex: none;
+}
+
+.modal-lg .act-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+
+.act-col-when {
+  inline-size: 168px;
+}
+
+.act-col-res {
+  inline-size: 76px;
+}
+
+.act-action {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Operation-type chip in front of the action text */
+.act-type {
+  margin-inline-end: 6px;
+}
+
+/* Error-code chip after the action text (the sync summary's .ss-code
+   idiom) */
+.act-code {
+  margin-inline-start: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.act-object {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Target path of a file write (LOG-004), below the project name */
+.act-path {
+  display: block;
+  margin-block-start: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Result badges: ok in the accent tint, skipped in warning, error in
+   danger — the same mixes as the history op badges */
+.act-res {
+  font-weight: 600;
+}
+
+.act-res--ok {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.act-res--skipped {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+}
+
+.act-res--error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}

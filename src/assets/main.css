@@ -71,6 +71,17 @@
 @import '../styles/archived.css';
 @import '../styles/excluded.css';
 
+/* The service screens' ported sections (T-367): the sync summary and
+   the sync bar's run-progress line, the app settings, the activity,
+   the help and About windows. With these the frozen mock-up's
+   stylesheet is ported in full (the deliberately unported parts are
+   recorded in DECISIONS.md, T-367's entry). */
+@import '../styles/sync-summary.css';
+@import '../styles/settings.css';
+@import '../styles/activity.css';
+@import '../styles/help.css';
+@import '../styles/about.css';
+
 /* The frozen mock-up is not a source of utility candidates (see the
    header note above). */
 @source not '../../docs/prototype';

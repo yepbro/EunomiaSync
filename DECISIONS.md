@@ -27207,6 +27207,223 @@ a file`) ships in the bundle, the D-212/D-213 pattern.
    expanded path (`rootHint: "{root}"`), the reference's exact
    attribute. Point 7(g) rewritten for the new shape.
 
+### D-216 — T-367: the service screens on seed data — the sync summary's one dialog with two views, the app settings with its five section components, the activity window, the help window on typed blocks, and About — 2026-11-26
+
+Problem: the service screens had no components — the sync summary and
+the "Unsynced changes" view (MAIN-024…031, OUT-009), the app Settings
+window (DEF-001…005), the Activity window (LOG-001…006, §7.7), the
+Help window (HLP-001…005) and About (UPD-005, REL-004) did not exist,
+and the behavior cards behind them (the sync run T-199's family, the
+settings application T-203's, the activity filters T-206's, the help
+search and content T-209…T-218's, the update check T-212/T-213's) need
+the markup to refine. The card had to port the reference's last five
+dialogs as behavior-free Vue components on seed data, porting the
+reference stylesheet's final five sections.
+
+Sources: card T-367 (the acceptance ruling of 2026-11-25: no tests
+written or run, the visual match is checked by code review without
+screenshots); D-206/D-211's porting rules and token swap; the
+D-212…D-215 precedents (id→class selector conversion, the registry's
+seed-free rule, the parameterized showcase, the dist/ proof, shared
+wording keys, the i18n-t slot composition); spec MAIN-024…031, OUT-009,
+DEF-001…005, LOG-001…006, the §7.7 UI row, HLP-001…005, UPD-001, 005,
+REL-004, UI-002, UI-011, NFR-022; the demo data of app.js
+(SYNC_OUTCOMES ~3626, ACTIVITY ~4370, HELP ~4642, ABOUT_* ~4934,
+SET_NUMBER_FIELDS ~3931).
+
+1. **Structure.** `src/components/sync/` — SyncSummaryDialog.vue (the
+   reference's ONE `#sync-summary-dialog` carries both views; the
+   brief's reading is followed: one dialog component with a
+   `view: 'summary' | 'pending'` prop, size-lg BaseModal + the
+   `.sync-summary-dialog` class hooking the footer's hidden-button
+   rule) with UnsyncedChangesList.vue (the pending list: the two-column
+   table and the "Everything is synced." empty state) rendered in the
+   pending view; `src/components/settings/` — AppSettingsDialog.vue
+   (props values, ranges, rangeError, baseFiles) with one component per
+   section: SettingsDefaultsSection.vue, SettingsBackupsSection.vue,
+   SettingsScanningSection.vue, SettingsLogsSection.vue,
+   SettingsUpdatesSection.vue; `src/components/activity/`
+   ActivityDialog.vue (props entries, projects, logLimits; the filter
+   bar stays in the dialog — the template stays under the ~150-line
+   bound); `src/components/help/` HelpDialog.vue (props articles,
+   optional query) with HelpArticleBody.vue (the typed blocks) and
+   highlight.ts (the splitMark/containsQuery helpers);
+   `src/components/about/` AboutDialog.vue (props productName,
+   version, identifier, author, repositoryUrl, repositoryLabel,
+   licenses; size md — the reference's bare `.modal`). Every dialog is
+   on the T-363 contract (BaseModal + `defineModel<boolean>('open')`,
+   title ids from `useId()`); method="dialog" forms make Close the
+   dialogs' own return value. No component imports the seed's DATA or
+   `src/ipc/**` — types ride `import type`, data only through props.
+
+2. **The one-dialog-two-views reading and the data-derived states.**
+   (a) The sync summary: the outcome badge ("success"/"partial") and
+   the four counter chips are computed from the `rows` prop by
+   runOutcomeOf's rule (any skipped or failed row makes the run
+   partial — §9.4 phase 4); each row renders project, target file,
+   status chip and reason, the skipped/failed rows their `E_*` code
+   chip and what-to-do hint (UI-011) — reasons, codes and hints are
+   seed DATA (per-run facts, not a closed vocabulary like the scan's
+   reasons); the status words, counter labels and the outcome note are
+   catalog copy keyed by the closed enums. The pending view renders the
+   seed's dirty projects (the four `status: 'dirty'` seed projects)
+   with their target files — scheme C's `<STEM>.project.md` row is
+   docktree's. (b) The settings fields carry the §6.5 seed values; ONE
+   field — Backups retention — renders in its range-error state from
+   the seed's `settingsRangeError` (the typed 300 shown in the input,
+   `aria-invalid`, the visible inline error; the stored 10 keeps its
+   place per DEF-001's "the previous value stays until it is fixed"
+   — the previous value is the stored setting, not a second visible
+   number: the demo's wireSetNumber keeps the typed value in the input
+   and leaves SETTINGS untouched, app.js ~4038). The exclusions render
+   as chips with a remove cross each (the demo's aria-label fact) and
+   the inert add row; the extra-files block renders only for scheme A
+   (the seed default), a position select disabled while its flag is
+   off, the derived names following the base file (the demo's stemOf
+   computed); the status line "Settings are applied immediately" sits
+   above the footer; the Updates and About section carries the four
+   link buttons (the D-10 pair, "About…", "Check for updates"). (c) The
+   activity entries render newest-first in the seed's order with their
+   type chip, `E_*` code chip, ok/skipped/error chip and the file-write
+   path under the project (LOG-004); the bulk operation is the demo's
+   single entry with its change count; the limits hint interpolates
+   the seed log limits (LOG-006). The four filters render with their
+   options and the demo's at-rest "All …" selections, inert. (d) The
+   help window renders the two panes; the optional `query` prop is the
+   search's sanctioned state: matching is title-or-body (HLP-001's
+   match rule over the blocks' plain texts), matching titles and body
+   texts get `<mark>` around the case-insensitive matches via
+   splitMark (string splitting in the script, no v-html), the counter
+   reads "All N articles" at rest and "N of M articles match" under a
+   query, zero matches show the empty state with the open article
+   staying. (e) About renders the brand line with the version chip,
+   the identifier, the author, the dual license (both links through
+   i18n-t slots), the repository, the stable-channel line (D-27) and
+   the collapsible dependency licenses; the update block renders its
+   at-rest "Last check: never" hint (UPD-002) — the check's states are
+   the update card's.
+
+3. **Local UI state only**: the selected help article (click
+   switching, the demo's aria-pressed idiom; a selection that falls
+   out of the match set falls back to the first match — the demo's
+   rule, a rendering decision here). Everything else is NOT done: no
+   sync run, no field application or validation, no exclusions
+   add/remove, no filtering, no search typing, no link handling, no
+   update check or install. The owners: T-199's family (the sync run,
+   the summary opening, the pending view's run start), T-203's (the
+   settings application, the range validation, the exclusions
+   editing), T-206's (the activity filters and their persistence),
+   T-209…T-218's (the help search behavior, the complete article
+   bodies, HLP-005's Markdown FAQ), T-212/T-213's (the update check
+   and install).
+
+4. **The seed extension.** types.ts gained SyncStatus, the
+   SyncSummaryRow union (coded arm for skipped/failed only),
+   SyncPendingRow, ActivityType/ActivityResult, ActivityEntry (explicit
+   nulls state "no project / no path / no code" — every demo row states
+   all facts), HelpBlock (heading/paragraph/code/list with an
+   `ordered` flag) and HelpArticle. sync.ts stores the demo run's END
+   state (the SYNC_OUTCOMES rows in column order; the tick timer and
+   the per-tick column apply stay unported) with the target files as
+   the demo targetPathOf's rendered display strings and the pending
+   rows; activity.ts stores the demo log in its RENDERED order —
+   renderActivity sorts the demo offsets ascending (newest first), so
+   within each run the finish line precedes the start line (the demo
+   ARRAY's narrative order is not kept) — with histStamp's rendered
+   stamps on the fixed UTC+3 clock (the history-seed precedent;
+   `minutesBack` and the `file` flag are not carried — the flag
+   becomes the rendered path), plus the project-filter options (the
+   seed projects) and the log-limits pair derived from the settings
+   seed (LOG-006: the limits come from settings); help.ts stores the
+   article list with typed bodies —
+   the FULL body of "Quick start" and "Schemes A/B/C" (the most
+   structural ones), a two-paragraph body for the rest, the complete
+   articles being T-216…T-218's; the demo's inline Markdown emphasis
+   (backticks, bold) is not modeled — the block texts are plain
+   strings; about.ts stores the product facts, the dependency-license
+   demo list and the update check's demo metadata (aboutNextVersion,
+   aboutReleaseChanges — seeded for the update card, rendered by
+   nothing here). settings.ts gained the §6.5 ranges
+   (settingNumberRanges, the demo SET_NUMBER_FIELDS) and the demo
+   `settingsRangeError`. All export through seed/index.ts.
+
+5. **CSS sections ported** (theme-token swap applied; one file each,
+   imported from src/assets/main.css after the projects family's):
+   Sync summary 2288–2523 → sync-summary.css (the section's opening
+   .sync-progress/.sync-spinner rules — the sync bar's run-progress
+   line — land here too; T-363's sync-panel.css header note pointing
+   at "the sync-behavior card" is updated to point here); Settings
+   2524–2588 → settings.css (no color tokens in the range — a verbatim
+   port over the shared .ps-* idioms); Activity 2665–2769 →
+   activity.css (the table and empty state reuse the ported
+   .hist-table/.hist-empty/.hist-op idiom); Help 2770–2967 → help.css;
+   About 2968–3125 → about.css (the update-check result-state rules —
+   .about-result-line, the update/installed chips, .about-changes,
+   .about-install — ported with the section though no current element
+   carries them: they style the update card's future states). The
+   `#ss-result`/`#ss-pending`/`#sync-summary-dialog` id selectors
+   become classes (`.ss-result`/`.ss-pending` and the
+   `.sync-summary-dialog` compound on the BaseModal root — the D-212
+   id→class precedent). **With these five sections the reference's
+   stylesheet is ported in full**: every section of
+   docs/prototype/styles.css now has its src/styles/ file; what was
+   deliberately left unported across the earlier cards stays as
+   recorded in their entries (the mock-up's palette block, D-211; the
+   scan bar's two-div animation, D-215; the confirmation dialogs' slot,
+   D-215; nothing else).
+
+6. **Readings chosen where the brief was open.** (a) The range-error
+   state's "previous value still shown" reads as the stored setting
+   keeping its value (DEF-001's sentence) while the INPUT shows the
+   typed out-of-range seed value — no second visible number (the
+   demo's behavior; point 2b). (b) The help `query` prop drives BOTH
+   the list filter and the body highlighting over title-or-body
+   matching — HLP-001's "in the list and in the text" — while the
+   brief's wording names the titles only; the pane's h3 stays
+   unhighlighted like the demo. (c) The two full help bodies are
+   "Quick start" and "Schemes A/B/C". (d) The scheme radios, base-file
+   label, extra-files labels and position wordings reuse the project
+   settings' catalog keys (one wording, two screens — the D-215
+   precedent); the sync summary's per-row reasons/hints are seed data
+   (per-run facts), unlike the scan's closed-vocabulary badges. (e)
+   The registry entries: the sync summary in both views and the help
+   in both states ride one parameterized showcase each with two
+   one-line wrappers (the D-215 settings-scheme pattern); the
+   settings, activity and About windows ride one showcase each.
+
+7. **Checks and proofs.** cargo fmt --check, pnpm lint, format:check,
+   typecheck, build — all exit 0 (no tests written or run, per the
+   acceptance ruling; no existing test file needed a change). The
+   dist/ proof: grep for the seed strings and registry ids that exist
+   only in src/dev/** (`sync-pending`, `help-query`, `E_MARKERS_INVALID`,
+   `E_PROJECT_UNAVAILABLE`, `Quick start`, `Scheme B — marked area`,
+   `rusqlite 0.32`, `pro.yepbro.eunomiasync`, `Bulk assign — 12
+assignments changed`, `notes-api`, `old-crm`) — zero matches in
+   dist/, while the production `sync.*` catalog copy (`Sync summary`,
+   `Written`) ships in the bundle, the D-212/D-213 pattern; the one
+   `sync-summary` hit in dist/ is the ported `.sync-summary-dialog`
+   CSS class (production stylesheet by design, like `.scan-dialog`).
+
+8. **Round-1 review fixes** (the review: deepseek-v4.1-flash, verdict
+   NEEDS_FIXES; six findings, all accepted). P1: the activity seed
+   stored the demo array's NARRATIVE order and claimed it
+   newest-first — renderActivity sorts the offsets ascending, so the
+   rendered (and now the seed's) order puts each run's finish line
+   before its start line; the seed rows were reordered, the header
+   and this entry's point 4 rewritten (§7.7's "entries are
+   newest-first"). P2: the five settings sections lost the reference's
+   `aria-labelledby` → the h3 titles (the ids are aria facts, not JS
+   handles) — restored per section through `useId()`; the help body
+   highlighted only paragraphs and list items — headings and code
+   blocks now split through the same helper (HLP-001's "in the text";
+   the demo's TreeWalker walks every text node). P3: the About seed
+   header's wrong index.html range (3844–3934, not 3945); the
+   types.ts header's promise of an "About rows" shape that does not
+   exist (reworded — the About facts are plain seed strings); the
+   log-limits pair now derives from the settings seed instead of
+   repeating it. The D-214 gap in DECISIONS.md's numbering predates
+   this card and is not this entry's to fill.
+
 ### D-217 — T-121: the sync panel's two reads — `sync_status` over the flag, MAIN-027's derived time and the dirty cache's count, and `sync_last_result` as the run row's `error_code` first production reader through the D-147 seam — 2026-11-26
 
 The card (§7.10 Sync row's two remaining names, MAIN-024…027/030/031,

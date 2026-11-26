@@ -1,0 +1,36 @@
+{
+  "sync": {
+    "summaryTitle": "Sync summary",
+    "pendingTitle": "Unsynced changes",
+    "outcome": {
+      "success": "success",
+      "partial": "partial"
+    },
+    "outcomeNote": {
+      "success": "Every active project was written or left unchanged.",
+      "partial": "Last attempt: partial — skips and failures do not stop the run (D-09, §9.4)."
+    },
+    "countersLabel": "Run counters",
+    "countWritten": "Written",
+    "countUnchanged": "Unchanged",
+    "countSkipped": "Skipped",
+    "countFailed": "Failed",
+    "summaryCaption": "Sync results: project, target file, status and reason",
+    "pendingCaption": "Projects with unsynced changes and their target files",
+    "colProject": "Project",
+    "colTargetFile": "Target file",
+    "colStatus": "Status",
+    "colReason": "Reason",
+    "status": {
+      "written": "written",
+      "unchanged": "unchanged",
+      "skipped": "skipped",
+      "failed": "failed"
+    },
+    "pendingSubtitle": "Projects whose current assignments differ from the last sync.",
+    "pendingEmpty": "Everything is synced.",
+    "pendingHint": "Files change only on the explicit “Run sync” command (G5) — nothing is written meanwhile.",
+    "runSync": "Run sync",
+    "close": "Close"
+  }
+}

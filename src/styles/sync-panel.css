@@ -4,8 +4,9 @@
  * theme-token swap applied. The panel is `flex: none` inside the
  * `.app` column (base.css), so it stays pinned below the scroll area
  * at every window size (MAIN-025; T-148's absorbed criterion). The
- * run-progress styles (styles.css 2297+) belong to the sync-behavior
- * card — the progress element renders `hidden` in this skeleton.
+ * run-progress styles (styles.css 2297+) landed with the sync-summary
+ * section (src/styles/sync-summary.css, T-367) — the progress element
+ * renders `hidden` in this skeleton.
  *
  * One swap beyond the token table: the badge's text is the palette's
  * on-accent token, not the reference's literal #ffffff — white on the

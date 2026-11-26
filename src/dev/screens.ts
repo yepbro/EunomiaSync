@@ -48,6 +48,18 @@ import ExcludedShowcase from './showcases/ExcludedShowcase.vue'
 import ArchiveProjectDialog from '../components/projects/ArchiveProjectDialog.vue'
 import RestoreProjectDialog from '../components/projects/RestoreProjectDialog.vue'
 import RemoveExclusionDialog from '../components/projects/RemoveExclusionDialog.vue'
+/* The service screens (T-367): the sync summary in both views, the
+   app settings, the activity, the help (at rest and with a query)
+   and About — the data windows ride one showcase each (the registry
+   stays seed-free, D-212; the parameterized-showcase pattern of the
+   projects family). */
+import SyncResultShowcase from './showcases/SyncResultShowcase.vue'
+import SyncPendingShowcase from './showcases/SyncPendingShowcase.vue'
+import SettingsShowcase from './showcases/SettingsShowcase.vue'
+import ActivityShowcase from './showcases/ActivityShowcase.vue'
+import HelpRestShowcase from './showcases/HelpRestShowcase.vue'
+import HelpQueryShowcase from './showcases/HelpQueryShowcase.vue'
+import AboutShowcase from './showcases/AboutShowcase.vue'
 
 export type Screen = {
   /** Stable id used in the `#screen=<id>` hash. */
@@ -177,4 +189,25 @@ export const screens: readonly Screen[] = [
     title: 'Remove exclusion confirmation (UI-010)',
     component: RemoveExclusionDialog,
   },
+  /* The service screens (T-367): the sync summary's two views, the
+     settings, the activity, the help's two states and About. */
+  {
+    id: 'sync-summary',
+    title: 'Sync summary (MAIN-024…031, OUT-009)',
+    component: SyncResultShowcase,
+  },
+  {
+    id: 'sync-pending',
+    title: 'Unsynced changes (MAIN-026)',
+    component: SyncPendingShowcase,
+  },
+  { id: 'settings', title: 'Settings (DEF-001…005)', component: SettingsShowcase },
+  { id: 'activity', title: 'Activity (LOG-001…006)', component: ActivityShowcase },
+  { id: 'help', title: 'Help (HLP-001…005)', component: HelpRestShowcase },
+  {
+    id: 'help-query',
+    title: 'Help — search query (HLP-001…004)',
+    component: HelpQueryShowcase,
+  },
+  { id: 'about', title: 'About (UPD-005, REL-004)', component: AboutShowcase },
 ]

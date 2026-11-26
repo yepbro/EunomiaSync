@@ -1,0 +1,166 @@
+/*
+ * About modal (T-367, UPD-001…005, REL-004): the mock-up's section
+ * (docs/prototype/styles.css 2968–3125) ported with the theme-token
+ * swap applied (the swap table lives in DECISIONS.md, D-206/D-211;
+ * the reference's muted and faint text tokens both map to
+ * `--ink-muted`, its strong-border token to `--line`). The brand mark
+ * (`.brand-mark`, src/styles/toolbar.css), the chips
+ * (src/styles/matrix-rows.css), the hint idiom and the global
+ * :focus-visible outline are already ported. The update check's
+ * result-state rules (`.about-result-line`, the update/installed
+ * chips, `.about-changes`, `.about-install`) ride along: their
+ * elements render only from the update card's states, the initial
+ * hint needs none of them.
+ *
+ * The mock-up's class names are kept (the porting rule).
+ */
+
+/* Brand row under the title */
+.about-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.about-brand .brand-mark {
+  inline-size: 16px;
+  block-size: 16px;
+  border-radius: 4px;
+}
+
+/* Definition rows in the project-settings read-only row idiom: the dt
+   is the muted label column, the dd the value */
+.about-info {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.about-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.about-row dt {
+  flex: none;
+  inline-size: 104px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+.about-row dd {
+  margin: 0;
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+.about-row code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+}
+
+/* External links (both license texts, repository): the title marks the
+   new tab, the underline marks the link itself */
+.about-info a {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.about-info a:hover {
+  color: var(--accent);
+}
+
+/* Dependency licenses (REL-004): compact demo list inside a <details> */
+.about-licenses summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+}
+
+.about-licenses[open] summary {
+  margin-block-end: 8px;
+}
+
+.about-license-list {
+  margin: 0;
+  padding: 8px 10px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+}
+
+/* Muted REL-004 note under the list (closed hides it with the list) */
+.about-licenses .ps-hint {
+  margin-block-start: 6px;
+}
+
+/* Update check block (UPD-001…003): primary button + aria-live result
+   area under it */
+.about-update {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 12px;
+}
+
+.about-check-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* Badge + text line ("Update available: 0.2.0", "Installed — …") */
+.about-result-line {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.about-chip-update,
+.about-chip-installed {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.about-changes {
+  margin: 0;
+  padding-inline-start: 18px;
+  font-size: 12.5px;
+  color: var(--ink-muted);
+}
+
+.about-changes li {
+  margin: 2px 0;
+}
+
+/* Install action with the UPD-003 note under it */
+.about-install {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}

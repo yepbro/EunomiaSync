@@ -3,8 +3,8 @@
  * only containers may import it (App.vue, DevGallery.vue); components
  * take props. The family cards T-364…T-367 extend the modules here
  * with their screens' data (T-364 matrix, T-365 history/preview,
- * T-366 scan/archived/exclusions/backups/file-preview; T-367's
- * activity, help, sync summary and about still to come).
+ * T-366 scan/archived/exclusions/backups/file-preview, T-367 the sync
+ * summary, activity, help and about).
  *
  * The bundle reaches the app through a DEV-only dynamic import
  * (App.vue), so the whole directory is absent from the production
@@ -29,3 +29,9 @@ export * from './archived'
 export * from './exclusions'
 export * from './backups'
 export * from './file-preview'
+/* The service screens' additions (T-367): the sync summary and pending
+   rows, the activity log, the help articles and the About facts. */
+export * from './sync'
+export * from './activity'
+export * from './help'
+export * from './about'

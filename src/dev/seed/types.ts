@@ -256,6 +256,95 @@ export type BackupRow = {
   readonly run: string
 }
 
+/*
+ * The service screens' shapes (T-367): the sync summary and pending
+ * rows, the activity entries and the help articles — all DATA shapes
+ * for the seed only (the real wire types arrive through
+ * src/bindings.ts; the About facts are plain seed strings in
+ * ./about.ts and carry no shape here).
+ */
+
+/** The §6.2 sync_run_projects status enum (the summary's four groups). */
+export type SyncStatus = 'written' | 'unchanged' | 'skipped' | 'failed'
+
+/**
+ * One per-project row of the sync run summary (OUT-009, UI-011). A
+ * discriminated union on `status`: only the skipped and failed rows
+ * carry the `E_*` code and the what-to-do hint (UI-011's what-to-do
+ * answer). `targetFile` is the row's rendered display path (the demo
+ * targetPathOf's output — "~"-prefixed, like the projects' syncedAt
+ * stamps).
+ */
+export type SyncSummaryRow =
+  | {
+      readonly status: 'written' | 'unchanged'
+      readonly project: string
+      readonly targetFile: string
+      readonly reason: string
+    }
+  | {
+      readonly status: 'skipped' | 'failed'
+      readonly project: string
+      readonly targetFile: string
+      readonly reason: string
+      readonly code: string
+      readonly hint: string
+    }
+
+/**
+ * One row of the "Unsynced changes" view (MAIN-026): the dirty project
+ * and its target file (scheme C writes `<STEM>.project.md`, §9.4).
+ */
+export type SyncPendingRow = {
+  readonly project: string
+  readonly targetFile: string
+}
+
+/** The §7.7 entry type groups (the Type filter's values). */
+export type ActivityType = 'projects' | 'library' | 'assignments' | 'sync' | 'backups'
+
+/** The §7.7 result enum (the ok / skipped / error chips). */
+export type ActivityResult = 'ok' | 'skipped' | 'error'
+
+/**
+ * One activity entry (LOG-001…005): time, type, action, object and
+ * result. `when` is the entry's rendered display stamp (the demo
+ * histStamp's output on the fixed UTC+3 clock, like syncedAt); `path`
+ * is the file-write target shown under the project (LOG-004, null on
+ * entries that write no file); `code` is the `E_*` chip (null on
+ * entries without one). Nulls instead of optional fields: every demo
+ * row states all five facts.
+ */
+export type ActivityEntry = {
+  readonly type: ActivityType
+  readonly action: string
+  readonly project: string | null
+  readonly path: string | null
+  readonly result: ActivityResult
+  readonly code: string | null
+  readonly when: string
+}
+
+/**
+ * One typed block of a help article's body (the FAQ is Markdown in the
+ * real app — HLP-005; the demo mini renderer's block vocabulary): a
+ * section heading (the demo's `####`, an h4 under the pane's h3), a
+ * paragraph, a fenced code block, or a list (`ordered` picks ol/ul).
+ * Paragraph and list texts are plain strings — the demo's inline
+ * Markdown emphasis (backticks, bold) is not modeled.
+ */
+export type HelpBlock =
+  | { readonly kind: 'heading'; readonly text: string }
+  | { readonly kind: 'paragraph'; readonly text: string }
+  | { readonly kind: 'code'; readonly text: string }
+  | { readonly kind: 'list'; readonly ordered: boolean; readonly items: readonly string[] }
+
+/** One help article (HLP-001…005): the title and its typed body. */
+export type HelpArticle = {
+  readonly title: string
+  readonly body: readonly HelpBlock[]
+}
+
 /** The §6.5 settings defaults (demo SETTINGS; the real app keeps them
  * in the settings table as JSON — D-18). Key names mirror the table. */
 export type Settings = {

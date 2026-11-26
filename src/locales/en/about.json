@@ -1,0 +1,23 @@
+{
+  "about": {
+    "title": "About",
+    "versionKey": "Version",
+    "identifierKey": "App identifier",
+    "authorKey": "Author",
+    "licenseKey": "License",
+    "licenseValue": "Dual license: {mit} and {apache}",
+    "licenseMit": "MIT License",
+    "licenseApache": "Apache License, Version 2.0",
+    "licenseMitTitle": "MIT License — opens in a new tab",
+    "licenseApacheTitle": "Apache License, Version 2.0 — opens in a new tab",
+    "repositoryKey": "Repository",
+    "repositoryTitle": "GitHub repository — opens in a new tab",
+    "channelKey": "Update channel",
+    "channelValue": "stable — signed updates via the Tauri updater from GitHub Releases (D-27)",
+    "licensesSummary": "Dependency licenses",
+    "licensesHint": "Demo data — the full list is generated at build time (REL-004).",
+    "checkUpdates": "Check for updates",
+    "checkNever": "Last check: never — checks run at startup if enabled in Settings (UPD-002).",
+    "close": "Close"
+  }
+}

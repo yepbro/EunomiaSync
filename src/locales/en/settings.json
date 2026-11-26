@@ -1,0 +1,43 @@
+{
+  "settings": {
+    "title": "Settings",
+    "defaultsTitle": "Defaults for new projects",
+    "defaultsHint": "Changing the defaults does not affect existing projects (DEF-005).",
+    "backupsTitle": "Backups",
+    "backupRetentionLabel": "Backups kept per file",
+    "backupRetentionHint": "1–200. Zero is not allowed: writing without a backup is forbidden (BKP-005). Default 10 per file (D-17).",
+    "scanningTitle": "Scanning",
+    "scanDepthLabel": "Maximum folder depth",
+    "scanDepthHint": "1–20 (D-04).",
+    "exclusionsLabel": "Excluded folder names",
+    "exclusionsInputLabel": "Add a folder name to the exclusion list",
+    "exclusionsPlaceholder": "Add folder name…",
+    "exclusionsAdd": "Add",
+    "exclusionRemoveTitle": "Remove {name}",
+    "exclusionRemoveAria": "Remove {name} from excluded folder names",
+    "exclusionsHint": "Folders with these names are skipped at any depth (D-05).",
+    "logsTitle": "History and logs",
+    "revisionsLabel": "Versions per entity",
+    "revisionsHint": "10–1000.",
+    "logEntriesLabel": "Log entries kept",
+    "logEntriesHint": "1000–100000.",
+    "logDaysLabel": "Days kept in the log",
+    "logDaysHint": "7–3650.",
+    "updatesTitle": "Updates and About",
+    "checkOnStart": "Check for updates at startup",
+    "updatesHint": "Updates come from GitHub Releases through the signed Tauri updater (UPD-002, D-27).",
+    "openArchived": "Archived projects…",
+    "openExclusions": "Excluded paths…",
+    "openAbout": "About…",
+    "checkUpdates": "Check for updates",
+    "statusLine": "Settings are applied immediately — there is no Save button.",
+    "error": {
+      "backupRetention": "Backup limit: an integer from 1 to 200 (§6.5).",
+      "scanDepth": "Scan depth: an integer from 1 to 20 (§6.5).",
+      "historyRevisions": "Versions per entity: an integer from 10 to 1000 (§6.5).",
+      "logEntries": "Log entries: an integer from 1000 to 100000 (§6.5).",
+      "logDays": "Log days: an integer from 7 to 3650 (§6.5)."
+    },
+    "close": "Close"
+  }
+}

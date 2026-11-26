@@ -1,0 +1,70 @@
+/*
+ * Settings modal (T-367, DEF-001…004, §6.5): the mock-up's section
+ * (docs/prototype/styles.css 2524–2588) ported verbatim — the range
+ * carries no color tokens, so no theme-token swap arises. It reuses
+ * the project settings form idioms (.ps-section/.ps-field/.ps-scheme/
+ * .ps-check-row/.ps-hint/.ps-error — src/styles/project-settings.css,
+ * T-366's section); only the parts without an existing class are
+ * carried here, exactly as the reference does.
+ *
+ * The mock-up's class names are kept (the porting rule).
+ */
+
+/* The first section sits right under the title — no separator above it */
+.set-body > .ps-section:first-child {
+  border-block-start: 0;
+  padding-block-start: 0;
+}
+
+/* Three limits side by side (history + log sizes) */
+.ps-grid-3 {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+}
+
+/* Number inputs stay compact: the §6.5 ranges are short */
+.set-number {
+  inline-size: 140px;
+}
+
+/* Excluded folder names (D-05): chip rows with a delete icon each */
+.set-excl-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.set-excl-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Delete icon at the 24 px target size (standalone control, unlike the
+   in-cell 20 px cell-icon instances) */
+.set-excl-remove {
+  inline-size: 24px;
+  block-size: 24px;
+}
+
+/* "Add folder name" row */
+.set-excl-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.set-excl-add .ps-input {
+  inline-size: 240px;
+}
+
+/* D-10 screens + About / Check for updates */
+.set-buttons {
+  display: flex;
+  gap: 10px;
+}
+
+/* Static status line above the footer: hint must not shrink or scroll */
+.modal-lg .set-status {
+  flex: none;
+}

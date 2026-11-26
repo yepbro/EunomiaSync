@@ -1,0 +1,36 @@
+{
+  "activity": {
+    "title": "Activity",
+    "subtitle": "User-visible actions; diagnostic entries go only to the file log (LOG-005).",
+    "filterDateLabel": "Filter activity by date",
+    "dateAll": "All time",
+    "date7d": "Last 7 days",
+    "dateToday": "Today",
+    "filterProjectLabel": "Filter activity by project",
+    "projectAll": "All projects",
+    "filterTypeLabel": "Filter activity by type",
+    "typeAll": "All types",
+    "type": {
+      "projects": "Projects",
+      "library": "Library",
+      "assignments": "Assignments",
+      "sync": "Sync",
+      "backups": "Backups"
+    },
+    "filterResultLabel": "Filter activity by result",
+    "resultAll": "All results",
+    "result": {
+      "ok": "ok",
+      "skipped": "skipped",
+      "error": "error"
+    },
+    "limits": "Limits: {entries} entries or {days} days, cleaned at startup and once a day (LOG-006).",
+    "tableCaption": "Activity log: time, action, project or path, result",
+    "colTime": "Time",
+    "colAction": "Action",
+    "colObject": "Project / path",
+    "colResult": "Result",
+    "empty": "Nothing matches the current filters.",
+    "close": "Close"
+  }
+}

@@ -1,0 +1,199 @@
+/*
+ * Help modal (T-367, HLP-001…004): the mock-up's section
+ * (docs/prototype/styles.css 2770–2967) ported with the theme-token
+ * swap applied (the swap table lives in DECISIONS.md, D-206/D-211;
+ * the reference's muted and faint text tokens both map to
+ * `--ink-muted`, its text token to `--ink`, its strong-border token
+ * to `--line`). The empty state rides the ported `.hist-empty`
+ * (src/styles/library-history.css, T-365's section); the article's
+ * body typography mirrors the editor preview's ported rules.
+ *
+ * The mock-up's class names are kept (the porting rule).
+ */
+
+.help-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: grid;
+  grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.help-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-block-size: 0;
+  border-inline-end: 1px solid var(--border);
+  padding-inline-end: 14px;
+}
+
+.help-list {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* `hidden` must win over the flex display above (UI-012 empty state) */
+.help-list[hidden] {
+  display: none;
+}
+
+.help-item {
+  appearance: none;
+  font: inherit;
+  min-inline-size: 0;
+  min-block-size: 28px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  text-align: start;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.help-item:hover {
+  background: var(--row-hover);
+}
+
+.help-item[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* `hidden` must win over the flex display above */
+.help-item[hidden] {
+  display: none;
+}
+
+.help-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-inline-size: 0;
+}
+
+/* The client-side search (HLP-001) sits under the list, like the
+   editor's "Add variant" block */
+.help-search {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-block-start: 8px;
+  border-block-start: 1px solid var(--border);
+}
+
+.help-search input[type='search'] {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  min-block-size: 28px;
+}
+
+/* "N of M articles match" under the search box */
+.help-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ink-muted);
+}
+
+.help-article-pane {
+  min-inline-size: 0;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.help-article-pane h3 {
+  flex: none;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.help-article {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+}
+
+.help-article p {
+  margin: 0 0 8px;
+}
+
+.help-article h3,
+.help-article h4,
+.help-article h5,
+.help-article h6 {
+  margin: 12px 0 6px;
+  line-height: 1.3;
+}
+
+.help-article h3 {
+  font-size: 14px;
+}
+.help-article h4 {
+  font-size: 13px;
+}
+.help-article h5,
+.help-article h6 {
+  font-size: 12.5px;
+}
+
+.help-article ul,
+.help-article ol {
+  margin: 0 0 8px;
+  padding-inline-start: 22px;
+}
+
+.help-article li {
+  margin: 2px 0;
+}
+
+.help-article pre {
+  margin: 0 0 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+
+.help-article code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.help-article :not(pre) > code {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+}
+
+/* Search matches (HLP-001) in the list titles and the article body:
+   the accent-soft background is the cue, the text color stays --ink
+   for AA contrast in both themes */
+.help-item mark,
+.help-article mark {
+  background: var(--accent-soft);
+  color: var(--ink);
+  border-radius: 2px;
+  padding: 0 1px;
+}

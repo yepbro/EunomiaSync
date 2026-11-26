@@ -1,0 +1,13 @@
+{
+  "help": {
+    "title": "Help",
+    "navLabel": "Help articles",
+    "listLabel": "Articles",
+    "empty": "No articles match the current search.",
+    "searchLabel": "Search",
+    "searchPlaceholder": "Search articles…",
+    "counterAll": "All {n} articles",
+    "counterMatch": "{n} of {m} articles match",
+    "close": "Close"
+  }
+}
