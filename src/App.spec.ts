@@ -11,8 +11,15 @@ import { i18n } from './i18n'
 // gone with the placeholder; T-212 wires app_info/projects_list back
 // into this window and restores those assertions.
 const mountApp = async () => {
+  // The seed arrives through the DEV-only dynamic import in App.vue's
+  // onMounted. The barrel spans the whole src/dev/seed/ tree, so the
+  // module runner resolves it over several event-loop turns — more than
+  // one flushPromises macrotask. Pre-loading the same module here makes
+  // the component's import() settle from cache within a single
+  // flushPromises, deterministically; the assertions below stay
+  // unchanged and still run against the rendered DOM.
+  await import('./dev/seed')
   const wrapper = mount(App, { global: { plugins: [i18n] } })
-  // The seed lands through a DEV-only dynamic import in onMounted.
   await flushPromises()
   return wrapper
 }

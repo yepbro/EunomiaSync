@@ -27745,6 +27745,80 @@ sound and I found no new verified evidence"). No findings at any
 level; the review phase is complete after the second round (no
 third round).
 
+### D-218 — the first run of the frontend suites on the skeleton branch — the four seed-timing failures in App.spec.ts fixed in the harness; both suites green — 2026-11-26
+
+Problem: the skeleton batch (D-211…D-216) was accepted by the ruling
+of 2026-11-25 without writing or running any test, and three existing
+test files were edited "for consistency" (App.spec.ts twice, e2e/
+smoke.spec.ts, theme.spec.ts) without ever executing them. The owner's
+ruling of 2026-11-26 requires one run of both suites before the branch
+merges, every red fixed, all fixes in one commit.
+
+Sources: the owner's rulings of 2026-11-25/26; D-211 (the shell's
+DEV-guarded dynamic seed import), D-212 (the rendered matrix rows
+App.spec.ts asserts); the run logs vitest.log, e2e.log, vitest-2.log,
+e2e-2.log under /tmp/opencode/tests/ of the run session.
+
+1. **The run.** `pnpm run test` (vitest 4.1.12): exit 1 — 405 tests,
+   401 passed / 4 failed / 0 skipped, wall 6 s. `pnpm run e2e`
+   (Playwright, chromium, 1 worker): exit 0 — 4 passed / 0 failed /
+   0 skipped, wall 7 s. All four failures sat in src/App.spec.ts with
+   one symptom: every seed-driven assertion saw the shell's empty
+   pre-seed state — 1 filter option instead of 9, the "Show hidden"
+   count "0" instead of "2", an empty last-sync stamp instead of
+   "19 Nov 2026, 14:32 (UTC+3)", and the UI-012 empty state visible
+   instead of the 33 rendered rows.
+
+2. **Diagnosis — class C, a test bug; the production code is correct.**
+   App.vue loads the seed through the DEV-only dynamic import in
+   onMounted (D-211); the barrel spans the whole src/dev/seed/ tree
+   (17 modules), and under the vitest module runner the import settles
+   over several event-loop turns — one flushPromises() drains fewer
+   turns than the resolution needs (two verified insufficient too), so
+   the component renders before the seed lands. A throwaway probe
+   verified each fact separately: import.meta.env.DEV is true under
+   vitest; the seed exports exactly the literals the test asserts;
+   the mounted App renders all of them once the module is pre-loaded.
+
+3. **The fix.** mountApp in src/App.spec.ts pre-loads ./dev/seed
+   before mounting, so the component's import() resolves from cache
+   within one flushPromises deterministically. Every assertion stayed
+   unchanged — no skip, no deletion, no loosened assertion; the tests
+   keep driving the rendered DOM. The empty shell in a production
+   build remains the documented skeleton-phase state until T-212 wires
+   app_info/projects_list into this window.
+
+4. **What the run says about the batch.** The unverified "for
+   consistency" edits were sound in their oracles: of the three files
+   the batch edited, e2e/smoke.spec.ts and theme.spec.ts passed as
+   written, and App.spec.ts's assertions were correct — only its
+   harness under-waited. The nine vitest spec files the batch did not
+   touch (the i18n catalog coverage over every .vue file,
+   no-raw-ui-text, date, the five ipc spec files — ipc/index, ipc/
+   mode, ipc/fixtures/generator, ipc/mock/commands, ipc/mock/events —
+   and AppErrorAlert) passed untouched against the much larger
+   frontend, so the batch's per-feature catalog split (D-207 ruling 3)
+   held UI-020.
+
+5. **Checks.** Second run after the fix: vitest exit 0 — 405/405
+   passed (wall 9 s); e2e exit 0 — 4/4 passed (wall 7 s). Light
+   checks: cargo fmt --check, pnpm lint, format:check, typecheck,
+   build — all exit 0.
+
+6. **To the owner.** The four seed tests now lean on the harness
+   pre-loading the seed; when T-212 replaces the seed with the IPC
+   facade, mountApp's pre-import goes with it. The run logs stay under
+   /tmp/opencode/tests/ (host-cleaned nightly); nothing else is left.
+
+7. **Round-1 review fixes** (the review: deepseek-v4.1-flash, verdict
+   NEEDS_FIXES; one finding, accepted). P2: this entry's item 4
+   miscounted the untouched spec files as "seven" where the first
+   run's log shows ten other vitest spec files passing, and "the rest
+   of the theme pair" named a second theme spec that does not exist —
+   item 4 rewritten to the exact tally (three batch-edited files: two
+   passed as written, App.spec.ts's harness fixed; nine untouched
+   vitest specs passing); no code change.
+
 ### D-219 — T-123: closing the window during a sync — the `main` close intercepted by label, the `sync://close-confirmation` ask (empty payload), the `sync_confirm_exit` command over a write-in-flight gate, and the exit through an injected seam — 2026-11-26
 
 The card (§9.4's "Closing the window during a sync" paragraph,
