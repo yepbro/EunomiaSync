@@ -73,11 +73,14 @@ describe('App (the main-window shell, T-363)', () => {
     expect(wrapper.find('header.toolbar .btn-ghost[hidden]').exists()).toBe(true)
   })
 
-  it('shows the UI-012 no-instructions empty state while the rows slot is unfilled', async () => {
+  it('renders the seed library rows — no empty state once rows exist', async () => {
     const wrapper = await mountApp()
-    // T-364 fills the #rows slot; the empty state renders until then.
-    expect(wrapper.find('.empty-state').exists()).toBe(true)
-    expect(wrapper.find('.empty-state').text()).toContain('No instructions yet.')
+    // T-364 renders the seed's library in the frame's tbody (9 headings
+    // + 24 instructions); the UI-012 empty state shows only when the
+    // row list is empty.
+    expect(wrapper.find('.empty-state').exists()).toBe(false)
+    expect(wrapper.findAll('.matrix tbody tr')).toHaveLength(33)
+    expect(wrapper.find('.matrix tbody .row-heading').text()).toContain('General')
   })
 
   it('imports no IPC module', () => {

@@ -40,7 +40,19 @@ const sparseCells: Readonly<Record<string, Readonly<Record<string, Assignment>>>
     docktree: main,
     'sandbox-cf': main,
   },
-  'Response tone': { 'yepbro/site': main, docktree: changedMain },
+  // The §11.2 custom-text cell (MAIN-007) and the extend cell (MAIN-034)
+  // are the two states the demo's STATIC data never shows: the demo
+  // builds custom cells only through its JS flows (app.js
+  // refreshCellIcons, data-custom cells). One demo cell each is added
+  // here (recorded in DECISIONS.md, T-364): a replace cell for
+  // quotameter on Response tone, and an extend cell for moli on Naming
+  // conventions with the base variant "Strict" — the variant assigned
+  // in the cell when "+" was pressed (MAIN-034).
+  'Response tone': {
+    'yepbro/site': main,
+    docktree: changedMain,
+    quotameter: { state: 'custom', mode: 'replace', dirty: false },
+  },
   'Comment style': {
     EunomiaSync: main,
     'task-id-mcp': changedMain,
@@ -57,6 +69,7 @@ const sparseCells: Readonly<Record<string, Readonly<Record<string, Assignment>>>
     EunomiaSync: changedNone,
     'task-id-mcp': variant('Strict'),
     docktree: main,
+    moli: { state: 'custom', mode: 'extend', base: 'Strict', dirty: false },
   },
   'Type hints': { EunomiaSync: main, quotameter: main, docktree: changedNone },
   'Line length': { 'yepbro/site': main },

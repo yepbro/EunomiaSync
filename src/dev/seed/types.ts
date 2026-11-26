@@ -101,12 +101,26 @@ export type LibraryRow = LibraryHeading | LibraryInstruction
  * A discriminated union on `state`: only the `variant` state carries a
  * variant name, so an unnameable "variant assignment" cannot be built.
  * `dirty` marks a change made in the app that the next sync writes
- * (the mock-up's "(changed)" cells).
+ * (the mock-up's "(changed)" cells). The `custom` arm is the
+ * per-project custom text (§11.2, MAIN-007/MAIN-034, T-364): `mode`
+ * is the replace/extend radio of MAIN-034, and `base` names the base
+ * variant of an extend cell — the variant assigned when "+" was
+ * pressed, fixed while the cell stays custom (a replace cell has no
+ * base). An EMPTY VARIANT is not a state of its own: it is a `main` or
+ * `variant` assignment whose variant's text is empty (LIB-014/D-13) —
+ * the rendering derives it (an instruction with `text: null` has an
+ * empty main variant).
  */
 export type Assignment =
   | { readonly state: 'none'; readonly dirty: boolean }
   | { readonly state: 'main'; readonly dirty: boolean }
   | { readonly state: 'variant'; readonly variant: string; readonly dirty: boolean }
+  | {
+      readonly state: 'custom'
+      readonly mode: 'replace' | 'extend'
+      readonly base?: string
+      readonly dirty: boolean
+    }
 
 /** Assignments keyed by instruction name, then by project name. */
 export type AssignmentMatrix = Readonly<Record<string, Readonly<Record<string, Assignment>>>>

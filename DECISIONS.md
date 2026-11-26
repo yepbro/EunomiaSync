@@ -26357,6 +26357,238 @@ effect.
    `var(--page)`); i18n.spec.ts needed no edit (it resolves against
    the merged catalog).
 
+### D-212 — T-364: the matrix skeleton on seed data — the container-agnostic row and cell components, all eight §11.2 states, the header internals, the column menu, the variant popover, the tooltip, and the two bulk dialogs — 2026-11-25
+
+Problem: the shell's frame rendered an empty tbody behind an
+unfilled slot, the column headers showed bare project names, and
+none of the matrix family's components existed. The card had to port
+the reference's rows, cells, column-header internals, column menu,
+variant popover, text tooltip and bulk dialogs as behavior-free Vue
+components on seed data — with every state of §11.2 present,
+distinguishable without color, and named for screen readers — without
+breaking the seed's DEV-only bundle gate and without pre-empting the
+behavior cards (T-169 virtualization, T-184/T-355 interactions,
+T-187 tooltip wiring).
+
+Sources: card T-364 (the acceptance ruling of 2026-11-25: no tests
+written or run, the visual match is checked by code review without
+screenshots); D-206/D-211's porting rules and token swap; spec
+§11.2 (lines 797–813), MAIN-001…032, UI-010, UI-023, NFR-019/020.
+
+1. **Structure.** `src/components/matrix/` — MatrixHeadingRow.vue
+   (props `heading`, `columnCount`), MatrixInstructionRow.vue
+   (`row`, `projects`, `rowAssignments`), MatrixCell.vue (`row`,
+   `project`, `assignment`; hosts the VariantPopover),
+   ProjectColumnHeader.vue (`project`; renders the whole `th.c-proj`
+   and hosts the ColumnMenu), ColumnMenu.vue (`anchor`; emits
+   `close`/`select`), VariantPopover.vue (`entries`, `anchor`; emits
+   `close`), InstructionTextTooltip.vue (`text`, `open` only),
+   BulkAssignDialog.vue (`open` model + `projects`, `variants`),
+   BulkConfirmDialog.vue (`open` model + optional `text`), and
+   floating.ts (the shared viewport clamp, the outside-click/Escape
+   dismissal, the anchor helper — the demo's positioning formulas
+   verbatim per component: the menu right-aligns under the trigger
+   with gap 4 (app.js 1110–1112), the popover left-aligns with gap
+   6 (app.js 1280–1282); both flip above the trigger's top). MatrixFrame.vue no longer has a slot: it takes `rows`
+   and `assignments` props and renders the row components in its
+   tbody itself (the empty state keys off `rows.length === 0`); the
+   `#rows` mechanism is gone. App.vue passes the seed's `library`
+   and `assignments` through the same DEV-guarded dynamic import.
+   The CONTAINER-AGNOSTIC rule holds for every row and cell
+   component: props in, one row/cell/header of content out, scripts
+   never touch DOM order (no `nth-child`, `parentElement`,
+   `closest('table')`); the menu and the popover position from their
+   own element plus an anchor POINT handed in as data (the trigger's
+   bottom-right, taken from the click event's `currentTarget`) —
+   T-169 can re-host them in a virtualized container. The menu
+   closes on outside click and Escape (the demo's target hit-test
+   against the trigger class — `.col-menu-btn` / `.cell-icon--eye`
+   — keeps the toggle click from closing what it just opened);
+   scroll-close and the real actions are T-184/T-355's. The menu
+   moves focus to its first item on open (the demo's fact,
+   app.js ~1115).
+
+2. **The eight cell states, each derived from the seed** (the
+   union of `src/dev/seed/types.ts` + the row): (a) not assigned —
+   `state: 'none'`, a bare checkbox, no select; (b) main variant —
+   `state: 'main'`, checked + inline select showing "Main"
+   (LIB-002's main-variant name; the demo's "Default" loses to the
+   spec, §11.2 row 2); (c) alternative — `state: 'variant'`, the
+   select shows the variant's name; (d) custom text — `state:
+'custom'`, a DISABLED select showing "Custom" and edit/delete
+   icons; (e) extend custom — the same plus the dashed "+" chip
+   (`.extend-mark`, title names the base variant, MAIN-034); (f)
+   empty variant — NOT a union member: derived (main → the
+   instruction's `text === null`; variant → the named variant's
+   `text === ''`, LIB-014/D-13), rendered as the dashed-border
+   select `.variant-select--empty`; (g) changed — `dirty: true` on
+   any state: the dimmed `.cell-changed` shade, the title tooltip
+   "Assignment changed — will be written on the next sync" (the
+   demo's fact, app.js 219), and a VISIBLE "(changed)" suffix
+   (`.cell-changed-mark` — spec §11.2 row 7 wins over the demo,
+   whose suffix is screen-reader-only); (h) unavailable project —
+   `project.status === 'unavailable'` derived in the component (D-211
+   ruling 7): cells disabled, no icon cluster, the header carries
+   the warning icon, and the cells' accessible-name state becomes
+   §11.2 row 8's "Project unavailable" (round-1 review: the label is
+   the column's, but the disabled cells announce it). Every cell
+   carries the "+" affordance even when
+   unassigned (MAIN-007; the demo's `cell-unchecked` hiding loses to
+   spec §11.2 line 810). Each cell's accessible name is
+   "instruction — project: state", "(changed)" included (NFR-019),
+   through `matrix.cell.name` + the `matrix.cell.state*` keys; the
+   empty-variant label is wired into the state derivation for both
+   the main and the variant arm (round-1 review: the seeded
+   Pre-commit checks cell must announce "Assigned, empty variant"). The
+   assigned select always exists when the checkbox is checked —
+   including rows the demo left select-less (its chip-driven
+   `variantOptionsFor` suppression, app.js 226–231): §11.2's
+   main-variant state names the select, and the empty-variant state
+   cannot exist without one; the demo's static at-rest look for
+   those seven rows deviates accordingly (a spec-wins reading, like
+   D-211's).
+
+3. **The seed extension and the added demo cells.** The Assignment
+   union gained the brief's custom arm exactly: `{ state: 'custom';
+mode: 'replace' | 'extend'; base?: string; dirty: boolean }` —
+   `base` names the extend cell's fixed base variant (MAIN-034).
+   The demo's STATIC data has no custom cells at all (its JS builds
+   them in flows only), so two demo cells were added to
+   assignments.ts and are recorded here per the brief: (i) Response
+   tone — quotameter, `{ state: 'custom', mode: 'replace' }`; (ii)
+   Naming conventions — moli, `{ state: 'custom', mode: 'extend',
+base: 'Strict' }` (the variant the demo assigns to task-id-mcp in
+   the same row). The empty-variant state rides the demo's own
+   "empty variant assigned" cell (Pre-commit checks — EunomiaSync,
+   seeded as a plain `main` of the text-less instruction in D-211
+   ruling 7). No `matrix.ts` was needed: nothing was missing from
+   the seed — the popover's full texts ride `library.ts` through
+   props (the real app will fetch them per variant id through
+   `variant_get`, MAIN-032; the demo's "Default" option name becomes
+   "Main (main variant)" per LIB-002). `src/dev/seed/matrix.ts` is
+   therefore not created.
+
+4. **The header internals and UI-023.** ProjectColumnHeader renders
+   the reference's `th.c-proj`: `.proj-line` (the color chip via a
+   `:style` custom-property binding, the 1–6 char label, the full
+   name in the `title` and an sr-only span — MAIN-028) and the
+   status sub-line `.proj-sub` per `ProjectStatus`: ok → the short
+   last-sync stamp (derived from the seed's long display stamp by a
+   local regex — the demo's format fact; the real-data card replaces
+   it with Intl per UI-020), dirty → dot + "unsynced changes",
+   external/deleted → the warning triangle + text, unavailable →
+   the circle-slash + text (icons inlined as the reference's SVG
+   markup facts). The edit/preview/"⋮" icons the demo injects with
+   JS (app.js 5079–5121) are inlined the same way, with the demo's
+   classes and labels. The "⋮" hugs the right edge
+   (`.proj-line .col-menu-btn`), and the header divider rule
+   (`.c-proj + .c-proj`) had already landed with T-363's frame
+   section (matrix.css 97–101). The Instruction column header gained
+   the add-section `.hbtn.hbtn--add` button (the `#instruction-header`
+   id and the styles.css 618–621 rule are the reference's; D-211
+   ruling 7c had left it "header internals, T-364").
+
+5. **CSS sections ported** (one file each, imported from
+   src/assets/main.css after the shell's): Project column headers
+   382–457 → matrix-columns.css; Tree rows 458–622 → matrix-rows.css
+   (`.hide-btn` rides along unused — its behavior is MAIN-012's
+   card); Bulk assignment operations 623–679 → matrix-bulk.css;
+   Variant contents popover 680–745 → matrix-popover.css; Matrix
+   cells 746–898 → matrix-cells.css; Interactive states 950–1098 →
+   matrix-states.css (minus `.toggle-count`/`.empty-state`, already
+   ported early by T-363 — noted in the file header). Three
+   reference ID selectors became classes for instance-reusable
+   components, declarations unchanged: `#column-menu` →
+   `.column-menu`, `#variants-popover` → `.variants-popover`,
+   `#text-tooltip` → `.text-tooltip`. The section's three
+   decorative tints (`--row-drop` 874–882, `--row-selected`/
+   `--cell-changed` 963–973) moved to base.css's three-block
+   pattern beside `--border`/`--row-hover`. Two forced ride-alongs
+   outside the brief's ranges: `.extend-mark` (styles.css 1250–1265,
+   the excluded dialog zone) — the §11.2 extend chip; and two NEW
+   rules, `.variant-select--empty` and `.cell-changed-mark`,
+   following the reference's dashed-outline and muted-text idioms
+   for the two §11.2 states the demo's stylesheet never drew. The
+   checked checkbox takes the accent-as-control-background swap
+   (`--accent-strong`, D-211 ruling 4); its check mark is painted
+   in the theme's `--on-accent` value — a data URI cannot read a
+   var(), so the two theme values ride the three-block pattern
+   (light `#ffffff`, dark `#052e22`) instead of the demo's
+   hardcoded white, which would have failed AA in the dark theme.
+
+6. **The dialogs and the showcases.** BulkAssignDialog and
+   BulkConfirmDialog wrap BaseModal per the T-363 contract
+   (`defineModel<boolean>('open')`); their data is props only —
+   `projects`, `variants` (`readonly BulkVariantChoice[]`, rendered
+   only for the one-selected-row case), and the confirm line `text`
+   (absent → the mock-up's "Placeholder." stands in, its static
+   fact; its JS fills the count at runtime). The demo's `#bulk-form`
+   id and the JS-filled containers are dropped; title ids come from
+   Vue's `useId()`. The gallery-side entries show the chrome with
+   the defaults (empty project list); the real parent passes the
+   seed (the selection card, T-184's family). The `.ps-field`/
+   `.ps-check-row` classes stay in the markup with their styles
+   left to the project-settings card's section (styles.css 1160+).
+   src/dev/showcases/ holds five DEV-only wrapper screens —
+   MatrixCellStates (one cell per §11.2 state off real seed rows,
+   fabricated assignments), ColumnHeaderStates (the five statuses
+   off the seed projects), ColumnMenuShowcase and
+   VariantPopoverShowcase (open next to a trigger), TooltipShowcase
+   (visible) — all registered in screens.ts together with the two
+   dialogs. The registry's seed-free rule is rewritten as its real
+   boundary: screens.ts is reachable ONLY through DevGallery.vue,
+   which rides the statically-replaced DEV guard, so the registry,
+   the showcases and the seed all stay out of the production bundle;
+   the build's dist/ grep proves it (checked: the registry titles,
+   a showcase hint, the seed texts, the palette hex — all absent;
+   the production `matrix` catalog present).
+
+7. **Readings chosen where the brief was open.** (a) The assigned
+   cell always carries the inline select (ruling 2's spec-wins
+   argument). (b) The main variant's display name is "Main"
+   (LIB-002), not the demo's "Default", in the select and the
+   popover. (c) The caret button renders with the reference's static
+   `aria-expanded="true"` and no handler (collapse is UI-004's
+   card); the hide/restore eye button is NOT rendered (the demo
+   injects it with JS; MAIN-012's card owns it) — the hidden rows
+   render with the reference's static `.row-hidden` + dashed chip.
+   (d) The demo's one pre-checked row-sel checkbox ("Secrets
+   handling", its staged screenshot state) is not carried: the seed
+   has no selection concept, so every row-sel renders unchecked and
+   the toolbar cluster stays hidden at zero. (e) The short sync
+   stamp is derived from the long seed stamp by a local regex
+   (ruling 4); the header tooltip composes per status through
+   `matrix.header.title*` (the dirty column keeps the plain
+   titleOk line, per the demo). (f) The popover entry derivation
+   reads `text === ''` (alternatives) and `text === null` (the main
+   of a text-less instruction) as empty, without ALG-002's
+   whitespace normalization — the seed holds no whitespace-only
+   texts; the build-side composition keeps the rule. (g) The demo's
+   pre-JS `variant-btn` cells (alternative assigned) render as the
+   spec's checkbox + select, since the select always exists (ruling
+   2). (h) `option` values are the markers `main`/`custom` and the
+   variant names — no `v-model` exists to read them; the static
+   `:selected` bindings carry the state. (i) The card text's "Move
+   left / Move right" menu items lose to the reference and the spec:
+   the frozen menu (index.html 2811–2828) and §7.4/MAIN-033 name
+   "Preview file…" / "Assign all visible" / "Clear column", and those
+   three are what the component ports; a move command for columns is
+   not in the spec's column menu.
+
+8. **Consistency edits (none run, none skipped or deleted — the
+   owner acceptance ruling).** App.spec.ts: one test became untrue
+   — "shows the UI-012 no-instructions empty state while the rows
+   slot is unfilled" — because the frame now renders the seed's 33
+   rows; rewritten minimally to assert the rows render and the
+   empty state does not exist. The other tests stay true unchanged.
+   One pre-existing T-363 defect is fixed in passing: the toolbar's
+   bulk button was visible at rest despite `hidden` — `.btn`'s
+   `display: inline-flex` defeats the attribute — and the
+   reference's `#bulk-assign-btn[hidden]` rule (matrix-bulk.css)
+   plus the reference's own id on the button (index.html 107) is
+   the same fix the demo ships; the button's `hidden` attribute
+   binding is unchanged.
+
 ### D-214 — CI 45782298320: T-110's DB-015 echo oracle was platform-blind — the macOS temp root pushed the picked path over D-115's cap; the fixture is deliberately over-cap on every platform now and the expectation is computed from the documented arithmetic — 2026-11-26
 
 Problem: CI run 45782298320 (push of `3b800ca`, T-120's landing) was

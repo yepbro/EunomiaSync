@@ -1,0 +1,77 @@
+{
+  "matrix": {
+    "addSection": "Add top-level section",
+    "header": {
+      "titleOk": "{project} — last successful sync: {stamp}",
+      "titleExternal": "{project} — target file changed outside the app (see 5.7). Last successful sync: {stamp}",
+      "titleUnavailable": "{project} — folder unavailable (moved or drive disconnected). Last successful sync: {stamp}",
+      "titleDeleted": "{project} — target file {file} not found. Last successful sync: {stamp}",
+      "subDirty": "unsynced changes",
+      "subExternal": "modified externally",
+      "subUnavailable": "unavailable",
+      "subDeleted": "target deleted",
+      "editProject": "Edit project — {project}",
+      "previewFile": "Preview file — {project}",
+      "columnActions": "Column actions — {project}"
+    },
+    "menu": {
+      "label": "Column actions",
+      "preview": "Preview file…",
+      "assignAll": "Assign all visible",
+      "clearColumn": "Clear column"
+    },
+    "row": {
+      "selectRow": "Select row: {name}",
+      "editInstruction": "Edit instruction: {name}",
+      "toggleSection": "Toggle section {name}",
+      "emptyTitle": "Empty instruction — the text is not written yet.",
+      "emptyMark": "(empty instruction)",
+      "hiddenChip": "hidden",
+      "variantChipTitle": "no variants | 1 variant | {count} variants"
+    },
+    "cell": {
+      "name": "{instruction} — {project}: {state}",
+      "stateNone": "Not assigned",
+      "stateMain": "Assigned, main variant",
+      "stateVariant": "Assigned, variant {variant}",
+      "stateCustom": "Assigned, custom text",
+      "stateExtend": "Assigned, custom text extending a variant",
+      "stateEmpty": "Assigned, empty variant",
+      "stateUnavailable": "Project unavailable",
+      "changedSuffix": "(changed)",
+      "changedTitle": "Assignment changed — will be written on the next sync",
+      "assignedText": "Assigned text — {instruction}",
+      "mainVariant": "Main",
+      "customLabel": "Custom"
+    },
+    "popover": {
+      "label": "Variant texts",
+      "showTexts": "Show variant texts — {instruction}",
+      "mainVariantLabel": "Main (main variant)",
+      "assignedBadge": "assigned",
+      "emptyNote": "Empty variant — outputs no text (D-13)"
+    },
+    "custom": {
+      "add": "Create a custom instruction — {instruction} — {project}",
+      "edit": "Edit the custom instruction — {instruction} — {project}",
+      "editExtend": "Edit the custom instruction (supplements {variant}) — {instruction} — {project}",
+      "delete": "Delete the custom instruction — {instruction} — {project}",
+      "extendMarkTitle": "Supplements {variant} — appended after the library variant text"
+    },
+    "bulk": {
+      "title": "Assign to projects",
+      "text": "Choose the projects for the selected instructions.",
+      "projectsLegend": "Projects",
+      "variantLabel": "Variant",
+      "mainVariantLabel": "Main (main variant)",
+      "cancel": "Cancel",
+      "apply": "Apply"
+    },
+    "bulkConfirm": {
+      "title": "Bulk change",
+      "placeholder": "Placeholder.",
+      "cancel": "Cancel",
+      "continue": "Continue"
+    }
+  }
+}

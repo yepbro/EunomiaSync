@@ -32,11 +32,19 @@
   --w-check: 40px;
   --w-name: 300px;
   --w-proj: 150px;
+  /* The T-364 decorative tints: row drag-and-drop target, selected
+     rows, changed cells (mock-up styles.css 874–882 and 963–973). */
+  --row-drop: #dbeafe;
+  --row-selected: #d9f2e6;
+  --cell-changed: #d4dae2;
 }
 
 [data-theme='dark'] {
   --border: #2b3a58;
   --row-hover: #22304e;
+  --row-drop: #14315c;
+  --row-selected: #14382b;
+  --cell-changed: #060a12;
 }
 
 /* The pre-JS paint and the no-JS world — same values as the attribute
@@ -45,6 +53,9 @@
   :root:not([data-theme='light']) {
     --border: #2b3a58;
     --row-hover: #22304e;
+    --row-drop: #14315c;
+    --row-selected: #14382b;
+    --cell-changed: #060a12;
   }
 }
 

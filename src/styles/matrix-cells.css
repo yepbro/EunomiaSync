@@ -1,0 +1,203 @@
+/*
+ * Matrix cells (T-364, MAIN-001…005 / §11.2 / MAIN-007): the assignment
+ * cell — custom checkbox, inline variant select, per-cell icon cluster,
+ * extend mark — the mock-up's "Matrix cells" section
+ * (docs/prototype/styles.css 746–898) ported verbatim with the theme
+ * token swap applied (`--text` → `--ink`, `--text-faint` →
+ * `--ink-muted`, `--border-strong` → `--line`). The checked checkbox's
+ * background takes the accent-AS-CONTROL-BACKGROUND swap
+ * (`--accent-strong`, D-211 ruling 4), so its check mark is painted in
+ * the theme's `--on-accent` value — a data-URI cannot read a var(), so
+ * the two theme values ride the theme.css three-block pattern.
+ * Rendered by MatrixCell.vue.
+ *
+ * Two rules are ride-alongs outside the brief's section split, both
+ * recorded in DECISIONS.md (T-364): `.extend-mark` (styles.css
+ * 1250–1265, inside the excluded dialog range) is the §11.2 extend
+ * cell's "+" chip; `.variant-select--empty` and `.cell-changed-mark`
+ * are new rules for the §11.2 empty-variant state (LIB-014) and the
+ * visible "(changed)" suffix, following the reference's dashed-outline
+ * and muted-text idioms.
+ */
+
+/* ----- Matrix cells (MAIN-001…005: four states, shape-based, NFR-020) --- */
+
+.c-cell {
+  text-align: center;
+}
+
+.c-fill {
+  background: var(--surface);
+}
+
+/* Custom checkbox: unchecked = outline, checked = filled with a check mark */
+input[type='checkbox'] {
+  appearance: none;
+  inline-size: 16px;
+  block-size: 16px;
+  margin: 0;
+  border: 1.5px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 12px 12px;
+  cursor: pointer;
+  flex: none;
+}
+
+input[type='checkbox']:hover {
+  border-color: var(--accent);
+}
+
+input[type='checkbox']:checked {
+  border-color: var(--accent);
+  background-color: var(--accent-strong);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+/* The check mark follows the theme's --on-accent value (dark theme
+   paints a dark check on the light --accent-strong) — the same three
+   blocks as theme.css / base.css. */
+[data-theme='dark'] input[type='checkbox']:checked {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23052e22' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) input[type='checkbox']:checked {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23052e22' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  }
+}
+
+input[type='checkbox']:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+/* Assigned cell: checkbox + variant select (rows with a variant badge) */
+.cell-assign {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.variant-select {
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0 3px;
+  min-block-size: 18px;
+  max-inline-size: 64px;
+  cursor: pointer;
+}
+
+.variant-select:hover {
+  border-color: var(--accent);
+}
+
+.variant-select:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Empty variant (§11.2, LIB-014): assigned but outputs no text — the
+   dashed border is the shape signal (NFR-020), the .empty-mark idiom */
+.variant-select--empty {
+  border-style: dashed;
+}
+
+/* Changed cell's visible "(changed)" suffix (§11.2): the muted-text
+   idiom of .chip/.hidden-chip — color is not the only signal */
+.cell-changed-mark {
+  flex: none;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--ink-muted);
+  margin-inline-start: 2px;
+}
+
+.proj-line .cell-icon--edit {
+  margin-inline-start: 3px;
+}
+
+/* Section drop target: the "Instruction" column header
+   (--row-drop lives in base.css with the other decorative tints). */
+#instruction-header.drop-target {
+  background-color: var(--row-drop);
+}
+
+/* Per-project custom instruction icons (add / edit / delete) */
+.cell-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-inline-start: 6px;
+  block-size: 18px;
+  vertical-align: middle;
+}
+
+.cell-icon {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  inline-size: 20px;
+  block-size: 20px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.cell-icon svg {
+  inline-size: 14px;
+  block-size: 14px;
+  fill: currentColor;
+}
+
+.cell-icon:hover {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.cell-icon--delete:hover {
+  color: var(--danger);
+  background: transparent;
+}
+
+/* Row drag-and-drop between sections
+   (--row-drop lives in base.css with the other decorative tints). */
+.matrix tbody tr:not(.row-heading) {
+  cursor: grab;
+}
+
+.matrix tbody tr.dragging {
+  opacity: 0.5;
+}
+
+.matrix tbody tr.drop-target > .c-check,
+.matrix tbody tr.drop-target > .c-name,
+.matrix tbody tr.drop-target > .c-cell,
+.matrix tbody tr.drop-target > .c-fill {
+  background-color: var(--row-drop);
+}
+
+/* Extend-type custom cells: a small "+" chip marks that the custom text
+   supplements the library variant instead of replacing it (the tooltip
+   carries the details) — styles.css 1250–1265, a forced ride-along. */
+.extend-mark {
+  flex: none;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--ink-muted);
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  padding: 2px 4px;
+  cursor: help;
+}

@@ -5,6 +5,16 @@
       "panelTitle": "Dev screens",
       "openScreen": "Open screen: {title}",
       "hint": "#screen=<id> opens a screen; only in DEV builds."
+    },
+    "showcase": {
+      "cellStates": "Matrix cells — the eight §11.2 states",
+      "headerStates": "Column headers — the five statuses",
+      "columnMenu": "Column actions menu",
+      "menuHint": "Open by default; the ⋮ toggles, outside click and Escape close.",
+      "variantPopover": "Variant contents popover",
+      "popoverHint": "Open by default; the eye toggles, outside click and Escape close.",
+      "tooltip": "Instruction text tooltip (MAIN-006)",
+      "tooltipHint": "Visible; the delay, triggers and viewport clamping are T-187's."
     }
   }
 }

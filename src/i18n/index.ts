@@ -33,6 +33,7 @@
 import { createI18n } from 'vue-i18n'
 import en from '../locales/en.json'
 import shell from '../locales/en/shell.json'
+import matrix from '../locales/en/matrix.json'
 import dev from '../locales/en/dev.json'
 
 // The dev namespace serves only the DEV-only gallery (T-363): the
@@ -42,7 +43,7 @@ import dev from '../locales/en/dev.json'
 const devMessages = import.meta.env.DEV ? dev : {}
 
 /** The merged English catalog: the base file plus the per-feature files. */
-const catalog = { ...en, ...shell, ...devMessages }
+const catalog = { ...en, ...shell, ...matrix, ...devMessages }
 
 /** The message catalog type: nested feature namespaces, string leaves. */
 export type MessageSchema = typeof catalog

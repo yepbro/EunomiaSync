@@ -1,0 +1,141 @@
+/*
+ * Interactive states of the matrix (T-364): hidden rows, selected rows,
+ * changed cells, caret buttons, the selection chip and the instruction
+ * text tooltip — the mock-up's "Interactive states" section
+ * (docs/prototype/styles.css 950–1098) ported with the theme token swap
+ * applied (`--text` → `--ink`, `--text-muted`/`--text-faint` →
+ * `--ink-muted`, `--border-strong` → `--line`). The section's three
+ * decorative tints (`--row-selected`, `--cell-changed` — styles.css
+ * 963–973 — and, with the cells section, `--row-drop`) are declared in
+ * base.css with the other decorative values. Two rules were already
+ * ported early by T-363 (DECISIONS.md, D-211 ruling 7a) and are NOT
+ * repeated here: `.toggle-count` (styles.css 1083–1090 → toolbar.css)
+ * and `.empty-state` (1093–1097 → matrix.css). The `#text-tooltip` id
+ * selector becomes the `.text-tooltip` class (instance-reusable
+ * component; declarations unchanged). The toolbar bulk button's
+ * `[hidden]` rule of this section's sibling (styles.css 627–629) landed
+ * in matrix-bulk.css. Rendered by MatrixHeadingRow.vue,
+ * MatrixInstructionRow.vue, MatrixCell.vue and
+ * InstructionTextTooltip.vue.
+ */
+
+/* ----- Interactive states (app.js) --------------------------------------- */
+
+/* Hidden column: the project filter collapses the whole column */
+.col-off {
+  visibility: collapse;
+}
+
+/* Hidden row: search / collapsed section */
+.row-off {
+  display: none;
+}
+
+/* Row selected via the leading checkbox (solid bg — sticky cells)
+   (--row-selected lives in base.css with the other decorative tints) */
+.matrix tbody tr.row-selected .c-check,
+.matrix tbody tr.row-selected .c-name,
+.matrix tbody tr.row-selected .c-cell,
+.matrix tbody tr.row-selected .c-fill {
+  background-color: var(--row-selected);
+}
+
+/* Assignment differs from the last synced state: the whole cell gets a
+   gray shade darker than the base cell background; survives hover and
+   selection (--cell-changed lives in base.css) */
+.matrix tbody td.c-cell.cell-changed {
+  background-color: var(--cell-changed);
+}
+
+/* Unassigned cell: everything but the checkbox is hidden */
+.matrix tbody td.c-cell.cell-unchecked .variant-select,
+.matrix tbody td.c-cell.cell-unchecked .cell-icons {
+  display: none;
+}
+
+/* Hidden instructions (LIB-005…007): dimmed + dashed "hidden" chip */
+.row-hidden .name {
+  color: var(--ink-muted);
+}
+
+.hidden-chip {
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--ink-muted);
+  border: 1px dashed var(--ink-muted);
+  border-radius: 999px;
+  padding: 2px 6px;
+  flex: none;
+}
+
+/* Caret buttons: collapse/expand of sections (click anywhere on the row) */
+.row-heading {
+  cursor: pointer;
+  user-select: none;
+}
+
+.caret-btn {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  inline-size: 24px;
+  block-size: 24px;
+  min-inline-size: 24px;
+  min-block-size: 24px;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex: none;
+}
+
+.caret-btn::before {
+  content: '▾';
+  font-size: 11px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.caret-btn[aria-expanded='false']::before {
+  transform: rotate(-90deg);
+}
+
+.caret-btn:hover {
+  color: var(--ink);
+  background: var(--row-hover);
+}
+
+/* "N rows selected" chip in the toolbar */
+.selected-chip {
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+/* Instruction text tooltip (MAIN-006): one fixed-position element shared
+   by every row; the owning component clamps it to the viewport. Themed
+   via CSS vars. */
+.text-tooltip {
+  position: fixed;
+  z-index: 60;
+  max-inline-size: min(440px, calc(100vw - 16px));
+  max-block-size: 260px;
+  overflow: auto;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 0.18);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

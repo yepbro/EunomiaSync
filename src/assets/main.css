@@ -47,6 +47,13 @@
 @import '../styles/sync-panel.css';
 @import '../styles/modal.css';
 @import '../styles/motion.css';
+/* The matrix family's ported sections (T-364), after the shell's. */
+@import '../styles/matrix-columns.css';
+@import '../styles/matrix-rows.css';
+@import '../styles/matrix-bulk.css';
+@import '../styles/matrix-popover.css';
+@import '../styles/matrix-cells.css';
+@import '../styles/matrix-states.css';
 
 /* The frozen mock-up is not a source of utility candidates (see the
    header note above). */

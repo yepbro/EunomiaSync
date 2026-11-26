@@ -1,0 +1,68 @@
+/*
+ * Bulk assignment operations (T-364, §7.4 / UI-010): the toolbar bulk
+ * button's `[hidden]` fix, the project/variant rows of the bulk dialog,
+ * and the column actions menu — the mock-up's "Bulk assignment
+ * operations" section (docs/prototype/styles.css 623–679) ported
+ * verbatim with the theme token swap applied (`--text` → `--ink`,
+ * `--border-strong` → `--line`). The `#column-menu` id selector becomes
+ * the `.column-menu` class: the demo has exactly one element, a
+ * component must be instance-reusable (the declarations are unchanged).
+ * Rendered by ColumnMenu.vue and BulkAssignDialog.vue.
+ */
+
+/* ----- Bulk assignment operations (§7.4 UI bulk operations) --------------- */
+
+/* The toolbar ghost button must really disappear without a selection:
+   .btn sets display, which would defeat the [hidden] attribute */
+#bulk-assign-btn[hidden] {
+  display: none;
+}
+
+/* Project/variant rows of #bulk-dialog: the .ps-check-row idiom plus the
+   header color dot */
+.bulk-row {
+  padding-block: 3px;
+}
+
+.bulk-row .proj-color {
+  inline-size: 10px;
+  block-size: 10px;
+}
+
+/* Column actions menu: one reusable fixed-position menu per project
+   header "⋮" button; the owning component positions and clamps it like
+   the tooltip. display:flex would defeat the [hidden] attribute, so it
+   is re-applied explicitly. */
+.column-menu {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 180px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 0.18);
+}
+
+.column-menu[hidden] {
+  display: none;
+}
+
+.column-menu button {
+  appearance: none;
+  font: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: start;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.column-menu button:hover {
+  background: var(--row-hover);
+}
