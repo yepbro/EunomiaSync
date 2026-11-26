@@ -28423,8 +28423,10 @@ future MarkdownPreview.vue for HTML sanitized by the backend
 (SEC-005) — card T-190's work; the confirmed defects, the false record
 and the stale documents are fixed now, in one commit; the layered work
 goes through the existing cards T-149, T-150, T-153 and T-368; the
-separate review of the styles commit 4b3d788 is waived — one review
-covers both commits.
+separate review of the styles commit ce9d7a4 is waived — one review
+covers both commits (ce9d7a4 is that commit's hash after the branch was
+rebased onto `main` before its merge; the review itself ran on
+4b3d788, the pre-rebase hash its report names).
 
 1. **One floating layer per kind (review H2).** useDismiss ignored a
    CLASS (`ignoreSelector`): the outside-click check returned early
