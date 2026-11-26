@@ -8,9 +8,9 @@
  * `.ie-warnings-list` and the 760px media query) style #edit-dialog's
  * markup and were ported with the instruction editor (T-365, D-213
  * point 5), and the `.fp-body` base + the markdown selector groups
- * ride the same file (src/styles/library-editor.css). The
- * empty-column note (`.fp-note`, MAIN-033's no-assignments state) is
- * rendered by FilePreviewDialog.vue.
+ * ride the same file (src/components/library/instruction-editor.css).
+ * The empty-column note (`.fp-note`, MAIN-033's no-assignments state)
+ * is rendered by FilePreviewDialog.vue.
  *
  * The mock-up's class names are kept (the porting rule).
  */

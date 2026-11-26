@@ -10,7 +10,7 @@
  * reusable (the D-212 precedent), and the compound keeps the override
  * above the generic `.modal-lg form` height rule of the
  * project-settings section. The badges ride the ported `.chip` base
- * (src/styles/matrix-rows.css).
+ * (src/components/matrix/matrix-rows.css).
  *
  * The indeterminate bar is a NATIVE <progress> without a value in the
  * build (the card's reading): the browser paints and animates its own

@@ -9,8 +9,9 @@
  * 963–973 — and, with the cells section, `--row-drop`) are declared in
  * base.css with the other decorative values. Two rules were already
  * ported early by T-363 (DECISIONS.md, D-211 ruling 7a) and are NOT
- * repeated here: `.toggle-count` (styles.css 1083–1090 → toolbar.css)
- * and `.empty-state` (1093–1097 → matrix.css). The `#text-tooltip` id
+ * repeated here: `.toggle-count` (styles.css 1083–1090 →
+ * src/components/shell/toolbar.css) and `.empty-state` (1093–1097 →
+ * src/components/shell/matrix-frame.css). The `#text-tooltip` id
  * selector becomes the `.text-tooltip` class (instance-reusable
  * component; declarations unchanged). The toolbar bulk button's
  * `[hidden]` rule of this section's sibling (styles.css 627–629) landed

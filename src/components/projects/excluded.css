@@ -8,8 +8,9 @@
  * `.modal-lg form` height rule of the project-settings section: like
  * the archived list, the demo list only shrinks. The rows reuse the
  * archived modal's idiom (`.scan-row`, `.ar-list`, `.ar-meta`,
- * `.chip` — src/styles/scan.css, src/styles/archived.css,
- * src/styles/matrix-rows.css).
+ * `.chip` — src/components/projects/scan.css,
+ * src/components/projects/archived.css,
+ * src/components/matrix/matrix-rows.css).
  *
  * The badge wording carries the meaning; the tint only supports it:
  * neutral for "Added manually" (the default .chip look), tinted for

@@ -5,6 +5,10 @@
  * `.toggle-count` (styles.css 1083–1090) — the hidden-instructions
  * counter is visible at rest in the shell, so its rule rides along;
  * the rest of styles.css 950–1098 stays with the cards T-364…T-367.
+ * The `.spacer` utility lived here until the styles partition of
+ * 2026-11-26 moved it to src/styles/base.css with the other
+ * cross-family utilities (DECISIONS.md, D-221); this file now lives
+ * next to the shell's components.
  */
 
 /* ----- Toolbar (D-14, UI: search + project filter + "Show hidden") ----- */
@@ -102,10 +106,6 @@
   cursor: pointer;
   user-select: none;
   white-space: nowrap; /* the label must not stack at the 960px minimum */
-}
-
-.spacer {
-  flex: 1 1 auto;
 }
 
 /* Hidden-instruction counter next to the "Show hidden" toggle: dashed

@@ -9,6 +9,9 @@
  * danger button's text from the reference's literal #ffffff to
  * on-accent: white on the dark danger is 2.77:1, on-accent 5.35; in
  * the light theme on-accent is white, so the light look is unchanged.
+ * Every generic .btn* rule lives here: the two disabled-state rules
+ * moved in from the projects family's project-settings section in the
+ * styles partition of 2026-11-26 (DECISIONS.md, D-221).
  */
 
 /* ----- Buttons ---------------------------------------------------------- */
@@ -53,4 +56,15 @@
 
 .btn-danger:hover {
   filter: brightness(0.92);
+}
+
+/* Disabled confirm button (typed name does not match yet — T-165's
+   behavior; the archive dialog renders the disabled state at rest) */
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn-danger:disabled:hover {
+  filter: none;
 }

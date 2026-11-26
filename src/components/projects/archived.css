@@ -10,9 +10,10 @@
  * the auto height above the generic `.modal-lg form` height rule of
  * the project-settings section: the list only shrinks, so the dialog
  * sizes to its content. The rows ride the scan-results row idiom
- * (`.scan-row`, src/styles/scan.css), the color dot the ported
- * `.proj-color` (src/styles/matrix-columns.css), the empty state the
- * history panel's `.hist-empty` (src/styles/library-history.css).
+ * (`.scan-row`, src/components/projects/scan.css), the color dot the
+ * ported `.proj-color` (src/components/matrix/matrix-columns.css),
+ * the empty state the history panel's `.hist-empty`
+ * (src/components/library/history.css).
  *
  * Rendered by ArchivedProjectsDialog.vue.
  */

@@ -5,7 +5,7 @@
  * the reference's muted and faint text tokens both map to
  * `--ink-muted`, its focus token to `--focus-ring`, its strong-border
  * token to `--line`). The op chips ride the ported `.chip` base
- * (src/styles/matrix-rows.css). The two
+ * (src/components/matrix/matrix-rows.css). The two
  * `.modal-lg` layout rules here are this section's own (the subtitle
  * and the scrolling body); the `.modal-lg` width lives in
  * src/styles/modal.css and is not ported twice. The scrolling body

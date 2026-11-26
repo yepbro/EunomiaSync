@@ -5,7 +5,7 @@
  * the reference's muted and faint text tokens both map to
  * `--ink-muted`, its strong-border token to `--line`). The table
  * reuses the ported `.hist-table` idiom and the result badges extend
- * the `.hist-op` idiom (src/styles/library-history.css, T-365's
+ * the `.hist-op` idiom (src/components/library/history.css, T-365's
  * section); the empty state rides the ported `.hist-empty`. The
  * `#act-rows`/`#act-empty` id selectors of the markup are JS handles
  * and carry no rules here.

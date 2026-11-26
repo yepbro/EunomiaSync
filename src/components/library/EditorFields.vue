@@ -6,9 +6,8 @@
 // here: the values arrive per render from the dialog's selected
 // variant (the fields re-render on selection), the error paragraphs
 // keep the mock-up's markup hidden until the validation card lands
-// (T-189). The .ps-input/.ps-error styles live in the project-settings
-// card's section (styles.css 1543+) and land with it — the D-212
-// precedent for the shared form idioms.
+// (T-189). The .ps-input/.ps-error styles live in src/styles/form.css
+// (the shared form primitives).
 import { useId } from 'vue'
 import { useI18n } from 'vue-i18n'
 

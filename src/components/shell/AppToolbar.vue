@@ -65,7 +65,8 @@ const { t, n } = useI18n()
     <!-- Bulk assignment (§7.4 UI bulk operations, UI-010): appears with
          a row selection. Hidden in this skeleton: there is no selection
          state yet (the matrix card wires it). The id is the reference
-         markup fact — #bulk-assign-btn[hidden] (matrix-bulk.css)
+         markup fact — #bulk-assign-btn[hidden]
+         (src/components/matrix/matrix-bulk.css)
          overrides .btn's display, so `hidden` really hides the button. -->
     <button id="bulk-assign-btn" type="button" class="btn btn-ghost" :hidden="selectedCount === 0">
       {{ t('shell.toolbar.bulkAssign') }}

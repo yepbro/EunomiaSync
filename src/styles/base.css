@@ -3,8 +3,9 @@
  * 83–136) ported verbatim with the theme-token swap applied (the
  * reference's text/background/focus tokens map to the theme.css names —
  * the swap table lives in DECISIONS.md, T-363 entry). Plain global
- * rules on purpose: the sticky matrix offsets and the visually-hidden
- * utility must work from any template, not from a scoped subtree.
+ * rules on purpose: the sticky matrix offsets and the tiny utilities
+ * (.spacer, .visually-hidden) must work from any template, not from a
+ * scoped subtree.
  *
  * The mock-up's own palette block (styles.css 24–82) is NOT ported —
  * colors live only in src/assets/theme.css. What IS carried here are
@@ -114,4 +115,12 @@ body {
   padding: 0 !important;
   border: 0 !important;
   white-space: nowrap !important;
+}
+
+/* Horizontal flex filler (the toolbar's clusters, the library editor's
+   and the scan window's action rows): a cross-family utility, so it
+   lives here — moved out of the toolbar section in the styles
+   partition of 2026-11-26 (DECISIONS.md, D-221). */
+.spacer {
+  flex: 1 1 auto;
 }

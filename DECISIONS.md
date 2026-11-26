@@ -28283,3 +28283,119 @@ The full chain was re-run green after the round-1 fixes and stands
 for the commit; this addendum is the commit's only delta after it
 (doc-only, the pre-commit hook's four checks re-run green on the
 amend).
+
+### D-221 — the styles re-partition by owner — the stylesheets moved next to their components, the shared primitives stay in src/styles; a pure move (427 rules), the rest state identical — 2026-11-26
+
+Problem: the 25 ported stylesheets under src/styles/ were partitioned
+by the mock-up's stylesheet sections — a temporary shape from the port
+(D-211…D-216). Parallel work requires that each task touch only its
+own component's files, so one family's rules had to stop living in a
+shared directory. One file for everything was considered and declined:
+every task would edit the same file, and two tasks adding a block
+would collide. The owner's ruling of 2026-11-26: every family owns its
+stylesheets next to its components; src/styles/ keeps only what at
+least two families share (base, buttons, modal, the new form, motion);
+all imports stay centralized in src/assets/main.css, one explicit line
+per stylesheet, so the cascade order stays explicit and deterministic.
+
+Sources: the owner's ruling of 2026-11-26; the static proofs
+rules-before.json / rules-after.json / pure-move.txt, the order review
+order-flips.json / order-review.md / co-class-check.cjs /
+co-class-hits.json, and the browser capture capture-before.log /
+capture-after.log / before-hashes.json / after-hashes.json /
+before.tsv.gz / after.tsv.gz / diff-report.md with the repeat runs
+capture-det1.log / capture-det2.log — all under
+/home/brooks/projects/business/EunomiaSync/.opencode/audits/styles-refactor-2026-11-26/
+(gitignored, outside the repository; the scripts are capture.cjs,
+rules.cjs, order-flips.cjs, co-class-check.cjs, diff.cjs).
+
+1. **The partition.** 21 stylesheets moved, plain global CSS, class
+   names unchanged, every selector and declaration identical:
+   about.css → components/about/about.css; activity.css →
+   components/activity/activity.css; help.css → components/help/
+   help.css; library-history.css → components/library/history.css;
+   library-editor.css → components/library/instruction-editor.css;
+   matrix-bulk/cells/columns/popover/rows/states.css → components/
+   matrix/; archived/excluded/file-preview/project-settings/scan.css →
+   components/projects/; settings.css → components/settings/;
+   matrix.css → components/shell/matrix-frame.css; sync-panel.css and
+   toolbar.css → components/shell/; sync-summary.css →
+   components/sync/. Shared in src/styles/: base.css, buttons.css and
+   modal.css keep the cross-family primitives (parts of the form
+   idioms and the generic .btn*/.modal* rules moved in from
+   project-settings.css), motion.css untouched, and form.css is NEW —
+   the shared form idioms .field-label, .edit-text, .ps-* pulled out
+   of project-settings.css because more than one family uses them.
+
+2. **Static proof — the pure move holds.** rules.cjs compares the
+   distinct rule texts (selectors and declaration bodies) extracted
+   from the before tree (25 files, the mock-up's import order) and the
+   after tree (26 files, the by-owner order): distinct rules 427 =
+   427, PURE MOVE: HOLDS. Nothing is scoped, layered or renamed;
+   src/assets/theme.css is untouched.
+
+3. **Static proof — the order review.** order-flips.cjs compares
+   every rule pair whose relative order changed and keeps those that
+   could matter: equal specificity (any selector of A against any of
+   B) and at least one shared declared property. 1022 such pairs
+   flipped; the heuristic flagged 5; co-class-check.cjs swept all 1022
+   against every static class attribute in src/components/** +
+   src/App.vue (568 elements): 0 same-element class overlaps, so 0
+   real co-matches — no reorder required. The five flagged pairs each
+   carry a "cannot co-match" verdict in order-review.md (checked
+   against the markup: .ps-scheme blocks contain only type="radio"
+   inputs; no element carries ps-body together with hist-subtitle,
+   hist-body, fp-path, h2, .ps-tabs, .ps-danger or .modal-actions).
+
+4. **Browser proof — the rest state at REST is identical.** The
+   capture walks 37 passes (35 gallery screens + the main window + the
+   gallery launcher panel) × 2 themes and records 269 properties per
+   element in rest, hover and focus states: 482,133 rows before,
+   482,116 after. NOT ONE rest-state key differs: every missing, extra
+   and differing key in diff-report.md is a hover@ or focus@ key (153
+   missing, 136 extra — all hover or focus; 83 differing hashes — all
+   focus, differing only in outline*). No stylesheet of the project
+   declares a 3px outline, and the four focus rules are the same
+   before and after, so the "after" outline values cannot come from
+   the moved rules in any order. The focus differences are the
+   browser's :focus-visible heuristic, i.e. the capture method, not
+   the CSS. A direct probe of main.matrix-wrap on the re-partitioned
+   tree (Vite dev server, Playwright Chromium, 1440×900, reduced
+   motion): `focus()` as the first action on a fresh page →
+   :focus-visible TRUE → `outline: 2px solid rgb(37, 99, 235)`,
+   `outline-offset: -2px` (the project's focus ring; the dark theme
+   gives rgb(96, 165, 250)); `focus()` right after a real mouse click
+   → :focus-visible FALSE → `outline: 3px none rgb(15, 23, 42)`,
+   `outline-offset: 0px` — the browser's INITIAL values when no
+   outline is shown (outline-width: medium = 3px, outline-color:
+   currentColor). The capture hovers a representative and then focuses
+   it: when the hover lands, the browser is in mouse modality and the
+   programmatic focus shows no ring; when the hover is skipped, no
+   mouse input preceded the focus and the ring shows. Hovers succeed
+   and fail differently from run to run — the two repeat runs on the
+   same code differ in hover rows per screen (64 vs 77, 85 vs 98,
+   91 vs 104, 165 vs 184). Therefore the rest state is proven
+   identical by the capture; hover and focus captures are NOT a valid
+   oracle for this refactor (they depend on the input modality and on
+   hover actionability); interactive states are covered by the static
+   proofs — the identical rule set including every :hover/:focus rule,
+   and the order review of the flips — plus the probe above.
+
+5. **The suites.** Unit suite: 405/405 tests pass; the process exits 1
+   because of a pre-existing harness race unrelated to this change —
+   src/assets/theme.spec.ts mounts and unmounts the shell without
+   awaiting the DEV-guarded seed import (the hazard D-218 fixed in
+   App.spec.ts only); App.vue, both specs and src/dev/seed/** are
+   unmodified by this commit. The race is fixed in the next commit.
+   E2E: 4/4 green. Light checks (cargo fmt --check, eslint, prettier
+   --check, vue-tsc, vite build): all exit 0.
+
+6. **The rule for future cards.** A new component's styles go to its
+   family folder (src/components/<family>/<name>.css) and add ONE
+   import line at the family's position in src/assets/main.css —
+   never a component-level import. Styles shared by two or more
+   families go to src/styles/ with the same one-line central import.
+
+7. **Supersession.** The "styles under src/styles/" statements in
+   D-211…D-216 describe the port-time layout and are superseded by
+   this record; as dated history they are not rewritten.

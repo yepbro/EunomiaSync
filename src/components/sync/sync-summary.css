@@ -11,8 +11,8 @@
  * become classes (the D-212 id→class precedent), as does the
  * `#sync-summary-dialog` footer rule (the `.sync-summary-dialog`
  * class on the BaseModal root). The op/status chips ride the ported
- * `.chip` base (src/styles/matrix-rows.css) and the results table
- * reuses the ported `.hist-*` table idiom's look by carrying its own
+ * `.chip` base (src/components/matrix/matrix-rows.css) and the results
+ * table reuses the ported `.hist-*` table idiom's look by carrying its own
  * `.ss-table` copy (the reference keeps a separate table section).
  *
  * The mock-up's class names are kept (the porting rule).

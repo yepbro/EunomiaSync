@@ -10,8 +10,7 @@
 // data, T-185's). No behavior: no validation, no create/rename
 // (T-185's family); Cancel/Save are the form's method="dialog" return
 // values. The .ps-field/.ps-input/.ps-error/.ps-hint styles live in
-// the project-settings card's section (styles.css 1543+) and land
-// with it — the D-212 precedent for the shared form idioms.
+// src/styles/form.css (the shared form primitives).
 import { computed, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseModal from '../ui/BaseModal.vue'

@@ -4,8 +4,8 @@
  * swap applied (the swap table lives in DECISIONS.md, D-206/D-211;
  * the reference's muted and faint text tokens both map to
  * `--ink-muted`, its strong-border token to `--line`). The brand mark
- * (`.brand-mark`, src/styles/toolbar.css), the chips
- * (src/styles/matrix-rows.css), the hint idiom and the global
+ * (`.brand-mark`, src/components/shell/toolbar.css), the chips
+ * (src/components/matrix/matrix-rows.css), the hint idiom and the global
  * :focus-visible outline are already ported. The update check's
  * result-state rules (`.about-result-line`, the update/installed
  * chips, `.about-changes`, `.about-install`) ride along: their

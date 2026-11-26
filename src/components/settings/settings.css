@@ -3,8 +3,8 @@
  * (docs/prototype/styles.css 2524–2588) ported verbatim — the range
  * carries no color tokens, so no theme-token swap arises. It reuses
  * the project settings form idioms (.ps-section/.ps-field/.ps-scheme/
- * .ps-check-row/.ps-hint/.ps-error — src/styles/project-settings.css,
- * T-366's section); only the parts without an existing class are
+ * .ps-check-row/.ps-hint/.ps-error — src/styles/form.css, the shared
+ * primitives); only the parts without an existing class are
  * carried here, exactly as the reference does.
  *
  * The mock-up's class names are kept (the porting rule).

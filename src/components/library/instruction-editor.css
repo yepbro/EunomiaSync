@@ -14,9 +14,8 @@
  * .ie-warnings-list, the narrow-window media query) and are ported
  * here — they style #edit-dialog's markup. The `.ps-input`,
  * `.ps-select`, `.ps-tabs`, `.ps-error`, `.ps-hint` form idioms the
- * markup reuses stay unported: they live in the project-settings
- * section (styles.css 1543–1915) and land with it (the D-212
- * precedent for the shared form idioms).
+ * markup reuses live in src/styles/form.css (the shared form
+ * primitives; the D-212 precedent for the shared form idioms).
  *
  * The mock-up's class names are kept (the porting rule).
  */

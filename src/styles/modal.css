@@ -5,7 +5,10 @@
  * (UI-002). Two size modifiers ride along from the per-dialog sections
  * (styles.css 1167–1169 and 1545–1547): `.modal-xl` and `.modal-lg`
  * are the BaseModal size props' widths, not dialog layout; the rest of
- * styles.css 1160–3125 belongs to the cards T-364…T-367.
+ * styles.css 1160–3125 belongs to the cards T-364…T-367. The shared
+ * field primitives (`.field-label`, `.edit-text`) lived here until the
+ * styles partition of 2026-11-26 moved them to src/styles/form.css
+ * with the other cross-family form idioms (DECISIONS.md, D-221).
  */
 
 /* ----- Modal base (native <dialog>: focus management, inert background,
@@ -46,27 +49,6 @@
   justify-content: flex-end;
   gap: 10px;
   margin-top: 6px;
-}
-
-/* Shared field label + monospace editor text (UI-003; also used by the
-   project settings modal) */
-.field-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--ink-muted);
-}
-
-.edit-text {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--ink);
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  resize: vertical;
-  min-block-size: 110px;
 }
 
 /* Size modifiers (BaseModal's `size` prop; styles.css 1167–1169 and

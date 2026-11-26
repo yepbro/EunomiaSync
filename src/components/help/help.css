@@ -5,7 +5,7 @@
  * the reference's muted and faint text tokens both map to
  * `--ink-muted`, its text token to `--ink`, its strong-border token
  * to `--line`). The empty state rides the ported `.hist-empty`
- * (src/styles/library-history.css, T-365's section); the article's
+ * (src/components/library/history.css, T-365's section); the article's
  * body typography mirrors the editor preview's ported rules.
  *
  * The mock-up's class names are kept (the porting rule).

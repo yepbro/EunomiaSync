@@ -1,0 +1,195 @@
+/*
+ * Shared form primitives: the field/label idioms carried by the markup
+ * of TWO OR MORE component families — the library editor's tabs and
+ * fields (T-365), the heading and bulk-assign dialogs, the archive
+ * dialog, the project settings (T-366) and the app settings (T-367);
+ * the D-212/D-213 precedent for the shared form idioms. One file so a
+ * parallel task never has to edit a foreign family's stylesheet (the
+ * styles partition of 2026-11-26, DECISIONS.md D-221). The rules are a
+ * pure move out of src/styles/modal.css (`.field-label`, `.edit-text`)
+ * and the projects family's project-settings.css (the `.ps-*` rules);
+ * the selectors and the declarations are untouched, and their original
+ * relative order within each source file is kept.
+ *
+ * The mock-up's class names are kept (the porting rule).
+ */
+
+/* Shared field label + monospace editor text (UI-003; also used by the
+   project settings modal) */
+.field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+.edit-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  resize: vertical;
+  min-block-size: 110px;
+}
+
+/* Fixed scrolling body of the tabbed, fixed-height dialogs (the
+   project settings and the app settings) */
+.modal-lg .ps-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  /* Inner side insets: with overlay scrollbars the fields otherwise sit
+     flush against (and partly under) the scrollbar, and the content
+     touches the dialog borders on both sides while scrolling (PRJ-008,
+     UI-023) */
+  padding-inline: 12px;
+}
+
+/* `hidden` must win over the flex display of panels and fields */
+.ps-panel[hidden],
+.ps-field[hidden] {
+  display: none;
+}
+
+/* Tabs: General / Backups (BKP-004) */
+.ps-tabs {
+  display: flex;
+  gap: 4px;
+  border-block-end: 1px solid var(--border);
+}
+
+.ps-tab {
+  appearance: none;
+  font: inherit;
+  font-weight: 600;
+  color: var(--ink-muted);
+  background: transparent;
+  border: 0;
+  border-block-end: 2px solid transparent;
+  margin-block-end: -1px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.ps-tab:hover {
+  color: var(--ink);
+}
+
+.ps-tab[aria-selected='true'] {
+  color: var(--ink);
+  border-block-end-color: var(--accent);
+}
+
+.ps-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-block-start: 1px solid var(--border);
+  padding-block-start: 12px;
+}
+
+.ps-section-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ink-muted);
+}
+
+/* Fields */
+.ps-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.ps-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-inline-size: 0;
+}
+
+.ps-input,
+.ps-textarea {
+  font: inherit;
+  inline-size: 100%;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+}
+
+.ps-select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+}
+
+.ps-pos-select {
+  inline-size: 92px;
+  flex: none;
+}
+
+.ps-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ink-muted);
+}
+
+.ps-error {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--danger);
+}
+
+.ps-hint code,
+.ps-scheme code,
+.ps-check-row code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+/* Schemes (PRJ-012) */
+.ps-schemes {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.ps-scheme {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.ps-scheme input {
+  margin-block-start: 2px;
+  accent-color: var(--accent);
+}
+
+.ps-scheme strong {
+  font-weight: 650;
+}
+
+.ps-extra-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ps-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  cursor: pointer;
+}

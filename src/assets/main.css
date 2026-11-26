@@ -25,13 +25,23 @@
  *    directory of the file carrying it (this file), not the project
  *    root — tailwindcss 4.3.5 builds each source's base from the
  *    containing stylesheet — hence the two levels up.
- *  - The shell's ported stylesheets (T-363) live in src/styles/, one
- *    file per section of the frozen mock-up's stylesheet
- *    (docs/prototype/styles.css): base, toolbar, buttons, matrix,
- *    sync-panel, modal, motion. They are plain global stylesheets —
+ *  - The ported stylesheets (T-363…T-367) are partitioned by OWNER
+ *    (the styles partition of 2026-11-26, DECISIONS.md D-221):
+ *    src/styles/ keeps only what at least two component families
+ *    share — base (element defaults, decorative custom properties,
+ *    the .spacer/.visually-hidden utilities), buttons (every generic
+ *    .btn* rule), form (the shared .field-label/.edit-text/.ps-*
+ *    form idioms), modal (the generic .modal* rules) and motion.
+ *    Every family owns its stylesheets next to its components
+ *    (src/components/<family>/). Plain global stylesheets on purpose —
  *    the reference's rules are structural (position:sticky offsets,
- *    ::backdrop) and do not survive scoping — imported right after
- *    theme.css because CSS @import rules must precede other statements.
+ *    ::backdrop) and do not survive scoping. All imports stay
+ *    centralized HERE, one explicit line per stylesheet in the proven
+ *    cascade order: if each component imported its own stylesheet,
+ *    the CSS order would follow the module graph and shift with code
+ *    splitting. The rule for future components: a new component's
+ *    styles go to its family folder and add ONE import line at the
+ *    family's position below — never a component-level import.
  *  - @layer base carries the app-wide accessibility norms: a visible
  *    theme-aware focus ring (UI-021) and the >=24px minimum for
  *    interactive controls (NFR-022). Component styles may override the
@@ -40,47 +50,57 @@
  */
 @import 'tailwindcss';
 @import './theme.css';
+
+/* ----- Shared primitives (used by two or more component families).
+   Their rules carry no cascade interactions of their own, so their
+   position before every family block is safe. */
 @import '../styles/base.css';
-@import '../styles/toolbar.css';
 @import '../styles/buttons.css';
-@import '../styles/matrix.css';
-@import '../styles/sync-panel.css';
+@import '../styles/form.css';
 @import '../styles/modal.css';
 @import '../styles/motion.css';
+
+/* ----- Component families: one import line per stylesheet, in the
+   frozen mock-up's section order within each family. */
+
+/* The shell (T-363): toolbar, matrix frame, sync panel. */
+@import '../components/shell/toolbar.css';
+@import '../components/shell/matrix-frame.css';
+@import '../components/shell/sync-panel.css';
+
 /* The matrix family's ported sections (T-364), after the shell's. */
-@import '../styles/matrix-columns.css';
-@import '../styles/matrix-rows.css';
-@import '../styles/matrix-bulk.css';
-@import '../styles/matrix-popover.css';
-@import '../styles/matrix-cells.css';
-@import '../styles/matrix-states.css';
+@import '../components/matrix/matrix-columns.css';
+@import '../components/matrix/matrix-rows.css';
+@import '../components/matrix/matrix-bulk.css';
+@import '../components/matrix/matrix-popover.css';
+@import '../components/matrix/matrix-cells.css';
+@import '../components/matrix/matrix-states.css';
 
 /* The library family's ported sections (T-365): the instruction
    editor (UI-003) and the history panel (LIB-026/027). The small
    confirmation dialogs' slot carried no rules and was removed by
-   T-366 (the shared form idioms land with the project-settings
-   section below). */
-@import '../styles/library-editor.css';
-@import '../styles/library-history.css';
+   T-366 (the shared form idioms live in src/styles/form.css). */
+@import '../components/library/instruction-editor.css';
+@import '../components/library/history.css';
 
 /* The projects family's ported sections (T-366): file preview,
    project settings, scan, archived and excluded paths. */
-@import '../styles/file-preview.css';
-@import '../styles/project-settings.css';
-@import '../styles/scan.css';
-@import '../styles/archived.css';
-@import '../styles/excluded.css';
+@import '../components/projects/file-preview.css';
+@import '../components/projects/project-settings.css';
+@import '../components/projects/scan.css';
+@import '../components/projects/archived.css';
+@import '../components/projects/excluded.css';
 
 /* The service screens' ported sections (T-367): the sync summary and
    the sync bar's run-progress line, the app settings, the activity,
    the help and About windows. With these the frozen mock-up's
    stylesheet is ported in full (the deliberately unported parts are
    recorded in DECISIONS.md, T-367's entry). */
-@import '../styles/sync-summary.css';
-@import '../styles/settings.css';
-@import '../styles/activity.css';
-@import '../styles/help.css';
-@import '../styles/about.css';
+@import '../components/sync/sync-summary.css';
+@import '../components/settings/settings.css';
+@import '../components/activity/activity.css';
+@import '../components/help/help.css';
+@import '../components/about/about.css';
 
 /* The frozen mock-up is not a source of utility candidates (see the
    header note above). */
