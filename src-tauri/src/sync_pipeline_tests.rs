@@ -4,7 +4,11 @@
 //! the §15.4 mapping of DoD 7, 13–15 and 17; OUT-005, OUT-011, OUT-012,
 //! OUT-014, OUT-015 — widened by task T-127 with §15.2's failure rows
 //! T-F1 and T-F10: DoD 11/12's backup refusal and DoD 16's copy limit,
-//! OUT-006/OUT-019 and BKP-003/005/006/009).
+//! OUT-006/OUT-019 and BKP-003/005/006/009 — and by task T-128 with
+//! §15.2's write-path rows T-F5…T-F8: the read-only skip (OUT-007/008,
+//! D-094), the symlinked target (D-092), the vanished project folder
+//! and the locked file (§9.4 phase 3 step 3, §10's
+//! `E_WRITE_FAILED`/`E_FILE_LOCKED`).
 //!
 //! Every test drives the REAL pipeline — [`crate::commands::sync_run`]
 //! over the production seams through the five §9.4 phases, a real
@@ -19,7 +23,12 @@
 //! production seams spell as the real clock, and the T-F1 failure row
 //! injects its refusing copy through the command's own `backup` seam
 //! (the app layer's honest injector — sync_phase2's docs) while
-//! everything else stays production.
+//! everything else stays production. T-128's two refusals follow the
+//! same injector: T-F7's write seam deletes the project folder and
+//! then calls the production write — the refusal the run answers with
+//! is the OS's own ENOENT, not a synthetic error — and T-F8's answers
+//! the typed `E_FILE_LOCKED` endgame the exhausted §9.5 ladder
+//! produces, the ladder itself staying eunomia-fs's pin (D-099).
 //!
 //! # The oracles are the spec's literals
 //!
@@ -50,6 +59,10 @@
 //! | `an_aborted_run_stamps_the_abort_clock_and_never_moves_the_last_success` | §9.4 phase 4 step 4 (MAIN-027), OUT-020, D-131, D-185, D-197 |
 //! | `a_backup_failure_of_the_second_of_three_files_changes_no_file_sweeps_the_created_copies_and_aborts_the_run` | T-F1, §15.4 DoD 11/12, OUT-006, OUT-019, BKP-005/009, §9.4 phase 2 step 2, §10 `E_BACKUP_FAILED`, OUT-020, MAIN-027 |
 //! | `a_backup_limit_of_three_keeps_exactly_the_last_three_copies_after_five_syncs_with_changes` | T-F10, §15.4 DoD 16, BKP-003/006, §6.4, §6.5 `backup.retention`, §9.4 phase 4 step 2 |
+//! | `a_read_only_target_is_skipped_with_e_no_write_access_while_the_run_continues` | T-F5, OUT-007/008, D-094, §10 `E_NO_WRITE_ACCESS`, §9.4 phase 2, OUT-020, MAIN-027 |
+//! | `a_symlinked_claude_md_target_writes_the_real_file_and_the_link_survives` | T-F6, §9.4 phase 1 step 2 (D-092), ALG-020…022, BKP-001, OUT-020 |
+//! | `a_project_folder_deleted_between_preflight_and_the_write_fails_only_that_project` | T-F7, §9.4 phase 3 step 3, §10 `E_WRITE_FAILED` (the D-099 fold), OUT-020 |
+//! | `a_locked_target_fails_its_project_with_e_file_locked_and_the_backup_stays` | T-F8, §9.4 phase 3 step 3, §10 `E_FILE_LOCKED`, §9.5 step 4 (D-099's ladder, pinned in `eunomia-fs`), OUT-020 |
 //!
 //! # The "no file observer" clause
 //!
@@ -70,8 +83,10 @@
 //! operations of one test go through the store writers those commands
 //! will call over the same `Db::run` executor — the posture of the
 //! phase-0 suite's mid-run-edit test. The run itself is always the real
-//! command (two tests substitute the command's own seams for refusals
-//! — the write seam and, for T-F1, the backup copy seam, both §15.1
+//! command (the write seam is substituted by three tests — the
+//! E_WRITE_FAILED example of OUT-020, T-F7's vanishing-folder fixture,
+//! T-F8's typed lock refusal — the backup copy seam by T-F1's, and the
+//! abort clock by the abort characterization's, all §15.1
 //! fault-injection rows). The harness owns its copies of the mock-app
 //! shape because every sibling suite's helpers are private to it; the
 //! error mappers are the consolidated seams (D-162, D-171), never a
@@ -107,7 +122,9 @@ use tauri::Manager;
 use tauri::test::{MockRuntime, mock_builder, mock_context, noop_assets};
 use tauri_specta::Event;
 
-use eunomia_fs::atomic::{AtomicWriteError, WriteFailed, WriteStep, WrittenFile};
+use eunomia_fs::atomic::{
+    AtomicWriteError, FileLockedFailure, WriteFailed, WriteStep, WrittenFile,
+};
 use eunomia_fs::backup::{BackupError, BackupOutcome, BackupTarget};
 use eunomia_fs::temp_repos::{RepoRoot, TempRepos};
 use eunomia_store::backup_records::{BackupRecord, BackupRecordStatus, list_for_project};
@@ -774,6 +791,43 @@ fn text_of(bytes: &[u8], what: &str) -> String {
 
 fn write(path: &Path, contents: impl AsRef<[u8]>) {
     fs::write(path, contents).expect("writing the file must work");
+}
+
+/// Marks a file read-only for a scope and restores the original
+/// permissions when the scope ends — std's `set_readonly`, the D-094
+/// definition of the "marked read-only" state, honored by the
+/// write-access probe on every platform, root included (the probe
+/// reads the flag, it does not predict the OS). The phase-1 suite's
+/// own fixture, owned here per the harness posture, plus the restore
+/// half: `set_readonly(false)` would re-add EVERY write bit on Unix
+/// (clippy's `permissions_set_readonly_false`), and on Windows a
+/// read-only file refuses its own removal — the fixture folders go
+/// with the world only if the original mode returns, panic included.
+struct ReadOnlyMark {
+    path: PathBuf,
+    permissions: fs::Permissions,
+}
+
+impl ReadOnlyMark {
+    fn new(path: &Path) -> Self {
+        let permissions = fs::metadata(path)
+            .expect("stating the fixture file must work")
+            .permissions();
+        let mut marked = permissions.clone();
+        marked.set_readonly(true);
+        fs::set_permissions(path, marked).expect("marking the fixture read-only must work");
+        Self {
+            path: path.to_owned(),
+            permissions,
+        }
+    }
+}
+
+impl Drop for ReadOnlyMark {
+    fn drop(&mut self) {
+        fs::set_permissions(&self.path, self.permissions.clone())
+            .expect("restoring the fixture's permissions must work");
+    }
 }
 
 /// The sorted entry names of a folder.
@@ -2738,4 +2792,524 @@ fn a_backup_limit_of_three_keeps_exactly_the_last_three_copies_after_five_syncs_
             );
         }
     }
+}
+
+// ---- the §15.2 write-path rows: read-only, symlink, vanished folder,
+// locked file (T-128) -------------------------------------------------------
+
+#[test]
+fn a_read_only_target_is_skipped_with_e_no_write_access_while_the_run_continues() {
+    // T-F5 — "The target file is read-only" → "`skipped`,
+    // `E_NO_WRITE_ACCESS`" (§15.2; §9.4 phase 1 step 3, OUT-007/008,
+    // D-094; §10's row). The preflight half is the phase-1 suite's pin
+    // (`a_read_only_target_is_skipped_and_the_run_continues` — the
+    // probe's verdict, the healthy project readied), and the add-time
+    // warning over the same flag is the ipc/scan suites' fact; what
+    // no suite pinned is the RUN-level row the Expected cell spells:
+    // the statuses and the §10 literal through the real command, the
+    // untouched file, the backupless skip (phase 2 copies `ready`
+    // projects' files — a skipped project gains nothing), and OUT-020's
+    // kept-previous-state half, which only means something over a
+    // non-empty previous state — hence the prepare run.
+    let (world, _library, _events) = three_scheme_world(
+        BaseName::AgentsMd,
+        BaseName::ClaudeMd,
+        BaseName::ClaudeMd,
+        Some(B_OLD_BLOCK),
+    );
+    // Old bytes on the two whole-file targets, so the prepare run
+    // OVERWRITES rather than creates and every project holds exactly
+    // one pre-run copy — the state the skip has to keep untouched.
+    let a_old = b"Hand-written AGENTS.md of the team.\n".to_vec();
+    let c_old = b"Hand-written project file of the team.\n".to_vec();
+    write(&world.project(0).target, &a_old);
+    write(&world.project(2).target, &c_old);
+    // The prepare run: one success, one copy per project, every
+    // project stamped — the state the skip has to keep.
+    let prepared = run_sync(&world, None);
+    assert_eq!(prepared.verdict, "success");
+    assert_eq!(statuses(&prepared), ["written", "written", "written"]);
+    let kept: Vec<Stamps> = (0..3).map(|index| stamps(&world, index)).collect();
+    let pre_run_copies: Vec<Vec<Vec<u8>>> =
+        (0..3).map(|index| backup_bytes(&world, index)).collect();
+    for (index, copies) in pre_run_copies.iter().enumerate() {
+        assert_eq!(
+            copies.len(),
+            1,
+            "project {index}: the prepare run copied the old bytes"
+        );
+    }
+
+    // The external edits give every project something to write and
+    // copy; then the middle target's read-only mark (std's portable
+    // flag, the D-094 state the probe answers to).
+    let a_external = b"Edited by hand before the read-only sync.\n".to_vec();
+    let b_external = text_of(&read(&world.project(1).target), "scheme B")
+        .replace("Yak text.", "Yak text, edited by hand.")
+        .into_bytes();
+    let c_external = b"Changed outside before the read-only sync.\n".to_vec();
+    write(&world.project(0).target, &a_external);
+    write(&world.project(1).target, &b_external);
+    write(&world.project(2).target, &c_external);
+    let modified_before = modified_of(&world.project(1).target);
+    let _read_only = ReadOnlyMark::new(&world.project(1).target);
+
+    let second = run_sync(&world, None);
+
+    // The run's rows: a skipped project beside written ones is §9.4
+    // phase 4 step 3's `partial`, and the skip carries its §10 code —
+    // the literal the panel renders on the row.
+    assert_eq!(second.verdict, "partial");
+    assert_counters(&second, 3, 2, 0, 1, 0);
+    assert_eq!(
+        statuses(&second),
+        ["written", "skipped", "written"],
+        "T-F5: the read-only target's row reads `skipped`, the run continues"
+    );
+    assert_eq!(
+        second.projects[1].error_code.as_deref(),
+        Some("E_NO_WRITE_ACCESS"),
+        "§10: the skip's code surfaces where the row contract spells it"
+    );
+
+    // The read-only file is untouched — the external bytes and their
+    // modification time.
+    assert_eq!(
+        read(&world.project(1).target),
+        b_external,
+        "the read-only target keeps the user's bytes"
+    );
+    assert_eq!(
+        modified_of(&world.project(1).target),
+        modified_before,
+        "the read-only target was not even rewritten"
+    );
+
+    // The skip backed nothing up: the skipped project's set is
+    // exactly the prepare run's copy, the written two gained theirs.
+    for index in 0..3 {
+        let mut expected = pre_run_copies[index].clone();
+        if index != 1 {
+            expected.push([&a_external, &b_external, &c_external][index].clone());
+        }
+        assert_eq!(
+            backup_bytes(&world, index),
+            expected,
+            "project {index}: the skipped project gains no copy, the written two gain theirs"
+        );
+    }
+
+    // OUT-020: a skipped project keeps its previous sync state; the
+    // written two are stamped with this run. MAIN-027: a `partial`
+    // run is nobody's last successful sync.
+    assert_eq!(
+        stamps(&world, 1),
+        kept[1],
+        "OUT-020: the skipped project keeps its previous sync state"
+    );
+    assert_stamped_in_run(
+        stamps(&world, 0).0.as_deref(),
+        &second,
+        "the written scheme-A project",
+    );
+    assert_stamped_in_run(
+        stamps(&world, 2).0.as_deref(),
+        &second,
+        "the written scheme-C project",
+    );
+    assert_eq!(
+        last_success(&world),
+        prepared.finished_at,
+        "MAIN-027: the overall time stays the prepare run's"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_claude_md_target_writes_the_real_file_and_the_link_survives() {
+    // T-F6 — "`CLAUDE.md` is a symlink to `AGENTS.md`" → "The write
+    // goes to the real file; the link is kept" (§15.2; §9.4 phase 1
+    // step 2, D-092: the resolved write path is the real file behind
+    // the link). The phase-1 suite pins the preflight half — the
+    // resolution itself and the ALG-033 comparison reading the real
+    // file through the link
+    // (`a_symlinked_target_resolves_to_the_real_file`, also
+    // cfg(unix)); this test is the run-level half: a REAL sync writes
+    // the real file, and when the run is done the link is still a
+    // link pointing at it. cfg(unix) like the phase-1 twin — creating
+    // a Windows FILE symlink needs SeCreateSymbolicLinkPrivilege or
+    // Developer Mode, and no Windows twin of this row exists: a
+    // junction cannot alias a file, so the Windows shape is an open
+    // gap (D-225's follow-up), not this suite's.
+    let mut world = build(&[WriteSettings::plain(Scheme::A, BaseName::ClaudeMd)]);
+    let real = world.project(0).root.join("AGENTS.md");
+    let real_old = b"The team's hand-written AGENTS.md, behind the link.\n".to_vec();
+    write(&real, &real_old);
+    // The row's own fixture: `CLAUDE.md` — this project's target — is
+    // a symlink to `AGENTS.md`.
+    std::os::unix::fs::symlink("AGENTS.md", &world.project(0).target)
+        .expect("creating the CLAUDE.md link must work");
+    seed_standard_library(&world);
+    let _events = go_live(&mut world);
+
+    let before = Timestamp::now();
+    let summary = run_sync(&world, None);
+    let after = Timestamp::now();
+
+    assert_eq!(summary.verdict, "success");
+    assert_eq!(statuses(&summary), ["written"]);
+
+    // The write went to the REAL file: `AGENTS.md` holds the build,
+    // closed by the run's marker…
+    let (managed, marker) = split_whole_file(&read(&real), "the real file behind the link");
+    assert_eq!(managed, BODY, "ALG-020…022 built into the real file");
+    assert_marker_within_run(&marker, before, after);
+    // …and reading through the link sees the same bytes — the user's
+    // editor, following `CLAUDE.md`, reads what the run wrote.
+    assert_eq!(
+        read(&world.project(0).target),
+        read(&real),
+        "the link resolves to the file the run wrote"
+    );
+
+    // The link is kept — still a symlink, still pointing at
+    // `AGENTS.md`: the §9.5 replace hit the resolved path, never the
+    // link's own directory entry.
+    let link = fs::symlink_metadata(&world.project(0).target).expect("the link must be statable");
+    assert!(
+        link.file_type().is_symlink(),
+        "T-F6: CLAUDE.md is still a symlink after the sync"
+    );
+    assert_eq!(
+        fs::read_link(&world.project(0).target)
+            .expect("the link's target must be readable")
+            .to_string_lossy(),
+        "AGENTS.md",
+        "the link still points at the real file"
+    );
+    // And the run created nothing else: the repo holds its `.git`,
+    // the real file, and the link.
+    assert_eq!(
+        entries_of(&world.project(0).root),
+        [".git", "AGENTS.md", "CLAUDE.md"],
+        "no file was created beside the real one and the link"
+    );
+
+    // The backup holds the pre-sync bytes — the old hand-written
+    // `AGENTS.md`. (Which SPELLING phase 2 copied — the resolved path
+    // or the link — is not observable here: through the link the
+    // bytes read the same; the resolved-source contract is phase 2's
+    // own docs' pin.) OUT-020 stamps the project — the real file was
+    // written.
+    assert_eq!(
+        backup_bytes(&world, 0),
+        [real_old],
+        "one copy of the pre-sync bytes was made"
+    );
+    assert_stamped_in_run(
+        stamps(&world, 0).0.as_deref(),
+        &summary,
+        "the project behind the symlinked target",
+    );
+}
+
+#[test]
+fn a_project_folder_deleted_between_preflight_and_the_write_fails_only_that_project() {
+    // T-F7 — "The project folder is deleted between preflight and the
+    // write" → "Project `failed`; the others continue" (§15.2; §9.4
+    // phase 3 step 3: a failed write stops one project, never the
+    // run). No synthetic error: preflight read the target and readied
+    // it (phase 1), phase 2 copied it, and the write then discovers
+    // the folder gone — a real ENOENT from the real §9.5 pipeline,
+    // classified by the real table. The §10 row that classification
+    // lands on is `E_WRITE_FAILED` (the staging-create refusal on a
+    // deleted parent, the D-099 fold; the Expected cell names no
+    // code, so the observed one is the contract pinned here). The
+    // write seam is the deterministic clock hand: its closure removes
+    // the folder at the write call itself — after phase 2's copy has
+    // committed, before any byte of this project's write moves — and
+    // then calls the production write, which reports the truth.
+    let (world, _library, _events) = three_scheme_world(
+        BaseName::AgentsMd,
+        BaseName::ClaudeMd,
+        BaseName::ClaudeMd,
+        Some(B_OLD_BLOCK),
+    );
+    // The prepare run and the external edits — the T-F1 shape: every
+    // target differs from both the build and its last copy, so the
+    // failing run has a real copy to keep and real bytes it would
+    // have replaced.
+    let a_old = b"Hand-written AGENTS.md of the team.\n".to_vec();
+    let c_old = b"Hand-written project file of the team.\n".to_vec();
+    write(&world.project(0).target, &a_old);
+    write(&world.project(2).target, &c_old);
+    let prepared = run_sync(&world, None);
+    assert_eq!(prepared.verdict, "success");
+    let pre_run_copies: Vec<Vec<Vec<u8>>> =
+        (0..3).map(|index| backup_bytes(&world, index)).collect();
+    for (index, copies) in pre_run_copies.iter().enumerate() {
+        assert_eq!(
+            copies.len(),
+            1,
+            "project {index}: the prepare run copied the old bytes"
+        );
+    }
+    let a_external = b"Edited by hand before the vanishing sync.\n".to_vec();
+    let b_external = text_of(&read(&world.project(1).target), "scheme B")
+        .replace("Yak text.", "Yak text, edited by hand.")
+        .into_bytes();
+    let c_external = b"Changed outside before the vanishing sync.\n".to_vec();
+    write(&world.project(0).target, &a_external);
+    write(&world.project(1).target, &b_external);
+    write(&world.project(2).target, &c_external);
+    let kept: Vec<Stamps> = (0..3).map(|index| stamps(&world, index)).collect();
+
+    // The seam: the second project's write call deletes its folder
+    // first — the resolved path identifies the project, so the loop's
+    // order cannot fake the fixture.
+    let vanished_root = world.project(1).root.clone();
+    let vanished_target = eunomia_fs::paths::canonicalize(&world.project(1).target)
+        .expect("the target canonicalizes");
+    let deleting_write = Arc::new(
+        move |target: &Path, contents: &[u8]| -> Result<WrittenFile, AtomicWriteError> {
+            if target == vanished_target {
+                fs::remove_dir_all(&vanished_root)
+                    .expect("the fixture folder must delete at the seam");
+            }
+            crate::sync_phase3::production_write(target, contents)
+        },
+    );
+    let seams = SyncRunSeams {
+        backup: Arc::new(eunomia_fs::backup::backup_target_file),
+        write: deleting_write,
+        abort_clock: SyncRunSeams::production().abort_clock,
+        progress_clock: SyncRunSeams::production().progress_clock,
+    };
+    let second = completed(
+        tauri::async_runtime::block_on(crate::commands::sync_run_with(
+            world.app.handle().clone(),
+            None,
+            CancelToken::new(),
+            seams,
+        ))
+        .expect("§9.4 phase 3 step 3: a failed write stops one project, never the run"),
+    );
+
+    // The row: the vanished project `failed`, the run continued —
+    // written projects on BOTH sides of the failure — and the verdict
+    // is §9.4 phase 4 step 3's `partial`.
+    assert_eq!(second.verdict, "partial");
+    assert_counters(&second, 3, 2, 0, 0, 1);
+    assert_eq!(
+        statuses(&second),
+        ["written", "failed", "written"],
+        "T-F7: the vanished project fails, the others continue"
+    );
+    assert_eq!(
+        second.projects[1].error_code.as_deref(),
+        Some("E_WRITE_FAILED"),
+        "§10: a vanished folder is the staging-create refusal (ENOENT, the D-099 fold)"
+    );
+
+    // The others really were written: their files hold the build.
+    for index in [0, 2] {
+        let (managed, _) =
+            split_whole_file(&read(&world.project(index).target), "a continuing project");
+        assert_eq!(managed, BODY, "project {index}: the build was laid down");
+    }
+
+    // This run's copy of the vanished project's file SURVIVES the
+    // failed write — phase 2's committed history is not phase 3's to
+    // touch (§9.4 phase 3 step 3) — and every written project's set
+    // gained its copy.
+    for index in 0..3 {
+        let mut expected = pre_run_copies[index].clone();
+        expected.push([&a_external, &b_external, &c_external][index].clone());
+        assert_eq!(
+            backup_bytes(&world, index),
+            expected,
+            "project {index}: this run's copy stays — the failed write deletes nothing"
+        );
+    }
+
+    // OUT-020: the failed project keeps its previous sync state; the
+    // written two are stamped with this run.
+    assert_eq!(
+        stamps(&world, 1),
+        kept[1],
+        "OUT-020: the failed project keeps its previous sync state"
+    );
+    assert_stamped_in_run(
+        stamps(&world, 0).0.as_deref(),
+        &second,
+        "the written scheme-A project",
+    );
+    assert_stamped_in_run(
+        stamps(&world, 2).0.as_deref(),
+        &second,
+        "the written scheme-C project",
+    );
+}
+
+#[test]
+fn a_locked_target_fails_its_project_with_e_file_locked_and_the_backup_stays() {
+    // T-F8 — "The file is locked by an editor (Windows)" → "3
+    // retries, then `E_FILE_LOCKED`; backup kept" (§15.2; §10's
+    // `E_FILE_LOCKED` row; §9.5 step 4's 100/300/900 ms schedule;
+    // §9.4 phase 3 step 3). The LADDER is eunomia-fs's three-level
+    // pin (D-099): the loop's mechanics against injected refusals,
+    // the simulated exhaustion driving the REAL schedule on every
+    // platform (atomic.rs's own suite and
+    // `eunomia-fs/tests/fault_injection.rs`), and the REAL Windows
+    // criterion — an editor's handle without FILE_SHARE_DELETE — on
+    // the CI Windows leg
+    // (`a_target_open_without_share_delete_is_retried_then_file_locked`).
+    // What no suite pinned is the RUN-level half: what the app does
+    // when the exhausted ladder's typed refusal comes back — the row,
+    // the code, the retry count riding the row's message, the kept
+    // backup, the continued run. The write seam answers that typed
+    // refusal directly (the app layer's honest injector, the
+    // E_WRITE_FAILED precedent): the exact endgame the real ladder
+    // produces — `retries: 3`, the last refusal carrying the lock
+    // code (32 — ERROR_SHARING_VIOLATION on Windows, the number
+    // atomic.rs spells the simulated channel with; on the Unix legs
+    // the literal is only the carried marker) — with everything else
+    // production. The real editor lock inside a real run stays the
+    // Windows manual smoke item.
+    let (world, _library, _events) = three_scheme_world(
+        BaseName::AgentsMd,
+        BaseName::ClaudeMd,
+        BaseName::ClaudeMd,
+        Some(B_OLD_BLOCK),
+    );
+    // The prepare run and the external edits, the same shape as T-F7.
+    let a_old = b"Hand-written AGENTS.md of the team.\n".to_vec();
+    let c_old = b"Hand-written project file of the team.\n".to_vec();
+    write(&world.project(0).target, &a_old);
+    write(&world.project(2).target, &c_old);
+    let prepared = run_sync(&world, None);
+    assert_eq!(prepared.verdict, "success");
+    let pre_run_copies: Vec<Vec<Vec<u8>>> =
+        (0..3).map(|index| backup_bytes(&world, index)).collect();
+    let a_external = b"Edited by hand before the locked sync.\n".to_vec();
+    let b_external = text_of(&read(&world.project(1).target), "scheme B")
+        .replace("Yak text.", "Yak text, edited by hand.")
+        .into_bytes();
+    let c_external = b"Changed outside before the locked sync.\n".to_vec();
+    write(&world.project(0).target, &a_external);
+    write(&world.project(1).target, &b_external);
+    write(&world.project(2).target, &c_external);
+    let modified_before = modified_of(&world.project(1).target);
+    let kept: Vec<Stamps> = (0..3).map(|index| stamps(&world, index)).collect();
+
+    // The seam: the second project's write answers the exhausted
+    // ladder's typed refusal — identified by the resolved path, so
+    // the loop's order cannot fake the fixture.
+    let locked_target = eunomia_fs::paths::canonicalize(&world.project(1).target)
+        .expect("the target canonicalizes");
+    let locked_refusal = Arc::new(
+        move |target: &Path, contents: &[u8]| -> Result<WrittenFile, AtomicWriteError> {
+            if target == locked_target {
+                Err(AtomicWriteError::FileLocked(FileLockedFailure {
+                    step: WriteStep::Replace,
+                    path: target.to_path_buf(),
+                    retries: 3,
+                    // Code 32 is ERROR_SHARING_VIOLATION on Windows —
+                    // the number atomic.rs spells the simulated lock
+                    // channel with. On the Unix legs the same literal
+                    // is only the carried marker: nothing interprets
+                    // the raw code here, the typed variant and its
+                    // Display are platform-neutral.
+                    source: std::io::Error::from_raw_os_error(32),
+                    cleanup: None,
+                }))
+            } else {
+                crate::sync_phase3::production_write(target, contents)
+            }
+        },
+    );
+    let seams = SyncRunSeams {
+        backup: Arc::new(eunomia_fs::backup::backup_target_file),
+        write: locked_refusal,
+        abort_clock: SyncRunSeams::production().abort_clock,
+        progress_clock: SyncRunSeams::production().progress_clock,
+    };
+    let second = completed(
+        tauri::async_runtime::block_on(crate::commands::sync_run_with(
+            world.app.handle().clone(),
+            None,
+            CancelToken::new(),
+            seams,
+        ))
+        .expect("§9.4 phase 3 step 3: a failed write stops one project, never the run"),
+    );
+
+    // The row: the locked project `failed` with `E_FILE_LOCKED`, the
+    // run continued past it, and the verdict is `partial`.
+    assert_eq!(second.verdict, "partial");
+    assert_counters(&second, 3, 2, 0, 0, 1);
+    assert_eq!(
+        statuses(&second),
+        ["written", "failed", "written"],
+        "§9.4 phase 3 step 3: the locked file fails its project, the others continue"
+    );
+    assert_eq!(
+        second.projects[1].error_code.as_deref(),
+        Some("E_FILE_LOCKED"),
+        "T-F8: the exhausted ladder's refusal is the row's §10 code"
+    );
+    // The retry count rides the row's message — the observable the
+    // panel renders; the schedule itself is eunomia-fs's pin.
+    assert!(
+        second.projects[1]
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("3 retries failed")),
+        "the row's message carries the ladder's own count, got {:?}",
+        second.projects[1].error_message
+    );
+
+    // The editor's file is intact — the bytes and their modification
+    // time (§9.5: a refused replace leaves the original alone).
+    assert_eq!(
+        read(&world.project(1).target),
+        b_external,
+        "the locked target keeps its bytes"
+    );
+    assert_eq!(
+        modified_of(&world.project(1).target),
+        modified_before,
+        "the locked target was not even rewritten"
+    );
+
+    // Backup kept: this run's copy of the locked file SURVIVES the
+    // failed write — phase 2's committed history — and every written
+    // project's set gained its copy.
+    for index in 0..3 {
+        let mut expected = pre_run_copies[index].clone();
+        expected.push([&a_external, &b_external, &c_external][index].clone());
+        assert_eq!(
+            backup_bytes(&world, index),
+            expected,
+            "project {index}: this run's copy stays — the failed write deletes nothing"
+        );
+    }
+
+    // OUT-020: the failed project keeps its previous sync state; the
+    // written two are stamped with this run.
+    assert_eq!(
+        stamps(&world, 1),
+        kept[1],
+        "OUT-020: the failed project keeps its previous sync state"
+    );
+    assert_stamped_in_run(
+        stamps(&world, 0).0.as_deref(),
+        &second,
+        "the written scheme-A project",
+    );
+    assert_stamped_in_run(
+        stamps(&world, 2).0.as_deref(),
+        &second,
+        "the written scheme-C project",
+    );
 }

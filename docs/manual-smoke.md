@@ -18,7 +18,9 @@ suite cannot reach: the real clock, the production worker-thread path
 of the degradation warn, and Windows' GUI stderr and file locking.
 Section 4 (D-186) is the first any-OS item that joined them: the
 recovery path's re-arm of the state services; section 5 joined it in
-the same shape — the externally-modified display half of OUT-014. Part two: the scenario
+the same shape — the externally-modified display half of OUT-014 — and
+section 6 (T-128) rejoins the Windows family: the real editor lock of
+§15.2 T-F8 inside a real sync run. Part two: the scenario
 runs S1–S7, S9, S10 that spec §15.5 conditions the release on (added
 by T-315). Items for other OSes and other subsystems may join below.
 
@@ -303,6 +305,81 @@ short last-sync time (MAIN-028), and the target file
 **Restore.** No rights or locks to undo; the scratch project goes with
 the scenario section's common-preparation cleanup (the step-4 backup
 copy stays under `<data dir>/backups/` by design).
+
+## 6. A locked target file inside a real sync run (Windows)
+
+Source: spec §15.2 T-F8 ("The file is locked by an editor (Windows) →
+3 retries, then `E_FILE_LOCKED`; backup kept"), §9.5 step 4, §10's
+`E_FILE_LOCKED` row, §9.4 phase 3 step 3; §15.3's Windows row ("locked
+files"). The ladder and the run-level verdict are automated — the
+retry schedule and its classification are pinned in `eunomia-fs`
+(atomic.rs and `tests/fault_injection.rs`, D-099; the REAL
+Windows-handle criterion runs on the CI Windows leg), and the
+run-level half (the `failed` row with `E_FILE_LOCKED`, the kept
+backup, the continued run) is pinned in `sync_pipeline_tests.rs`
+(T-128) over the command's write seam. What no automation covers is
+the composition this item walks: a REAL held-open target inside a
+REAL app run — the app's own watch service, progress and finish
+included.
+
+Pending: the "Run sync" button, the progress region and the summary
+modal — spec §16 M3/M5, the same dependency S7 names (the backend the
+item drives is landed and pinned); until the UI lands, the item waits
+beside S7.
+
+**Prepare.** Two throwaway scheme-A repos (the scenario section's
+common preparation), each added as a project and synced once, so both
+target files exist and hold the build. One instruction assigned to
+both projects; edit its variant text so the next sync has something to
+write and back up for both. Hold `<repo1>\AGENTS.md` open WITHOUT
+delete sharing — the deterministic holder, the same share-mode shape
+the CI test builds, from PowerShell:
+
+```powershell
+$f = [System.IO.File]::Open("<repo1>\AGENTS.md", 'Open', 'Read', 'Read')
+```
+
+(FileShare.Read alone — no FILE_SHARE_DELETE, so the replace must
+refuse.) A real editor that provably locks the same way works too;
+verify by the outcome below, not by assumption. Leave the handle
+open.
+
+**Do.**
+
+1. With the file held open, run sync (§9.4; the §7.10 `sync_run`
+   command; MAIN-024…027's "Run sync" button).
+2. Read the summary's per-project rows, the target file, the backups
+   folder, the file log; release the holder (`$f.Close()`).
+3. Run sync again.
+
+**Pass when.**
+
+- Step 1 does not hang or crash: the run takes a little over 1.3 s
+  longer than usual for the held project (§9.5 step 4's 100/300/900 ms
+  pauses), then answers — the app's own UI stays responsive
+  throughout (SYS-001: the write rides the blocking pool).
+- The held project's row reads `failed` with `E_FILE_LOCKED` and a
+  message naming the file, the lock and "3 retries failed"; the run's
+  verdict is `partial` — the OTHER project is `written` (§9.4 phase 3
+  step 3: a failed write stops one project, never the run).
+- The held file is intact: the bytes on disk are exactly what they
+  were before the run (§9.5: a refused replace leaves the original
+  alone), and no staging file of the D-088 grammar
+  (`.<name>.eunomia-<8 hex>.tmp`) remains in the repo (§9.5 step 7
+  removed it).
+- The backup is kept: `<data dir>\backups\<held project's
+id>__<slug>/` gained this run's copy of the pre-sync bytes — the
+  failed write does not sweep phase 2's committed history (§9.4 phase
+  3 step 3).
+- Step 3 writes the file: the held project goes `written`, its file
+  holds the new build — §10's remedy for a lock is the idempotent
+  retry once the holder closed. No new copy appears: the source still
+  equals the copy the locked run made, so BKP-010's dedup claims it
+  (the pair's one copy is the locked run's own).
+
+**Restore.** Release the holder; the scratch repos go with the
+scenario section's common-preparation cleanup (the backup copy stays
+by design).
 
 ## Scenario runs S1–S7, S9, S10
 

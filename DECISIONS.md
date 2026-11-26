@@ -28936,3 +28936,230 @@ no test code change. The round-1 fixes were re-verified as landed
 abort-stamp presence check, the T-F9 duality, the manual-smoke
 scoping; the worktree's `target/` cache flagged as post-merge
 cleanup, not a finding).
+
+### D-225 — T-128: the §15.2 write-path rows at run level — the read-only skip, the symlinked target, the vanished folder through the real §9.5 refusal, and the locked file's row over the seam — 2026-11-26
+
+Problem: the card ("[Backend] Write write-failure tests T-F5, T-F6,
+T-F7, T-F8"; spec 15.2's Expected column is the oracle) asks for the
+four write-path rows the release checklist leans on. Rule 2 inventory
+first — the layers that already exist: the phase-1 suite pins T-F5's
+preflight half (`a_read_only_target_is_skipped_and_the_run_continues`
+— the probe's verdict and the healthy project readied) and T-F6's
+resolution half (`a_symlinked_target_resolves_to_the_real_file`,
+cfg(unix) — the resolved path and the ALG-033 comparison through the
+link), while the add-time warning over the same read-only flag is the
+ipc/scan suites' fact; eunomia-fs pins T-F8's whole LADDER three ways
+(D-099: the loop's mechanics against injected refusals, the simulated
+exhaustion driving the real 100/300/900 schedule on every platform —
+atomic.rs's own suite and `tests/fault_injection.rs` — and the REAL
+Windows-handle criterion on the CI Windows leg,
+`a_target_open_without_share_delete_is_retried_then_file_locked`);
+T-F7 had nothing anywhere. What NO suite pins is the RUN-level half
+of each row: the statuses and §10 literals through the real command,
+the disk and `backups/` facts, and — for T-F7 — the real refusal
+itself. (OUT-020's skipped half is already pinned by
+`last_sync_times_follow_only_the_written_and_unchanged_statuses` —
+over an EMPTY previous state and, for the failed half, over a
+non-empty one; T-F5's new fact is the skipped half over a PAST sync.)
+
+Solution: four new tests in `sync_pipeline_tests.rs` (the §15.1
+integration home — its harness, its doc table), one per row.
+
+- **T-F5** (`a_read_only_target_is_skipped_with_e_no_write_
+access_while_the_run_continues`): pure production seams — the
+  three-scheme world with old bytes pre-written (a prepare run that
+  overwrites, so every project holds exactly one pre-run copy and
+  OUT-020's skip promise has a non-empty previous state), external
+  edits, then the middle target marked read-only through the
+  `ReadOnlyMark` guard (std's `set_readonly`, the D-094 state; the
+  guard restores the ORIGINAL permissions on drop because
+  `set_readonly(false)` re-adds every write bit on Unix — clippy's
+  `permissions_set_readonly_false` — and on Windows a read-only file
+  refuses its own removal). Asserted: verdict `partial`, statuses
+  `["written", "skipped", "written"]`, the row's `E_NO_WRITE_ACCESS`
+  literal, the file's bytes and mtime unmoved, the skipped project's
+  backup set exactly its pre-run copy while the written two gained
+  theirs, OUT-020's kept pair, MAIN-027's unmoved overall time.
+- **T-F6** (`a_symlinked_claude_md_target_writes_the_real_file_and_
+the_link_survives`, cfg(unix) like the phase-1 twin — creating a
+  Windows FILE symlink needs SeCreateSymbolicLinkPrivilege or
+  Developer Mode, and no Windows twin of the row exists):
+  one scheme-A `CLAUDE.md` project, the real `AGENTS.md` holding
+  hand-written old bytes, `CLAUDE.md` a symlink to it. Asserted after
+  the real run: `AGENTS.md` holds the build closed by the run's
+  marker, reading through the link sees the same bytes, the link is
+  still a symlink still pointing at `AGENTS.md` (§9.5's replace hit
+  the resolved path, never the link's own directory entry), the repo
+  gained no other file, one copy of the pre-sync bytes was made (the
+  SOURCE spelling is not observable here — through the link the bytes
+  read the same; phase 2's resolved-source contract is its own docs'
+  pin), the stamp lands. cfg(unix) because creating a Windows FILE
+  symlink needs SeCreateSymbolicLinkPrivilege or Developer Mode; no
+  Windows twin of the row exists (a junction cannot alias a file —
+  the round-1 P2-4 correction), an open gap recorded as a follow-up.
+- **T-F7** (`a_project_folder_deleted_between_preflight_and_the_
+write_fails_only_that_project`): the write seam is the deterministic
+  clock hand — its closure deletes the second project's folder AT the
+  write call (after phase 2's copy committed, before any byte of that
+  write moves) and then calls the production write, so the refusal is
+  the OS's own ENOENT classified by the real §9.5 pipeline, never a
+  synthetic error. The Expected cell names no code; the observed
+  contract is pinned as what the code produces: the staging-create
+  refusal folds to `E_WRITE_FAILED` (D-099). Asserted: the command
+  answers Ok (a failed write stops one project, never the run — §9.4
+  phase 3 step 3), verdict `partial`, statuses
+  `["written", "failed", "written"]` (both sides of the failure), the
+  `E_WRITE_FAILED` literal, the continuing projects' files hold the
+  build, THIS run's copy of the vanished project stays (phase 2's
+  history is not phase 3's to touch), OUT-020's kept pair.
+- **T-F8** (`a_locked_target_fails_its_project_with_e_file_locked_
+and_the_backup_stays`): the write seam answers the typed endgame
+  the exhausted §9.5 ladder produces — `FileLockedFailure` with
+  `retries: 3` and the sharing-violation code 32, the shape the fs
+  exhaustion tests produce — with everything else production. The
+  LADDER itself ("3 retries") stays eunomia-fs's pin (cited above);
+  what this test adds is the run-level half: the row's `E_FILE_LOCKED`
+  literal, the retry count riding the row's message ("3 retries
+  failed" — the observable the panel renders), the editor's bytes and
+  mtime intact, the kept backup, the continued run, OUT-020. The
+  real editor lock inside a real run — the composition no automation
+  covers (the fs ladder is real only at the fs layer; the run-level
+  refusal here is typed) — is now manual-smoke.md section 6 (Windows,
+  T-127's S10 split applied to T-F8).
+
+Platform-fact checks behind the two seam tests: deleting a WATCHED
+repo folder works on Windows because notify 8.2.2's backend opens
+watched directories with `FILE_SHARE_READ | FILE_SHARE_DELETE |
+FILE_SHARE_WRITE` (notify-8.2.2/src/windows.rs:195-198), so the
+T-F7 fixture's `remove_dir_all` cannot hit a sharing violation; the
+seams identify their project by the CANONICAL resolved path, so the
+loop's visiting order cannot fake the fixture (T-127's P3-3 lesson).
+
+Module docs updated in the same change (the header's scope sentence,
+the "what pins what" table's four rows, the boundaries paragraph's
+seam list, the exceptions paragraph naming the two new injectors).
+
+Mutations (each reverted after the red run; no M3 exists — the
+label was simply skipped when the ledger was first written, so the
+runs are M1, M2 (re-run once after the `ReadOnlyMark`
+restructuring), M4–M14, thirteen in all): M1 the phase-1 access
+refusal's code swapped to `E_PROJECT_UNAVAILABLE` → red at T-F5's
+`E_NO_WRITE_ACCESS` literal with the statuses still green (the two
+sites discriminated); M2 phase 1 ignores the rights refusal → red at
+T-F5's verdict (`success` ≠ `partial`), the statuses/bytes/backup
+groups failing behind it — re-run after the `ReadOnlyMark`
+restructuring to confirm the final shape still bites; M4
+`resolve_target_path`'s symlink arm stops resolving (the link itself
+becomes the write path) → red at T-F6's real-file content group (the
+still-old `AGENTS.md` fails the marker-form check), the link-kept
+group failing behind it (the §9.5 rename would replace the link with
+a regular file); M5 phase 3's failure arm marks `written` → red at
+T-F7's and T-F8's verdicts; M6 `write_code`'s WriteFailed arm →
+FileLocked → red at T-F7's `E_WRITE_FAILED` literal; M7 the reverse
+swap → red at T-F8's `E_FILE_LOCKED` literal; M8 the failure message
+replaced by a fixed string → red at T-F8's "3 retries failed"
+message assertion only (T-F7 green — the group isolates); M9 phase 3
+stops at the first failed write → red at both "the run must answer
+Ok" premises (the §9.4 phase 3 step 3 contract's front line); M10 the
+`backup.retention` default 10 → 1 (the store's own defaults test
+reddens as collateral — it is the default's own pin) → red at the
+backup-set equality loop of all three tests — via the WRITTEN
+projects' pairs (T-F5's skipped project 1 holds one record, `rn = 1`,
+kept under any limit, so its own expected set stays true; projects
+0/2 and all of T-F7/T-F8's pairs lose their oldest copy) — T-F5
+included only after its fixture was strengthened (the first run
+exposed that the prepare run had CREATED projects 0/2's targets, so
+no pre-run copies existed for the limit to prune — the fixture now
+pre-writes old bytes, matching the T-F1 shape); M11 phase 4's step-1
+stamping admits `skipped` rows → red at T-F5's OUT-020 stamps only
+(T-F7/T-F8 green — their rows are `failed`, phase 3's own arm); M12
+phase 3's failure arm also stamps the failed project → red at T-F7's
+and T-F8's OUT-020 stamps. Two round-1 additions (the P3-1 gaps):
+M13 write_access's probe file stops being removed (the cleanup line
+commented out) → red at T-F6's entries assertion — the probe's
+`.AGENTS.md.eunomia-<hex>.tmp` debris is a fourth entry (the
+write-access doctest reddens as collateral — it is the
+debris-convergence contract's own pin); M14 phase 3's failure arm
+runs a retention sweep at limit 1 (the plausible wrong "rollback":
+the failure path pruning the pairs) → red at T-F7's and T-F8's
+backup-kept loops — the property the Expected cell names, not the
+pruning window M10 exercises. Groups stated as redundant rather than
+mutated (the round-1 P3-1 ruling): T-F5's "the skipped project gains
+no copy" has no constructible production mutation — phase 2's
+eligible list needs a `Ready` verdict's facts, and a `Skipped`
+verdict carries none, so admitting it means inventing data; the
+ready-only eligibility is the phase-2 suite's own pin. T-F6's
+backup/stamps groups and T-F8's bytes/mtime group share their guards
+with existing pins (every written-row test stamps; the E_WRITE_FAILED
+sibling example asserts the identical intact-file fact over the
+identical seam shape).
+
+Checks (synchronous, `CARGO_BUILD_JOBS=2`): `cargo test --no-run -p
+eunomia-sync` green; `cargo nextest run --no-fail-fast
+--test-threads=4` — 1996 passed, 0 skipped (T-127's 1992 plus the
+four rows); `cargo test --doc --workspace` — 98 doc tests green
+(D-195); `cargo clippy --workspace --all-targets -- -D warnings`
+green (after the `ReadOnlyMark` fix for
+`permissions_set_readonly_false`); `cargo fmt --all -- --check`
+green; `cargo deny check` green, no new ignores. Frontend untouched —
+no pnpm checks run. eunomia-fs untouched in the diff — its
+feature-gated layer needs no re-run.
+
+Review round 1 (deepseek-v4.1-flash, report
+`.opencode/reviews/t128-round1-report.md`, VERDICT: CHANGES
+REQUESTED — 4 × P2, 4 × P3, no P0/P1) — all eight findings fixed:
+P2-1 (the manual item named a `.eunomiasync` staging name that
+cannot exist — the grammar is `.<name>.eunomia-<8 hex>.tmp`, D-088)
+accepted — the pass criterion now names the real grammar; P2-2 (the
+item's "another copy is made" contradicted BKP-010's dedup — the
+locked run's copy of the UNCHANGED source is exactly what the retry
+dedups against) accepted — the bullet now states the dedup and that
+the pair's one copy is the locked run's own; P2-3 ("run sync
+(§7.7, MAIN-020)" — §7.7 is the Action Log and MAIN-020 does not
+exist) accepted — the citation is now §9.4 / §7.10 `sync_run` /
+MAIN-024…027; P2-4 (the T-F6 comment claimed §15.3's Windows shape
+is "the junction" — a junction cannot alias a FILE, so the claim
+hid a real gap) accepted — the comment and this entry now state the
+privilege reason and the open gap (a follow-up for the board);
+P3-1 (mutation-ledger gaps: T-F6's entries group, the
+failure-path-sweep property, the imprecise M10 wording) accepted —
+M13 and M14 were RUN (red at the named groups) and the M10 record
+now says the loop reddens via the written pairs' oldest copies while
+the skipped pair's single record survives any limit; the remaining
+groups are stated as redundant with named pins, with the
+no-constructible-mutation reasoning for the skipped-eligibility
+fact; P3-2 ("four tests substitute" enumerated three) accepted —
+the boundaries sentence now names the write seam's three tests, the
+backup seam's one and the abort clock's one; P3-3 (the inventory
+overstated the OUT-020 gap and the T-F6 backup parenthetical was
+unevidenced — through the link the bytes read the same) accepted —
+the inventory qualifies the new fact as the skipped half over a
+past sync, and the T-F6 bullet/comment/assertion now pin "one copy
+of the pre-sync bytes" with the spelling fact left to phase 2's own
+docs; P3-4 (manual-smoke section 6 lacked a `Pending:` line — the
+run button and summary modal are §16 M3/M5, S7's own dependency)
+accepted — the line is there in section 5's shape. The reviewer's
+unverified note about editor share modes led to a better fixture:
+the manual item now hands the tester the deterministic PowerShell
+holder (FileShare.Read, no FILE_SHARE_DELETE — the CI test's own
+shape) instead of an editor-behavior assumption. The pre-commit
+hook's frontend suite (eslint, prettier, vue-tsc) ran with the
+commit and passed — the "frontend untouched" statement holds with
+it.
+
+Review round 2 (hy4-flash-free, report
+`.opencode/reviews/t128-round2-report.md`, over the AMENDED commit,
+VERDICT: APPROVE — 2 × P3, no P0/P1/P2; the mandatory test audit
+passed all four checks, and every round-1 fix was re-verified as
+landed and correct): P3-1 (the mutation ledger jumps M2 → M4 with no
+M3 record — a reader cannot tell whether M3 was run, merged or
+dropped) accepted — the ledger's opening now states that no M3
+exists (a skipped label, never a run) and counts the thirteen runs;
+P3-2 (the T-F8 comment called the injected code 32 "a sharing
+violation" unqualified — true only on Windows; on the Unix legs the
+same literal is EPIPE, and the platform-fact rule asks the comment
+to say so) accepted — the comment now names ERROR_SHARING_VIOLATION
+as the Windows fact and the Unix legs' literal as the carried
+marker (the typed variant and its Display are platform-neutral, so
+no behavior or assertion changed). Record-only fixes: no test code
+changed beyond the two comments.
