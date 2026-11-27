@@ -808,6 +808,17 @@ phase modules, the `sync://progress` event (T-119) and `sync_cancel`
 (T-120) are registered; the panel — including any Cancel control that
 would call `sync_cancel` mid-run — is not.)
 
+The manual check the Cancel control gains when the panel lands
+(T-337/D-234): cancel a run mid-flight (before the backups) and open
+the Activity window — the run's bracket shows the `sync.run_started`
+entry (info, ok) closed by the `sync.run_cancelled` entry (info,
+skipped), the same window a backup failure closes with its
+`sync.run_aborted` entry (S10 below); the run's summary answers
+`aborted` with no target file changed. Until the control exists the
+backend half is covered by the automated battery (the real-command
+cancel test in `ipc_tests.rs` pins the entry's shape); this line
+waits with the panel.
+
 **§9.4's "Closing the window during a sync" — the dialog half is the
 pending line (T-123).** The backend half is registered (the
 `sync://close-confirmation` ask, the `sync_confirm_exit` command, the

@@ -30859,3 +30859,173 @@ APPROVE-WITH-FIXES: 1 P2 + 3 P3 — all taken or reported):
   Unix, so the P2-3 guard is needed; the suggested name's stem/ext
   inherit the file charset, so a tampered cell cannot inject a
   separator into `set_file_name` either.
+
+### D-234 — T-337: the cancel journal entry — `sync.run_cancelled` joins the vocabulary, and the user-cancel stop closes the bracket D-223 left open — 2026-11-27
+
+Problem: spec §8 S10's "the log has a cancel entry" was, at T-337's
+triage (2026-11-24), a promise the landed journal did not keep: D-138's
+sync command journaled nothing for ANY interrupted run and the
+vocabulary had no cancel member (the T-315 executor's report; the then
+manual-smoke S10 entry recorded the drift verbatim). The owner ruling
+chose option 2 — "implement cancel journaling in the backend so spec
+§8 S10 matches the code: an interrupted (cancelled) run leaves a
+cancel entry" (code-matches-spec; the spec row stays untouched). T-124
+(commit cc5e236, D-223) landed after the triage and closed the §10-
+coded half: phase 1's free-space tail, phase 2's backup abort (S10's
+own flow — the entry D-223 reading 3 cites as S10's "cancel entry")
+and the `pipeline_refusal` wrapper all journal `sync.run_aborted`
+(error/error, `Details::Failure`), and the manual-smoke S10 entry now
+cites it. The honest delta left for this card (the scoping reading,
+verified against the code): the USER-cancel path journals nothing —
+§9.4's one cancel point (the stop `sync_cancel`'s latched token
+produces at the phase-2 boundary) writes its `aborted` row through
+`stop_run` (plain `Db::run`) plus the file-log facade line
+`logging::sync_run_aborted`, and D-223 reading 5 left exactly that
+bracket "open by design" while scoping T-124's own card to
+"отмена при ошибке копии" — the ERROR cancellation. The owner ruling's
+"(cancelled)" half stayed unimplemented; that gap is this card's core
+(the orchestrator's brief named it explicitly).
+
+Solution: the reading first (rule 1), the code after.
+
+1. **The member is distinct: `Action::SyncRunCancelled` →
+   `"sync.run_cancelled"`** (the D-223 precedent for extending the
+   closed vocabulary). `SyncRunAborted`'s recorded semantics stay
+   §10-coded-only (error/error, a `Details::Failure` code); a user
+   cancel is a state, not a failure — §10 names no code for it (D-138's
+   `""` literal, D-210's declined-cancel ruling) — so it cannot ride
+   `SyncRunAborted` without lying on level, outcome and payload. The
+   near miss T-124 pinned against the not-yet-existing member became
+   the member; the single-L `"sync.run_canceled"` takes its place in
+   the rejection list, pinning the double-L spelling.
+2. **The shape: info/user/skipped, the `sync_run` entity,
+   `sync_run_id` set, `project_id` and details none.** Level info +
+   visibility user + result non-error is D-051's UNMIRRORED shape —
+   deliberate: the file log already records this stop through its own
+   dedicated facade line (`logging::sync_run_aborted`'s info line,
+   carrying the class-only reason the closed `Details` enum has no
+   SEC-008-legal route for), and a mirrored journal twin would double
+   the file's volume with a duplicate (D-051's rationale for the
+   unmirrored family). Outcome `skipped` is the closed vocabulary's
+   nearest member — the run deliberately did nothing, the partial
+   pairing's own gloss ("the run completed deliberately short of full
+   success"). No `Details::Failure`: no §10 code exists to name a user
+   decision. No project: a cancel is about the run (the error aborts'
+   `path: None` posture analog).
+3. **The producer site: inside `stop_run`'s own transaction, through
+   `run_with_mirror` + `mirror.record`** (D-228's boundary; the D-194
+   one-set rule the abort family follows — the `aborted` row and its
+   journal claim commit or vanish together). A new `UserStop` enum
+   (`CancelPoint`/`ConfirmationGate`) is the parameter that decides
+   the journaling, so the call sites read their stop's kind.
+4. **The D-25 gate stays unjournaled** (D-223 reading 5, upheld for
+   the gate): the gate stop is a question, not a cancel — the decline
+   that "cancels the whole run" (§9.4 phase 1 step 6) rides no code
+   path (the row is already terminal when the user declines; the
+   confirm re-call is a full new run with its own bracket), and a
+   `run_cancelled` entry at the gate would claim a decision that had
+   not happened. The row stays the queryable truth `sync_last_result`
+   serves (D-217); the census pin "the bracket alone" stays.
+5. **The crash-interrupted sweep and the `sync_cancel` command
+   journal nothing** (scope boundary): a crash is not a cancel
+   (nobody decided; §9.4's recovery paragraph's "events are written
+   to the log" is the file-log line `sync_runs_interrupted`, T-258's
+   posture), and the command owns no database access by design
+   (D-210) — its answers are states, and the run's own stop is the
+   authoritative outcome; the entry rides the stop, where the row and
+   the claim commit as one set. The too-late latch is the no-op §9.4
+   defines, so it never reaches the stop path and journals nothing.
+
+Wire surface: no new command (the entry is a producer, not a
+surface) — `bindings.ts` unchanged, `collect_commands!` unchanged.
+The frontend diff is the D-108 mirror the vocabulary change demands:
+`ACTION_MEMBERS` 24 → 25 with the generator spec's length pin (the
+mock's `activity_list` action filter validates against that list, so
+the growth is a correctness need, not only doc honesty: without it
+the mock would reject the `sync.run_cancelled` filter value the real
+boundary accepts). The mock's `syncRun` stand-in models no cancel
+path (its documented limits — synchronous, no live-run window), so
+its journal census is untouched. Frozen-zone deviation, recorded
+(Rule 10): `src/ipc/mock/commands.ts`'s `activity_list` doc still
+says "the closed 24-member vocabulary" (its `activity_list` doc,
+~line 1997) — the file is T-353's zone and stays untouched here; the
+one-word count fix (24 → 25) goes to that task's owner or a
+follow-up card, reported by the round-1 review (P2-2) and carried in
+the executor's report for the main session to card.
+
+Docs (Rule 11): `logging::sync_run_aborted`'s doc dropped its now-
+false "the store's action vocabulary has no cancel member" sentence;
+ARCHITECTURE.md's cancel-check-point line and journal section name
+the entry; manual-smoke's S7 gains the manual check the Cancel
+control earns when the panel lands (backend-verified until then);
+the spec §8 S10 row is untouched (the code now matches it — the gap
+was on the code side).
+
+Tests: store — the mapping table's "sync runs" category carries the
+member (label extended), `ALL` = 25, the round-trip and the
+single-L near-miss rejection. ipc_tests — the census Shape 3 pins
+the cancelled run's multiset (`sync.run_cancelled` info/skipped over
+`sync.run_started` info/ok) and the entry's full shape (entity, id
+column, visibility, no details, no project); the REAL-command cancel
+test (`sync_cancel_stops_the_live_run_before_the_backups` — the run
+cancelled through the actual `sync_cancel` invoke over the published
+token, parked on the gated database) pins the same shape on the path
+the card's DoD names; the gate census stays "the bracket alone" with
+the reading cited; the too-late convergence pins that no
+`sync.run_cancelled` entry lands for a finished run; the
+nothingToCancel convergence pins that the journal count the command
+left equals the count it found (the answer wrote no entry — the
+round-1 P3-2 shape, not global emptiness). Mutation groups:
+M1 the producer's insert dropped (the shape pins and both census
+tests red) · M2 the level flipped to error (the D-051 mirror would
+engage — the census shape pin red) · M3 the outcome flipped to ok ·
+M4 the near-miss spelling substitution (`sync.run_canceled` stored —
+the round-trip and the read-side rejection red).
+
+Review round 1 (deepseek-v4.1-flash, report
+`.opencode/reviews/t337-round1-report.md`, VERDICT: APPROVE — 0×P0,
+0×P1, 2×P2, 3×P3): the reviewer re-ran both Rust suites, the
+frontend trio and the mutation battery independently (five mutants —
+the executor's four plus the gate arm forced to journal, reddening
+the gate census Shape 2, which validates the `UserStop` enum's
+discriminating role) and found no correctness or security defect.
+
+- _P2-1 (the phase-4 "journal dictionary" still said the sync-runs
+  category is THREE members) TAKEN_ — the dictionary now says FIVE
+  and names the bracket's three closing alternatives
+  (finish/abort/cancel) with their producers; the count was stale
+  from T-124's own landing and this change grew the same category
+  (Rule 11 satisfied here, not deferred again).
+- _P2-2 (the frozen mock's `activity_list` doc still says
+  "24-member") RECORDED, not edited_ — `src/ipc/mock/commands.ts` is
+  T-353's zone; the deviation is recorded above (Rule 10) and the
+  one-word fix reported for the board (the main session's card).
+- _P3-1 (the ipc_tests sync-journal section header no longer
+  described the battery) TAKEN_ — the header now names the bracket's
+  closing alternatives and both cancel entries.
+- _P3-2 (the nothingToCancel pin asserted global journal emptiness
+  rather than "this answer wrote nothing") TAKEN_ — the test now
+  captures the journal count before the invokes and asserts the
+  count it left equals the count it found.
+- _P3-3 (the crash-interrupted sweep journals no entry while the
+  card's title says "for interrupted runs") REPORTED, not fixed_ —
+  reading 5's scope boundary stands (a crash is not a cancel; §9.4's
+  recovery "events are written to the log" is the file-log line);
+  the owner/orchestrator confirms the reading or cards the
+  crash-interrupted journaling as a follow-up — the executor's
+  report carries it.
+
+Review round 2 (hy4-flash-free, report
+`.opencode/reviews/t337-round2-report.md`, VERDICT: APPROVE —
+0×P0/P1/P2, 1×P3): the second reviewer verified every round-1
+disposition against the code (the FIVE-member dictionary and its
+producers, the recorded-not-edited frozen mock count, the section
+header, the count-based nothingToCancel pin), replayed two mutants
+itself (the producer disabled → the census Shape 3 red; the gate arm
+forced to journal → Shape 2 red; both restored byte-for-byte), ran
+the store action-log suite, the cancel battery and the generator
+spec, and found no correctness or security defect. Its one P3 —
+D-234's own Tests paragraph still described the PRE-fix
+"pins an empty journal" wording — is TAKEN: the sentence now states
+the count-based pin. No code change; the review phase ends here
+(two rounds, no third).

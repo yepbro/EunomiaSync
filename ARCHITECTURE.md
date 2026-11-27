@@ -345,7 +345,11 @@ Rust commands are registered through `tauri-specta`:
    `SyncCancelSlot` (T-258, D-147) for the `sync_cancel` command
    (T-120, D-210 — `src-tauri/src/sync_cancel.rs`: latches that very
    token and answers `cancelled`/`tooLate`/`nothingToCancel` over the
-   slot's point-of-no-return knowledge latch);
+   slot's point-of-no-return knowledge latch; the stop the latched
+   token produces journals the run's `sync.run_cancelled` entry —
+   T-337/D-234, inside the same transaction as the `aborted` row,
+   info/user/skipped, the unmirrored Activity-window shape; the D-25
+   gate's stop journals nothing — the decline rides no code path);
    after phase 2 no stop exists), phases 2/3/4, the
    never-fatal after-sync refresh and finish reports, and the summary
    read back from the committed rows — emitting the §7.10
@@ -1005,7 +1009,13 @@ rule's named family (T-124/D-223): phase 1's free-space tail, phase
 run's `sync.run_aborted` INSIDE the abort transaction that commits —
 the aborting transaction IS the "next transaction" the failed
 phase's error claim lands in, so the two rules are one rule, not
-opposites. Reads come in two seams with two
+opposites. The run's cancel entry is the user-shaped twin of that
+family (T-337/D-234): the one cancel check point's stop transaction
+journals `sync.run_cancelled` (info/user/skipped, no details — §10
+has no code that names a user decision) beside the `aborted` row it
+writes, through the same `run_with_mirror` boundary; the D-25 gate's
+stop journals nothing (the decline rides no code path — the row is
+the queryable truth). Reads come in two seams with two
 orderings: `recent` (newest by insert order — journal replay) and
 `list` (the Activity window's query, T-027: filters by inclusive
 DB-002 date range, project, actions, result and visibility, paginated

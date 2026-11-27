@@ -95,14 +95,19 @@
 //! message in the row's `details` cell — the one free-text home the
 //! schema offers, spelled by the store.
 //!
-//! **The journal dictionary** (D-051, widened by T-124/D-223):
-//! LOG-001…004's "sync runs and their results per project" is THREE
-//! members — phase 0 opens the run's bracket with one
-//! `sync.run_started` entry (info/user/ok, in its own record
-//! transaction), one `sync.run_finished` summary (entity `sync_run`,
-//! result by verdict) and one `sync.project_result` per project (the
-//! entry's own `project_id`/`sync_run_id` columns, result by the
-//! row's status) close it. The level/result mapping is this module's
+//! **The journal dictionary** (D-051, widened by T-124/D-223 and
+//! T-337/D-234): LOG-001…004's "sync runs and their results per
+//! project" is FIVE members — phase 0 opens the run's bracket with
+//! one `sync.run_started` entry (info/user/ok, in its own record
+//! transaction), the bracket's closing half is one of three members
+//! (`sync.run_finished`, written here, entity `sync_run`, result by
+//! verdict; `sync.run_aborted` — a §10-coded stop, error/error — by
+//! phase 1's free-space tail, phase 2's backup abort or the
+//! command's P3-4 wrapper; `sync.run_cancelled` — the user cancel,
+//! info/user/skipped — by the command's stop), and one
+//! `sync.project_result` per project (the entry's own
+//! `project_id`/`sync_run_id` columns, result by the row's status)
+//! rides between them. The level/result mapping is this module's
 //! ruling over the closed vocabularies: `written`/`unchanged` →
 //! info/ok (a written project carries its target path in
 //! [`Details::File`](action_log::Details::File), LOG-001…004's "for

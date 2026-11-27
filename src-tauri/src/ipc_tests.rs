@@ -12327,11 +12327,13 @@ fn the_summary_carries_the_skip_and_failure_codes_by_name() {
 }
 
 // ---------------------------------------------------------------------------
-// The sync journal (T-124, LOG-001…004, §10, S10, D-223): the run's
-// bracket (start/finish), the per-project entries with §10's full
-// field list, the backup-creation entries, and the cancel entry of a
-// backup-failure abort. The battery here drives the REAL command; the
-// phase suites pin each producer's own transaction discipline.
+// The sync journal (T-124, LOG-001…004, §10, S10, D-223, T-337/D-234):
+// the run's bracket (start, then one of finish/abort/cancel as the
+// closing half), the per-project entries with §10's full field list,
+// the backup-creation entries, and the cancel entries of a
+// backup-failure abort and a user cancel. The battery here drives
+// the REAL command; the phase suites pin each producer's own
+// transaction discipline.
 // ---------------------------------------------------------------------------
 
 /// The run's journal entries as full records (newest first, filtered
@@ -12635,8 +12637,12 @@ fn the_sync_journal_member_census_per_run_shape() {
         drop(temp);
     }
     // Shape 2 — the D-25 gate stop: the start bracket alone (the
-    // user's decision is no journal category — D-223's reading 5;
-    // the row is the queryable truth `sync_last_result` serves).
+    // user's decision is no journal category — D-223's reading 5,
+    // upheld for the GATE by T-337/D-234: the gate is a question, not
+    // a cancel, and the decline that "cancels the whole run" (§9.4
+    // phase 1 step 6) rides no code path — the row is the queryable
+    // truth `sync_last_result` serves, and the confirm re-call is a
+    // full new run with its own bracket).
     {
         let (temp, app) = sync_app();
         let repos = temp.path().join("repos");
@@ -12675,7 +12681,10 @@ fn the_sync_journal_member_census_per_run_shape() {
         drop(temp);
     }
     // Shape 3 — the user's cancel (a token latched before the run):
-    // the bracket alone, for the same reading.
+    // the bracket and its closing entry (T-337/D-234 — the owner
+    // ruling's "an interrupted (cancelled) run leaves a cancel entry";
+    // D-223 reading 5's deliberately-open bracket closes here, the
+    // entry's own member).
     {
         let (temp, app) = sync_app();
         let repos = temp.path().join("repos");
@@ -12702,13 +12711,40 @@ fn the_sync_journal_member_census_per_run_shape() {
             panic!("the cancelled run answered its aborted summary");
         };
         assert_eq!(summary.verdict, "aborted");
+        let journal = sync_journal_of(&app, &summary.run_id);
         assert_eq!(
-            sync_journal_of(&app, &summary.run_id)
+            journal
                 .iter()
-                .map(|record| record.action.as_str())
+                .map(|record| (
+                    record.action.as_str(),
+                    record.level.as_str(),
+                    record.result.as_str(),
+                    record.project_id.as_deref()
+                ))
                 .collect::<Vec<_>>(),
-            vec!["sync.run_started"],
-            "the cancel stop's members: the bracket alone"
+            vec![
+                ("sync.run_cancelled", "info", "skipped", None),
+                ("sync.run_started", "info", "ok", None),
+            ],
+            "the cancel stop's members: the bracket and the cancel entry"
+        );
+        // The entry's own shape (the D-234 reading): the `sync_run`
+        // entity and id column; `user` visibility (LOG-005 — the
+        // Activity window's own data); no details (§10 has no code
+        // that names a user decision, and the closed payload has no
+        // free-text route for the reason — SEC-008); no project (a
+        // cancel is about the run, not one project).
+        assert_eq!(
+            journal[0].entity,
+            Some((
+                eunomia_store::action_log::EntityType::SyncRun,
+                summary.run_id.clone()
+            ))
+        );
+        assert_eq!(journal[0].visibility.as_str(), "user");
+        assert_eq!(
+            journal[0].details, None,
+            "no §10 code exists for a user decision"
         );
         drop(app);
         drop(temp);
@@ -12962,6 +12998,46 @@ fn sync_cancel_stops_the_live_run_before_the_backups() {
         Some("cancelled by the user before the backups"),
         "the stop row's no-code literal and class-only line"
     );
+    // The stop's journal claim (T-337/D-234), pinned HERE — on the
+    // run cancelled through the REAL `sync_cancel` command's latch
+    // (the published token the command latched above), not a planted
+    // row: the run's bracket closes with its `sync.run_cancelled`
+    // entry, in the D-234 shape — info/user/skipped (the unmirrored
+    // Activity-window shape: the file log's `sync_run_aborted` info
+    // line carries the reason the entry cannot), the `sync_run`
+    // entity, no details (§10 names no user decision), no project.
+    let journal = sync_journal_of(&app, &summary.run_id);
+    assert_eq!(
+        journal
+            .iter()
+            .map(|record| (
+                record.action.as_str(),
+                record.level.as_str(),
+                record.result.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("sync.run_cancelled", "info", "skipped"),
+            ("sync.run_started", "info", "ok"),
+        ],
+        "the cancelled run's bracket closes with its cancel entry"
+    );
+    assert_eq!(
+        journal[0].entity,
+        Some((
+            eunomia_store::action_log::EntityType::SyncRun,
+            summary.run_id.clone()
+        )),
+        "the entry's entity is the run it stopped"
+    );
+    assert_eq!(
+        journal[0].details, None,
+        "no §10 code names a user decision"
+    );
+    assert_eq!(
+        journal[0].project_id, None,
+        "a cancel is about the run, not one project"
+    );
     // The slot cleared with the answer, the census holds exactly one
     // empty literal, and the flag freed (§9.4 phase 4 step 5's reset
     // happens at the stop the same way).
@@ -13068,6 +13144,16 @@ fn sync_cancel_after_the_point_of_no_return_answers_too_late() {
         count_empty_run_error_codes(&app),
         0,
         "a finished run carries NULL, never the empty literal"
+    );
+    // The too-late convergence shape journals nothing new (T-337):
+    // the post-consultation latch is the no-op §9.4 phase 2 step 3
+    // defines, so no stop path runs and the finished run's journal
+    // holds no `sync.run_cancelled` entry.
+    assert!(
+        sync_journal_of(&app, &summary.run_id)
+            .iter()
+            .all(|record| record.action.as_str() != "sync.run_cancelled"),
+        "a too-late cancel journals no cancel entry — the run finished"
     );
     drop(app);
     drop(temp);
@@ -13189,6 +13275,12 @@ fn sync_cancel_with_no_live_run_answers_nothing_to_cancel() {
     let (temp, app) = sync_app();
     let webview = main_webview(&app);
     assert!(published_cancel_token(&app).is_none(), "no run is live");
+    // The journal count this test found, before any cancel: the
+    // pinned fact is "the convergence WROTE nothing", so the count
+    // it leaves must equal the count it found (not global emptiness,
+    // which would break for unrelated reasons the day a fixture
+    // journals a setup entry).
+    let journal_before = journal_entries(&sync_database_of(&app)).len();
 
     let answer = invoke_sync_cancel(&webview).expect("the no-run arm is an outcome");
     assert_eq!(
@@ -13205,6 +13297,15 @@ fn sync_cancel_with_no_live_run_answers_nothing_to_cancel() {
         sync_all_runs(&app),
         Vec::<(String, String)>::new(),
         "nothing was written — no run row exists"
+    );
+    // The convergence shapes journal nothing (T-337): the command
+    // owns no database access (D-210's structural claim; this pin is
+    // its behavioral proof) — the count it found is the count it
+    // left, so no `sync.run_cancelled` entry (or any other) landed.
+    assert_eq!(
+        journal_entries(&sync_database_of(&app)).len(),
+        journal_before,
+        "a nothingToCancel answer writes no journal entry"
     );
     assert!(
         !app.state::<crate::sync_running::SyncRunning>().is_running(),

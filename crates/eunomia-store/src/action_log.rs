@@ -341,9 +341,9 @@ pub enum Action {
     /// A heading was deleted (physical delete, §6.4).
     HeadingDeleted,
     // LOG-001…004: "sync runs and their results per project" — the
-    // run's own lifecycle entries (start, finish, abort — T-124/D-223
-    // added the start and the abort beside D-051's finish) plus one
-    // entry per project.
+    // run's own lifecycle entries (start, finish, abort, cancel —
+    // T-124/D-223 added the start and the abort beside D-051's
+    // finish, T-337/D-234 the cancel) plus one entry per project.
     /// A sync run started (§9.4 phase 0's record; the run-level
     /// bracket's opening half).
     SyncRunStarted,
@@ -352,8 +352,16 @@ pub enum Action {
     /// A sync run aborted before finishing — the §10-coded stops
     /// (the backup failure's cancellation, S10's "cancel entry"; a
     /// pipeline error's terminal row), never the user-shaped stops
-    /// (§10 names no code for those).
+    /// (the cancel point's entry is its own member,
+    /// [`Action::SyncRunCancelled`]; §10 names no code for those).
     SyncRunAborted,
+    /// A sync run cancelled by its user before the backups (§9.4's
+    /// single consultation; T-337/D-234): the user-shaped twin of
+    /// [`Action::SyncRunAborted`] — a decision, not a §10-coded
+    /// failure, so the entry carries no `Details::Failure` (§10 has
+    /// no code that names a user decision) and lands at
+    /// info/`Outcome::Skipped`, the unmirrored Activity-window shape.
+    SyncRunCancelled,
     /// One project's outcome inside a sync run.
     SyncProjectResult,
     /// LOG-001…004: "backup creation" (BKP target-file copies; the
@@ -381,7 +389,7 @@ pub enum Action {
 
 impl Action {
     /// Every member, in the order the module docs group them.
-    pub const ALL: [Action; 24] = [
+    pub const ALL: [Action; 25] = [
         Action::ProjectAdded,
         Action::ProjectChanged,
         Action::ProjectArchived,
@@ -402,6 +410,7 @@ impl Action {
         Action::SyncRunStarted,
         Action::SyncRunFinished,
         Action::SyncRunAborted,
+        Action::SyncRunCancelled,
         Action::SyncProjectResult,
         Action::BackupCreated,
         Action::ErrorReported,
@@ -432,6 +441,7 @@ impl Action {
             Action::SyncRunStarted => "sync.run_started",
             Action::SyncRunFinished => "sync.run_finished",
             Action::SyncRunAborted => "sync.run_aborted",
+            Action::SyncRunCancelled => "sync.run_cancelled",
             Action::SyncProjectResult => "sync.project_result",
             Action::BackupCreated => "backup.created",
             Action::ErrorReported => "error.reported",
@@ -473,6 +483,7 @@ impl Action {
             "sync.run_started" => Ok(Action::SyncRunStarted),
             "sync.run_finished" => Ok(Action::SyncRunFinished),
             "sync.run_aborted" => Ok(Action::SyncRunAborted),
+            "sync.run_cancelled" => Ok(Action::SyncRunCancelled),
             "sync.project_result" => Ok(Action::SyncProjectResult),
             "backup.created" => Ok(Action::BackupCreated),
             "error.reported" => Ok(Action::ErrorReported),
@@ -1506,11 +1517,12 @@ mod tests {
                 ],
             ),
             (
-                "sync runs (their lifecycle: started, finished, aborted)",
+                "sync runs (their lifecycle: started, finished, aborted, cancelled)",
                 &[
                     Action::SyncRunStarted,
                     Action::SyncRunFinished,
                     Action::SyncRunAborted,
+                    Action::SyncRunCancelled,
                 ],
             ),
             ("sync results per project", &[Action::SyncProjectResult]),
@@ -1627,19 +1639,23 @@ mod tests {
         }
     }
 
-    /// The sync-run lifecycle members (T-124/D-223): both new
+    /// The sync-run lifecycle members (T-124/D-223, T-337/D-234): the
     /// spellings round-trip, and near misses — the verb-only forms,
-    /// the cancelled synonym, a merged word — stay outside the
-    /// vocabulary, so the extension did not open it.
+    /// the single-L American spelling, a merged word — stay outside
+    /// the vocabulary, so the extensions did not open it.
     #[test]
     fn the_sync_run_members_round_trip_and_reject_near_misses() {
-        // as_str → from_member → as_str is the identity for both new
+        // as_str → from_member → as_str is the identity for the
         // members; the spellings come from §9.4's own status words
-        // ("the run gets the `aborted` status") and the card's own
-        // "Запуск" over LOG-001…004's "sync runs".
+        // ("the run gets the `aborted` status"), the card's own
+        // "Запуск" over LOG-001…004's "sync runs", and the cancel
+        // member's §9.4 phase 2 step 3 domain word (a run stopped by
+        // its user is "cancelled" — the row's own details line spells
+        // it, D-138).
         for (member, spelling) in [
             (Action::SyncRunStarted, "sync.run_started"),
             (Action::SyncRunAborted, "sync.run_aborted"),
+            (Action::SyncRunCancelled, "sync.run_cancelled"),
         ] {
             assert_eq!(
                 Action::from_member(member.as_str()).expect("the stored spelling must parse"),
@@ -1647,10 +1663,13 @@ mod tests {
             );
             assert_eq!(member.as_str(), spelling);
         }
-        // Near misses stay outside the vocabulary.
+        // Near misses stay outside the vocabulary. The single-L
+        // "canceled" pins the member's exact double-L spelling — the
+        // near miss T-124 used for the not-yet-existing member became
+        // the member itself (T-337/D-234).
         for rejected in [
             "sync.run_start",
-            "sync.run_cancelled",
+            "sync.run_canceled",
             "sync.runaborted",
             "sync.run_started_by_user",
         ] {

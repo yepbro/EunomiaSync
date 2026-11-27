@@ -1922,9 +1922,13 @@ pub(crate) fn sync_run_abort_refused(code: &str) {
 /// "declining cancels the whole run"; after phase 2 no stop exists).
 /// `info` + the fixed class-only `reason`: the stop is a decision, not
 /// a failure, and the run row's `aborted` details cell carries the same
-/// sentence — the §7.7 journal of the run itself is phase 4's (an
-/// aborted run writes no journal entries; the store's action
-/// vocabulary has no cancel member — recorded in D-138).
+/// sentence. The §7.7 journal's own half (T-337/D-234): the CANCEL
+/// point's stop transaction journals a `sync.run_cancelled` entry
+/// (info/user/skipped — the unmirrored shape, so this line stays the
+/// file log's only record of the stop, carrying the reason the entry
+/// cannot); the D-25 gate's stop still journals nothing (the decline
+/// rides no code path — the gate row is the queryable truth, D-223
+/// reading 5, D-217).
 pub(crate) fn sync_run_aborted(reason: &str) {
     tracing::info!(
         target: "eunomia::sync",

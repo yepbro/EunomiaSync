@@ -198,11 +198,11 @@ describe('generateActivityEntries: closed vocabularies', () => {
     // The D-108 strict-coverage mirror: the mock's `activity_list`
     // filter validates against this list, so a member lost here
     // would make the mock reject a filter value the real boundary
-    // accepts. The length literal (24, `Action::ALL` today) catches
+    // accepts. The length literal (25, `Action::ALL` today) catches
     // an accidental deletion; the dedup check catches a copy-paste
     // double. No cross-language oracle exists (bindings.ts carries no
     // enum), so the two literals are the pin.
-    expect(ACTION_MEMBERS).toHaveLength(24)
+    expect(ACTION_MEMBERS).toHaveLength(25)
     expect(new Set(ACTION_MEMBERS).size).toBe(ACTION_MEMBERS.length)
   })
 

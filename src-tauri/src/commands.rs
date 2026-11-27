@@ -1684,6 +1684,7 @@ pub(crate) async fn sync_run_with<R: Runtime>(
                 confirmation.len()
             ),
             crate::sync_phase2::db002_stamp((seams.abort_clock)()),
+            UserStop::ConfirmationGate,
         )
         .await?;
         logging::sync_run_aborted("awaiting the empty-build confirmation");
@@ -1696,7 +1697,11 @@ pub(crate) async fn sync_run_with<R: Runtime>(
     // phase 2 (§9.4 phase 2 step 3's point of no return). The stop is
     // the D-131 tail shape — the row `aborted`, the verdicts phase 1
     // wrote stay — and the answer is the `aborted` summary, not an
-    // `Err`: the user asked for this.
+    // `Err`: the user asked for this. The stop transaction journals
+    // the run's `sync.run_cancelled` entry (T-337/D-234): the owner
+    // ruling's "an interrupted (cancelled) run leaves a cancel entry"
+    // — S10's own backup-failure flow was T-124's error abort; this
+    // is its user-shaped twin.
     if cancel.is_cancelled() {
         stop_run(
             &app,
@@ -1704,6 +1709,7 @@ pub(crate) async fn sync_run_with<R: Runtime>(
             "",
             "cancelled by the user before the backups",
             crate::sync_phase2::db002_stamp((seams.abort_clock)()),
+            UserStop::CancelPoint,
         )
         .await?;
         logging::sync_run_aborted("cancelled by the user before the backups");
@@ -1972,6 +1978,27 @@ fn wire_count(count: i64) -> i32 {
     i32::try_from(count).expect("a run's project count fits the wire's i32")
 }
 
+/// Which user-shaped stop [`stop_run`] is writing — the journaling
+/// decision the stop's own kind makes (T-337/D-234). The CANCEL
+/// point's stop journals the run's `sync.run_cancelled` entry inside
+/// the stop's own transaction (the row and its journal claim commit
+/// as one set, the D-194 rule the abort family already follows); the
+/// D-25 gate's stop journals nothing — the gate is a question, not a
+/// cancel, and the decline that "cancels the whole run" (§9.4 phase 1
+/// step 6) rides no code path (the row is already terminal when the
+/// user declines; an entry would claim a decision that had not
+/// happened, and the confirm re-call is a full new run with its own
+/// bracket).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserStop {
+    /// §9.4's single consultation stopped the run: the user's cancel,
+    /// through `sync_cancel`'s latched token.
+    CancelPoint,
+    /// The D-25 empty-build gate: the run stops to ask, the answer is
+    /// `NeedsConfirmation`.
+    ConfirmationGate,
+}
+
 /// Writes a user-shaped stop's terminal row: `aborted` with the
 /// caller-supplied `finished_at` — the abort clock's answer in the
 /// DB-002 spelling (D-197) — and a class-only details line. The `code`
@@ -1983,20 +2010,60 @@ fn wire_count(count: i64) -> i32 {
 /// input it offers), so "" is the no-code spelling and the first run
 /// reader's reading is pinned at [`run_error_code_or_none`] (D-138's
 /// obligation, landed as the one seam — T-258).
+///
+/// The `stop` kind decides the journaling (see [`UserStop`]): the
+/// cancel point's stop also journals the run's `sync.run_cancelled`
+/// entry — info/user/skipped, the `sync_run` entity, `sync_run_id`
+/// set, no details — INSIDE this same transaction through
+/// `run_with_mirror` + `mirror.record` (D-228's buffer, flushed with
+/// the stop's own commit). The unmirrored shape is deliberate
+/// (D-051's policy table): the file log already carries this stop's
+/// own facade line (`logging::sync_run_aborted`'s info line with the
+/// class-only reason — a decision, not a failure), and a mirrored
+/// journal twin would double the file's volume with a duplicate; no
+/// `Details::Failure` exists for the entry because §10 has no code
+/// that names a user decision (D-138's `""` literal, D-210's
+/// declined-cancel ruling), and the closed `Details` enum has no
+/// free-text route for the reason (SEC-008).
 async fn stop_run<R: Runtime>(
     app: &AppHandle<R>,
     run_id: &str,
     code: &str,
     details: &str,
     finished_at: String,
+    stop: UserStop,
 ) -> Result<(), AppError> {
     let run_id = run_id.to_owned();
     let code = code.to_owned();
     let details = details.to_owned();
+    let journal_cancel = stop == UserStop::CancelPoint;
     managed_db(app)?
-        .run(move |tx| {
+        .run_with_mirror(move |tx, mirror| {
             abort_run(tx, &run_id, &finished_at, &code, &details)
-                .map_err(db::sync_runs_to_app_error)
+                .map_err(db::sync_runs_to_app_error)?;
+            // The cancel point's journal claim (T-337/D-234): the
+            // run's bracket gains its closing half inside the stop's
+            // own transaction, after the row it describes — the
+            // D-194 one-set rule the abort family follows. The gate
+            // arm records nothing (the enum's doc records why), so
+            // its buffer stays empty and the flush emits nothing —
+            // the plain-`run` behavior by construction.
+            if journal_cancel {
+                let mut entry = LogEntry::new(
+                    Action::SyncRunCancelled,
+                    Level::Info,
+                    Visibility::User,
+                    Outcome::Skipped,
+                );
+                entry.entity = Some(Entity {
+                    kind: EntityType::SyncRun,
+                    id: run_id.as_str(),
+                });
+                entry.sync_run_id = Some(run_id.as_str());
+                insert(tx, &entry).map_err(activity_log_to_app_error)?;
+                mirror.record(&entry);
+            }
+            Ok(())
         })
         .await
 }
