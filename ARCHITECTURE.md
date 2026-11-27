@@ -420,7 +420,9 @@ Rust commands are registered through `tauri-specta`:
    `heading_delete`/`items_move` (T-330, the batch absorbing
    T-092…T-095, `src-tauri/src/headings.rs`): validated heading
    creation/rename, point-wise level change, whole-branch ±1 shift,
-   physical delete that keeps instructions in order, and semantic
+   physical delete that keeps instructions in order (a level-2
+   section still holding items — nested headings and hidden rows
+   included — is refused first, LIB-037), and semantic
    item/branch moves. Each runs one `Db::run` transaction over the
    existing core ALG-060/061/062 algorithms and the store's whole-order
    persistence; a heading operation journals `heading.*`, a moved

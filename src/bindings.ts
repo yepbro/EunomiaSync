@@ -1183,8 +1183,14 @@ export const commands = {
 	 *  Physically deletes one heading (§6.4 LIB-033). The store closes the
 	 *  position gap; every instruction and nested heading stays in its
 	 *  previous relative order and therefore belongs to the preceding
-	 *  section. The delete and `heading.deleted` journal entry share one
-	 *  transaction; no revision is written.
+	 *  section — which is exactly why LIB-037 (§6.4) refuses a level-2
+	 *  heading whose section still holds ANY item (instructions, nested
+	 *  headings, hidden rows included): a root section has no previous
+	 *  section to move them into. The refusal is the typed `E_VALIDATION`
+	 *  naming `id` with the blocking item count, checked before any write;
+	 *  an empty root and every nested heading delete as before. The
+	 *  delete and `heading.deleted` journal entry share one transaction;
+	 *  no revision is written.
 	 */
 	headingDelete: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("heading_delete", { id }, options),
 	/**

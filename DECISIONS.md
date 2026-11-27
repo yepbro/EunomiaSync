@@ -30357,3 +30357,135 @@ startup/fatal-gate separation) — the one finding processed:
   the superseded-pointer parenthetical (the D-226 dated-record
   posture) noting the executor's new name while pointing at the
   addendum that records the migration.
+
+### D-231 — T-360: heading_delete refuses a non-empty root section — the LIB-033 move-up ground, the ALG-060 section as the item oracle, and the widened scope as the hidden-row half — 2026-11-27
+
+Problem: the landed `heading_delete` (T-330, D-191) deletes
+unconditionally. D-203's reading (7) contracted the prototype's
+trash-disable as LIB-037: a top-level section that still holds items
+cannot be deleted — LIB-033 moves a deleted heading's items into the
+previous section, and a root has none. The card asks for the command's
+defensive half only (the typed refusal); the UI's disable/tooltip/
+refresh is the UI half of LIB-037 and stays with the frontend work.
+Four readings were open; the chosen readings, written before the
+implementation (the rule-1 discipline):
+
+1. **The level rule: exactly level 2, read from the store row.** The
+   spec's own words are "a level-2 heading whose section holds any
+   item" (§7.10's command note), and §6.2 caps levels at 2–6 with no
+   H1 — level 2 IS the root; nothing above it exists to receive the
+   moved items. The check reads the operand's already-decoded store
+   row (`heading_of`'s `LibraryItem.heading_level == Some(2)`), so
+   the ordered-table read and the branch walk run only for roots;
+   every nested delete keeps T-330's cost and behavior.
+2. **The item oracle: the ALG-060 branch's section, never a local
+   walk.** "The section holds any item" is §2's "heading section" —
+   the items after the heading up to the next heading of level L or
+   higher — exactly `heading_branch(&core, index).section()`
+   (`crates/eunomia-core/src/heading_range.rs`, ALG-060). The
+   command resolves it over `core_items(&rows)` and refuses iff the
+   range is non-empty: instructions and nested headings of any depth
+   both sit inside it, and this module's own rule ("It never
+   re-implements a branch walk") is kept. `body::section_end` stays
+   private to the build (D-053, unchanged).
+3. **The hidden-row half: the widened scope, not a state filter.**
+   The ordered read is `list_items(transaction, ItemScope::All)` —
+   the "Show hidden" scope — and the ALG-060 walk never reads an
+   instruction's state (D-11: a hidden instruction keeps its place
+   in the structure), so hidden rows block the delete by geometry
+   alone, with no hidden-specific branch to get wrong. The refusal's
+   measured fact (`items`) is the section length, hidden rows
+   included in the count.
+4. **The refusal shape and placement.** The typed `E_VALIDATION`
+   naming `id` — the LIB-024/025/036 family pattern (D-203 (1)/(7))
+   — plus one measured fact, the blocking item count in `items`
+   (the `with_number` precedent; a number, never title text —
+   rule 8). The check runs inside the one `run_with_mirror`
+   transaction, after the operand resolves (`heading_of`) and
+   BEFORE any write (`delete_heading`): a state-dependent refusal
+   cannot precede the transaction (the operand and its section are
+   database facts), and the family's validate-first reading is
+   "everything validated before the WRITE" — `items_move`'s
+   self/descendant guard and `heading_create`'s parent check sit at
+   the same seam. A refused delete writes no row, no journal entry,
+   no revision (the closure returns before any mutation); the
+   success path journals `heading.deleted` exactly as T-330 landed
+   it — journaling code is untouched.
+
+Solution: the guard in `heading_delete_impl`
+(`src-tauri/src/headings.rs`), the command's doc comment carrying
+the LIB-037 sentence, ARCHITECTURE.md's headings-family sentence
+gaining the refusal clause, and four mock-IPC tests in
+`headings_tests.rs` (the T-093 battery's extension): a root holding
+an instruction (rows byte-equal, journal empty, `items` = "1"); a
+root holding a nested heading with content (`items` = "2") and a
+root whose only item is a bare nested heading (`items` = "1") —
+both shapes of the "nested headings count" half; a root whose only
+item is HIDDEN (the invisible row still blocks); and the preserved
+successes — an empty root deletes (order kept, dense positions, one
+`heading.deleted` entry, no revisions), while T-330's existing
+nested-with-content delete test stays green untouched. The wire
+SIGNATURE is unchanged (same command, same `Result<(), AppError>`,
+no type or argument edits), but specta embeds the command's doc
+comment as the `headingDelete` JSDoc in the generated
+`src/bindings.ts` — so the doc sentence forces a regeneration
+(rule 10's canonical forced deviation, recorded here): the
+regenerated diff is comment-only, and the committed file is what
+`export_bindings_are_up_to_date` now checks (its first run was red
+by design — the D-034 regenerate-then-compare contract — and green
+on the re-run). `mode.spec.ts`, the mock layer and every other
+frontend file stay untouched; `bindings.ts` is excluded from
+prettier and eslint as machine-written (`.prettierignore`,
+`eslint.config.js`), and the pnpm trio (format:check, lint,
+typecheck) was run to prove the regenerated file breaks nothing.
+
+Mutation battery (each mutant reverted byte-for-byte and SHA-256
+verified after each run): the check removed → the three refusal
+tests red (exit 100); the level check inverted (`==` → `!=`) → the
+three refusals AND the nested-with-content success red while the
+empty-root success stays green — the level rule discriminates; the
+scope narrowed to `ItemScope::Active` → exactly the hidden-item
+test red — the "hidden rows included" half is load-bearing, not
+decorative.
+
+Follow-ups: the TypeScript mock's `headingDelete`
+(`src/ipc/mock/commands.ts:1337-1346`) still deletes
+unconditionally — the mock layer lives in the ipc files the
+parallel tasks own (T-351: bindings/ipc/mode.spec), so the
+divergence is reported here, not edited: the mock should mirror the
+refusal (a level-2 row whose ALG-060 section holds any row) when
+its owner next touches it.
+
+**Round-1 review addendum (same task, 2026-11-27; report
+`.opencode/reviews/t360-round1-report.md`,
+deepseek-v4.1-flash, exit 0): APPROVE — 0×P0/P1/P2, 2×P3.** The
+reviewer independently re-ran the targeted suites, the pnpm trio,
+clippy and fmt, and reproduced all three mutation claims exactly
+(check disabled → 3 refusals red; level inverted → refusals plus
+the nested success red, empty-root green; scope narrowed to
+`Active` → only the hidden test red), each reverted with SHA-256
+verified against the committed state. Findings:
+
+- _P3-1 (test-local naming) TAKEN_ — in the nested-heading refusal
+  test the H2 operand was `bare` and its H3 `_nested`; a reader
+  first maps "bare" to the nested heading. Renamed `bare` →
+  `bare_root` and `_nested` → `_empty_nested`; assertions
+  untouched.
+- _P3-2 (the mock-divergence follow-up needs its board card)
+  REPORTED, not fixed here_ — the card is the main session's to
+  create (the board rule); this record already names the
+  divergence, and the executor's report carries it to the
+  orchestrator.
+
+**Round-2 review addendum (same task, 2026-11-27; report
+`.opencode/reviews/t360-round2-report.md`, hy4-flash-free, exit 0):
+APPROVE — 0×P0/P1/P2/P3.** The second reviewer audited all eight
+focus points independently, re-ran the falsification battery
+itself (guard disabled → the 3 refusal tests red; level inverted →
+the refusals plus T-330's nested-success red, empty-root success
+green; the guard's read narrowed to `ItemScope::Active` → exactly
+the hidden-row test red; every mutant restored byte-for-byte with
+the SHA matched against HEAD), and confirmed the round-1 P3-1
+rename landed (`bare_root`/`_empty_nested`). No findings; no fix
+was needed. The mock-divergence follow-up stays the main session's
+board card (both rounds reported it).

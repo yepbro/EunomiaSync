@@ -714,8 +714,14 @@ async fn heading_update_impl<R: Runtime>(
 /// Physically deletes one heading (§6.4 LIB-033). The store closes the
 /// position gap; every instruction and nested heading stays in its
 /// previous relative order and therefore belongs to the preceding
-/// section. The delete and `heading.deleted` journal entry share one
-/// transaction; no revision is written.
+/// section — which is exactly why LIB-037 (§6.4) refuses a level-2
+/// heading whose section still holds ANY item (instructions, nested
+/// headings, hidden rows included): a root section has no previous
+/// section to move them into. The refusal is the typed `E_VALIDATION`
+/// naming `id` with the blocking item count, checked before any write;
+/// an empty root and every nested heading delete as before. The
+/// delete and `heading.deleted` journal entry share one transaction;
+/// no revision is written.
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn heading_delete<R: Runtime>(
@@ -731,7 +737,31 @@ async fn heading_delete_impl<R: Runtime>(app: AppHandle<R>, id: String) -> Resul
     let database = managed_db(&app)?;
     database
         .run_with_mirror(move |transaction, mirror| {
-            heading_of(transaction, &id)?;
+            let heading = heading_of(transaction, &id)?;
+            // LIB-037: only a ROOT section can be refused, so the
+            // ordered read and the ALG-060 walk run for level-2
+            // headings alone. The widened scope keeps hidden
+            // instructions in the picture (D-11: they are items of
+            // the structure), and the branch's section covers
+            // instructions and nested headings alike — the module
+            // never re-implements the walk.
+            if heading.heading_level == Some(2) {
+                let rows = list_items(transaction, ItemScope::All).map_err(library_error)?;
+                let index = index_of(&rows, &id, "id")?;
+                let section = heading_branch(&core_items(&rows), index)
+                    .map_err(branch_error)?
+                    .section();
+                if !section.is_empty() {
+                    return Err(with_number(
+                        field_refusal(
+                            "id",
+                            "a top-level section that still holds items cannot be deleted",
+                        ),
+                        "items",
+                        section.len(),
+                    ));
+                }
+            }
             delete_heading(transaction, &id).map_err(library_error)?;
             journal(
                 transaction,

@@ -7,7 +7,10 @@
 //! The four absorbed definitions of done lead the suite:
 //!
 //! - T-092: heading name/level validation, journal presence, no versions.
-//! - T-093: physical delete keeps the section's instructions in order.
+//! - T-093: physical delete keeps the section's instructions in order;
+//!   LIB-037 refuses a non-empty root section (instructions, nested
+//!   headings, hidden rows included) before any write, while an empty
+//!   root still deletes.
 //! - T-094: point-wise level change and whole-branch ±1 shift; an
 //!   out-of-range shift is `E_VALIDATION` and changes nothing.
 //! - T-095: one transaction with renumbering, restart persistence, and
@@ -626,6 +629,123 @@ fn heading_delete_refuses_an_instruction_or_unknown_id_without_writing() {
     }
     assert_eq!(rows_of(&database), before);
     assert!(journal_of(&database).is_empty());
+}
+
+#[test]
+fn heading_delete_refuses_a_root_section_that_still_holds_an_instruction() {
+    let (_temp, app) = headings_app();
+    let database = database_of(&app);
+    let alpha = seed_heading(&database, "Alpha", 2);
+    let _item = seed_instruction(&database, "Item");
+    let _beta = seed_heading(&database, "Beta", 2);
+    let webview = main_webview(&app);
+    let before = rows_of(&database);
+
+    let error = invoke_heading_delete(&webview, &alpha.id)
+        .expect_err("a root section holding an instruction is refused (LIB-037)");
+    assert_eq!(
+        error["params"]["items"],
+        serde_json::json!("1"),
+        "the refusal carries the blocking item count"
+    );
+    assert_validation(error, "id");
+
+    assert_eq!(
+        rows_of(&database),
+        before,
+        "the refused delete touches no row, position or order"
+    );
+    assert!(journal_of(&database).is_empty());
+    assert_eq!(revisions_total(&database), 0);
+}
+
+#[test]
+fn heading_delete_refuses_a_root_section_that_holds_a_nested_heading() {
+    let (_temp, app) = headings_app();
+    let database = database_of(&app);
+    let alpha = seed_heading(&database, "Alpha", 2);
+    let _child = seed_heading(&database, "Child", 3);
+    let _grandchild = seed_instruction(&database, "Grandchild");
+    let bare_root = seed_heading(&database, "Bare", 2);
+    let _empty_nested = seed_heading(&database, "Nested", 3);
+    let webview = main_webview(&app);
+    let before = rows_of(&database);
+
+    // A nested heading with content under it: the H3 and its
+    // instruction are both items of the root's section.
+    let error = invoke_heading_delete(&webview, &alpha.id)
+        .expect_err("a root section holding a nested heading is refused (LIB-037)");
+    assert_eq!(error["params"]["items"], serde_json::json!("2"));
+    assert_validation(error, "id");
+
+    // A nested heading with nothing under it is still an item of the
+    // root's section and blocks the delete.
+    let error = invoke_heading_delete(&webview, &bare_root.id)
+        .expect_err("a nested heading blocks the root's delete even when itself empty");
+    assert_eq!(error["params"]["items"], serde_json::json!("1"));
+    assert_validation(error, "id");
+
+    assert_eq!(rows_of(&database), before);
+    assert!(journal_of(&database).is_empty());
+}
+
+#[test]
+fn heading_delete_refuses_a_root_section_whose_only_item_is_hidden() {
+    let (_temp, app) = headings_app();
+    let database = database_of(&app);
+    let alpha = seed_heading(&database, "Alpha", 2);
+    let hidden = seed_instruction(&database, "Hidden");
+    hide_instruction(&database, &hidden.id);
+    let webview = main_webview(&app);
+    let before = rows_of(&database);
+
+    // No closing H2 follows: the section runs to the end of the list,
+    // and the invisible row still blocks the delete (LIB-037).
+    let error = invoke_heading_delete(&webview, &alpha.id)
+        .expect_err("a hidden instruction still counts as the section's item (LIB-037)");
+    assert_eq!(error["params"]["items"], serde_json::json!("1"));
+    assert_validation(error, "id");
+
+    assert_eq!(rows_of(&database), before);
+    assert!(journal_of(&database).is_empty());
+}
+
+#[test]
+fn heading_delete_still_deletes_an_empty_root_section() {
+    let (_temp, app) = headings_app();
+    let database = database_of(&app);
+    let alpha = seed_heading(&database, "Alpha", 2);
+    let first = seed_instruction(&database, "First");
+    let empty = seed_heading(&database, "Empty", 2);
+    let beta = seed_heading(&database, "Beta", 2);
+    let last = seed_instruction(&database, "Last");
+    let webview = main_webview(&app);
+
+    invoke_heading_delete(&webview, &empty.id)
+        .expect("an empty root section still deletes (LIB-037)");
+
+    assert!(row_of(&database, &empty.id).is_none());
+    let rows = rows_of(&database);
+    assert_eq!(
+        ids_of(&rows),
+        vec![
+            alpha.id.as_str(),
+            first.id.as_str(),
+            beta.id.as_str(),
+            last.id.as_str()
+        ],
+        "the rows around the deleted empty root keep their order"
+    );
+    assert_eq!(
+        rows.iter().map(|row| row.position).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert_eq!(
+        journal_count(&database, Action::HeadingDeleted, &empty.id),
+        1,
+        "the successful delete journals exactly as before"
+    );
+    assert_eq!(revisions_total(&database), 0);
 }
 
 // ---------------------------------------------------------------------------
