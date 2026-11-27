@@ -42,8 +42,13 @@
 //! "a real change", D-16 — a save without changes writes no version
 //! AND no journal); create/delete/restore journal unconditionally
 //! after a genuine transition; `variant_set_main` writes no version
-//! (D-16: the main flag is not snapshot-visible) and journals the
-//! `variant.changed` "main choice" member. Idempotent re-sends
+//! (D-16: the main flag is not snapshot-visible), journals the
+//! `variant.changed` "main choice" member, and REFUSES an empty
+//! promotion (LIB-036, the defensive surface behind the editor's
+//! disabled star): a variant whose ALG-002-normalized text is empty
+//! — the same oracle `variant_get`'s `is_empty` flag carries — is
+//! the typed `E_VALIDATION` refusal naming `id`, decided inside the
+//! transaction before any write. Idempotent re-sends
 //! (delete on already-deleted, restore on active, set_main on the
 //! current main) are verified no-ops — nothing written, journaled or
 //! versioned (the `projects_reorder` replayed-drag shape).
@@ -839,9 +844,15 @@ async fn variant_update_impl<R: Runtime>(
 /// text of the §9.8 snapshot. The journal entry is the `variant.
 /// changed` action's own "main choice" member. Promoting the current
 /// main (the UI's disabled button, defensively re-sent) is the
-/// verified no-op: nothing is written, journaled or versioned. A
-/// soft-deleted variant cannot take the flag; an unknown id is the
-/// typed by-id refusal.
+/// verified no-op: nothing is written, journaled or versioned — an
+/// already-main variant KEEPS its flag while empty (LIB-036's badge
+/// rule). Promoting a variant whose normalized text is empty is
+/// refused instead (LIB-036, the defensive surface behind the
+/// editor's disabled star): the D-13/ALG-002 `is_empty` oracle —
+/// the same derivation [`VariantGetResult`]'s flag carries — with
+/// the typed `E_VALIDATION` refusal naming `id`, decided inside the
+/// transaction before any write. A soft-deleted variant cannot take
+/// the flag; an unknown id is the typed by-id refusal.
 ///
 /// One transaction: the demote/promote pair and the journal entry
 /// (the store's two-statement swap stays atomic inside it — the
@@ -878,6 +889,26 @@ async fn variant_set_main_impl<R: Runtime>(
                 .ok_or_else(|| rejected_field("id", &id, "no variant with this id"))?;
             if variant.is_main && variant.state == VariantState::Active {
                 return Ok(VariantRecord::from_store(variant));
+            }
+            // LIB-036: an empty variant cannot be made the main one —
+            // the D-13/ALG-002 emptiness oracle, the exact derivation
+            // `variant_get`'s `is_empty` flag and `library_get`'s
+            // inline entries carry (D-232/D-187 — no fork). Active
+            // rows alone: a soft-deleted operand keeps the store's
+            // own `VariantNotActive` refusal below. The guard sits
+            // after the verified no-op (an already-main variant keeps
+            // its flag while empty — LIB-036's badge rule) and before
+            // the write: a refused promotion writes no row, no
+            // version and no journal entry (the D-231 validate-first
+            // seam; the mirror buffer never records).
+            if variant.state == VariantState::Active
+                && eunomia_core::normalize::variant_text(&variant.content).is_empty()
+            {
+                return Err(rejected_field(
+                    "id",
+                    &id,
+                    "an empty variant cannot be made the main variant",
+                ));
             }
             // The flag swap: DB-010's exactly-one holds through the
             // demote-then-promote order the store owns.

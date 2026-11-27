@@ -1158,9 +1158,15 @@ export const commands = {
 	 *  text of the §9.8 snapshot. The journal entry is the `variant.
 	 *  changed` action's own "main choice" member. Promoting the current
 	 *  main (the UI's disabled button, defensively re-sent) is the
-	 *  verified no-op: nothing is written, journaled or versioned. A
-	 *  soft-deleted variant cannot take the flag; an unknown id is the
-	 *  typed by-id refusal.
+	 *  verified no-op: nothing is written, journaled or versioned — an
+	 *  already-main variant KEEPS its flag while empty (LIB-036's badge
+	 *  rule). Promoting a variant whose normalized text is empty is
+	 *  refused instead (LIB-036, the defensive surface behind the
+	 *  editor's disabled star): the D-13/ALG-002 `is_empty` oracle —
+	 *  the same derivation [`VariantGetResult`]'s flag carries — with
+	 *  the typed `E_VALIDATION` refusal naming `id`, decided inside the
+	 *  transaction before any write. A soft-deleted variant cannot take
+	 *  the flag; an unknown id is the typed by-id refusal.
 	 * 
 	 *  One transaction: the demote/promote pair and the journal entry
 	 *  (the store's two-statement swap stays atomic inside it — the

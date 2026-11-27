@@ -1994,7 +1994,7 @@ export const mockCommands: IpcCommands = {
    * `activity_list` (§7.10/§7.7): the boundary validates exactly like the
    * real command (`validated_activity_query`): limit 1..=500 (default 50),
    * offset ≥ 0, DB-002-shaped date bounds, a non-inverted range, actions
-   * within the closed 24-member vocabulary, result within {ok, error,
+   * within the closed 25-member vocabulary, result within {ok, error,
    * skipped} — every rejection is `E_VALIDATION` naming field/value/reason.
    * Then: every filter combines with AND; LOG-005 keeps diagnostics out
    * unless `include_diagnostic` explicitly opts in; newest first (`ts`
@@ -3219,7 +3219,10 @@ export const mockCommands: IpcCommands = {
   /**
    * `variant_set_main` (§7.10, T-089): demote-and-promote keeps exactly
    * one active main (DB-010); re-promoting the current main is the
-   * journaled-nothing no-op.
+   * journaled-nothing no-op. Promoting a variant whose normalized text
+   * is empty is refused (LIB-036, the D-13/ALG-002 `outputsNoText`
+   * oracle — the defensive surface behind the editor's disabled star):
+   * the typed `E_VALIDATION` naming `id`, nothing written or journaled.
    */
   async variantSetMain(id) {
     const state = mockState()
@@ -3240,6 +3243,19 @@ export const mockCommands: IpcCommands = {
       })
     }
     if (row.isMain) return toVariantRecord(instruction, row)
+    // LIB-036: an empty variant cannot be made the main one — the
+    // same `outputsNoText` oracle `variantGet`'s `is_empty` flag
+    // derives (D-13/ALG-002). The refusal sits after the current-main
+    // no-op (an already-main variant keeps its badge while empty) and
+    // before any flag move: a refused promotion writes and journals
+    // nothing.
+    if (outputsNoText(row.content)) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        value: id,
+        reason: 'an empty variant cannot be made the main variant',
+      })
+    }
     for (const other of instruction.variants) {
       if (other.id !== row.id) other.isMain = false
     }

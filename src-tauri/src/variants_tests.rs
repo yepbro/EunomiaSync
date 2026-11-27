@@ -20,7 +20,9 @@
 //!   NUL, the reserved marker line, the 262,144-character limit) and
 //!   the no-version-without-a-real-change gate.
 //! - **T-089 `variant_set_main`** — after the change the instruction
-//!   has exactly one main variant.
+//!   has exactly one main variant, and an empty promotion is refused
+//!   (LIB-036: the ALG-002 oracle, the typed `E_VALIDATION` naming
+//!   `id`, nothing written or journaled).
 //! - **T-090 `variant_delete`** — no assignment disappears (they move
 //!   to the replacement, the main by default), the last active
 //!   variant is refused even when a replacement is named, the main
@@ -1385,6 +1387,192 @@ fn variant_set_main_on_the_current_main_is_a_verified_no_op() {
 }
 
 #[test]
+fn variant_set_main_refuses_an_empty_variant() {
+    // LIB-036's defensive surface behind the editor's disabled star
+    // (§7.10's command note): "promoting a variant whose normalized
+    // text is empty is refused with the typed `E_VALIDATION` naming
+    // `id`". The empty text arrives through the REAL create (the
+    // editor's "empty" affordance, LIB-017…022); the refusal writes
+    // NOTHING — the flags never move, no version, no journal entry —
+    // and the instruction is not wedged: promoting a sibling with
+    // real text still demotes-and-promotes (DB-010, T-089's own
+    // criterion, adjacent to the refusal).
+    let (_temp, app) = variants_app();
+    let database = database_of(&app);
+    let (instruction, main) = seed_instruction(&database, 1);
+    let second = seed_variant(&database, &instruction.id, "Second", "second text");
+    let webview = main_webview(&app);
+    let empty = invoke_variant_create(&webview, &instruction.id, "Empty", "empty")
+        .expect("the empty-mode create must succeed (LIB-017…022)");
+    let journal_before = journal_of(&database);
+
+    let error = invoke_variant_set_main(&webview, &empty.id)
+        .expect_err("an empty variant cannot be made the main variant");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("id"));
+    assert_eq!(
+        error["params"]["value"],
+        serde_json::json!(empty.id),
+        "the refusal names the id the caller sent"
+    );
+    assert_eq!(
+        error["params"]["reason"],
+        serde_json::json!("an empty variant cannot be made the main variant")
+    );
+    // Nothing was written, read back through the store: the main
+    // keeps its flag, the empty row was not promoted, DB-010's
+    // exactly-one is untouched, no version appeared, and the journal
+    // is identical to the pre-refusal census (a refused operation
+    // journals nothing — D-051).
+    assert!(
+        stored_variant(&database, &main.id)
+            .expect("the main must still exist")
+            .is_main,
+        "the main keeps its flag"
+    );
+    assert!(
+        !stored_variant(&database, &empty.id)
+            .expect("the empty row must still exist")
+            .is_main,
+        "the empty variant was not promoted"
+    );
+    assert_eq!(
+        active_main_count(&database, &instruction.id),
+        1,
+        "DB-010's exactly-one is untouched"
+    );
+    assert_eq!(
+        revisions_of(&database, &empty.id),
+        vec![(1, "create".to_owned())],
+        "the refusal wrote no version"
+    );
+    assert_eq!(
+        journal_of(&database),
+        journal_before,
+        "the refusal journaled nothing"
+    );
+
+    // The success counterweight: a sibling with real text still
+    // promotes, demoting the old main.
+    let promoted = invoke_variant_set_main(&webview, &second.id)
+        .expect("promoting a variant with real text must succeed");
+    assert!(promoted.is_main);
+    assert!(
+        !stored_variant(&database, &main.id)
+            .expect("the old main must still exist")
+            .is_main,
+        "the previous main was demoted"
+    );
+    assert_eq!(active_main_count(&database, &instruction.id), 1);
+    assert!(
+        journal_of(&database)
+            .iter()
+            .any(|entry| entry.action.as_str() == "variant.changed"),
+        "the real promotion is journaled"
+    );
+}
+
+#[test]
+fn variant_set_main_refuses_a_whitespace_only_variant() {
+    // The ALG-002 half of the oracle is load-bearing: "empty" is
+    // "outputs no text", so a whitespace-only body counts exactly as
+    // it counts in a built file (D-13) — the naive `content.
+    // is_empty()` twin would let this promotion through (the
+    // mutation that reddens this test). The whitespace-only text
+    // arrives through the REAL save (§6.9 allows it); the refusal
+    // writes nothing.
+    let (_temp, app) = variants_app();
+    let database = database_of(&app);
+    let (instruction, main) = seed_instruction(&database, 1);
+    let webview = main_webview(&app);
+    let padded = invoke_variant_create(&webview, &instruction.id, "Padded", "empty")
+        .expect("the empty-mode create must succeed");
+    invoke_variant_update(&webview, &padded.id, None, Some(" \n\t "))
+        .expect("a whitespace-only save is legal §6.9 text");
+    let journal_before = journal_of(&database);
+
+    let error = invoke_variant_set_main(&webview, &padded.id)
+        .expect_err("a whitespace-only variant outputs no text (D-13)");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("id"));
+    assert_eq!(
+        error["params"]["value"],
+        serde_json::json!(padded.id),
+        "the refusal names the id the caller sent"
+    );
+    assert_eq!(
+        error["params"]["reason"],
+        serde_json::json!("an empty variant cannot be made the main variant")
+    );
+    assert!(
+        stored_variant(&database, &main.id)
+            .expect("the main must still exist")
+            .is_main,
+        "the main keeps its flag"
+    );
+    assert!(
+        !stored_variant(&database, &padded.id)
+            .expect("the padded row must still exist")
+            .is_main,
+        "the whitespace-only variant was not promoted"
+    );
+    assert_eq!(
+        active_main_count(&database, &instruction.id),
+        1,
+        "DB-010's exactly-one is untouched"
+    );
+    assert_eq!(
+        revisions_of(&database, &padded.id),
+        vec![(1, "create".to_owned()), (2, "update".to_owned())],
+        "the refusal wrote no version beyond the real save"
+    );
+    assert_eq!(
+        journal_of(&database),
+        journal_before,
+        "the refusal journaled nothing"
+    );
+}
+
+#[test]
+fn variant_set_main_on_an_empty_current_main_is_still_the_verified_no_op() {
+    // LIB-036's badge rule: "an already-main variant keeps its badge
+    // while empty" — the refusal targets PROMOTIONS, so the current
+    // main re-sent while empty (its body cleared through a real
+    // save) stays D-189's verified no-op: nothing is written,
+    // journaled or versioned. This also pins the guard's ORDER: the
+    // no-op branch answers before the emptiness refusal can (the
+    // mutation that hoists the refusal reddens this test).
+    let (_temp, app) = variants_app();
+    let database = database_of(&app);
+    let (instruction, main) = seed_instruction(&database, 1);
+    let webview = main_webview(&app);
+    invoke_variant_update(&webview, &main.id, None, Some(""))
+        .expect("clearing the main's body is a legal save");
+    assert!(
+        invoke_variant_get(&webview, &main.id)
+            .expect("the emptied main reads back")
+            .is_empty,
+        "the main's body is empty after the save (the D-13 oracle)"
+    );
+    let journal_before = journal_of(&database);
+
+    let answer = invoke_variant_set_main(&webview, &main.id)
+        .expect("re-sending the current main is the no-op, empty or not");
+    assert!(answer.is_main);
+    assert_eq!(active_main_count(&database, &instruction.id), 1);
+    assert_eq!(
+        revisions_of(&database, &main.id),
+        vec![(1, "create".to_owned()), (2, "update".to_owned())],
+        "the no-op wrote no version"
+    );
+    assert_eq!(
+        journal_of(&database),
+        journal_before,
+        "the no-op journaled nothing"
+    );
+}
+
+#[test]
 fn variant_set_main_refuses_a_soft_deleted_variant_and_an_unknown_id() {
     let (_temp, app) = variants_app();
     let (instruction, main) = seed_instruction(&database_of(&app), 1);
@@ -1401,6 +1589,31 @@ fn variant_set_main_refuses_a_soft_deleted_variant_and_an_unknown_id() {
             .expect("the main must still exist")
             .is_main,
         "the main flag never moved"
+    );
+
+    // The Active-scope half of the LIB-036 guard: an EMPTY soft-deleted
+    // operand still gets the store's actionable reason — "restore it
+    // first", not the emptiness rule (each refusal names its real
+    // reason; the guard's `state == Active` condition is load-bearing
+    // here, pinned by the reason assert).
+    let empty = invoke_variant_create(&webview, &instruction.id, "Empty", "empty")
+        .expect("the empty-mode create must succeed (LIB-017…022)");
+    invoke_variant_delete(&webview, &empty.id, None)
+        .expect("the delete of a non-main variant defaults to the main");
+    let deleted_empty = invoke_variant_set_main(&webview, &empty.id)
+        .expect_err("an empty soft-deleted variant cannot become main either");
+    assert_eq!(deleted_empty["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(deleted_empty["params"]["field"], serde_json::json!("id"));
+    assert_eq!(
+        deleted_empty["params"]["reason"],
+        serde_json::json!("the variant is soft-deleted; restore it first"),
+        "the soft-deleted refusal names the real reason, emptiness or not"
+    );
+    assert!(
+        stored_variant(&database_of(&app), &main.id)
+            .expect("the main must still exist")
+            .is_main,
+        "the main flag never moved for the empty row either"
     );
 
     let unknown = invoke_variant_set_main(&webview, "no-such-variant")

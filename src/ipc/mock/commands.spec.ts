@@ -3411,7 +3411,10 @@ describe('variantCreate', () => {
     // carry the new main's text.
     const state = mockState()
     const instruction = firstInstructionOf(state)
-    const second = await commands.variantCreate(instruction.id, 'Second', 'empty')
+    // `copy_main`: the promoted operand must carry real text —
+    // LIB-036 refuses an empty promotion (the refusal twin lives in
+    // the variantSetMain suite below).
+    const second = await commands.variantCreate(instruction.id, 'Second', 'copy_main')
     await commands.variantSetMain(second.id)
     await commands.variantUpdate(second.id, null, 'the new main text')
 
@@ -3637,7 +3640,9 @@ describe('variantSetMain', () => {
     const state = mockState()
     const instruction = firstInstructionOf(state)
     const main = activeVariantOf(instruction)
-    const created = await commands.variantCreate(instruction.id, 'Second', 'empty')
+    // `copy_main`: the promoted operand carries real text — LIB-036
+    // refuses an empty promotion (pinned by the twin below).
+    const created = await commands.variantCreate(instruction.id, 'Second', 'copy_main')
 
     const promoted = await commands.variantSetMain(created.id)
 
@@ -3659,6 +3664,81 @@ describe('variantSetMain', () => {
 
     expect(answer.is_main).toBe(true)
     expect(state.activity).toHaveLength(journalBefore)
+  })
+
+  it('refuses an empty and a whitespace-only promotion, writing nothing (LIB-036)', async () => {
+    // The defensive surface behind the editor's disabled star: the
+    // D-13/ALG-002 `outputsNoText` oracle (the same one
+    // `variantGet`'s `is_empty` flag derives) decides, the refusal
+    // is the typed `E_VALIDATION` naming the id, and a refused
+    // promotion writes nothing — flags stay, the journal census
+    // stays. The whitespace-only body arrives through the real save
+    // (§6.9 allows it) and must count exactly as it counts in a
+    // built file.
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    const blank = await commands.variantCreate(instruction.id, 'Blank', 'empty')
+    const padded = await commands.variantCreate(instruction.id, 'Padded', 'empty')
+    await commands.variantUpdate(padded.id, null, ' \n\t ')
+    const journalBefore = state.activity.length
+
+    await expect(commands.variantSetMain(blank.id)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'id',
+        value: blank.id,
+        reason: 'an empty variant cannot be made the main variant',
+      },
+    })
+    await expect(commands.variantSetMain(padded.id)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'id', reason: 'an empty variant cannot be made the main variant' },
+    })
+
+    // Nothing written: the main keeps its flag, neither empty row
+    // gained it, exactly one main remains, the journal did not move.
+    expect(main.isMain).toBe(true)
+    expect(liveVariantOf(state, blank.id)?.isMain).toBe(false)
+    expect(liveVariantOf(state, padded.id)?.isMain).toBe(false)
+    expect(instruction.variants.filter((row) => row.isMain)).toHaveLength(1)
+    expect(state.activity).toHaveLength(journalBefore)
+  })
+
+  it('still promotes real text after a refusal, and an emptied current main stays the no-op', async () => {
+    // The refusal does not wedge the instruction: a real-text
+    // sibling still demotes-and-promotes. And LIB-036's badge rule —
+    // "an already-main variant keeps its badge while empty" — pins
+    // the ORDER: the current-main no-op answers before the
+    // emptiness refusal can (the emptied main is re-sent and
+    // converges, never errors).
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    const created = await commands.variantCreate(instruction.id, 'Second', 'copy_main')
+    const empty = await commands.variantCreate(instruction.id, 'Doomed', 'empty')
+    await expect(commands.variantSetMain(empty.id)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+    })
+
+    const promoted = await commands.variantSetMain(created.id)
+    expect(promoted.is_main).toBe(true)
+    expect(instruction.variants.filter((row) => row.isMain)).toHaveLength(1)
+    if (main) expect(main.isMain).toBe(false)
+
+    // The emptied-main no-op: the save itself journals one real
+    // change (the census baseline); the re-send must add nothing
+    // on top of it. The premise is proven through the read — the
+    // promoted row really is empty when the no-op answers (the
+    // Rust twin asserts the same premise).
+    await commands.variantUpdate(created.id, null, '')
+    expect((await commands.variantGet(created.id)).is_empty).toBe(true)
+    const censusAfterTheSave = state.activity.length
+
+    const answer = await commands.variantSetMain(created.id)
+
+    expect(answer.is_main).toBe(true)
+    expect(state.activity).toHaveLength(censusAfterTheSave)
   })
 })
 

@@ -416,7 +416,12 @@ Rust commands are registered through `tauri-specta`:
    `variant_delete` moves the deleted variant's assignments to the
    replacement (the instruction's main by default, LIB-023) inside
    the same transaction, refusing the last active variant (LIB-025)
-   and the main without a named successor; `variant_create` copies
+   and the main without a named successor; `variant_set_main`
+   refuses to promote a variant whose normalized text is empty (the
+   D-13/ALG-002 `is_empty` oracle, LIB-036 — the defensive surface
+   behind the editor's disabled star) with the typed `E_VALIDATION`
+   naming `id`, decided inside the transaction before any write;
+   `variant_create` copies
    the main's current text or starts empty (LIB-017…022); §5.4
    allows library edits during a sync, so none of the five takes the
    SYS-005 gate the project-changing commands do — and the Library

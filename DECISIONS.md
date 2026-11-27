@@ -31194,3 +31194,153 @@ this run): `cargo test --no-run -p eunomia-sync`;
 `cargo fmt --all -- --check`; `cargo deny check` — all exit 0;
 no frontend file changed (the pre-commit hook's eslint, prettier
 and vue-tsc gates ran on both commits).
+
+### D-237 — T-352: variant_set_main refuses an empty promotion — the LIB-036 defensive surface, the reused ALG-002 oracle, and the no-op-first order — 2026-11-27
+
+Problem: the T-329-era `variant_set_main` (D-189) promotes
+unconditionally: the store's `set_main_variant` guards unknown ids
+and soft-deleted rows, but nothing refuses an empty operand. Spec
+LIB-036 and §7.10's command notes contract the refusal — "promoting
+a variant whose normalized text is empty (the D-13/ALG-002
+`is_empty` oracle) is refused with the typed `E_VALIDATION` naming
+`id` — the LIB-024/025 pattern" — the defensive surface behind the
+editor's disabled star (the UI's own disable/tooltip/live half stays
+with the frontend work).
+
+Readings chosen (written before the code, the rule-1 discipline):
+
+- **The refusal targets PROMOTIONS only; the verified no-op answers
+  first.** D-189 reading 5 states the current-main re-send is a
+  verified no-op unconditionally, and LIB-036's own UI half says "an
+  already-main variant KEEPS its badge while empty (create mode
+  starts with an empty `Main`)" — an existing empty main is a
+  tolerated state, and a no-op re-send writes nothing either way, so
+  refusing it would add an error path with no protective effect. The
+  guard therefore sits AFTER the `is_main && Active` no-op branch and
+  is pinned by a dedicated test (an emptied current main re-sent
+  converges; the order-hoist mutation reddens it).
+- **Active rows alone.** A soft-deleted operand keeps the store's
+  own `VariantNotActive` refusal ("the variant is soft-deleted;
+  restore it first") — the pre-read already decodes `state`, so the
+  emptiness check simply does not apply to deleted rows, and each
+  refusal names its real reason.
+- **The oracle is reused, never forked.** The exact call is
+  `eunomia_core::normalize::variant_text(&variant.content).is_empty()`
+  — the derivation `variant_get`'s
+  `VariantGetResult::from_store` (D-232) and `library_get`'s inline
+  flag (D-187) carry; the mock twin is the shared `outputsNoText`
+  (T-351). Whitespace-only counts as empty (D-13), pinned by its own
+  test and by the naive-`content.is_empty()` mutation that reddens
+  exactly it.
+- **The envelope and placement.** `rejected_field("id", &id, "an
+empty variant cannot be made the main variant")` — this command's
+  own id-addressed refusal shape (params field/value/reason; rule 8:
+  the id is the caller's own input, the stored text never rides the
+  wire). The check runs inside the one `run_with_mirror`
+  transaction, after the by-id pre-read and the no-op branch, BEFORE
+  `set_main_variant` — D-231's validate-first seam ("everything
+  validated before the WRITE"): a refused promotion writes no row,
+  no version and no journal entry, and never calls `mirror.record`
+  (D-228: the per-attempt buffer dies unflushed with the rollback).
+
+Landing: `src-tauri/src/variants.rs` (the guard in
+`variant_set_main_impl`, the command's doc comment and the module
+docs carrying the LIB-036 sentence), three Rust mock-IPC tests in
+`variants_tests.rs` (the empty-text refusal — envelope asserted
+field/value/reason, flags/version/journal read back unchanged, plus
+the success counterweight: a real-text sibling still
+demotes-and-promotes, proving the refusal does not wedge the
+instruction; the whitespace-only refusal — the ALG-002-load-bearing
+half; the emptied-current-main no-op — the order pin),
+`src/bindings.ts` regenerated through the export pin test (the doc
+sentence is embedded as the `variantSetMain` JSDoc — D-231's rule-10
+canonical forced deviation; the diff is comment-only, the first pin
+run red by design per D-034, the re-run green), the mock layer
+(`variantSetMain`'s refusal twin over `outputsNoText`, its doc
+comment, and the drive-by: `activity_list`'s stale "24-member
+vocabulary" doc word corrected to 25 — the word the follow-up card
+in INBOX named, this commit closes that half), the mock battery
+(two new contracts: the empty + whitespace-only refusals with
+nothing written and the journal census unmoved; the real-text
+success and emptied-main no-op pair; the two pre-existing setups
+that promoted an `'empty'`-source operand switched to `'copy_main'`
+— the behavior legitimately changed, the operands must carry real
+text), and `ARCHITECTURE.md`'s variant-commands sentence gaining
+the refusal clause.
+
+Checks: `cargo test --no-run -p eunomia-sync`, `cargo nextest run
+--no-fail-fast --test-threads=4` (961/961), `cargo test --doc
+--workspace` (99), `cargo clippy --workspace --all-targets
+-D warnings`, `cargo fmt --all -- --check`, `cargo deny check`,
+`pnpm typecheck`, `pnpm test` (440/440), `pnpm format:check`,
+`pnpm lint` — all exit 0.
+
+Mutation battery (rule 4; each mutant restored byte-for-byte,
+md5-verified against the pristine copies): M1 the guard disabled →
+exactly the two refusal tests red (the empty variant was actually
+promoted — the panic shows `is_main: true`); M2 the oracle weakened
+to the naive `content.is_empty()` → exactly the whitespace-only
+refusal red (the empty-text refusal stays green — the ALG-002
+normalize is load-bearing); M3 the guard hoisted ABOVE the no-op
+branch → exactly the emptied-current-main no-op test red (the
+order is load-bearing); FM1 the mock's guard dropped → exactly the
+two new mock contracts red. Every other test in each mutant run
+stayed green. (A fifth mutation — the guard's `state == Active`
+scope dropped, reddening the extended soft-deleted test's reason
+assert — joined the battery with round 1's P3-1 fix; the addendum
+below records it.)
+
+**Round-1 review addendum (same task; report
+`.opencode/reviews/t352-round1-report.md`, deepseek-v4.1-flash,
+exit 0): APPROVE WITH NITS — 0×P0/P1/P2, 4×P3; the test audit its
+own PASS** (coverage falsifiable and mutation-pinned, no
+tautologies; the two `'empty'`→`'copy_main'` setup switches judged
+a legitimate behavior update, not check evasion). The reviewer
+verified the guard placement (no `mirror.record` before the early
+return), the byte-identical oracle at all three call sites, the
+envelope, the comment-only bindings diff, the 25-member count on
+both the generator array and the store enum, and every Rule-11 doc
+claim. All four P3s TAKEN:
+
+- _P3-1 TAKEN_ — the guard's Active-scope half was unpinned: the
+  soft-deleted test's operand carried real text and no `reason`
+  assert, so dropping `state == Active` left the suite green. The
+  test now adds an empty soft-deleted arm (create empty, delete,
+  re-send `variant_set_main`) asserting the store's
+  "the variant is soft-deleted; restore it first" reason and the
+  unmoved main flag; the branch's load-bearing half was verified by
+  a fifth mutation (the `state == Active` condition dropped → that
+  test red; guard restored byte-identical, md5-matched).
+- _P3-2 TAKEN_ — the mock's emptied-main no-op test never proved
+  its premise; it now asserts `(await variantGet(created.id)).
+is_empty === true` before the re-send (the read journals nothing,
+  so the census baseline is unchanged — the Rust twin's premise
+  assert mirrored).
+- _P3-3 TAKEN_ — the whitespace-only refusal now asserts
+  `params.value` too (the empty-text path already did).
+- _P3-4 TAKEN_ — the oracle quote above was split mid-span across
+  two lines (CommonMark renders the break as a space, misquoting
+  the call); rewrapped onto one line.
+
+The affected checks re-ran green after the fixes: the full
+nextest battery (961/961), clippy, fmt, doc tests, and the pnpm
+quartet.
+
+**Round-2 review (same task; report
+`.opencode/reviews/t352-round2-report.md`, hy4-flash-free — the
+next different model per the chain, exit 0): APPROVE WITH NITS —
+0×P0/P1/P2, 1×P3; the test audit its own PASS.** The reviewer
+diffed the pre-amend commit against the amended one and verified
+all four round-1 dispositions landed exactly as claimed (nothing
+else silently changed in the amend), re-checked every
+special-attention area (the guard placement with the
+`run_with_mirror` rollback path, the byte-identical oracle at all
+three sites, the envelope, the mock order, the 25-member count on
+the generator array AND the store enum's `Action::ALL`, Rule 11),
+and confirmed every claimed mutation is pinned by concrete
+assertions with no tautologies and no check evasion. Its one P3 —
+the mutation-battery paragraph above enumerated only the four
+initial mutants while the commit and the addendum name five — is
+TAKEN: the paragraph now points at the addendum's fifth mutation,
+making the record self-contained. No code change; the review phase
+ends here (two rounds, no third).
