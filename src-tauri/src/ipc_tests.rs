@@ -7319,9 +7319,14 @@ pub(crate) fn converge_startup_watch(
 ) -> u64 {
     /// The quiescence window: no further pass for this long after the
     /// last observed one means the startup's pending deliveries have
-    /// drained. The file's canonical settle span (the idempotence
-    /// drains below use the same 300 ms); at 7 × the 40 ms test
-    /// debounce it is deep enough that a delivery still pending
+    /// drained. The file's canonical settle span (the negative
+    /// event-asserts elsewhere in this file no longer lean on it —
+    /// they observe a pass completion or an ack instead; only this
+    /// startup drain among them still needs a window, per D-181's
+    /// macOS straggler class — the pass-count silence settles that
+    /// stay, the refused-add's 300 ms and the START_SETTLE battery,
+    /// are D-227's recorded out-of-scope remainder); at 7 × the 40 ms
+    /// test debounce it is deep enough that a delivery still pending
     /// behind it is a pathology the bound catches, not noise.
     const QUIESCENCE: std::time::Duration = std::time::Duration::from_millis(300);
 
@@ -7644,8 +7649,19 @@ fn an_external_edit_marks_the_project_externally_modified_without_writing_anythi
         external,
         "a watch event must never write a file (OUT-014)"
     );
-    // Idempotence: the debounce settles, no further events.
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Idempotence, deterministically: one more FULL pass over the
+    // unchanged world, awaited through the after-sync seam — the
+    // service emits synchronously BEFORE it counts the pass, so the
+    // ack proves both the completion and the delivery: a re-reporting
+    // verdict cache would land on the wire inside the observed pass,
+    // not after a 300 ms settle window this used to hope for.
+    let idempotence =
+        tauri::async_runtime::block_on(crate::file_watch::refresh_after_sync(app.handle()))
+            .expect("the idempotence probe pass must succeed");
+    assert!(
+        idempotence.is_empty(),
+        "an unchanged verdict re-diffs to nothing: {idempotence:?}"
+    );
     assert!(events.try_recv().is_err(), "an unchanged verdict is silent");
 
     // The simulated next sync: the pipeline's own write (fresh build
@@ -7680,7 +7696,7 @@ fn an_external_edit_marks_the_project_externally_modified_without_writing_anythi
     // Drain the wire for the clearing (whoever produced it) and pin
     // exactly-once — the shared shape, extracted with this test's own
     // race note (round-1 review's P2-2) in its doc.
-    drain_the_clearing(&events, expected_clearing);
+    drain_the_clearing(&app, &events, expected_clearing);
     // Windows teardown rule: the app's managed `Db` closes first.
     stop_watch_service(app.handle());
     drop(app);
@@ -8420,6 +8436,22 @@ fn an_unavailable_project_is_unwatched_until_its_folder_returns() {
         eunomia_store::settings::Scheme::A,
     );
     seed_assigned_instruction(&database, project_id.clone(), "Style", "Be brief.");
+    // The control lane for the "no watch" assert below: a second,
+    // AVAILABLE project whose file stays watched and matching for
+    // the whole test. Its same-bytes rewrite after the junk write is
+    // the deterministic flush — the event it fires through the REAL
+    // debouncer guarantees one observed pass by which every delivery
+    // up to that moment (the junk write's included, had it been
+    // watched) has been processed through.
+    let echo_root = repo_dir(temp.path(), "echo");
+    let echo_target = echo_root.join("AGENTS.md");
+    let echo_id = seed_watched_project(
+        &database,
+        echo_root.display().to_string(),
+        "/echo",
+        eunomia_store::settings::Scheme::A,
+    );
+    seed_assigned_instruction(&database, echo_id, "Echo Style", "Be brief.");
     let marker = eunomia_core::marker::creation_marker_line(
         eunomia_core::marker::MarkerTime {
             year: 2026,
@@ -8447,6 +8479,10 @@ fn an_unavailable_project_is_unwatched_until_its_folder_returns() {
         &marker,
     );
     std::fs::write(&target, &synced_file).expect("the synced fixture must work");
+    // The control lane's file: the same build bytes ("Be brief." is
+    // its instruction too), so it classifies Matches and stays
+    // silent through every pass of the test.
+    std::fs::write(&echo_target, &synced_file).expect("the control fixture must work");
     simulate_sync_hash(
         &database,
         project_id.clone(),
@@ -8466,22 +8502,43 @@ fn an_unavailable_project_is_unwatched_until_its_folder_returns() {
     let events = listen_file_changed(&app);
     wait_for_watch_passes(&app, 1);
     assert!(events.try_recv().is_err(), "the healthy startup is silent");
+    // The quiescent baseline (the sibling tests' D-181 shape): the
+    // fixtures wrote BOTH files before the spawn, and a macOS
+    // FSEvents straggler can still land as a post-startup debounced
+    // pass — an absolute count below would let it satisfy a wait
+    // early and silently void the negative asserts. The probe
+    // rewrites echo's matching file, so the wire stays silent
+    // through the drain.
+    let settled = converge_startup_watch(&app, &echo_target);
 
     // The folder dies (the .git entry goes — the D-084 probe fails)
     // and the availability recheck runs, as the focus trigger would.
     std::fs::remove_dir_all(root.join(".git")).expect("removing the .git entry must work");
     tauri::async_runtime::block_on(crate::availability::recheck_and_emit(app.handle()))
         .expect("the availability recheck must succeed");
-    wait_for_watch_passes(&app, 2); // the listener's refresh ran
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    wait_for_watch_passes(&app, settled + 1); // the listener's refresh ran
+    // The prune pass is OBSERVED complete here — the service emits
+    // synchronously before it counts the pass, so whatever the prune
+    // would emit is already on the wire: an immediate assert, no
+    // settle window (the "healthy startup is silent" shape above).
     assert!(
         events.try_recv().is_err(),
         "leaving the watch set emits nothing (the prune is silent)"
     );
 
-    // The watch is gone: a recreated junk file is invisible.
+    // The watch is gone: a recreated junk file is invisible. The
+    // proof is the control flush, not a settle window: echo's
+    // same-bytes rewrite (the converge_startup_watch probe shape)
+    // fires a REAL debounced event whose partial pass is observed
+    // through the counter — and the junk write happened first, so
+    // its own delivery, had the file stayed watched and routed,
+    // would have been coalesced into that observed pass (or run
+    // before it) and emitted there: the immediate assert catches
+    // it, deterministically. Echo's re-read stays Matches-clean,
+    // so the correct world is silent.
     std::fs::write(&target, "junk while unwatched\n").expect("the junk write must work");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::fs::write(&echo_target, &synced_file).expect("the control rewrite must work");
+    wait_for_watch_passes(&app, settled + 2);
     assert!(
         events.try_recv().is_err(),
         "an unavailable project has no watch — SYS-007's removal rule"
@@ -8492,7 +8549,7 @@ fn an_unavailable_project_is_unwatched_until_its_folder_returns() {
     std::fs::create_dir_all(root.join(".git")).expect("restoring the .git entry must work");
     tauri::async_runtime::block_on(crate::availability::recheck_and_emit(app.handle()))
         .expect("the second availability recheck must succeed");
-    wait_for_watch_passes(&app, 3);
+    wait_for_watch_passes(&app, settled + 3);
     // The conditional report wait (run 45009611489's race note, the
     // helper's own doc): the pass counter can reach the awaited
     // number a hair before the listener delivers the emit onto the
@@ -8584,7 +8641,11 @@ fn a_queued_fire_and_forget_refresh_behind_file_events_still_runs_a_full_pass() 
         .expect("the watcher must start");
     let events = listen_file_changed(&app);
     wait_for_watch_passes(&app, 1);
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // The startup pass is OBSERVED complete — the service emits
+    // synchronously before it counts the pass — and the 30 s debounce
+    // holds every fixture write's event past this test's lifetime, so
+    // the immediate assert is the deterministic form (the same shape
+    // as the availability suite's "healthy startup is silent").
     assert!(
         events.try_recv().is_err(),
         "both projects match their builds: a clean startup is silent"
@@ -9606,9 +9667,21 @@ fn synced_world_between_syncs(
         summary.projects_written, 1,
         "the creation run wrote the target"
     );
-    // Settle: the run's write fired the debouncer, and a matching file
-    // is silent — the drain proves the silence instead of assuming it.
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Settle, deterministically: the run's write fired the debouncer,
+    // and a matching file is silent. The awaited seam runs one more
+    // FULL pass and returns its diff — the empty answer IS the
+    // "matches its build" proof, and the pass's ack is observed, so
+    // anything the pass emitted (nothing) already precedes the wire
+    // assert. A debounced batch still pending from the run's write is
+    // subsumed by the Refresh, never left to race a 300 ms window.
+    let settle_diff =
+        tauri::async_runtime::block_on(crate::file_watch::refresh_after_sync(app.handle()))
+            .expect("the settle pass must succeed");
+    assert!(
+        settle_diff.is_empty(),
+        "the freshly synced file matches its build — the settle pass \
+         re-diffs empty: {settle_diff:?}"
+    );
     assert!(
         events.try_recv().is_err(),
         "the freshly synced file matches its build — no event"
@@ -9638,8 +9711,14 @@ fn split_written_target(bytes: &str) -> (&str, &str) {
 /// state clears" from the T-F13 criterion test: whichever pass emits
 /// the clearing (the awaited full pass or the write's own debounced
 /// re-read) is a scheduling race, so the facts asserted are "it lands,
-/// exactly once, and nothing else does".
+/// exactly once, and nothing else does". The "nothing else" half is
+/// deterministic: one more FULL pass is awaited through the after-sync
+/// seam (its ack observed — the service emits synchronously before it
+/// counts the pass), so a re-emitting regression lands on the wire
+/// inside that observed pass and the post-probe drain catches it
+/// immediately, not inside a fixed settle window.
 fn drain_the_clearing(
+    app: &tauri::App<tauri::test::MockRuntime>,
     events: &std::sync::mpsc::Receiver<crate::file_watch::FileChangedEvent>,
     expected: crate::file_watch::ProjectFileChange,
 ) {
@@ -9668,8 +9747,16 @@ fn drain_the_clearing(
         vec![expected],
         "the clearing arrives exactly once"
     );
-    // … and once the debounce settles, no duplicate follows.
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // … and nothing follows it — the deterministic form: the probe
+    // pass's diff must be empty AND the wire must hold nothing after
+    // it (both observed through the ack, not a 300 ms window).
+    let settled =
+        tauri::async_runtime::block_on(crate::file_watch::refresh_after_sync(app.handle()))
+            .expect("the post-clearing settle pass must succeed");
+    assert!(
+        settled.is_empty(),
+        "the cleared world re-diffs to nothing: {settled:?}"
+    );
     let mut later = Vec::new();
     while let Ok(event) = events.try_recv() {
         later.extend(event.changes);
@@ -9766,6 +9853,7 @@ fn a_real_sync_run_overwrites_the_external_edit_backs_it_up_and_clears_the_state
     );
     // … and the state clears through the same wire.
     drain_the_clearing(
+        &app,
         &events,
         crate::file_watch::ProjectFileChange {
             project_id: project,
@@ -9798,22 +9886,59 @@ fn a_real_sync_run_recreates_a_deleted_target_and_clears_the_hint() {
     // unpinned: the batteries stopped at the flag being set.
     let (temp, app, webview, target, project, synced, events) = synced_world_between_syncs(9);
 
-    // The external deletion, with the baseline captured before it
-    // (the same race-free-facts rule as the overwrite test).
-    let base = app
-        .state::<crate::file_watch::FileWatchState>()
-        .pass_count();
+    // The external deletion. The detection runs through the awaited
+    // seam's full pass, not the debounced delivery: the first run's
+    // write CREATED this file milliseconds before the helper
+    // returned, and a remove inside the same debounce window is
+    // cancelled by the debouncer outright (notify-debouncer-full's
+    // create-then-remove queue drop) — the fixed settle sleep this
+    // test used to sit behind only ever separated the windows by
+    // timing luck. The DEBOUNCED delivery of a deletion stays the
+    // earlier battery's pin (deleting_a_synced_target_file…, a world
+    // where the file's create window is long closed); this test's
+    // own subject is the recreation, so the seam's deterministic
+    // pass answers the hint here — its ack observed, the diff the
+    // oracle, the event on the wire before the assert runs.
     std::fs::remove_file(&target).expect("the external deletion must work");
-    wait_for_watch_passes(&app, base + 1);
+    // The detection pass: the awaited seam GUARANTEES a classifying
+    // pass ran over the deleted world — the removal's own debounced
+    // delivery is not waitable (a create-then-remove pair inside one
+    // debounce window is cancelled outright by the debouncer, while
+    // a removal whose create window had already closed — the settle
+    // probe is a DB round-trip, not a clock — is a live event that
+    // can win this call's race). Whichever pass classified first
+    // owns the single emission (the diff contract); the seam never
+    // answers anything but the hint or the empty diff.
+    let deletion_hint = crate::file_watch::ProjectFileChange {
+        project_id: project.clone(),
+        external_changed: false,
+        file_deleted: true,
+    };
+    let deletion_diff =
+        tauri::async_runtime::block_on(crate::file_watch::refresh_after_sync(app.handle()))
+            .expect("the deletion's full pass must succeed");
+    assert!(
+        deletion_diff.is_empty() || deletion_diff == vec![deletion_hint.clone()],
+        "the seam answers the hint or nothing — the debounced removal \
+         pass may have won the race: {deletion_diff:?}"
+    );
     assert_eq!(
         next_flagged_changes(&events),
-        vec![crate::file_watch::ProjectFileChange {
-            project_id: project.clone(),
-            external_changed: false,
-            file_deleted: true,
-        }],
+        vec![deletion_hint],
         "SYS-009's hint for a file a sync once left behind"
     );
+    // … and nothing follows the hint — the duplicate-emission teeth
+    // the old settle window gave this spot, kept deterministic: the
+    // probe pass's completion is observed, so a re-emitting
+    // regression lands on the wire before the assert runs.
+    let post_hint =
+        tauri::async_runtime::block_on(crate::file_watch::refresh_after_sync(app.handle()))
+            .expect("the post-hint settle pass must succeed");
+    assert!(
+        post_hint.is_empty(),
+        "the deleted world re-diffs to nothing: {post_hint:?}"
+    );
+    assert!(events.try_recv().is_err(), "nothing follows the hint");
 
     // The next sync recreates it (this is scheme A; C writes the same
     // way, B would skip with E_MARKERS_INVALID — the pipeline's own
@@ -9846,6 +9971,7 @@ fn a_real_sync_run_recreates_a_deleted_target_and_clears_the_hint() {
     );
     // The hint clears through the same wire, and the column with it.
     drain_the_clearing(
+        &app,
         &events,
         crate::file_watch::ProjectFileChange {
             project_id: project,
@@ -9962,27 +10088,17 @@ fn an_archived_projects_edits_no_longer_reach_the_wire_while_its_active_sibling_
     );
 
     // Both files edited externally in the same window: only the active
-    // sibling may report. The baseline goes before the writes (the
-    // race-free-facts rule — a debounced pass landing between a write
-    // and a late baseline read is the timeout the rule exists to
-    // prevent).
-    let base = app
-        .state::<crate::file_watch::FileWatchState>()
-        .pass_count();
+    // sibling may report. Bravo's marking is collected through the
+    // canonical deadline wait — the pass counter alone cannot name
+    // WHICH pass carries it (a pending delivery can satisfy a count
+    // first), so the write's own debounced pass delivering it is
+    // bounded by the 5 s deadline, not by an instantaneous drain.
     std::fs::write(&alpha_target, "Edited in an editor.\n")
         .expect("the archived project's edit must work");
     std::fs::write(&bravo_target, "Edited in an editor.\n")
         .expect("the active project's edit must work");
-    wait_for_watch_passes(&app, base + 1);
-    // A settle window past the debounce, then the wire must hold
-    // exactly bravo's change — alpha's absence is the pin.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let mut delivered = Vec::new();
-    while let Ok(event) = events.try_recv() {
-        delivered.extend(event.changes);
-    }
     assert_eq!(
-        delivered,
+        next_flagged_changes(&events),
         vec![crate::file_watch::ProjectFileChange {
             project_id: bravo.clone(),
             external_changed: true,
@@ -9993,6 +10109,42 @@ fn an_archived_projects_edits_no_longer_reach_the_wire_while_its_active_sibling_
          convergence itself is the fs crate's `set_files` pin, \
          unreachable from this layer — `spawn_service` builds its own \
          watcher)"
+    );
+    // Alpha's absence and the exactly-once shape, deterministically:
+    // a FilesChanged batch carrying BOTH paths — bravo is the control
+    // lane (its route guarantees the partial pass runs and is
+    // OBSERVED through the counter), and alpha's path rides the same
+    // batch, so a stale route for the archived project would re-read
+    // its edit and emit inside the observed pass. The routing drop —
+    // the prune pass rebuilt the table — is SYS-007's removal rule,
+    // and bravo's re-read is a no-diff silence, so the correct world
+    // drains to nothing.
+    let flush_base = app
+        .state::<crate::file_watch::FileWatchState>()
+        .pass_count();
+    // The a19fe45 class (file_watch.rs's own battery doc): the
+    // routing table keys the RESOLVED path spelling, while the
+    // fixture paths are the raw tempdir spelling — /var vs
+    // /private/var on macOS, the resolved-vs-env form on Windows —
+    // so a manual FilesChanged carrying the raw spelling would miss
+    // the route, run no pass, and hang the wait. Canonicalized here
+    // exactly as the sec003 suite canonicalizes its picks.
+    let routed_alpha = eunomia_fs::paths::canonicalize(&alpha_target)
+        .expect("the alpha fixture must canonicalize");
+    let routed_bravo = eunomia_fs::paths::canonicalize(&bravo_target)
+        .expect("the bravo fixture must canonicalize");
+    app.state::<crate::file_watch::FileWatchState>().trigger(
+        crate::file_watch::Command::FilesChanged(vec![routed_alpha, routed_bravo]),
+    );
+    wait_for_watch_passes(&app, flush_base + 1);
+    let mut later = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        later.extend(event.changes);
+    }
+    assert!(
+        later.is_empty(),
+        "the archived project's edit never reaches the wire and the \
+         active sibling's marking arrives exactly once: {later:?}"
     );
     // The carrier agrees: the default read carries the active column
     // only, and it shows the edit.

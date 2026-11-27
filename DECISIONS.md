@@ -29509,3 +29509,224 @@ warnings` green; `cargo deny check` green, no new ignores. The
 D-101 release strings scan is unchanged by these rounds (no manifest
 or eunomia-fs change after the committed verification). Frontend
 untouched throughout — no pnpm checks run.
+
+### D-227 — T-326: the negative event-asserts of `ipc_tests` go deterministic — the fixed 300/100 ms sleeps before `try_recv`-empty assertions are replaced by observed pass completions, awaited-seam acks, and control-lane flushes — 2026-11-26
+
+Source: the 2026-11-23 project review's P3-3. The shape: a "no
+event" assertion slept a fixed ~300 ms (one site 100 ms) and then
+called `events.try_recv().is_err()` — an event arriving after the
+window passed false-green, and the sleep was pure timing hope on
+every run. The card named five review-era ranges (main@8f42622:
+`:6560-6561`, `:7356-7366`, `:8519-8523`, `:8580-8585`,
+`:8887-8889`); the inventory reconciles as seven physical sites,
+not five: the `:7356-7366` range spans TWO sleep+assert pairs (the
+prune-silence and the junk-write invisibility of the same
+availability test), and the task brief's own verified fact named
+the 100 ms startup-silence pair (`:7486` at 8f42622) that no card
+range covers. All seven were converted; the brief's "exactly 5
+expected" is reported as this reconciliation, not silently
+absorbed. An eighth fixed sleep in the same class —
+the refused-add's `assert_eq!(pass_count, 2)` behind a 300 ms
+sleep (`a_refused_add_runs_no_watch_pass`, today ~`:9098`) — has
+no `try_recv` and so falls outside the card's literal shape; it is
+the follow-up below, not a conversion.
+
+The foundational happens-before edge every conversion rests on
+(verified in the service loop's source, `file_watch.rs`): a pass
+runs `refresh_pass` → `finish_pass` — which EMITS the
+`state://file-changed` event, and Rust listeners deliver
+synchronously inside `emit` (the availability suite's rule, restated
+in `listen_file_changed`'s doc) — and only THEN does the loop call
+`note_pass()` (the counter, Release), and only then the ack
+`done.try_send(result)`. So observing `pass_count ≥ N` (the
+`wait_for_watch_passes` helper) or a refresh ack proves every
+emission of every completed pass has already landed on the test's
+mpsc channel. A negative assert placed after such an observation is
+deterministic in the direction the card cares about — it can never
+miss an event the producer already emitted — and its teeth come
+from the observed pass being real: a re-emitting regression emits
+inside that pass, before the observation, and the assert goes red
+immediately instead of inside a 300 ms hope.
+
+Per site (review-era → today's shape):
+
+- **S1** `an_external_edit…` ("an unchanged verdict is silent"): the
+  sleep became an awaited `refresh_after_sync` probe — one more FULL
+  pass over the unchanged world, its ack observed, its diff asserted
+  empty (the re-diff IS the idempotence oracle), then the wire
+  assert. A pending debounced batch from the edit is subsumed by the
+  probe's `Refresh` (the coalescing rule), never left to race.
+- **S2** `an_unavailable_project_is_unwatched…` ("the prune is
+  silent"): the sleep was simply deleted — the prune pass's
+  completion is already observed by the `wait_for_watch_passes(&app,
+2)` the test ran (the count is `settled + 1` over the convergence
+  baseline since the round-1 addendum below); the file's own `the
+healthy startup is silent` assert (no sleep, after a counted pass)
+  was the in-file precedent.
+- **S3** same test ("an unavailable project has no watch"): the
+  debounced pipeline for the junk write has no observable completion
+  signal of its own, so the test gained a CONTROL LANE — a second,
+  available, matching project ("echo") whose same-bytes rewrite
+  after the junk write fires a REAL debounced event: the partial
+  pass it guarantees is observed through the counter, and since the
+  junk write happened first, its own delivery (had the file stayed
+  watched and routed) would have been coalesced into that observed
+  pass or run before it. The immediate assert then catches a stale
+  route deterministically; the watch-map convergence itself stays
+  the fs crate's `set_files` pin (unreachable from this layer, the
+  test's own assert message records it).
+- **S4** `a_queued_fire_and_forget…` ("a clean startup is silent",
+  the 100 ms one): the sleep was deleted — the startup pass is
+  observed complete by `wait_for_watch_passes(&app, 1)`, and the
+  30 s long debounce holds every fixture write's event past the
+  test's lifetime.
+- **S5** `synced_world_between_syncs` ("the freshly synced file
+  matches its build — no event"): the sleep became the awaited
+  settle probe — the seam's diff asserted empty (the "matches its
+  build" proof made direct), the wire assert after the ack.
+- **S6** `drain_the_clearing` ("nothing follows the clearing"): the
+  helper gained the app handle and, after the exactly-once clearing
+  is consumed, an awaited probe pass — diff empty, then the drain
+  over the wire. A re-emitting regression lands in the observed
+  pass, not after a 300 ms window.
+- **S7** `an_archived_projects_edits…` ("only the active sibling's
+  edit reaches the wire"): the old shape had both races — an
+  instantaneous drain that could false-red when a straggler
+  satisfied the counted pass, and the 300 ms window that could
+  false-green. The marking is now collected through the canonical
+  `next_flagged_changes` deadline wait; the silence-after is a
+  manual `FilesChanged([alpha, bravo])` flush — bravo the control
+  lane (its route guarantees the observed partial pass), alpha's
+  path riding the same batch so a stale route for the archived
+  project would re-read its edit and emit inside the observed pass
+  — then the drain-empty assert.
+
+**The verified fact that reshaped one test** (the recreate test's
+red run on the first conversion attempt): notify-debouncer-full
+0.7.0's `push_remove_event` DROPS a file's whole pending queue when
+the file was created inside the same debounce window and then
+removed (registry source `src/lib.rs:498-502` — `Some(queue) if
+queue.was_created() => { self.queues.remove(path); }`), and its
+`push_event` skips a modify right after a create (`:519-528`). The
+old 300 ms settle sleep was never only "proving silence" in
+`a_real_sync_run_recreates…` — it was separating the first run's
+create window from the test's deletion by timing luck; with the
+settle made instantaneous, the deletion landed inside the create's
+window and was cancelled outright (no event, no pass — the wait
+timed out at "ran only 3 passes, waiting for 4"). The honest fix is
+not a smaller sleep: the deletion's DETECTION in that test now runs
+through the awaited seam's full pass (its ack observed, the seam's
+own diff asserted as the SYS-009 hint — relaxed to "the hint or the
+empty answer, the hint itself pinned on the wire" since the round-1
+addendum below, the event consumed before the assert) — the
+DEBOUNCED delivery of a deletion stays the
+earlier battery's pin (`deleting_a_synced_target_file…`, a world
+where the create window is long closed), and this test's own
+subject is the recreation. The same cancellation also explains why
+the overwrite sibling needs nothing: its edit is a modify-after-
+create (skipped by the debouncer) whose create event's pass
+re-reads the EDITED bytes, so the marking still arrives
+deterministically.
+
+Mutation evidence (each reverted byte-for-byte after its red run).
+Layer 1, the producer mutation — `diff_against_last`'s equality
+guard forced false, so every pass reports every verdict — reddened
+all six affected tests; S4 and S5 went red directly at their
+converted asserts, S1/S2/S3/S7 at the earlier already-sleep-free
+negative asserts of the same tests (the mutation is caught upstream;
+the tests have teeth either way). Layer 2, per-site spurious
+emission through the production `Event::emit` path injected
+immediately before each converted assert — each of the seven sites
+went red at ITS OWN assert: S1 at "an unchanged verdict is silent",
+S2 at "the prune is silent", S3 at "an unavailable project has no
+watch", S4 at "a clean startup is silent", S5 at "no event", S6 at
+"nothing follows the clearing", S7 at "never reaches the wire".
+
+Timing (nextest, `--test-threads=4`, `ipc_tests::` filter, same
+machine): before 6.827 s (199 tests); after 6.415 / 6.474 / 6.367 s
+— three consecutive green runs, all under the baseline. The full
+workspace baseline this branch started from: 139.198 s, 2001 tests
+(the final full-suite numbers are in the task report).
+
+Out of scope by the card's own line (fixed sleeps that are NOT
+try_recv-empty negative asserts): `START_SETTLE` (500 ms, five
+startup-battery pass-count settles), `QUIESCENCE` (the
+`converge_startup_watch` drain window — bounded by rounds, the
+D-181 macOS straggler class; its doc no longer claims the
+idempotence drains share it), the 1/10 ms jitter sleeps, and the
+refused-add's `assert_eq!(pass_count, 2)` behind its 300 ms sleep.
+All four are the same false-green class with a different oracle
+(the pass counter, not the wire); each needs its own happens-before
+edge (an awaited probe whose own pass is subtracted from the count,
+or a bus-drain observation) and is carried as a follow-up for the
+orchestrator's cards, together with `sync_pipeline_tests`' `SETTLE`
+verdict-settles, where the same awaited-seam technique applies.
+
+Round-1 review addendum (D-227, same task; report
+`.opencode/reviews/t326-round1-report.md`, deepseek-v4.1-flash,
+VERDICT: CHANGES REQUESTED — 1 × P0, 2 × P2, 2 × P3; the reviewer
+independently verified the loop-ordering edge in all three service
+arms, the synchronous-listener delivery, the inventory (7 sites,
+nothing else matching the shape), the notify-debouncer-full facts,
+and re-ran the ipc suite 199/199 green plus five repeats of the
+converted tests) — findings processed:
+
+- **P0 (the S7 control flush routed by the RAW path spelling —
+  macOS/Windows canonicalization divergence would miss the route,
+  run no pass, and hang the wait) TAKEN.** The manual
+  `FilesChanged` batch now carries `eunomia_fs::paths::canonicalize`
+  spellings, exactly the sec003 suite's precedent for the same
+  class (the a19fe45 note in `file_watch`'s own battery): the
+  routing table keys the resolved form, the fixture paths are the
+  raw tempdir form, and the two diverge on every CI leg except
+  Linux.
+- **P2 (S2/S3's absolute pass counts without startup convergence —
+  a macOS straggler could satisfy a wait early and void the
+  negative asserts; the deleted sleep used to absorb the class)
+  TAKEN.** The unavailable-folder test now takes the quiescent
+  baseline the sibling tests use
+  (`converge_startup_watch(&app, &echo_target)` — the probe
+  rewrites the control file, the wire stays silent through the
+  drain) and every later wait is `settled + n`; the echo lane's
+  extra pre-spawn write, which raised the straggler probability, is
+  absorbed by the same drain.
+- **P2 (the recreate test's seam-diff equality could false-red when
+  the debounced removal pass won the race — the settle probe is a
+  DB round-trip, not a clock, so the create window can close and
+  the removal becomes a live event) TAKEN.** The detection block
+  now asserts the hint on the WIRE (the deadline wait accepts
+  either producer), relaxes the seam's diff to "the hint or the
+  empty answer" (the honest race statement), and adds the
+  probe-and-drain tail — the post-hint pass awaited, its diff
+  empty, the wire empty — which keeps the old settle window's
+  duplicate-emission teeth deterministically.
+- **P3 (the reworded QUIESCENCE doc still overstated "only this
+  startup drain still needs a window") TAKEN** — the doc now scopes
+  the claim to the negative event-asserts and names the remaining
+  pass-count settles as D-227's out-of-scope remainder.
+- **P3 (the follow-up list named only the sync-pipeline SETTLE
+  sleeps) TAKEN** — the out-of-scope paragraph above now enumerates
+  all four in-file sites as follow-up candidates for the
+  orchestrator's cards.
+
+Round-2 review addendum (D-227, same task; report
+`.opencode/reviews/t326-round2-report.md`, hy4-flash-free — VERDICT:
+APPROVE, 0×P0/P1/P2, 1×P3; the reviewer independently re-verified all
+five round-1 resolutions as genuinely landed — the canonicalization
+fix checked against `target_of`/`resolve_target_path`'s key spelling
+on every CI leg, the convergence rebase confirmed free of absolute
+counts, the recreate relaxation confirmed still falsifiable, the
+QUIESCENCE doc and the follow-up enumeration confirmed — re-verified
+the foundational edge in all three service arms, re-ran the ipc
+suite three times green (6.777/6.637/6.524 s, all under the 6.827 s
+baseline) and left the worktree clean) — the one finding processed:
+
+- **P3 (two stale sentences in this entry's original paragraphs —
+  the S2 bullet still said `wait_for_watch_passes(&app, 2)` and the
+  recreate paragraph still said the seam's diff is "asserted as the
+  SYS-009 hint", both contradicted by the round-1 fixes and the
+  addendum's own record; rule 11) TAKEN** — both sentences now carry
+  the superseded-pointer parenthetical naming the round-1 change
+  (the dated-record posture: point, never rewrite; the D-226
+  precedent), so a future reader cannot re-tighten the relaxed
+  assert against the record.
