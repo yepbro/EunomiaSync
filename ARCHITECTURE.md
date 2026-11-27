@@ -508,10 +508,12 @@ the Rust side:
   manual smoke runs and the CI build matrix; the handler's window
   selection and missing-window case are unit-tested on the mock runtime.
 
-The updater registers from a disabled `plugins.updater` stub
-(`pubkey: ""`, no endpoints) because the plugin refuses to initialize
-without the section (DECISIONS.md D-023); it stays network-inert until the
-release task sets the real key and feed.
+The updater initializes from the live `plugins.updater` section
+(DECISIONS.md D-023, D-229): the embedded minisign public key and the one
+endpoint of the app's single update channel (stable, REL-004). Everything
+updater-side that the app owns — the channel/endpoint truth and the
+upcoming `update_check`/`update_install` commands — lives in
+`src-tauri/src/updater.rs` (see the Updater section).
 
 ## Data directory
 
@@ -1171,11 +1173,32 @@ through the same facade (D-155).
 ## Updater
 
 Auto-updates use `tauri-plugin-updater`, wired in `src-tauri/src/lib.rs`
-(DECISIONS.md D-005, D-023). Signing keys and the update endpoint are
-separate (release) tasks; until they land the plugin stays registered but
-unconfigured — every update check fails fast in Rust with
-`EmptyEndpoints`, and the webview has no path to the release feed. The
-updater is part of the MVP scope (spec 7.9).
+(DECISIONS.md D-005, D-023, D-229). The plugin initializes from the live
+`plugins.updater` section of `tauri.conf.json`: an embedded minisign
+public key — T-133 generated a dev-grade keypair whose private half
+lives outside the repository (SEC-011); the release task may swap the
+pair freely because nothing has been signed yet (D-229 records the swap
+path) — and the single endpoint of the app's one update channel,
+`stable`: GitHub Releases `latest.json` under the REL-004 repository.
+`src-tauri/src/updater.rs` owns the channel/endpoint truth (the config
+is pinned to it by `config_tests.rs`) and is the module the upcoming
+`update_check`/`update_install` commands (T-134/T-135) land in — the
+app's only network-adjacent module (NFR-013). Artifact signature
+verification is structural in the plugin and no configuration switch
+can skip it (UPD-003): `Update::install` verifies the bytes before
+installing them, and `Update::download` verifies the fully assembled
+buffer before returning it — the download progress callback, however,
+observes chunks before verification, so future consumers must treat
+callback bytes as unverified until the buffer passes. The app's own
+code contains no network code at all — the only HTTP client is the
+plugin's own, reached through `UpdaterExt` from the updater module,
+pinned by a `config_tests.rs` source scan (NFR-012); the manifest
+request is a GET of the fixed URL (no placeholders, no query), so no
+project or instruction data enters it (NFR-013) — the plugin sends
+only its own fixed transport metadata (`Accept`, its versioned
+user-agent). The webview has no path to the release feed (no updater
+permission, no network CSP source). The updater is part of the MVP
+scope (spec 7.9).
 
 ## Testing strategy
 

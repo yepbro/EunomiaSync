@@ -311,6 +311,14 @@ pub(crate) mod logging;
 #[cfg(desktop)]
 pub(crate) mod single_instance;
 
+// The update-feed module (UPD-003, NFR-012/NFR-013, SEC-004, REL-004,
+// D-229): the channel/endpoint truth the `plugins.updater` config is
+// pinned to, and the landing zone of the upcoming `update_check` /
+// `update_install` commands (T-134/T-135) — every updater-network call
+// site of the app lives in this one module. Needed on every platform,
+// exactly like the plugin registered below.
+pub(crate) mod updater;
+
 /// Constructs the tauri-specta builder with all commands and events
 /// registered. Shared by the app entry point and the binding export test.
 pub fn specta_builder() -> Builder<tauri::Wry> {
@@ -502,15 +510,21 @@ pub fn run() {
     // registered-project-only. The webview has no `dialog:` permission.
     let tauri_builder = tauri_builder.plugin(tauri_plugin_dialog::init());
 
-    // `updater` (D-005/D-023, SEC-001: network belongs to Rust): update
-    // check and install run in Rust behind the `update_check` /
-    // `update_install` app commands (upcoming tasks); the webview never
-    // contacts the release feed. The plugin refuses to initialize without
-    // a `plugins.updater` config section (2.14.1 `Config` has a required
-    // `pubkey` field), so `tauri.conf.json` carries a disabled stub
-    // (`pubkey: ""`, no endpoints) until the release task sets the real
-    // key and endpoints; with it, `updater()` fails fast with
-    // `EmptyEndpoints` instead of the app failing to start.
+    // `updater` (D-005/D-023/D-229, SEC-001: network belongs to Rust):
+    // update check and install run in Rust behind the `update_check` /
+    // `update_install` app commands (T-134/T-135, upcoming — they land
+    // in the `updater` module beside the endpoint/channel truth); the
+    // webview never contacts the release feed (no updater permission,
+    // no network CSP source). The plugin initializes from the real
+    // `plugins.updater` config: the embedded minisign public key —
+    // signature verification is structural in the plugin (install
+    // verifies before installing, download verifies the assembled
+    // buffer before returning it) — and the one endpoint of the app's
+    // single update channel, the stable GitHub Releases feed (REL-004;
+    // D-023's EmptyEndpoints stub is gone, `updater()` builds). The
+    // dev-grade key and the release task's swap path: D-229; the
+    // request-content and module-isolation posture
+    // (NFR-012/NFR-013): `updater.rs` module docs.
     let tauri_builder = tauri_builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     // `opener` (SEC-001): "open the data folder" runs in Rust behind the
@@ -1090,6 +1104,9 @@ pub(crate) fn start_database_session<R: Runtime>(app: &AppHandle<R>, mut databas
 
 #[cfg(test)]
 mod config_tests;
+
+#[cfg(test)]
+mod updater_tests;
 
 #[cfg(test)]
 mod db_tests;

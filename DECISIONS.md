@@ -29893,3 +29893,217 @@ deliberate, it is what gives M2 its teeth), P3-2 (`as_entry`'s
 structural level equality). No new dependencies, no unsafe, the store
 crate untouched, the frontend untouched (no pnpm checks — stated,
 not run).
+
+### D-229 — T-133: the updater goes live — the embedded public key, the stable channel's single endpoint, the updater module, and the network-code isolation pin — 2026-11-27
+
+Source: card T-133 (UPD-003, UPD-006, NFR-012, NFR-013, SEC-004,
+REL-004; spec §7.9/§13). D-023's disabled `plugins.updater` stub
+(`pubkey: ""`, no endpoints) is replaced by the real configuration,
+and D-023's accepted failure mode (`updater()` → `EmptyEndpoints`)
+is gone: `updater_tests::the_updater_initializes_from_the_real_config`
+builds a mock-runtime app from the REAL `tauri.conf.json`
+(`tauri::generate_context!()` — the same macro `run()` uses, so the
+test cannot drift from what the app runs with; the
+`mock_builder().build(generate_context!())` pairing is tauri's own
+documented pattern, `tauri-2.12.6/src/test/mod.rs`) and exercises the
+plugin's public `UpdaterExt::updater()` seam, which now returns `Ok`.
+
+**The channel expression (verified against the installed plugin).**
+REL-004 fixes one update channel, stable — but tauri-plugin-updater
+2.14.1 (Cargo.lock; sources in the cargo registry) has NO channel
+mechanism of its own: `Config` (`src/config.rs`) has no channel field
+(pubkey, endpoints, dangerous*, requireSignedVersion, allowDowngrades,
+windows), the `RemoteRelease` manifest (`src/updater.rs`) has no
+`channels` key, and a source grep for "channel" over the plugin finds
+only an `std::sync::mpsc` used for the macOS install main-thread hop
+(`updater.rs:1593`, production code — the round-1 P3-4 correction of
+this entry's first wording, which wrongly said "in its tests").
+"One channel" is therefore expressed the
+only way the plugin supports: exactly ONE endpoint (the stable feed's
+manifest URL) and nothing anywhere that could select a second feed.
+`src-tauri/src/updater.rs`'s `UpdateChannel` enum (one variant,
+`Stable`, `as_str() == "stable"`) is the typed form of that fact —
+UPD-005's About line and T-134's check result are its future
+production consumers (the `#[allow(dead_code)]`
+future-card precedent from sync_phase2/phase4).
+
+**The endpoint.** `https://github.com/yepbro/EunomiaSync/releases/
+latest/download/latest.json` — GitHub's stable redirect to the newest
+non-prerelease release's manifest asset, under the repository REL-004
+fixes. The T-234 release workflow will publish the asset; the URL is
+fixed by the repo and lands now (https is also the plugin's transport
+requirement: `validate_endpoints` rejects non-https in release
+builds, `config.rs`). The URL carries no placeholders — the plugin
+would expand `{{current_version}}`/`{{target}}`/`{{arch}}`/
+`{{bundle_type}}` if present (`updater.rs`, `check`) — and no query
+or fragment, so the request is a plain GET of the fixed string with
+no app data in it (NFR-013's "no project or instruction data" is a
+property of the URL shape, pinned by
+`the_endpoint_carries_no_request_shaping`).
+
+**The key ruling (owner instruction on the card, recorded here).**
+A real signing keypair did not exist (T-229, the release/signing
+infra card, not started). Generated NOW with the installed Tauri CLI
+(`tauri-cli 2.12.5`, `tauri signer generate --ci -w …`):
+
+- the key is **dev-grade, generated without a password** (`--ci`
+  skips the prompt; the CLI itself warns and recommends a password —
+  a password-protected production pair is T-229's decision);
+- **nothing has been signed yet** — no releases exist — so T-229 may
+  regenerate the pair for the release and swap the pubkey freely:
+  the swap is the new base64 value in `tauri.conf.json` plus nothing
+  else (the tests pin the key's SHAPE, never its value, so they
+  survive the swap);
+- the **private key lives OUTSIDE the repository** (SEC-011); its
+  exact location is reported to the owner in the task report, not
+  recorded here.
+
+**The pubkey format (verified against the plugin's decode chain).**
+`plugins.updater`'s `pubkey` is the content of the `.pub` file the
+CLI writes — which is itself the base64 (STANDARD) of the two-line
+minisign public key ("untrusted comment: …\nRW…"). That is exactly
+what the plugin consumes at artifact-verification time
+(`verify_signature`, `updater.rs`: base64 → UTF-8 string →
+`minisign_verify::PublicKey::decode`; the plugin's own test
+fixtures construct `pubkey: encode(two_line_key)` the same way).
+`config_tests::updater_config_carries_the_stable_feed_and_a_well_
+formed_public_key` runs the same chain over the real config value
+(test-only dev-dependency edges to `base64` 0.23.1 and
+`minisign-verify` 0.3.0 — both already resolved in the graph through
+tauri-plugin-updater, so no new crate versions; production builds
+never resolve them) plus two line-shape asserts for readable
+failures. Signature verification itself is structural in the plugin
+(UPD-003): `Update::install` verifies the bytes before installing
+them, `Update::download` verifies the fully assembled buffer before
+returning it — while the download progress callback observes chunks
+BEFORE verification, so callback bytes are unverified until the
+buffer passes (the round-1 P3-3 correction of this entry's first
+wording, which overstated "before any artifact byte is used") — and
+no config switch skips the check — a usable pubkey in the config is
+what turns it on, which is this card's `pubkey` field.
+
+**The module (NFR-013's "separate module").** The plugin's 2.14.1
+API is config-driven: endpoints and pubkey are read from
+`tauri.conf.json` at plugin initialization (`Builder::build`'s setup,
+`api.config()`), and the HTTP client is constructed INSIDE the
+plugin (`Updater::check` builds the reqwest client). Nothing at
+registration time is left for app code to construct — stated
+honestly, `src-tauri/src/updater.rs` owns: the channel/endpoint
+truth (`UpdateChannel`, `STABLE_ENDPOINT` — the single source the
+config is pinned against, so config and module cannot drift), the
+request-content and module-isolation documentation, and the landing
+zone for T-134/T-135's `update_check`/`update_install` commands
+(every updater-network call site of the app lives in this one
+module). The webview keeps zero updater permissions
+(capabilities/default.json, unchanged) and no network CSP source.
+
+**The network-isolation pin (NFR-012's "no other network requests").**
+A repo audit first: grepping the workspace's live sources for
+reqwest/hyper/ureq/isahc/curl/surf/socket2/tungstenite/quinn/tonic/
+TcpStream/UdpSocket/SocketAddr/std::net finds nothing — the app's own
+code has no network code today (reqwest and hyper are in the CARGO
+GRAPH, but as internal dependencies of tauri and the updater plugin —
+dependency code, not app code). The pin that keeps it true:
+`config_tests::workspace_sources_contain_no_network_client_code`
+scans every workspace `.rs` source (the same `workspace_rust_sources`
+walker the logging pins use — extended in round 1 to walk the
+`benches/` workspace member too; comments stripped so prose cannot
+trip or satisfy it; `*_tests.rs` files exempt — they never ship) for
+the common client spellings (HTTP client crates by name, their
+namespace forms, raw sockets, `std::net`, and the libc socket
+syscalls — a partial blacklist by design: a NEW networked crate is a
+rule-9 dependency decision, the pin keeps the app's own code free of
+the known clients) — with NO file exemptions, not even `updater.rs`:
+the app reaches the plugin through its API (`UpdaterExt`), never
+through the client crate, so any direct client spelling anywhere in
+app code is a boundary violation worth a conscious pin edit.
+cargo-deny `bans` could NOT express this pin: reqwest and hyper are
+legitimate graph members via the plugin itself, so a crate-level ban
+would fail the build; the source-level scan is the honest shape. The
+webview side was already pinned (CSP `connect-src` is ipc-only — any
+remote host fails `csp_has_no_remote_sources_in_any_directive`; the
+capability file set and its grants are pinned to the event-listen
+pair; no plugin JS packages). Mutation-verified: a `use
+std::net::TcpStream` planted in `eunomia-core` reddens the scan;
+emptying the pubkey, moving the config endpoint to another host,
+drifting the module constant, emptying the endpoints, and adding a
+query parameter each redden their own test.
+
+**Kept at defaults, as release-policy decisions.**
+`requireSignedVersion` (2.14.1's anti-downgrade-pairing hardening:
+reject updates whose signature's trusted comment does not carry the
+announced version) and `allowDowngrades` stay at their plugin
+defaults — the config test pins both. D-023 already ruled these
+release-task signing-policy decisions; turning `requireSignedVersion`
+on (safe compatibility-wise — nothing is signed yet) belongs to
+T-229/T-234 with the signing workflow, not to this wiring card.
+
+Follow-ups: T-229 (generate the production pair with a password,
+swap the pubkey, decide `requireSignedVersion`); T-234 (publish
+`latest.json`; the release smoke then exercises the real network
+path this card deliberately does not — no test contacts the feed);
+T-134/T-135 (the `update_check`/`update_install` commands land in
+the updater module; UPD-003's confirmation and sync-gate halves).
+
+Round-1 review addendum (D-229, same task; report
+`.opencode/reviews/t133-round1-report.md`, deepseek-v4.1-flash —
+VERDICT: APPROVE, 0×P0/P1, 1×P2, 7×P3; key hygiene, the channel/
+endpoint/verification posture, the config pins and the dev-dep edges
+all independently re-verified green) — the findings processed:
+
+- **P2 (the NFR-012/013 source pin was blindable: `strip_comments`
+  did not know string literals, so a `//` inside a URL literal cut
+  the line and a `/*` inside a glob literal swallowed the REST OF THE
+  FILE — live network code after such a line was invisible to the
+  pin while it stayed green) TAKEN** — `strip_comments` rewritten as
+  a literal-aware state machine (strings, byte strings, char
+  literals, raw strings with hash delimiters, lifetimes; nested
+  block comments now close at their real end; malformed literals
+  fall back to code visibility, never to file swallowing), pinned by
+  three new unit tests whose inputs are the reviewer's exact shapes
+  (a URL literal followed by live code; a `**/*.md` glob followed by
+  live code; comment forms, raw strings, escapes and lifetimes
+  unchanged) — the URL and glob tests RED on the old stripper
+  (verified by temporarily restoring it before landing the rewrite).
+  The sibling scans inherit the fix; the full eunomia-sync suite
+  stayed green through the swap (903/903).
+- **P3 (the channel test's closed-set assertion was true by
+  construction — `[Stable].iter().all(is Stable)` cannot fail) TAKEN**
+  — the vacuous block deleted; the comment now says the honest
+  guards of "one channel": the single-endpoint config pin and review.
+- **P3 (the request-shaping test missed the plugin's percent-encoded
+  placeholder spellings `%7B%7B…%7D%7D`) TAKEN** — the test now
+  rejects both spellings (the plugin substitutes the encoded form
+  FIRST, 2.14.1 `check`).
+- **P3 ("download and install both verify before any artifact byte
+  is used" overstated `download`'s ordering — the progress callback
+  observes chunks before verification) TAKEN** — reworded in
+  `updater.rs` module docs, the `lib.rs` registration comment,
+  ARCHITECTURE.md and this entry: install verifies before
+  installing; download verifies the assembled buffer before
+  returning it; callback bytes are unverified until the buffer
+  passes — stated for the future `update_install` implementer.
+- **P3 (D-229's channel-grep citation said "an mpsc in its tests" —
+  the hit is the macOS install main-thread hop, production code)
+  TAKEN** — the citation corrected above (the substantive no-channel
+  conclusion was already independently re-verified by the reviewer).
+- **P3 ("scans every workspace `.rs` source" was broader than the
+  walker — `benches/eunomia-load/src` was outside it) TAKEN** — the
+  walker now walks `benches/` too (sibling needles verified clean
+  there first, so the logging pins stay green through the extension);
+  the helper's docs name the future-directory duty.
+- **P3 (the needle list was a partial blacklist presented as "every
+  spelling") TAKEN** — five namespace spellings and the libc socket
+  syscalls added (`socket2::`, `tungstenite::`, `quinn::`, `tonic::`,
+  `hyper_util::`, `libc::socket`, `libc::connect` — `tonic` as a
+  namespace because bare `tonic` matches "monotonic" in live prose),
+  and the comment now says honestly: the common client spellings; a
+  NEW networked crate is a rule-9 dependency decision.
+- **P3 ("the only app-dependent value the plugin sends is the fixed
+  updater user-agent" was self-contradictory — the UA is the
+  plugin's own, and fixed `Accept` headers are sent too) TAKEN** —
+  reworded: the plugin sends only fixed transport metadata of its
+  own; nothing about the app or its data enters either request.
+
+Rejected: none — every round-1 finding was confirmed against the
+plugin's installed sources before the fix.

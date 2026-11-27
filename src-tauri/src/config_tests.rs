@@ -49,11 +49,15 @@
 //! T-246 (D-112's follow-up) it is exactly the event subscription
 //! lifecycle — `core:event:allow-listen` plus `core:event:allow-unlisten`
 //! — pinned by its own test below; everything else stays denied. The
-//! updater registers from a deliberately disabled
-//! `plugins.updater` stub in `tauri.conf.json`: the plugin refuses to
-//! initialize without the section (its config has a required `pubkey`
-//! field), and the tests pin both halves of that fact — the stub must
-//! exist and stay empty, and a section-less app must fail to build.
+//! updater initializes from the real `plugins.updater` section (T-133,
+//! D-229): the embedded minisign public key — checked through the
+//! plugin's own decode chain (base64 →
+//! `minisign_verify::PublicKey::decode`) — and the stable channel's
+//! single endpoint, pinned against the `updater` module's constant so
+//! the config and the module cannot drift apart; the `dangerous*`
+//! transport escapes and the signing-policy flags stay at their
+//! defaults, and a section-less app must still fail to build (the
+//! negative control D-023 keeps proving the section is required).
 //!
 //! The Windows application manifest (NFR-023, SEC-012/NFR-011) is pinned
 //! the same way, with an explicit honesty boundary: on Linux the build
@@ -94,8 +98,22 @@
 //! stripped): the log path must be derived from the data directory
 //! (§5.5), not from the OS-specific default that macOS points at
 //! `~/Library/Logs`.
+//!
+//! The network isolation posture (NFR-012, NFR-013, SEC-004) is pinned
+//! the same way: a text scan over the same sources (comments stripped)
+//! rejects every HTTP/socket client spelling, so the app's own code
+//! contains no network code at all — the only network client the app
+//! ever reaches is the one inside `tauri-plugin-updater`, invoked
+//! through the plugin's public API from the `updater` module (which is
+//! NFR-013's "separate module"). The webview side of the same fact is
+//! already pinned by the CSP and capability tests above.
 
 use serde_json::Value;
+
+// The pubkey well-formedness pin decodes through base64 (the plugin's
+// own first decode step); the dev-dependency edge is declared in
+// Cargo.toml with its justification.
+use base64::Engine;
 
 const EXPECTED_IDENTIFIER: &str = "pro.yepbro.eunomiasync";
 
@@ -410,13 +428,21 @@ fn collect_rust_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>
 
 /// Every `.rs` source of the workspace the logging pins scan:
 /// `src-tauri/src` (subdirectories included), the `src-tauri` build
-/// script, and the library crates under `crates/`. A macro call or an
-/// `app_log_dir()` wiring in any of them must not escape the pin.
+/// script, the library crates under `crates/`, and the bench crate
+/// under `benches/` (a workspace member — the round-1 P3-5 fix: a
+/// network spelling planted there was outside the walker while the
+/// pins' prose claimed "every workspace source"). A macro call, an
+/// `app_log_dir()` wiring or a network client in any of them must not
+/// escape the pin. A future top-level source directory (e.g. a
+/// `src-tauri/tests/` integration suite) must be added here when it
+/// appears — the floor check in the scans (`files` non-empty) cannot
+/// notice its absence.
 fn workspace_rust_sources() -> Vec<std::path::PathBuf> {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     collect_rust_files(&manifest_dir.join("src"), &mut files);
     collect_rust_files(&manifest_dir.join("../crates"), &mut files);
+    collect_rust_files(&manifest_dir.join("../benches"), &mut files);
     // The build script is outside `src/` but compiles into the same
     // app; a missing file fails the pins' read below, so a rename is a
     // conscious edit, not a silent narrowing of the scan.
@@ -516,6 +542,80 @@ fn app_log_dir_is_never_called() {
              per-OS smoke run checks the file location)",
             file.display()
         );
+    }
+}
+
+#[test]
+fn workspace_sources_contain_no_network_client_code() {
+    // Arrange & Act: every workspace `.rs` source (comments stripped —
+    // the honest precision of the sibling scans: prose explaining the
+    // network ban in a module's docs must not trip the pin, while an
+    // actual wiring is live code). `*_tests.rs` files never ship
+    // (cfg(test)) and are exempt, like every other scan in this module.
+    // No file is exempt otherwise: not the `updater` module (the plugin
+    // is reached through its API — `UpdaterExt` — which is not a client
+    // spelling), not the build script, not the library crates.
+    let files = workspace_rust_sources();
+    assert!(
+        !files.is_empty(),
+        "the source walker must find the workspace sources"
+    );
+    // The needles: the common spellings that open or drive a network
+    // client — the HTTP client crates by name (the plugin's own
+    // `reqwest` included: if app code ever touches the client crate
+    // directly, that is network code leaving the plugin's API), the
+    // raw std sockets and their module path, the alternative client
+    // crates' namespaces, and the libc socket syscalls (libc itself is
+    // a legitimate direct dependency here). Not an exhaustive blacklist
+    // of everything socket-shaped: a NEW networked crate is a
+    // dependency decision behind rule 9 and cargo-deny, and this pin's
+    // job is to keep the app's own code free of the known clients — a
+    // needle planted in a dependency's sources is out of scope either
+    // way. A `Url::parse` or an `http::` type alone is NOT a needle:
+    // parsing and header types are not connections; the pin trips on
+    // code that can move bytes to the network.
+    let network_needles = [
+        "reqwest",
+        "ureq",
+        "isahc",
+        "attohttpc",
+        "surf::",
+        "curl::",
+        "hyper::",
+        "hyper_util::",
+        "socket2::",
+        "tungstenite::",
+        "quinn::",
+        "tonic::",
+        "libc::socket",
+        "libc::connect",
+        "TcpStream",
+        "TcpListener",
+        "UdpSocket",
+        "SocketAddr",
+        "std::net",
+    ];
+    for file in &files {
+        let name = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file names must be UTF-8");
+        if name.ends_with("_tests.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(file).expect("a listed source file must be readable");
+        let stripped = strip_comments(&text);
+        for needle in network_needles {
+            assert!(
+                !stripped.contains(needle),
+                "`{}` must not use `{needle}` (live code): NFR-012/013 — \
+                 the app's only network use is the updater plugin's own \
+                 check/download of the signed artifact, reached through \
+                 the plugin API from `src-tauri/src/updater.rs`; any \
+                 other network code belongs there or nowhere (SEC-004)",
+                file.display()
+            );
+        }
     }
 }
 
@@ -1221,64 +1321,316 @@ fn app_defines_no_acl_manifest() {
     );
 }
 
-/// Strips `//` line comments and `/* ... */` block comments, ignoring
-/// string literals. A `//` line comment always wins over a `/*` on the
-/// same line: prose like `crates/**` inside a doc comment is *not* a
-/// block-comment start (the first version of this helper treated it as
-/// one and silently swallowed the rest of the file). Deliberately
-/// conservative for the marker scans below: stripping can only remove
-/// text, so it can never over-detect a marker — the worst case is a
-/// string-embedded comment delimiter hiding a live marker, which fails
-/// the pin with its exactly-once message instead of passing silently.
+/// Strips `//` line comments and `/* ... */` block comments (nested
+/// blocks included, as Rust nests them), leaving string, byte-string,
+/// char and raw-string literals intact — the scanner is literal-aware
+/// (D-229, the round-1 P2-1 fix).
+///
+/// Why literal-awareness is load-bearing: the previous delimiter-only
+/// stripper treated any `//` or `/*` as a comment start — including
+/// ones *inside* string literals. A URL literal cut the line at
+/// `https:`, and a glob literal like `"**/*.md"` opened a phantom
+/// block comment with no closing `*/`, silently dropping the rest of
+/// the file: live network code after such a line was invisible to the
+/// NFR-012/013 pin while it stayed green (reproduced by the round-1
+/// reviewer with an exact replica, and now pinned red by the
+/// `strip_comments` unit tests below).
+///
+/// Safety direction, deliberately: string and char literal *contents
+/// are kept verbatim* (a marker or needle inside a literal is visible
+/// to every scan — over-detection, a red pin and a conscious edit),
+/// comment contents are dropped, and malformed literals fall back to
+/// treating the opening quote as plain code (a raw newline inside a
+/// `"…"` string, which valid Rust cannot contain, ends the literal
+/// state) — no VALID RUST input shape can make the stripper swallow
+/// live text silently (round-2 P3-3: the claim is scoped to
+/// compiling sources, which is all the pins ever read; a malformed,
+/// non-compiling input — an unterminated raw string or block comment
+/// — keeps the scanner in that state to EOF and drops the tail, a
+/// shape no walked file can be in). Raw strings `r"…"`/`r#"…"#` (and
+/// the `br` byte form) keep their contents and may span newlines; a
+/// `'` that does not close a char literal within the escape/scalar
+/// bound is a lifetime and passes through.
 ///
 /// Shared with the other test modules (`errors_tests.rs` pins its wiring
 /// markers over comment-stripped sources the same way).
 pub(crate) fn strip_comments(source: &str) -> String {
-    let mut stripped = String::with_capacity(source.len());
-    let mut rest = source;
-    while !rest.is_empty() {
-        if let Some(line_comment) = rest.find("//") {
-            let before_line_comment = &rest[..line_comment];
-            // A `/*` before the `//` still opens a block comment; one at
-            // or after the `//` is inside the line comment and ignored.
-            match before_line_comment.find("/*") {
-                Some(block_start) => {
-                    stripped.push_str(&before_line_comment[..block_start]);
-                    match rest[block_start + 2..].find("*/") {
-                        Some(block_len) => rest = &rest[block_start + 2 + block_len + 2..],
-                        // Unterminated block comment: strip the rest.
-                        None => return stripped,
+    /// The scanner state. `Block` carries the nesting depth, `Raw` the
+    /// number of `#`s that must follow the closing quote.
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        Code,
+        Line,
+        Block(usize),
+        Str,
+        Raw(usize),
+    }
+
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    // The output is assembled byte-wise and converted at the end: byte
+    // pushes never panic on multi-byte UTF-8 (which only ever reaches
+    // the catch-all arms, since every state delimiter is ASCII), and a
+    // malformed-escape split of a scalar degrades to a lossy
+    // replacement instead of a panic.
+    let mut out: Vec<u8> = Vec::with_capacity(len);
+    let mut state = State::Code;
+    let mut i = 0;
+
+    /// A byte that may appear inside an identifier — a literal prefix
+    /// (`r`, `br`) is only a prefix when the previous byte is not one
+    /// of these, so `result` never starts a raw string.
+    fn is_identifier_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_'
+    }
+
+    while i < len {
+        match state {
+            State::Code => {
+                match bytes[i] {
+                    b'/' if i + 1 < len && bytes[i + 1] == b'/' => {
+                        state = State::Line;
+                        i += 2;
                     }
-                }
-                None => {
-                    stripped.push_str(before_line_comment);
-                    match rest[line_comment..].find('\n') {
-                        Some(newline) => {
-                            stripped.push('\n');
-                            rest = &rest[line_comment + newline + 1..];
+                    b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
+                        state = State::Block(1);
+                        i += 2;
+                    }
+                    b'"' => {
+                        out.push(b'"');
+                        state = State::Str;
+                        i += 1;
+                    }
+                    b'\'' => {
+                        // A char literal is `'` + one escape (`\n`,
+                        // `\xNN`, `\u{…}` — at most 11 content bytes) or
+                        // one scalar (at most 4 bytes) + `'`. A `'` whose
+                        // closing partner is farther away is a lifetime
+                        // and stays code — the bound keeps `<'a>(… &'a`
+                        // from being swallowed as one giant "literal".
+                        let closing = bytes[i + 1..]
+                            .iter()
+                            .position(|byte| *byte == b'\'')
+                            .map(|position| i + 1 + position);
+                        let is_char_literal = match closing {
+                            Some(j) if bytes[i + 1] == b'\\' => j - i <= 12,
+                            Some(j) => j - i <= 5,
+                            None => false,
+                        };
+                        if let Some(j) = closing.filter(|_| is_char_literal) {
+                            out.extend_from_slice(&bytes[i..=j]);
+                            i = j + 1;
+                        } else {
+                            out.push(b'\'');
+                            i += 1;
                         }
-                        // Line comment to the end of the file.
-                        None => return stripped,
+                    }
+                    b'r' | b'b' if i == 0 || !is_identifier_byte(bytes[i - 1]) => {
+                        // A raw-string prefix at an identifier boundary:
+                        // `r` (or `br`) followed by zero or more `#` and a
+                        // `"`. `b"…"` alone is an escaped byte string —
+                        // the quote itself enters `Str` on its own match
+                        // arm, so only the raw forms take this path.
+                        let mut j = i + if bytes[i] == b'b' { 1 } else { 0 };
+                        let starts_with_r = j < len && bytes[j] == b'r';
+                        if starts_with_r {
+                            j += 1;
+                            let mut hashes = 0usize;
+                            while j < len && bytes[j] == b'#' {
+                                hashes += 1;
+                                j += 1;
+                            }
+                            if j < len && bytes[j] == b'"' {
+                                out.extend_from_slice(&bytes[i..=j]);
+                                state = State::Raw(hashes);
+                                i = j + 1;
+                                continue;
+                            }
+                        }
+                        // Not a raw literal after all — plain identifier
+                        // text; one byte passes through and scanning
+                        // continues in `Code`.
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                    _ => {
+                        // Any other byte — including multi-byte UTF-8,
+                        // whose continuation bytes never equal an ASCII
+                        // delimiter — passes through as live text.
+                        out.push(bytes[i]);
+                        i += 1;
                     }
                 }
             }
-        } else {
-            match rest.find("/*") {
-                Some(block_start) => {
-                    stripped.push_str(&rest[..block_start]);
-                    match rest[block_start + 2..].find("*/") {
-                        Some(block_len) => rest = &rest[block_start + 2 + block_len + 2..],
-                        None => return stripped,
+            State::Line => {
+                if bytes[i] == b'\n' {
+                    out.push(b'\n');
+                    state = State::Code;
+                }
+                i += 1;
+            }
+            State::Block(depth) => {
+                if bytes[i] == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+                    state = State::Block(depth + 1);
+                    i += 2;
+                } else if bytes[i] == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
+                    state = if depth > 1 {
+                        State::Block(depth - 1)
+                    } else {
+                        State::Code
+                    };
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            State::Str => {
+                match bytes[i] {
+                    b'\\' if i + 1 < len => {
+                        out.extend_from_slice(&bytes[i..i + 2]);
+                        i += 2;
+                    }
+                    b'"' => {
+                        out.push(b'"');
+                        state = State::Code;
+                        i += 1;
+                    }
+                    b'\n' => {
+                        // A raw newline cannot appear inside a normal
+                        // string literal; ending the literal state here
+                        // keeps the scanner from ever swallowing the rest
+                        // of the file on malformed input.
+                        out.push(b'\n');
+                        state = State::Code;
+                        i += 1;
+                    }
+                    _ => {
+                        out.push(bytes[i]);
+                        i += 1;
                     }
                 }
-                None => {
-                    stripped.push_str(rest);
-                    return stripped;
+            }
+            State::Raw(hashes) => {
+                // The literal ends at `"` followed by exactly `hashes`
+                // `#`s; any other byte (newlines included) is content.
+                let close_end = i + hashes;
+                if bytes[i] == b'"'
+                    && close_end < len
+                    && (1..=hashes).all(|offset| bytes[i + offset] == b'#')
+                {
+                    out.extend_from_slice(&bytes[i..=close_end]);
+                    state = State::Code;
+                    i = close_end + 1;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
                 }
             }
         }
     }
-    stripped
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[test]
+fn a_url_literal_does_not_blind_comment_stripping() {
+    // Arrange & Act: the exact P2-1 shape — live code on the same line
+    // after a `//` INSIDE a string literal, plus live text after a
+    // `/*`-inside-a-string literal.
+    let source = r#"let url = "https://api.example.com"; ureq::get(url);
+let pattern = "**/*.md";
+network_code_after_the_glob();
+// a real comment
+let live = "state://project-availability"; more_live_code();"#;
+
+    // Assert: every live fragment stays visible — the old
+    // delimiter-only stripper cut the first line at `https:` (dropping
+    // `ureq::get(url);`) and treated the glob's `/*` as an unterminated
+    // block comment, silently dropping the REST OF THE FILE; both made
+    // the network-isolation pin blind while staying green.
+    let stripped = strip_comments(source);
+    assert!(
+        stripped.contains("ureq::get(url);"),
+        "live code after a `//` inside a string literal must stay visible: {stripped}"
+    );
+    assert!(
+        stripped.contains("network_code_after_the_glob();"),
+        "live code after a `/*` inside a string literal must stay visible (the old \
+         stripper dropped the whole rest of the file here): {stripped}"
+    );
+    assert!(
+        stripped.contains("more_live_code();"),
+        "live code after a scheme-style string literal must stay visible: {stripped}"
+    );
+    assert!(
+        stripped.contains("https://api.example.com"),
+        "string literal contents are kept verbatim: {stripped}"
+    );
+}
+
+#[test]
+fn comments_are_still_stripped_including_nested_blocks() {
+    // Arrange & Act: every comment form the pins rely on being removed.
+    let source = "// ureq\nlet a = 1; /// doc ureq\n//! module ureq\n/* block ureq */ let b = 2;\nlet c = 3; /* outer /* nested */ still outer */ let d = 4;";
+
+    // Assert: none of the needle-like text inside comments survives;
+    // the code between them does; nested block comments close at their
+    // real end, not at the inner `*/` (the old stripper ended early and
+    // leaked ` still outer */` as visible text).
+    let stripped = strip_comments(source);
+    assert!(
+        !stripped.contains("ureq"),
+        "comment text must not survive stripping: {stripped}"
+    );
+    for live in ["let a = 1;", "let b = 2;", "let c = 3;", "let d = 4;"] {
+        assert!(
+            stripped.contains(live),
+            "live code must survive stripping: {stripped}"
+        );
+    }
+    assert!(
+        !stripped.contains("still outer"),
+        "the nested block's tail is comment text (Rust nests block comments) and \
+         must not leak as live text: {stripped}"
+    );
+}
+
+#[test]
+fn raw_and_escaped_literals_keep_their_contents() {
+    // Arrange & Act: raw strings (with and without hashes, spanning a
+    // newline), escaped quotes, char literals and lifetimes — none of
+    // these may be mangled, and none may blind the scanner.
+    let source = r##"let doc = r#"an inner /* not a comment */ stays"#;
+let re = r"line one
+line two // still the string";
+let path = "escaped \" quote; ureq::get(url)";
+let nl = '\n'; let tab = '\t';
+fn borrow<'a>(text: &'a str) -> &'a str { text }"##;
+
+    // Assert: contents intact, code after them visible, lifetimes not
+    // eaten by the char-literal logic.
+    let stripped = strip_comments(source);
+    assert!(
+        stripped.contains("an inner /* not a comment */ stays"),
+        "raw string contents are kept verbatim: {stripped}"
+    );
+    assert!(
+        stripped.contains("line two // still the string"),
+        "a raw string spanning a newline keeps its contents and does not \
+         open a line comment: {stripped}"
+    );
+    assert!(
+        stripped.contains("ureq::get(url)"),
+        "live code after an escaped-quote string literal stays visible: {stripped}"
+    );
+    assert!(
+        stripped.contains("let nl = '\\n'; let tab = '\\t';"),
+        "char literals pass through unchanged: {stripped}"
+    );
+    assert!(
+        stripped.contains("fn borrow<'a>(text: &'a str) -> &'a str { text }"),
+        "lifetimes must not be parsed as char literals (a `'a` with no \
+         near closing quote is a lifetime): {stripped}"
+    );
 }
 
 #[test]
@@ -1324,59 +1676,108 @@ fn single_instance_plugin_registers_before_the_others() {
 }
 
 #[test]
-fn updater_config_section_is_a_disabled_stub_that_deserializes() {
+fn updater_config_carries_the_stable_feed_and_a_well_formed_public_key() {
     // Arrange & Act: the real `plugins.updater` value from
     // `tauri.conf.json`, deserialized with the actual config type the
     // plugin initializes from.
     let config = tauri_conf();
-    let stub = config["plugins"]["updater"].clone();
+    let section = config["plugins"]["updater"].clone();
 
-    // Assert (negative control): tauri feeds a plugin `Value::Null` when
-    // its config section is absent, and the updater refuses that — the
-    // companion `updater_plugin_refuses_to_initialize_without_a_config_
-    // section` test proves it end-to-end. If a future plugin version
-    // starts accepting an absent section, this assertion fails and the
-    // stub becomes removable: decide consciously, then.
+    // Assert (negative control, kept from D-023): tauri feeds a plugin
+    // `Value::Null` when its config section is absent, and the updater
+    // refuses that — the companion
+    // `updater_plugin_refuses_to_initialize_without_a_config_section`
+    // test proves it end-to-end. If a future plugin version starts
+    // accepting an absent section, this assertion fails and the section
+    // becomes removable: decide consciously, then.
     assert!(
         serde_json::from_value::<tauri_plugin_updater::Config>(serde_json::Value::Null).is_err(),
         "the updater config must keep rejecting an absent `plugins.updater` \
-         section; once it accepts one, the tauri.conf.json stub is dead \
-         weight and should be removed"
+         section; once it accepts one, the section is dead weight and \
+         should be removed"
     );
 
-    // Assert: the stub deserializes into the real plugin config with the
-    // updater effectively disabled — no endpoints, no public key, no
-    // dangerous transport relaxation. The release task fills the key and
-    // endpoints; the escapes must stay off.
-    let parsed: tauri_plugin_updater::Config = serde_json::from_value(stub).expect(
+    // Assert: the section deserializes into the real plugin config with
+    // the live update feed — UPD-003's embedded public key and exactly
+    // one endpoint, the stable channel's (REL-004). The endpoint is
+    // pinned against the `updater` module's `STABLE_ENDPOINT` constant
+    // (T-133, D-229): the plugin reads the endpoint from the config, the
+    // module owns the typed truth the upcoming commands (T-134/T-135)
+    // build on, and this pin keeps the two from drifting apart. The
+    // config type stores `url::Url`s; stringifying them keeps this test
+    // free of any direct `url` dependency.
+    let parsed: tauri_plugin_updater::Config = serde_json::from_value(section).expect(
         "`plugins.updater` must deserialize into the plugin config: \
          without a valid section the app fails to start (the plugin \
          config has a required `pubkey` field)",
     );
+    let endpoints: Vec<String> = parsed.endpoints.iter().map(|url| url.to_string()).collect();
+    assert_eq!(
+        endpoints,
+        [crate::updater::STABLE_ENDPOINT.to_string()],
+        "`plugins.updater` must carry exactly one endpoint — the stable \
+         channel's GitHub Releases manifest (REL-004, D-229): a second \
+         endpoint or a different URL is a channel/feed change and must \
+         land in the `updater` module's constant together with this pin"
+    );
+
+    // Assert: the public key is well-formed through the plugin's own
+    // decode chain (2.14.1 `verify_signature`: base64 STANDARD decode →
+    // UTF-8 string → `minisign_verify::PublicKey::decode`) — the same
+    // steps the plugin runs at artifact-verification time, so a key the
+    // plugin could never use fails here at test time. The two line-shape
+    // checks give the failure a readable cause; `PublicKey::decode` is
+    // the oracle (an independent implementation of the minisign format,
+    // not a mirror of this app's code).
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&parsed.pubkey)
+        .unwrap_or_else(|_| panic!("the updater pubkey must be base64 (the plugin decodes it with base64 STANDARD before `PublicKey::decode`)"));
+    let key_text = std::str::from_utf8(&decoded)
+        .unwrap_or_else(|_| panic!("the updater pubkey must decode to UTF-8 minisign key text"));
+    let lines: Vec<&str> = key_text.lines().collect();
     assert!(
-        parsed.endpoints.is_empty(),
-        "`plugins.updater` must carry no endpoints until the release task \
-         sets the real update feed"
+        lines.len() == 2 && lines[0].starts_with("untrusted comment: minisign public key"),
+        "the updater pubkey must be the two-line minisign public key the \
+         `tauri signer generate` `.pub` file contains (comment line + key \
+         line), got {} line(s)",
+        lines.len()
     );
     assert!(
-        parsed.pubkey.is_empty(),
-        "`plugins.updater` must carry no public key until the release \
-         task generates one"
+        lines[1].starts_with("RW"),
+        "the updater pubkey's key line must be a minisign Ed25519 public \
+         key (starts with `RW`), got: {}",
+        lines[1]
     );
+    assert!(
+        minisign_verify::PublicKey::decode(key_text).is_ok(),
+        "the updater pubkey must decode with minisign-verify — the \
+         library the plugin verifies artifacts through (UPD-003)"
+    );
+
+    // Assert: the escapes stay off. The `dangerous*` transport flags
+    // would weaken the https/TLS posture of the feed (the plugin's
+    // `validate_endpoints` already rejects non-https endpoints in
+    // release builds; the flags reach further, into certificate
+    // validation); `allowDowngrades` removes the only guard against
+    // installing an older validly signed release. `requireSignedVersion`
+    // (2.14.1's anti-downgrade-pairing hardening) stays at its default
+    // false: turning it on is a release-policy decision that belongs to
+    // the signing/release tasks (T-229/T-234, D-229's follow-up), not a
+    // config drive-by.
     assert!(
         !parsed.dangerous_insecure_transport_protocol
             && !parsed.dangerous_accept_invalid_certs
             && !parsed.dangerous_accept_invalid_hostnames,
         "`plugins.updater` must keep every `dangerous*` transport escape \
-         off"
+         off (NFR-012/SEC-004: the one network use is the https update \
+         feed, with normal certificate validation)"
     );
     assert!(
         !parsed.allow_downgrades && !parsed.require_signed_version,
         "`plugins.updater` must keep `allowDowngrades` off (it removes the \
          only guard against installing an older validly signed release) \
-         and `requireSignedVersion` at its default while the stub is \
-         inert: both are release-task signing-policy decisions that must \
-         be made consciously, not stub edits"
+         and `requireSignedVersion` at its default: both are release-task \
+         signing-policy decisions (T-229/T-234), not config edits"
     );
 }
 
@@ -1384,15 +1785,18 @@ fn updater_config_section_is_a_disabled_stub_that_deserializes() {
 fn updater_plugin_refuses_to_initialize_without_a_config_section() {
     // Arrange: the mock runtime (the same `tauri::test` harness the IPC
     // tests use) with a context that carries no `plugins.updater`
-    // section — what tauri would hand the plugin if the stub were
-    // deleted from tauri.conf.json.
+    // section — what tauri would hand the plugin if the section were
+    // removed from tauri.conf.json.
     let result = tauri::test::mock_builder()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .build(tauri::test::mock_context(tauri::test::noop_assets()));
 
     // Assert: plugin initialization (and with it app startup) fails, and
     // the failure is attributable to the updater plugin config — proving
-    // the stub in tauri.conf.json is required, not decoration.
+    // the `plugins.updater` section itself is required, not decoration
+    // (D-023 kept the negative control when its empty stub became the
+    // real key-and-feed section; round-2 P3-2 removed the stale "stub"
+    // wording).
     let error = match result {
         Ok(_) => panic!(
             "the updater plugin must refuse to initialize without a \

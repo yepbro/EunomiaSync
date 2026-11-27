@@ -154,3 +154,14 @@ tempfile = "3"
 # regular `eunomia-fs` edge above already builds it); no features are
 # added to the release path.
 eunomia-fs = { path = "../crates/eunomia-fs", features = ["fault-injection"] }
+# The updater pubkey well-formedness oracle of `config_tests.rs` (T-133,
+# DECISIONS.md D-229): the pin decodes the `plugins.updater` pubkey the
+# same way the plugin does at artifact-verification time — base64
+# STANDARD decode, then `minisign_verify::PublicKey::decode` — so a key
+# the plugin could never use fails at test time. Both are test-only
+# edges to already-resolved graph nodes (base64 0.23.1 is built via
+# tauri-plugin-updater, minisign-verify 0.3.0 the same), not new crates:
+# no new version, no production build resolves them, and cargo-deny
+# already licenses both through the updater dependency.
+base64 = "0.23"
+minisign-verify = "0.3"
