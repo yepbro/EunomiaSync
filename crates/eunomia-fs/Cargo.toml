@@ -17,8 +17,11 @@ default = []
 # NFR-024's kill-test substrate; task T-069, DECISIONS.md D-101).
 # Release guarantee, by construction: the feature is not in `default`
 # and no [dependencies] edge in the workspace enables it — the only
-# automatic enablement is this crate's own self dev-dependency below,
-# which exists so a plain `cargo test` exercises the fault points.
+# automatic enablements are dev-dependency edges: this crate's own self
+# dev-dependency below, which exists so a plain `cargo test` exercises
+# the fault points, and eunomia-sync's dev-dependency edge (T-130,
+# D-226), which turns the feature on for the app crate's test builds
+# so the run-level kill suite can arm the pause points.
 # `cargo build` and `cargo build --release` never resolve
 # dev-dependencies, so every production artifact (including the
 # Tauri app) compiles this crate with the feature off; and the module

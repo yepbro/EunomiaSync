@@ -20,11 +20,14 @@
 //!
 //! - the feature is not in `default`;
 //! - no `[dependencies]` edge anywhere in the workspace enables it —
-//!   the only automatic enablement is this crate's own self
-//!   dev-dependency (`[dev-dependencies] eunomia-fs = { path = ".",
-//!   features = ["fault-injection"] }`), which exists so a plain
-//!   `cargo test` exercises the fault points instead of trusting a
-//!   command-line flag nobody remembers in CI;
+//!   the only automatic enablements are DEV-dependency edges: this
+//!   crate's own self dev-dependency (`[dev-dependencies] eunomia-fs =
+//!   { path = ".", features = ["fault-injection"] }`), which exists so
+//!   a plain `cargo test` exercises the fault points instead of
+//!   trusting a command-line flag nobody remembers in CI, and
+//!   eunomia-sync's dev-dependency edge (T-130, DECISIONS.md D-226),
+//!   which turns the feature on for the app crate's test builds so
+//!   the run-level kill suite can arm the pause points;
 //! - `cargo build` and `cargo build --release` never resolve
 //!   dev-dependencies, so every production artifact — including the
 //!   Tauri app — compiles this crate with the feature off and

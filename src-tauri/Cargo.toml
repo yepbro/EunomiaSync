@@ -141,3 +141,16 @@ tauri = { version = "2", features = ["test"] }
 # dependency graph: `tempfile` 3 is already resolved workspace-wide via
 # eunomia-fs; this only adds a dev-only edge for src-tauri.
 tempfile = "3"
+# eunomia-fs's fault-injection feature, enabled for THIS package's test
+# builds only (T-130, DECISIONS.md D-226) — the same pattern the fs
+# crate's own self dev-dependency uses, applied cross-crate: the edge
+# participates whenever eunomia-sync's test targets resolve
+# dev-dependencies (`cargo test -p eunomia-sync`, a workspace-wide test
+# build), so `eunomia_fs::fault_injection`'s pause points — spec 15.1's
+# "force-killing the process" mechanism — are visible to the kill-test
+# suite; `cargo build` / `cargo build --release` never resolve
+# dev-dependencies, so every production artifact still compiles
+# eunomia-fs with the feature off. Not a new crate in the graph (the
+# regular `eunomia-fs` edge above already builds it); no features are
+# added to the release path.
+eunomia-fs = { path = "../crates/eunomia-fs", features = ["fault-injection"] }

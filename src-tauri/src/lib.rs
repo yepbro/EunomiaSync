@@ -1129,6 +1129,13 @@ mod sync_phase4_tests;
 #[cfg(test)]
 mod sync_pipeline_tests;
 
+// T-130's kill suite: §15.2's T-F2/T-F3 and NFR-024's between-phases
+// window — the real `sync_run` command inside a child process of this
+// same test binary, force-killed inside the fault-injection pause
+// windows (DECISIONS.md D-226).
+#[cfg(test)]
+mod sync_kill_tests;
+
 #[cfg(test)]
 mod scan_tests;
 

@@ -8393,7 +8393,13 @@ features = ["fault-injection"] }`) — cargo's supported self-edge —
   which exists so a plain `cargo test` (and CI) exercises the
   points without a flag. `cargo build`/`--release` never resolve
   dev-dependencies, so every production artifact (including the
-  Tauri app) compiles the crate with the feature off. The one
+  Tauri app) compiles the crate with the feature off.
+  [Superseded in part by D-226: a SECOND dev-dependency edge —
+  eunomia-sync's, enabling the feature for the app crate's own test
+  builds so the run-level kill suite can arm the pause points —
+  joins the self-edge as the automatic enablements. Every guarantee
+  above holds unchanged: both edges are dev-only, and D-226
+  re-verified the release scan with the same two-step method.] The one
   unification hole cargo leaves open — a release build that also
   resolves dev-dependencies (`cargo build --release --all-targets`,
   `cargo test --release`) would link the points into release
@@ -29163,3 +29169,343 @@ as the Windows fact and the Unix legs' literal as the carried
 marker (the typed variant and its Display are platform-neutral, so
 no behavior or assertion changed). Record-only fixes: no test code
 changed beyond the two comments.
+
+### D-226 — T-130: the §15.2 kill rows at run level — T-F2's kill before the rename, T-F3's kill between projects, and NFR-024's between-phases window, each through the real `sync_run` command in a force-killed child process — 2026-11-26
+
+Problem: the 15.2 kill rows are the one part of the failure table
+no in-process test can pin (T-126's suite and T-127/T-128's rows run
+the pipeline to its end inside the test process; a kill must take
+the PROCESS down with no unwinding, no §9.5 step-7 cleanup, no RAII
+teardown — the crash §9.4's "recovery after a crash" paragraph and
+ERR-002's "an interrupted file write leaves the old file (9.5)" are
+about). NFR-024 (P0) demands it in its own words: "For each step of
+pipeline phases 2–3, there is a test that force-kills the process
+(`SIGKILL` or `TerminateProcess`) and checks file integrity"; §15.1's
+fault-injection row names the mechanism — "failure points in `fs`, a
+child process with `SIGKILL` or `TerminateProcess`" — and the
+fault-injection task (T-069, D-101) built the pause points for
+exactly this, documented at the call sites as "T-F2's kill window"
+and "the between-phases kill tests (T-F3's shape)". The dependency
+tasks are done (the command, the startup `interrupted` marking
+D-147, the pause points D-101); this card is the tests themselves.
+
+Solution, half by half.
+
+**Half 1 — the child-process design.** Every kill test runs the REAL
+`sync_run` command (the production seams through all five §9.4
+phases, over the real `sync_run_with` seam injector) in a CHILD
+PROCESS — this same test binary re-executed under its own `--exact`
+filter, carrying the kill specification as env vars set through
+`Command::env` (the process-local API; the parent's own environment
+is never touched, so parallel tests in one process cannot see each
+other's children — and no `unsafe` `env::set_var` is ever needed).
+The child's first act inside the test fn is the role switch: the
+spec var present → the child half, which never returns; absent → the
+normal parent body. The child does not build its own world: it opens
+the PARENT's data root through the same `Db::open` a restarted app
+would run (multi-process SQLite over WAL is NFR-007's own posture),
+manages the same mock-app shell, and goes live the same way — the
+next process over a crashed one, which is exactly the position
+§9.4's recovery story puts the app in. The kill window itself is
+eunomia-fs's pause machinery: the pause state is THREAD-LOCAL and
+phase 3 runs every write on the blocking pool, so the arm happens
+INSIDE the `write` seam's closure — on the very thread the §9.5
+operation runs on — gated on the resolved target path (one arm per
+matching write; target-gating replaces arrival counting, because the
+closure's thread is whichever the pool chose). The closure hands the
+`PauseControl` to a supervisor thread (a Mutex-held `mpsc::Sender` —
+`Sender` is not `Sync`, and the seam closure must be), which waits
+for the arrival, writes a marker file, and HOLDS the control until
+the parent's kill or a 120 s ceiling (an orphaned child whose parent
+died self-releases and exits — a healthy CI runner keeps no parked
+process). The parent polls the marker's existence (30 s failure
+ceiling) while watching for the child's early exit — a run that
+completed without parking fails fast with the child's own panic
+naming what the run answered, not a timeout — then kills
+(`Child::kill`: `SIGKILL` on Unix, `TerminateProcess` on Windows, the
+one portable primitive — the Unix leg additionally asserts signal 9,
+the §15.1 literal, behind `#[cfg(unix)]`) and reaps. A `ReapOnDrop`
+guard kills and reaps on every parent exit path, so a parked child
+is never leaked. Because the marker is written only AFTER the
+arrival, and the run provably parks to write it, the kill lands
+INSIDE the window by construction, not by timing: no sleep, no race
+(the D-140 posture). The fixture is platform-gate-free and runs on
+all three CI legs; nothing here is manual-smoke.
+
+**Half 2 — the feature enablement.** `eunomia_fs::fault_injection`
+is visible to a consumer only when the `fault-injection` feature is
+on, and feature unification turns it on for a workspace-WIDE test
+build but NOT for a lone `cargo test -p eunomia-sync` (eunomia-fs's
+self dev-dependency participates only in its own package's test
+targets). The kill suite lives in eunomia-sync's test binary, so
+src-tauri gains a dev-dependency edge
+`eunomia-fs = { path = "../crates/eunomia-fs", features =
+["fault-injection"] }` — the same pattern the fs crate's own self
+dev-dependency uses, applied cross-crate (D-101's design: dev-deps
+only, never `[dependencies]`). The release guarantee is intact by
+construction and re-verified with D-101's two-step method:
+`cargo build --release -p eunomia-fs` then
+`strings target/release/libeunomia_fs.rlib | grep -c
+eunomia_fs15fault_injection` → 0, with the feature-enabled debug
+rlib of the same workspace build as the control → 1485 (the scan
+discriminates, not vacuously passes). Not a new crate in the graph
+(the regular `eunomia-fs` edge already builds it); the two doc
+blocks that said "the only automatic enablement is this crate's own
+self dev-dependency" (fault_injection.rs's module docs and the
+Cargo.toml feature comment) now name both dev-dep edges — Rule 11,
+the same change.
+
+**The scoping of NFR-024's "each step".** [Superseded by the
+round-1 addendum below: the first review's P0 rejected this reading
+as circular — the requirement cannot be read through the shape of a
+dependency task's point catalogue — and the two windows this
+paragraph declares unconstructible were then covered through the
+seam-side parks (`AfterBackup`, `AfterWrite`), with no production
+change. The paragraph is kept as the record of the reading the task
+STARTED from.] The sentence is read with
+the machinery its dependency task built: the constructible steps of
+phases 2–3 — the ones T-069/D-101 provide pause points for — are
+three windows, and all three are covered: between phases (phase 2 →
+phase 3's first write: `WriteEntry` armed on project 1 — §15.1's own
+"between phases" phrase, the row no 15.2 cell names), inside a write
+before the `rename` (`StagingSettled` — T-F2), and between projects
+(`WriteEntry` armed on project 2 — T-F3). Two finer windows have NO
+fault-injection point and no §15.2 row, and are recorded here as
+honest boundaries, not invented: inside a backup copy (phase 2 step
+1's mid-copy — the points catalogue arms none; widening it is a
+follow-up for the board) and between a completed write and its stamp
+transaction (a run-layer seam, not an `fs` point at all — and at
+that point the file is whole, so NFR-024's "checks file integrity"
+has no distinct claim to pin there).
+
+**The `interrupted` marking.** T-F3's Expected cell ("the run is
+marked `interrupted`") is driven the way production drives it: the
+parent calls `Db::mark_interrupted_runs` with
+`eunomia_store::values::now_utc()` — the exact call
+`start_database_session` (lib.rs's session tail) makes with the same
+input — and asserts the sweep took exactly the one corpse row. The
+parent process IS the next process over the crashed one. The startup
+WIRING (that the tail calls it, before the event loop) is D-147's
+marker pin and stays there — the house posture that the real `setup`
+hook cannot launch under a unit harness; this suite's subject is the
+crash state, not the launch.
+
+**T-F2's "on the next sync, the temp file is deleted".** Read with
+§9.4 phase 1 step 7's own rule in view: the sweep deletes debris
+"older than one hour" (D-088's window — it exists so a live write's
+staging file is never a deletion candidate). The next sync that CAN
+delete a killed run's debris is the one after the debris crosses the
+hour; the test simulates the hour by backdating the debris's mtime
+(the fs suite's own `stale_file` technique, opened for write because
+Windows' `SetFileTime` needs `FILE_WRITE_ATTRIBUTES`) and then runs
+the REAL next sync through the parent's `run_sync`, which sweeps in
+phase 1 and lands the write the crash interrupted. The one-hour
+window itself (a fresh staging file staying) is `temp_files`' own
+pin, not re-pinned here; the reconciliation of the Expected cell
+with step 7's window is this paragraph.
+
+Tests (`src-tauri/src/sync_kill_tests.rs`, registered in lib.rs
+beside `sync_pipeline_tests`): T-F2 — the original intact
+byte-for-byte, exactly one sweep-grammar debris file holding the
+settled full build (the fs suite's position pin, read at run level
+over the composed seam), the corpse `running` row, the marking's
+`interrupted` with the recovery `finished_at`, the backdated debris
+deleted by the next real sync, the folder left with exactly `.git`
+and the target, the write landed. T-F3 — a first successful run
+capturing both stamps and project 2's exact file, a library edit,
+the kill between the projects: project 1 carries the killed run's
+own stamp (DB-002 shape, at or after the run's `started_at`, not the
+old one) and the revised build; project 2 keeps the old stamp
+verbatim and run 1's exact bytes; the run rows sit where phase 3
+left them (`["written", "not_started"]` — §9.4's recovery clause
+"the project status already reflects what was written at the time of
+the crash", D-147's no-project-row ruling); the marking's
+`interrupted`; MAIN-027 unmoved. The between-phases row — both
+targets byte-identical, no staging debris anywhere, phase 2's
+committed copies present (`[old]` per project), the rows
+`not_started`, the stamps `(None, None)`, the corpse → `interrupted`.
+
+Two runtime failures the first run caught, both in the NEW fixture
+and both worth the record (the falsifiable discipline caught the
+test author, not the production): (1) the pause guard was scoped to
+the arm's `if` block, so `Armed` dropped — disarming the pause —
+before `production_write` ran, and the child's run completed
+normally; fault_injection's own `wait_for_arrival` Disconnected panic
+("the armed pause was disarmed before its point was reached") named
+the mistake, and the guard now lives across the production call as
+an `Option<Armed>` binding (an underscore-prefixed OWNED binding,
+never a bare `let _`, which would drop it immediately). (2) the
+marker-shape constant was misspelled ("EunomaSync", missing the i) —
+the app's real marker failed the shape assert, which is exactly the
+drift-detection the hand-spelled-oracle rule exists for; the constant
+now matches the sibling suite's byte for byte.
+
+Mutations (each reverted after the red run): M1 phase 1's
+`sweep_stale` skips the sweep call → red at T-F2's next-sync entries
+assertion (the debris survived: three entries vs two); M2 the store's
+`mark_interrupted_runs` UPDATE matches nothing → red at all three
+tests' `taken == 1` premise; M3 phase 3's stamp write skipped → red
+at T-F3's stamp group (the run-1 premise "the project was never
+stamped" fires first — the same production transaction stamps both
+runs; T-F2 and the between-phases row green, the group isolates);
+M4a `mark_project_written` skipped → red at run 1's premise through
+phase 4's own `Phase4RowUnsettled` refusal (the pipeline's invariant
+catches it before the killed run's rows can be read); M4b the
+status literal mutated to `unchanged` → red at the per-project-rows
+group (`["unchanged", "not_started"]` vs `["written",
+"not_started"]`) — the sharper form run because M4a's blast radius
+reaches the premise first; M5a the T-F3 fixture's arm target moved
+one project earlier → red at the stamp-window assertion (project 1's
+stamp is run 1's, before the killed run even started); M5b the T-F2
+fixture's pause point moved to the write's entry → red at the debris
+group (0 vs 1 — killed before any staging file existed). Groups
+stated as redundant with existing pins: the "original intact"
+assertions are guarded by the marker handshake (the kill provably
+lands inside the window) plus the fs suite's pause-position pins;
+the sweep's one-hour window and its near-miss grammar are
+`temp_files`' own pins; the sibling suites own the stamp-in-window
+helper's full form (the kill suite's variant narrows it to the
+crash's two clocks).
+
+Checks (synchronous, `CARGO_BUILD_JOBS=2`, exit codes): `cargo test
+--no-run -p eunomia-sync` green; `cargo nextest run --no-fail-fast
+--test-threads=4` — 1999 passed, 0 skipped (T-128's 1996 plus the
+three rows), 138 s, the kill tests at 0.16–0.20 s each; `cargo test
+--doc --workspace` — 98 doc tests green (D-195); `cargo clippy
+--workspace --all-targets -- -D warnings` green (after two fixture
+fixes: the seam closure's type annotation dropped for the house
+inference shape, and `target == &gate` → `target == gate`, clippy's
+`op_ref`); `cargo fmt --all -- --check` green; `cargo deny check`
+green, no new ignores; the D-101 strings scan as above. Frontend
+untouched — no pnpm checks run. eunomia-fs itself is touched only in
+two doc comments and its manifest's feature comment (Rule 11's doc
+truthfulness); its feature-gated layer needs no re-run beyond the
+workspace suite, which covers it.
+
+Round-1 review addendum (D-226, same task; report
+`.opencode/reviews/t130-round1-report.md`, deepseek-v4.1-flash,
+VERDICT: CHANGES REQUESTED — 1 × P0, 1 × P2, 4 × P3; the design's
+soundness axes — feature hygiene (the reviewer re-ran the strings
+scan and `cargo tree`), reaping, the handshake's race-freedom, the
+`interrupted`-marking honesty and T-F2's one-hour reconciliation —
+were verified clean) — findings processed:
+
+- **P0 (NFR-024's "each step" not met — the mid-phase-2 and
+  write-to-stamp windows untested; the "constructible with the
+  existing pause points" reading called circular) TAKEN, resolved by
+  implementation, not re-scope.** The reviewer was right that the
+  requirement cannot be read through the shape of a dependency
+  task's catalogue, and the card's own first sentence ("killed … at
+  each step of phases 2–3, INCLUDING…") asks for the steps. The fix
+  needed no production-crate change at all — the two missing step
+  windows are constructible through the SANCTIONED seams (the
+  §15.1 app-layer injector pattern T-127/T-128 established):
+  `ParkSite::AfterBackup` parks the backup seam's closure after the
+  production copy returned Ok and before phase 2's ONE record
+  transaction (inside §9.4 phase 2 step 1: the copy landed, no
+  `backup_records` row); `ParkSite::AfterWrite` parks the write
+  seam's closure after the §9.5 call returned Ok and before phase
+  3's verdict/stamp transaction (the phase 3 step 1→2 boundary: the
+  file wholly written, the row `not_started`). Two tests landed:
+  `a_kill_between_the_backup_copy_and_its_record_touches_no_target_file`
+  (targets byte-identical, project 1's copy on disk, project 2's
+  never reached, NO record rows, rows `not_started`, the corpse →
+  `interrupted`) and
+  `a_kill_between_the_write_and_its_stamp_leaves_the_file_whole_the_row_unwritten_and_marks_the_run_interrupted`
+  (project 1's file is the revised build — NFR-024's "no partly
+  written file" at its most exposed moment — the row still
+  `not_started`, both stamps old, MAIN-027 unmoved, the marking, and
+  the convergence epilogue: the next real sync answers `unchanged`
+  for the file the crash already wrote and `written` for the
+  untouched one — §10's idempotence). All four kill-relevant step
+  windows of phases 2–3 are now covered (the module docs' scoping
+  section was rewritten to say so). The one boundary left is
+  positional, not step-level: a kill in the MIDDLE of the copy's
+  byte stream — recorded above with the follow-up.
+- **P2 (the "what pins what" table claimed D-147's NULL `error_code`
+  pin the tests never asserted) TAKEN** — `newest_run_row` now reads
+  the `error_code` cell too, and every kill test asserts `None` on
+  both the corpse read and the interrupted read (a process death is
+  nobody's recorded decision; the row the claim was already pinned
+  on, ipc_tests, is unchanged).
+- **P3 (D-101's "the only automatic enablement" sentence in
+  DECISIONS.md went stale) TAKEN** — D-101's entry now carries a
+  superseded-in-part pointer naming D-226's second dev-dep edge and
+  the re-verified scan; the historical record is not rewritten.
+- **P3 (the follow-up had no board card) ACKNOWLEDGED, reported up**
+  — the board rules forbid an executor from creating cards; the
+  follow-up rides this task's report to the orchestrator, which
+  cards it (the AGENTS.local "Follow-ups" rule: a D-entry alone does
+  not track it).
+- **P3 (the child's libtest output polluted the parent's) TAKEN** —
+  the child runs `--quiet` (panics still print, the useful half).
+- **P3 (an oracle sentence read as a contradiction) TAKEN** — the
+  module docs now say the oracle is the "unchanged" relation, not a
+  predicted stamp, with the shape checked independently.
+
+Round-1 mutation additions (each reverted after the red run): M6
+the backup-copy test's park site moved to the write entry (past
+phase 2 entirely) → red at "the copy loop never reached project 2"
+(phase 2 completed: project 2's copy and every record exist — the
+phase-2-internal position is pinned, with the records group behind
+it); M7 the write-and-stamp test's park site moved to the write
+entry (before the write) → red at "the write landed wholly before
+the kill" (the old body vs the revised one — the after-write
+position is pinned); M2 re-run → red at the `taken == 1` premise of
+the two new tests as well (observed on both); M3 re-run → red at
+the write-and-stamp test's run-1 stamp premise (the same
+production transaction stamps both runs). Stated as redundant: the
+new tests' "rows `not_started`" groups share their guard with the
+between-phases test's (phase 0's own rows plus the handshake's
+proof that phase 3's verdicts never ran — M4b proves the marking
+machinery is assertion-visible), and the convergence epilogue's
+`unchanged` verdict is T-F9's and phase 1's own pin.
+
+Round-2 review addendum (D-226, same task; report
+`.opencode/reviews/t130-round2-report.md`, hy4-flash-free — VERDICT:
+CHANGES REQUESTED — 1 × P1, 1 × P2, 2 × P3, no P0; the round-1 P0
+resolution verified as genuinely landed ("the P0 fix genuinely
+landed, without touching a production crate"; all four test-audit
+checks passed over the five tests); the reviewer re-ran the five
+tests directly, green) — findings processed:
+
+- **P1 (D-226's scoping paragraph still asserted the refuted
+  three-window reading — the entry contradicted its own addendum)
+  TAKEN** — the paragraph now opens with the same superseded-pointer
+  pattern the D-101 fix used: the first review's P0 rejected the
+  reading, the two "unconstructible" windows were then covered, and
+  the paragraph stays as the record of the reading the task STARTED
+  from. Rule 11's shape for a corrected record: point, never rewrite.
+- **P2 (the follow-up card the addendum promised does not exist yet)
+  ACKNOWLEDGED** — correct split confirmed by the reviewer ("the
+  split itself is correct"); the card is the orchestrator's
+  merge-time action (the board rules forbid an executor from
+  creating it), and it is carried PROMINENTLY in the task's report:
+  `Follow-up T-130: the mid-byte-stream copy kill` (source: this
+  entry, round 1's P0 and round 2's P2; options: widen the
+  fault-injection catalogue with a mid-copy point, or accept the
+  boundary — the crash class is the same, only the uncommitted
+  copy's byte count differs). PENDING at this writing.
+- **P3 (round 1's unnumbered nit pair — dropped from the round-1
+  resolution list) TAKEN** — both were real and both landed now: the
+  "what pins what" citations no longer attribute the no-touch
+  invariant to §9.4 phase 2 step 2 (the backup-ERROR branch) — they
+  cite OUT-007 and the write being phase 3's first touch, which is
+  the honest basis; and the role switch requires the env VALUE
+  (`running_as_kill_child`, `== Ok("1")`), so a stray
+  `EUNOMIA_SYNC_KILL_CHILD` in a developer environment cannot flip a
+  parent run into the child role.
+- **P3 (`--quiet` only halves the child's stdout noise) TAKEN** — the
+  child's stdout is now `Stdio::null()` (the harness's summary lines
+  were the noise; stderr stays inherited — the child's panic text is
+  the failure diagnostic, and it rides stderr).
+
+Final checks after both rounds (synchronous, `CARGO_BUILD_JOBS=2`,
+exit codes): `cargo fmt --all -- --check` green; `cargo nextest run
+--no-fail-fast --test-threads=4` — 2001 passed, 0 skipped, ~138 s
+(the five kill tests at 0.17–0.21 s each); `cargo test --doc
+--workspace` green; `cargo clippy --workspace --all-targets -- -D
+warnings` green; `cargo deny check` green, no new ignores. The
+D-101 release strings scan is unchanged by these rounds (no manifest
+or eunomia-fs change after the committed verification). Frontend
+untouched throughout — no pnpm checks run.
