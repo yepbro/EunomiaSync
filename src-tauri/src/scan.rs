@@ -49,7 +49,7 @@
 //!    A start that finds the slot occupied answers the
 //!    [`E_SYNC_RUNNING` envelope](crate::commands::sync_running_refusal)
 //!    (§10's "a second run — command rejected — wait until it
-//!    finishes" row; the registry is closed at twenty codes, so no
+//!    finishes" row; the registry is closed at twenty-one codes, so no
 //!    `E_SCAN_RUNNING` literal exists to invent) and publishes
 //!    nothing. The slot IS the guard — there is no separate
 //!    scan-running flag whose race a second publication step would

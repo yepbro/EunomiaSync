@@ -517,7 +517,7 @@ fn sqlite_failures_map_to_registry_codes_and_the_wire_form() {
             "ConstraintViolation",
         ),
         // The recorded fallback (D-037): no generic infrastructure
-        // code exists in the twenty-code registry — but the class and
+        // code exists in the twenty-one-code registry — but the class and
         // the numeric code still reach the wire (no collapse into an
         // "other" label, no lost result code).
         (

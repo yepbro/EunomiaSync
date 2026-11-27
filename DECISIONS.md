@@ -30606,3 +30606,256 @@ oracles independent, every D-232 mutant mapped to a present assertion,
 no evasion, and the whitespace-only legality of `" \n\t "` verified
 against `validate_variant_text`'s own source. No findings, so no
 second amend; the review phase is complete after this round.
+
+### D-233 — T-353: the `backup_save` contract — the export's refusal order, the BKP-010 pre-write check, `E_RESTORE_SOURCE_MISSING` joining the registry, and the suggested-name grammar living in core — 2026-11-27
+
+Problem: T-353 lands spec §7.10's Backups export (BKP-012, D-203
+(2)): a per-row "Save to a chosen location" action that exports a
+stored copy to an OS-save-dialog location. Five readings were open
+before any code: the cancel answer's shape, the verify-mismatch
+answer's code (the task card's STOP condition if it needed a new §10
+code), whether the save dialog feeds SEC-003's session allowlist,
+what the write does to a pre-existing file at the chosen path, and
+where the `<stem>.backup-<stamp>.<ext>` suggested-name derivation
+lives (the card: "do not fork the parsing").
+
+Questions and chosen readings (recorded before implementation, Rule 1):
+
+1. **Cancel answers `Ok(None)`, success answers `Ok(Some(path))` —
+   the `dialog_pick_folder` shapes.** §7.10's own precedent ("nothing
+   on cancel") and the installed plugin's contract
+   (`blocking_save_file`: "the file path is `None` if the user closed
+   the dialog", tauri-plugin-dialog 2.8.4 src/lib.rs:783) make
+   `Option<String>` the honest wire shape. Success answers the path
+   ACTUALLY WRITTEN, not an echo of the suggestion: the user may edit
+   the suggested name in the dialog, and the written path is the fact
+   the answer asserts.
+2. **The verify-mismatch answer is `E_VERIFY_FAILED` — no new §10
+   code.** D-203 (2) pre-ruled it ("a mismatch or failed write per
+   §9.5's `E_VERIFY_FAILED`/`E_WRITE_FAILED` semantics"), so the STOP
+   condition never fired. Concretely: the command reads the copy's
+   bytes and checks the measured `(size, sha256)` against the
+   record's BKP-010 columns BEFORE the dialog opens and before any
+   destination byte moves — a copy that is not what its record claims
+   refuses without ever asking the user where to put it (§9.5 step 7's
+   "the original stays unchanged" covers the user's pre-existing
+   destination file, if any). A refused §9.5 write keeps its own arm's
+   code through the SAME `write_code` table the sync pipeline's
+   failure rows use (D-099, now `pub(crate)` in `sync_phase3.rs` —
+   the `production_write` sharing pattern): `E_WRITE_FAILED`,
+   `E_DISK_FULL`, `E_FILE_LOCKED`, `E_VERIFY_FAILED`.
+3. **`E_RESTORE_SOURCE_MISSING` joined the registry with THIS task.**
+   The code is not new — §10's table already carries its row, and the
+   row names `backup_save`'s export as its P0 user ("The backup file
+   behind a `backup_save` export (BKP-012) or the P1 restore
+   (BKP-007) is missing on disk"). The registry's own docs
+   anticipated exactly this ("they join the registry with their own
+   tasks"); BKP-012 is that task. `E_IMPORT_INVALID` (library import,
+   P1) remains the one excluded code. The refusal's `params` name the
+   record's stored status (BKP-012: "naming the record's status") —
+   for the three terminal statuses that is `pruned`/`missing`/
+   `discarded`, and for the file-gone-while-`ok` arm it is `ok`
+   (§10's effect column: "the record keeps its stored status" — no
+   `missing` transition; that detection is §10's future task, no v1
+   producer). A copy that exists but cannot be READ is the same
+   refusal with the OS facts in `details` (`source_read_refusal`).
+4. **SEC-003 does not apply.** The session allowlist gates paths the
+   UI SENDS to commands; `backup_save` takes only `id`, and the
+   destination is the OS dialog's own answer produced inside Rust
+   (SEC-001's posture — the webview holds no `dialog:` permission).
+   Nothing later consumes a UI-named export path, so there is nothing
+   to remember and no gate to feed. The answered path is the dialog's
+   spelling verbatim: a fresh save path does not resolve yet, and
+   canonicalizing it would fail (the `dialog_pick_folder` canonicalize
+   step exists FOR the allowlist's canonical-to-canonical comparison;
+   this command has no such consumer).
+5. **The write is §9.5's own pipeline** (`sync_phase3::production_
+write` → `eunomia_fs::atomic::write_target_file`): stage beside the
+   destination under the D-088 grammar, write and `sync_all`, replace
+   in one rename, re-read and verify. The §9.5 step-1 "resolve the
+   target path" is the caller's, and for a dialog-chosen fresh path
+   the dialog IS the resolution (the user named the file); the module
+   renames over exactly what it is given, and a refused export leaves
+   whatever the destination held before whole.
+6. **The suggested-name derivation lives in core** — `backup_name::
+export_suggested_name(backup_path)`, the grammar module's own
+   inverse (no second parser anywhere): the §5.5 layout validated
+   (exactly `backups/<dir>/<file>`, the directory component in the
+   builders' `[0-9A-Za-z_-]` charset so a whole `..` cannot ride in),
+   the file name decomposed from the right (`<target>.<stamp19>.<
+hash8>.bak`, the target keeping its own dots), the suggestion
+   `<stem>.backup-<stamp>.<ext>`. The derivation runs BEFORE the
+   data-dir join, so a corrupt `backup_path` cell is refused (the
+   `backup_records` Member posture: the D-037 fallback code with the
+   class-only `BackupRecordsCorrupt` label, SEC-008) and never reaches
+   the filesystem — the join's input is grammar-validated by
+   construction.
+
+Solution: `eunomia_store::backup_records::get` (the id-addressed
+read, D-193's row form, `None` for an unknown id) +
+`src-tauri/src/backups.rs` (`backup_save`/`backup_save_with`, the
+`dialog_pick_folder_with` split so the tests drive their own picker;
+`plugin_save_file` — `set_file_name(suggested).blocking_save_file()`,
+cited against the installed 2.8.4 at lib.rs:471/783, no desktop twin
+needed: unlike `blocking_pick_folder` (cfg(desktop), lib.rs:760) the
+save seam is not gated) + `errors.rs`'s registry gaining
+`RestoreSourceMissing` (as_str/message_key arms, the §10 table order)
+
+- `logging.rs`'s `backup_save_failed`. Frontend: the regenerated
+  `src/bindings.ts` (the command and the 21st `E_*` literal), the mock
+  twin (`backupSave` — the real refusals, the success arm answering the
+  would-be destination over the mock's own `<stem>.backup-<stamp>.<ext>`
+  twin, the `dialogPickFolder` canned-path pattern), `mode.spec`'s
+  forty-nine surface pin, the `E_RESTORE_SOURCE_MISSING` action group
+  `pickAnotherCopy` (§10's "Pick another copy") with its locale copy,
+  and `errors_tests.rs`'s registry pins (twenty-one literals, the P1
+  list now `E_IMPORT_INVALID` alone).
+
+Tests: the core half in `backup_name.rs` — the two-literal suggestion
+pins, the every-builder-output round trip (all six scheme/base
+pairs), the corrupt-cell refusal battery (eighteen arms at landing,
+twenty-five after the round-1 P1-1 fix added the seven
+Windows-separator/NUL/percent/space/non-ASCII arms), the Display
+shape.
+The store half in `tests/backup_records.rs` — `get` verbatim,
+`None`, the corrupt-cell `Member`. The command half in
+`backups_tests.rs` (the `RecordingPicker` seam drives the whole flow
+minus the OS dialog): the byte-for-byte export over a REAL copy file
+(the FIPS 180-2 "abc" vector as the digest oracle — the row's columns
+and the file agree the way a pipeline-written row would) with the
+suggested name pinned and the row/journal proven untouched; the
+pruned refusal (the row's own copy file deliberately LEFT ON DISK so
+the status check is the only refusal trigger); the unknown id; the
+cancel (`Ok(None)`, nothing written); the verify-mismatch refusal
+(substituted same-length bytes, the dialog never consulted); the
+file-gone-while-`ok` refusal (status stays `ok`, no row change); the
+refused write (missing parent folder → `E_WRITE_FAILED`); the corrupt
+`backup_path` cell (a tampered absolute path never reaching the
+filesystem); the no-database battery; the wire-envelope unknown id
+over the registered wrapper; the registration pin. The logging shape
+(`the_backup_save_failure_line_carries_the_code_and_payload`), the
+errors-registry pins, and the mock twin's battery in
+`commands.spec.ts`. Eleven mutation runs (each restored byte-for-
+byte): the record-verify skipped → the mismatch test red; the status
+check skipped → the pruned test red; the unknown id converging → both
+unknown-id tests red; the suggestion's stamp dropped → the
+suggested-name pins red; the cancel answered as a save → the cancel
+test red; the read failure mapped to `E_WRITE_FAILED` → the gone-file
+test red; the write short-circuited → the byte-for-byte and
+refused-write tests red; the stamp validator lax → the corrupt-cell
+battery red; the store read ignoring the id → the unknown-id store
+test red; the refusal's status param hardcoded to a constant → the
+file-gone-while-`ok` test red (it pins the `ok` cell; the pruned test
+now loops ALL THREE terminal statuses, so two of the three catch a
+collapsed mapping — the round-1 P2-2 fix); the mock's status check
+removed → the mock test red.
+
+Docs: ARCHITECTURE.md — the count forty-nine, the module-table row,
+the store-tree row, and the IPC-contract clause after the Backups
+read. manual-smoke.md's registered-command list gains `backup_save`.
+This entry. The spec needed no change: §7.10's `backup_save` sentence
+and §10's `E_RESTORE_SOURCE_MISSING` row are already D-203's text.
+
+User-copy note (the round-1 P3-5 question): BKP-012's "naming the
+record's status" is the machine-readable `params.status` half — the
+same posture as `E_VALIDATION`'s `field`/`reason` (params, not
+interpolated locale copy). Whether the user-facing sentence
+interpolates `{status}` is the UI task's copy decision (the
+`errors.db_corrupt` `{detail}` precedent exists if the owner wants
+it); no behavior depends on it here.
+
+Landing-rebase note (the orchestrator's): T-351 (parallel, the same
+base) also adds one command — the ARCHITECTURE count sentence and
+`mode.spec`'s surface list will union to FIFTY after both (each side's
+line edits must be taken as the union, not either side's whole-line
+replacement), and `errors_tests.rs`/`errors.rs`/`bindings.ts` are
+T-353-owned (T-351 owns variants.rs and the bindings' command surface
+— the regenerated bindings.ts unions both sides' exports).
+
+Round-1 review addendum (D-233, same task; report
+`.opencode/reviews/t353-round1-report.md`, deepseek-v4.1-flash,
+APPROVE-WITH-FIXES: 1 P1 + 3 P2 + 6 P3 — all taken except one
+deferred):
+
+- **P1-1 TAKEN (the decomposition's file component was not
+  platform-honest).** The layout gate split on `'/'` only and never
+  charset-checked the FILE component, so a tampered cell could carry
+  `..\..\` there — invisible to the split, a climb to Windows' `Path`
+  (and with the record's columns equally tampered, an arbitrary read
+  exported to the chosen destination). Fix: the file component joins
+  the directory component behind a builders' charset gate
+  (`[0-9A-Za-z._-]` — the whole vocabulary the four target literals
+  and the stamp/hash8/bak segments can spell), so no byte that could
+  parse as a separator on ANY platform can ride in; the property is
+  checked by the charset (platform-independent, no cfg split), pinned
+  by the new Windows-climb refusal arms and the joined-path
+  containment test. The doc sentence that read as covering the file
+  component was narrowed/rewritten to state both charsets.
+- **P2-1 TAKEN** — ARCHITECTURE.md's error-registry paragraph said
+  "twenty-code MVP registry / two P1 codes": now the twenty-one-code
+  registry with `E_RESTORE_SOURCE_MISSING`'s P0-user story and
+  `E_IMPORT_INVALID` alone excluded.
+- **P2-2 TAKEN** — the terminal-status refusal was pinned for
+  `pruned` only: the test now seeds and refuses ALL THREE terminal
+  statuses (each with its lingering file, each asserting its own
+  `params.status`), and this entry's mutation-claim sentence above was
+  corrected (hardcoding the status reddens the file-gone-`ok` test —
+  the pin that names `ok` — which is why the three-status loop
+  matters).
+- **P2-3 TAKEN** — the answer echoed `destination.display()`, which
+  silently replaces non-UTF-8 bytes: a save path the wire cannot carry
+  is now refused BEFORE the write (the D-086 dialog-boundary posture,
+  `rejected_field`'s shared shape with an export-specific reason), and
+  the answer is the validated `to_str()` text.
+- **P3-1/P3-2 TAKEN** — the module-doc arithmetic ("twenty-one codes
+  of the T-013 card's registry plus" asserted 22) and the four stale
+  "twenty-code registry" mentions (scan.rs, db.rs, recovery.rs,
+  db_tests.rs) swept to twenty-one.
+- **P3-3 TAKEN** — `BACKUPS_LAYOUT_ROOT` is now the one spelling both
+  `backup_relative_path`'s composition and the decomposition's gate
+  read (it was a second literal beside the builder's inline
+  `"backups"`).
+- **P3-4 TAKEN** — the byte-for-byte test's "no second row" assertion
+  was a by-id read that cannot see one; the project's history is now
+  counted through `list_for_project` (exactly one row).
+- **P3-5 RECORDED, not taken** — the user copy does not interpolate
+  the status: the params half is the whole reading (the `field`/
+  `reason` posture); the `{status}` interpolation is the UI task's
+  copy decision — the note above this addendum records it.
+- **P3-6 DEFERRED (follow-up, no board card from an executor)** — the
+  real OS save-dialog seam (suggested name, overwrite confirm,
+  byte-identity end to end) has no automated driver by design; the
+  manual-smoke entry should be written when the Backups tab's row
+  action lands (the file's "Pending surfaces" convention), reported to
+  the orchestrator in the task report.
+
+Round-2 review addendum (D-233, same task; report
+`.opencode/reviews/t353-round2-report.md`, hy4-flash-free,
+APPROVE-WITH-FIXES: 1 P2 + 3 P3 — all taken or reported):
+
+- **P2-1 TAKEN (the non-UTF-8 test's destination was bare relative).**
+  A parentless name would be refused by §9.5's own no-parent check
+  before any byte moved, so the test's "nothing was written" walk
+  could never see a write-first mutation's output. Fix: the
+  destination is now an ABSOLUTE path under the temp root (its parent
+  created, so the write is possible), and the test asserts the exact
+  destination's absence before the walk — the P2-3 claim ("refused
+  BEFORE the write") is now falsifiable.
+- **P3-1 TAKEN** — the arm count above corrected to the twenty-five
+  the battery holds after the round-1 additions.
+- **P3-2 REPORTED (the orchestrator's)** — the manual-smoke entry for
+  the real OS save-dialog seam (P3-6 round 1) has no tracking card:
+  an executor may not create one; the follow-up is in the task report
+  for the main session to card (INBOX, per the follow-ups rule).
+- **P3-3 TAKEN** — the pruned-row test renamed to
+  `backup_save_refuses_terminal_status_rows_before_the_dialog_opens`
+  (it loops all three terminal statuses since round 1's P2-2).
+- Round 2's own verification notes worth keeping: the containment
+  property holds through BOTH component gates (no byte that parses as
+  a separator on either platform can ride in, so
+  `data_dir.join(&record.backup_path)` cannot escape
+  `data_dir/backups`); `FilePath::into_path()` (tauri-plugin-fs
+  2.7.1, `file_path.rs:54`) really can return a non-UTF-8 `PathBuf` on
+  Unix, so the P2-3 guard is needed; the suggested name's stem/ext
+  inherit the file charset, so a tampered cell cannot inject a
+  separator into `set_file_name` either.

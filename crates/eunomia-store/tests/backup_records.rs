@@ -1,12 +1,13 @@
 //! Behavior tests for the `backup_records` repository (spec §6.2 DDL,
 //! §7.6 BKP-010, §9.4 phase 2; task T-115, the listing added by
-//! T-125).
+//! T-125, the id-addressed read by T-353).
 //!
 //! The tests run against a real database opened through `open_db` and
 //! migrated with `run_migrations` (the `tests/sync_runs.rs` pattern)
 //! and drive the repository through its public API — [`insert`],
-//! [`last_checked`], `all_paths` (T-332's orphan-report claim set)
-//! and [`list_for_project`] (T-125's per-project listing) — reading
+//! [`last_checked`], `all_paths` (T-332's orphan-report claim set),
+//! [`list_for_project`] (T-125's per-project listing) and [`get`]
+//! (T-353's id-addressed export lookup) — reading
 //! the `backup_records` table back with this module's own SQL: the
 //! table IS the specified artifact (§6.2), so its cells are the
 //! observable behavior.
@@ -37,6 +38,10 @@
 //!   tiebreak included), scoped strictly to the caller's project,
 //!   `Ok(vec![])` for a project without rows, and the typed `Member`
 //!   refusal for a corrupt status cell (D-039);
+//! * the BKP-012 export lookup (T-353): `get` answers the id-addressed
+//!   row verbatim (every column, the status decoded), `None` for an id
+//!   naming no row (the command layer's typed refusal), and the same
+//!   `Member` refusal for a corrupt status cell;
 //! * the T-114 handshake, end to end: rows written through THIS
 //!   writer over REAL files in a real data directory are pruned by
 //!   `backup_retention::apply` — the new writer and the shipped
@@ -49,7 +54,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use eunomia_core::backup_name::{BackupTime, backup_relative_path};
 use eunomia_core::project::{BaseName as CoreBaseName, ProjectId, Scheme as CoreScheme};
 use eunomia_store::backup_records::{
-    BackupRecordStatus, BackupRecordsError, CheckedCopy, NewBackupRecord, all_paths, insert,
+    BackupRecordStatus, BackupRecordsError, CheckedCopy, NewBackupRecord, all_paths, get, insert,
     last_checked, list_for_project,
 };
 use eunomia_store::backup_retention;
@@ -999,6 +1004,108 @@ fn list_for_project_refuses_a_corrupt_status_cell() {
 
     assert_eq!(
         list_for_project(&conn, &project),
+        Err(BackupRecordsError::Member {
+            column: "status",
+            found: "pending".to_owned(),
+        })
+    );
+}
+
+// ---- the id-addressed read (BKP-012, T-353) ---------------------------
+
+#[test]
+fn get_answers_the_id_addressed_row_verbatim() {
+    // The export command's lookup (D-193's row form): every column the
+    // record carries, read back by the row's own id — the same verbatim
+    // discipline as the insert-shape oracle, so a swapped column
+    // binding fails here too.
+    let (conn, _guard, _data) = records_db("get-row");
+    let project = seed_project(&conn, 1);
+    let run = seed_run(&conn, &project);
+    let backup_path = agents_path(&project, "Project 1", 1, stamp_time(1));
+    let sha256 = digest(1);
+    let id = insert(
+        &conn,
+        &sample_record(
+            &project,
+            &run,
+            "/repos/repo-1/AGENTS.md",
+            &backup_path,
+            &sha256,
+            BackupRecordStatus::Ok,
+        ),
+    )
+    .expect("the fixture record should insert");
+
+    let row = get(&conn, &id)
+        .expect("the id-addressed read should work")
+        .expect("the row the id names exists");
+    assert_eq!(row.id, id);
+    assert_eq!(row.project_id, project);
+    assert_eq!(row.sync_run_id.as_deref(), Some(run.as_str()));
+    assert_eq!(row.source_path, "/repos/repo-1/AGENTS.md");
+    assert_eq!(row.backup_path, backup_path);
+    assert_eq!(row.size_bytes, 64);
+    assert_eq!(row.sha256, sha256);
+    assert_eq!(row.status, BackupRecordStatus::Ok);
+    assert_eq!(row.created_at, CREATED_AT);
+}
+
+#[test]
+fn get_answers_none_for_an_unknown_id() {
+    // `None` is the honest absence (the command layer's typed
+    // E_VALIDATION refusal) — never a guessed or nearest row.
+    let (conn, _guard, _data) = records_db("get-unknown");
+    let project = seed_project(&conn, 1);
+    let run = seed_run(&conn, &project);
+    insert(
+        &conn,
+        &sample_record(
+            &project,
+            &run,
+            "/repos/repo-1/AGENTS.md",
+            &agents_path(&project, "Project 1", 1, stamp_time(1)),
+            &digest(1),
+            BackupRecordStatus::Ok,
+        ),
+    )
+    .expect("the fixture record should insert");
+
+    let row = get(&conn, "no-row-has-this-id").expect("the read itself should work");
+    assert_eq!(row, None, "an id naming no row is None");
+}
+
+#[test]
+fn get_refuses_a_corrupt_status_cell() {
+    // The same D-039 posture as the listing: a status cell outside the
+    // CHECK is the typed `Member` refusal, planted the same way.
+    let (conn, _guard, _data) = records_db("get-corrupt");
+    let project = seed_project(&conn, 1);
+    let run = seed_run(&conn, &project);
+    let id = insert(
+        &conn,
+        &sample_record(
+            &project,
+            &run,
+            "/repos/repo-1/AGENTS.md",
+            &agents_path(&project, "Project 1", 1, stamp_time(1)),
+            &digest(1),
+            BackupRecordStatus::Ok,
+        ),
+    )
+    .expect("the fixture record should insert");
+    conn.pragma_update(None, "ignore_check_constraints", true)
+        .expect("relaxing the CHECK for the tampering write should work");
+    conn.execute(
+        "UPDATE backup_records SET status = 'pending' WHERE id = ?1",
+        [&id],
+    )
+    .expect("tampering with the status cell should apply");
+    conn.pragma_update(None, "ignore_check_constraints", false)
+        .expect("restoring the CHECK should work");
+
+    assert_eq!(
+        get(&conn, &id),
         Err(BackupRecordsError::Member {
             column: "status",
             found: "pending".to_owned(),

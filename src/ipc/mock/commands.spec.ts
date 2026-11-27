@@ -4242,6 +4242,46 @@ describe('backupsList (T-125)', () => {
   })
 })
 
+describe('backupSave (T-353)', () => {
+  /** The first project's seeded stamp for row `n` (the seed's own
+   * formula) — the oracle the suggested name's stamp derives from. */
+  const stampOf = (n: number): string => isoUtc(BASE_TS_MS + (300 + n) * 1000)
+
+  it('exports the ok copy, refuses the terminal statuses and the unknown id (BKP-012)', async () => {
+    const state = mockState()
+    const project = state.projects[0]!
+    const journalBefore = state.activity.length
+
+    // The ok row (the seed's `n: 3` copy) answers the would-be
+    // destination: the suggested name's stem, stamp and extension over
+    // the mock's canned exports root — `<stem>.backup-<stamp>.<ext>`
+    // derived from the row's own §5.5 name.
+    const saved = await commands.backupSave(`${project.id}-bak-3`)
+    expect(saved).toBe(`/home/dev/exports/AGENTS.backup-${stampOf(3).replace(/[-:.]/g, '')}.md`)
+
+    // The three terminal statuses refuse with E_RESTORE_SOURCE_MISSING
+    // naming the record's status (the seed orders discarded(0),
+    // missing(1), pruned(2), ok(3)).
+    for (const [n, status] of [0, 1, 2].map((n) => [n, ['discarded', 'missing', 'pruned'][n]])) {
+      await expect(commands.backupSave(`${project.id}-bak-${n}`)).rejects.toMatchObject({
+        code: 'E_RESTORE_SOURCE_MISSING',
+        message_key: 'errors.restore_source_missing',
+        params: { status },
+      })
+    }
+
+    // The unknown id is the typed refusal naming `id`.
+    await expect(commands.backupSave('missing')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'id', reason: 'no backup record has this id' },
+    })
+
+    // Read-only: no journal entry, no row change, no new row.
+    expect(state.activity).toHaveLength(journalBefore)
+    expect(state.backupRecords.filter((row) => row.projectId === project.id)).toHaveLength(4)
+  })
+})
+
 /** The first kind-narrowed instruction row of the fixture world — the
  * union model's parent row the variant tests operate on. */
 function firstInstructionOf(state: ReturnType<typeof mockState>) {

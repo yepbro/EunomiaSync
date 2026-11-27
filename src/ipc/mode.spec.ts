@@ -28,6 +28,7 @@ describe('the mock command surface', () => {
       'assignmentSet',
       'assignmentSetCustom',
       'assignmentsBulk',
+      'backupSave',
       'backupsList',
       'dbBackupsList',
       'dbRecreate',

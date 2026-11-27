@@ -439,6 +439,7 @@ const DEFAULT_MESSAGE_KEYS = {
   E_DB_LOCKED: 'errors.db_locked',
   E_DB_CORRUPT: 'errors.db_corrupt',
   E_DB_TOO_NEW: 'errors.db_too_new',
+  E_RESTORE_SOURCE_MISSING: 'errors.restore_source_missing',
   E_UPDATE_FAILED: 'errors.update_failed',
 } as const satisfies Record<ErrorCode, string>
 
@@ -463,6 +464,7 @@ const CODE_ACTIONS: Readonly<Record<ErrorCode, string>> = {
   E_DB_LOCKED: 'retry',
   E_DB_CORRUPT: 'dbRecovery',
   E_DB_TOO_NEW: 'updateApp',
+  E_RESTORE_SOURCE_MISSING: 'pickAnotherCopy',
   E_UPDATE_FAILED: 'retry',
 }
 

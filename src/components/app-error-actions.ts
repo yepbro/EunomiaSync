@@ -1,7 +1,7 @@
 // The "what to do" half of the UI-011 error alert (T-143): the §10
 // user-action column, grouped. Spec §10 gives each ErrorCode a user
-// action; twenty codes collapse onto sixteen action groups wherever
-// the §10 actions genuinely coincide:
+// action; twenty-one codes collapse onto seventeen action groups
+// wherever the §10 actions genuinely coincide:
 //
 // - `fixTarget` — `E_TARGET_IS_DIR`/`E_TARGET_BROKEN_LINK`/
 //   `E_TARGET_OUTSIDE_ROOT` (one §10 row, "fix the target");
@@ -12,9 +12,10 @@
 //   there ("wait until it finishes") presumes a running operation the
 //   other two do not have (round-1 review P3-1).
 //
-// Every other code keeps its §10-specific action: merging further (say
-// access-rights with disk-space) would blur concrete instructions the
-// spec spells out.
+// Every other code keeps its §10-specific action (`E_RESTORE_SOURCE_
+// MISSING`'s "Pick another copy" included, BKP-012/T-353): merging
+// further (say access-rights with disk-space) would blur concrete
+// instructions the spec spells out.
 //
 // The group is keyed by `code`, not by `message_key`: §10's action
 // column is per-code, the ErrorCode union is closed (a new code fails
@@ -63,6 +64,7 @@ export const ERROR_ACTION_GROUPS = {
   E_VALIDATION: 'fixField',
   E_DB_CORRUPT: 'dbRecovery',
   E_DB_TOO_NEW: 'updateApp',
+  E_RESTORE_SOURCE_MISSING: 'pickAnotherCopy',
 } as const satisfies Record<ErrorCode, string>
 
 /** An action group id; the catalog key is `errors.actions.<id>`. */

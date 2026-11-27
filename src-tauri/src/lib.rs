@@ -297,11 +297,13 @@ pub(crate) mod project_update;
 // `revisions_list` and `revision_get` over the store's version repository.
 pub(crate) mod revisions;
 
-// The Backups module's project-copy listing (spec §7.10, BKP-004,
-// T-125): `backups_list` — one project's whole `backup_records`
-// history, every §6.2 CHECK status (§6.4 keeps the history as
-// status), newest first, through the store's
-// per-project read on the one `Db::run` transaction executor.
+// The Backups module (spec §7.10, BKP-004/BKP-012, T-125/T-353):
+// `backups_list` — one project's whole `backup_records` history,
+// every §6.2 CHECK status (§6.4 keeps the history as status), newest
+// first, through the store's per-project read on the one `Db::run`
+// transaction executor — and `backup_save` — the id-addressed export
+// of one stored copy to an OS-save-dialog location, verified against
+// the record's BKP-010 columns through the §9.5 atomic write.
 pub(crate) mod backups;
 
 // The DB invariant checks and the `db_verify` command (spec §6.3
@@ -367,7 +369,9 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // the Sync module's `sync_confirm_exit` (T-123, D-219),
         // the Sync module's `sync_status`/`sync_last_result` (T-121,
         // D-217) and the Backups module's `backups_list` (T-125,
-        // D-193 — the project-settings "Backups" tab's read), and the
+        // D-193 — the project-settings "Backups" tab's read), the
+        // Backups module's `backup_save` (T-353, BKP-012 — the
+        // per-row export through the SEC-001 save dialog), and the
         // System module's `db_verify` (T-131 — the §6.3 invariant
         // check's on-demand half, `db_verify.rs`). Every
         // later command task lists its own §7.10 names here.
@@ -425,6 +429,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             revisions::revision_get::<tauri::Wry>,
             revisions::revisions_list::<tauri::Wry>,
             backups::backups_list::<tauri::Wry>,
+            backups::backup_save::<tauri::Wry>,
         ])
         // The registered §7.10 events: `state://project-availability`
         // (T-079, D-09/DB-032), `state://dirty` (T-101,

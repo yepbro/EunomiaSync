@@ -2963,6 +2963,26 @@ pub(crate) fn backups_list_failed(error: &AppError) {
     );
 }
 
+/// The `backup_save` command failed (T-353, §10's every-error rule,
+/// BKP-012): the payload is the error's own §7.10 vocabulary, in the
+/// `backups_list_failed` shape. This line is the refused export —
+/// the typed `E_VALIDATION` of an unknown id, `E_RESTORE_SOURCE_MISSING`
+/// of a gone copy, the `E_VERIFY_FAILED` of bytes that are not the
+/// record's, or the §9.5 write's own code — never a fact about the
+/// destination's content (a refused write left it whole). A clean
+/// export logs nothing: the user pressed the button and got a file.
+pub(crate) fn backup_save_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::backups",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "exporting a stored backup copy failed"
+    );
+}
+
 /// The `db_verify` command — or the startup's session-tail arm of the
 /// same check — failed to RUN (T-131, §10's every-error rule): the
 /// payload is the error's own §7.10 vocabulary, in the
@@ -4526,6 +4546,41 @@ mod tests {
         assert!(
             log.contains("the app_info command failed"),
             "the line must say what failed, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_backup_save_failure_line_carries_the_code_and_payload() {
+        // The export command's §10 edge (T-353, BKP-012): a gone copy
+        // (E_RESTORE_SOURCE_MISSING, the record's status in params)
+        // reaches the log line with its code literal — the
+        // `dialog_pick_folder_failed` pin shape. A successful export
+        // logs nothing (no tracing call exists on the success path).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let mut gone = AppError::new(crate::errors::ErrorCode::RestoreSourceMissing);
+        gone.params.insert("status".to_owned(), "pruned".to_owned());
+
+        tracing::subscriber::with_default(subscriber, || {
+            backup_save_failed(&gone);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("code=\"E_RESTORE_SOURCE_MISSING\""),
+            "the line must carry its code literal, got: {log}"
+        );
+        assert!(
+            log.contains("exporting a stored backup copy failed"),
+            "the line must say what failed, got: {log}"
+        );
+        assert!(
+            log.contains("pruned"),
+            "the record's status travels on the line (BKP-012: naming the \
+             record's status), got: {log}"
         );
         drop(temp);
     }

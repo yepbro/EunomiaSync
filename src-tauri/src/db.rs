@@ -126,7 +126,7 @@
 //! preserved in `details.os_message`. Since the retry cycle landed,
 //! `E_DB_LOCKED` from a genuine busy means "retried three times,
 //! still busy" — which a fallback producer did not do. The fallback
-//! nevertheless stays (of the twenty codes its "operation rejected,
+//! nevertheless stays (of the twenty-one codes its "operation rejected,
 //! retry" effect remains the least harmful lie; the revision and its
 //! mitigations are recorded in DECISIONS.md): fallback errors never
 //! enter the retry cycle (only the busy/locked class does), and

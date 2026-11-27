@@ -458,8 +458,12 @@ fn whole_file(managed: &str, marker_line: &str) -> String {
 /// The §10 code of one refused atomic write (the D-099 table):
 /// `WriteFailed`/`NameFailed` fold into `E_WRITE_FAILED`, and the
 /// three typed verdicts of their own rows — `E_DISK_FULL` (the
-/// write-time half), `E_FILE_LOCKED`, `E_VERIFY_FAILED`.
-fn write_code(error: &AtomicWriteError) -> ErrorCode {
+/// write-time half), `E_FILE_LOCKED`, `E_VERIFY_FAILED`. The sync
+/// pipeline's failure rows and the export command's wire envelope
+/// share this one table (the D-149 one-spelling law) — `pub(crate)`
+/// for `backups::backup_save` (T-353), the `production_write`
+/// pattern.
+pub(crate) fn write_code(error: &AtomicWriteError) -> ErrorCode {
     match error {
         AtomicWriteError::NameFailed { .. } | AtomicWriteError::WriteFailed(_) => {
             ErrorCode::WriteFailed

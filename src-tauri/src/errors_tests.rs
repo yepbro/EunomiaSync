@@ -8,9 +8,10 @@
 //!
 //! - the committed `src/bindings.ts` (embedded at compile time, like
 //!   every file pin in `config_tests.rs`) exports the `AppError` type
-//!   with its four §7.10 fields and **all twenty** MVP code literals —
-//!   and no twenty-first `E_*` literal, so the two P1 codes of the §10
-//!   table stay out of the MVP registry until their own tasks add them;
+//!   with its four §7.10 fields and **all twenty-one** registry code
+//!   literals — and no other `E_*` literal, so the one remaining P1
+//!   code of the §10 table (`E_IMPORT_INVALID`) stays out of the
+//!   registry until its own task adds it;
 //! - `lib.rs` keeps the `typ` registration wired (without it, the export
 //!   test would silently *rewrite* the committed bindings to a version
 //!   without the type — this pin is what turns that rewrite red).
@@ -19,10 +20,12 @@
 //! from the enum — the same mutation-honesty as the `errors.rs` and
 //! `logging.rs` suites.
 
-/// The twenty MVP error-code literals (spec §10, T-013 card), in table
-/// order. Test-side registry: the enum↔literal mapping is behavior-tested
+/// The twenty-one registry error-code literals (spec §10: the T-013
+/// card's twenty plus `E_RESTORE_SOURCE_MISSING`, whose row the P0
+/// export `backup_save` turned on — BKP-012, T-353), in table order.
+/// Test-side registry: the enum↔literal mapping is behavior-tested
 /// in `errors.rs`; this list pins the *exported* form.
-const MVP_CODE_LITERALS: [&str; 20] = [
+const MVP_CODE_LITERALS: [&str; 21] = [
     "E_SYNC_RUNNING",
     "E_NOT_A_REPO",
     "E_PROJECT_UNAVAILABLE",
@@ -42,14 +45,17 @@ const MVP_CODE_LITERALS: [&str; 20] = [
     "E_DB_LOCKED",
     "E_DB_CORRUPT",
     "E_DB_TOO_NEW",
+    "E_RESTORE_SOURCE_MISSING",
     "E_UPDATE_FAILED",
 ];
 
-/// The two §10 codes that are P1 features and therefore outside the MVP
-/// registry (module docs of `errors.rs`): backup restore and library
-/// import. They appear here as literals precisely so their accidental
-/// addition fails loudly instead of sliding in with an unrelated change.
-const P1_CODE_LITERALS: [&str; 2] = ["E_RESTORE_SOURCE_MISSING", "E_IMPORT_INVALID"];
+/// The one §10 code that is still a P1 feature and therefore outside
+/// the registry (module docs of `errors.rs`): library import. It
+/// appears here as a literal precisely so its accidental addition
+/// fails loudly instead of sliding in with an unrelated change.
+/// (`E_RESTORE_SOURCE_MISSING` left this list with BKP-012/T-353 —
+/// the export is its §10 row's P0 user.)
+const P1_CODE_LITERALS: [&str; 1] = ["E_IMPORT_INVALID"];
 
 /// Strips `/** ... */` doc comments from generated TypeScript. specta
 /// exports the Rust doc comments, and they may contain `;`, `|` or even
@@ -73,7 +79,7 @@ fn strip_ts_doc_comments(bindings: &str) -> String {
 }
 
 #[test]
-fn bindings_export_the_app_error_type_with_all_twenty_codes() {
+fn bindings_export_the_app_error_type_with_all_twenty_one_codes() {
     // Arrange: the committed bindings file, embedded at compile time.
     let bindings = include_str!("../../src/bindings.ts");
 
@@ -99,13 +105,13 @@ fn bindings_export_the_app_error_type_with_all_twenty_codes() {
         );
     }
 
-    // Assert: every MVP code literal is present in the exported
+    // Assert: every registry code literal is present in the exported
     // `ErrorCode` union — the frontend sees the full registry — and the
-    // union holds exactly those twenty literals, pinning the set in both
-    // directions (a removed or added code fails the count). The union
-    // block is read from the doc-stripped text and delimited by the
-    // union's own `;`, so prose in exported doc comments cannot shift
-    // the boundary or the count.
+    // union holds exactly those twenty-one literals, pinning the set in
+    // both directions (a removed or added code fails the count). The
+    // union block is read from the doc-stripped text and delimited by
+    // the union's own `;`, so prose in exported doc comments cannot
+    // shift the boundary or the count.
     let stripped = strip_ts_doc_comments(bindings);
     let union_start = stripped
         .find("export type ErrorCode = ")
@@ -118,30 +124,30 @@ fn bindings_export_the_app_error_type_with_all_twenty_codes() {
         assert!(
             union.contains(&format!("\"{literal}\"")),
             "src/bindings.ts must contain the error code `{literal}` in \
-             the ErrorCode union (spec §10 MVP registry)"
+             the ErrorCode union (spec §10 registry)"
         );
     }
     let count = union.match_indices("\"E_").count();
     assert_eq!(
-        count, 20,
-        "the ErrorCode union must carry exactly the twenty MVP error-code \
-         literals, found {count}"
+        count, 21,
+        "the ErrorCode union must carry exactly the twenty-one registry \
+         error-code literals, found {count}"
     );
 }
 
 #[test]
-fn the_p1_codes_stay_out_of_the_mvp_registry() {
+fn the_p1_codes_stay_out_of_the_registry() {
     // Arrange & Act: the committed bindings file, embedded at compile
     // time, with the exported doc comments stripped — the same honesty
     // as the union pin: a doc comment that merely *mentions* a P1 code
     // must not trip this check for the wrong reason.
     let bindings = strip_ts_doc_comments(include_str!("../../src/bindings.ts"));
 
-    // Assert: the two P1 codes of the §10 table (backup restore,
-    // library import) are not in the MVP registry — the enum and the
-    // export must both stay without them until their own tasks land.
-    // (The count half of the presence pin above already makes them
-    // impossible; this pin names them so the failure explains itself.)
+    // Assert: the one remaining P1 code of the §10 table (library
+    // import) is not in the registry — the enum and the export must
+    // both stay without it until its own task lands. (The count half
+    // of the presence pin above already makes it impossible; this pin
+    // names it so the failure explains itself.)
     for literal in P1_CODE_LITERALS {
         assert!(
             !bindings.contains(literal),

@@ -400,7 +400,12 @@ pub(crate) fn opener_error_to_app_error(error: &tauri_plugin_opener::Error) -> A
 /// uninitialized-app bug, and the honest wire answer is the D-037
 /// fallback shape with a diagnostic — not a panic, and not a silent
 /// default directory.
-fn data_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, AppError> {
+/// The data directory the startup resolved and manages as
+/// [`data_dirs::DataRoot`] — the one spelling every command that needs
+/// the layout reads (`app_open_data_folder`, the recovery commands,
+/// `backup_save`'s copy lookup). `pub(crate)`: the `backups` module
+/// reuses it (the D-149 one-spelling law).
+pub(crate) fn data_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, AppError> {
     app.try_state::<data_dirs::DataRoot>()
         .map(|root| root.0.clone())
         .ok_or_else(|| {

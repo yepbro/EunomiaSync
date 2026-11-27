@@ -241,7 +241,7 @@ impl RecoveryError {
             RecoveryError::DbInit(init) => init.app_error().unwrap_or_else(|| {
                 // The generic init failure (an open error that is not a
                 // typed §10 situation): the D-037 fallback shape — the
-                // least harmful of the twenty codes — with the init
+                // least harmful of the twenty-one codes — with the init
                 // failure's own text as the diagnostic.
                 let mut error = AppError::new(ErrorCode::DbLocked);
                 error.details = Some(ErrorDetails {

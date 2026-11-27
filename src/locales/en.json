@@ -31,6 +31,7 @@
     "db_locked": "The database is busy",
     "db_corrupt": "The database is damaged ({detail})",
     "db_too_new": "The database uses schema {database_schema_version}, but this app supports only {app_schema_version}",
+    "restore_source_missing": "The backup copy behind this export is missing on disk",
     "update_failed": "The update check or installation failed",
     "update_migration_failed": "A database migration failed and was rolled back; the app did not change the database",
     "where": {
@@ -64,6 +65,7 @@
       "fixField": "Fix the invalid field, then save again.",
       "dbRecovery": "Pick a database copy on the recovery screen, or start with an empty database.",
       "updateApp": "Update the app to a newer version.",
+      "pickAnotherCopy": "Pick another backup copy.",
       "installPreviousVersion": "Install the previous app version, or update to a fixed release. The pre-migration copy of the database is at {backup_path}."
     },
     "details": {

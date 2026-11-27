@@ -61,7 +61,7 @@ crates/
     src/write_access.rs        #   §9.4 preflight: write-rights probe (tmp create, read-only) (working)
   eunomia-store/               # Database layer (SQLite), no Tauri dependency
     src/action_log.rs          #   Journal repository: LOG-001…005 + LOG-006 cleanup (working)
-    src/backup_records.rs      #   Per-run backup records, the BKP-010 dedup lookup, the BKP-004 listing (working)
+    src/backup_records.rs      #   Per-run backup records, the BKP-010 dedup lookup, the BKP-004 listing, the BKP-012 id-addressed read (working)
     src/backup_retention.rs    #   BKP-003 retention: newest N copies per pair (working)
     src/build_snapshot.rs      #   ALG-001 snapshot read: one read transaction (SYS-005) (working)
     src/data_sets.rs           #   Deterministic benchmark data sets M and L (working)
@@ -81,7 +81,7 @@ src-tauri/
   src/availability.rs      # Availability service: re-probes + state://project-availability (working)
   src/assignments.rs       # assignment_set / assignments_bulk / assignment_set_custom (working)
   src/backup_orphans.rs    # Orphaned .bak report at Db::open (read-only, T-332) (working)
-  src/backups.rs           # backups_list: the Backups tab read (BKP-004, T-125) (working)
+  src/backups.rs           # backups_list: the Backups tab read (BKP-004, T-125); backup_save: the export (BKP-012, T-353) (working)
   src/commands.rs          # IPC commands, the §7.10 registered set (working)
   src/config.rs            # config.toml load-or-create; broken file falls back to defaults (working)
   src/data_dirs.rs         # Data-directory layout + SEC-007 Unix modes (working)
@@ -190,7 +190,7 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is forty-nine commands — the §7.10 names that
+   The registered set is fifty commands — the §7.10 names that
    are implemented so far, matching the `mode.spec` surface list. It comprises the
    recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
@@ -463,7 +463,22 @@ Rust commands are registered through `tauri-specta`:
    transaction; an unknown project id is the typed `E_VALIDATION`
    refusal, a known project without rows the honest empty list, and
    the no-database answer is the `E_DB_LOCKED`/`NoDatabase` refusal
-   the other read commands share. Every further command name is fixed by §7.10
+   the other read commands share — and the Backups module's
+   `backup_save` (T-353, BKP-012): the id-addressed export of one
+   stored copy — the OS save dialog opens from Rust (SEC-001's
+   `dialog_pick_folder` pattern, the suggested name
+   `<stem>.backup-<stamp>.<ext>` derived by the core backup-name
+   grammar), the copy's bytes are checked against the record's
+   `size_bytes`/`sha256` columns (BKP-010's stored oracle) and written
+   to the chosen path through the §9.5 atomic write
+   (`sync_phase3::production_write`); the refusals are the typed
+   `E_VALIDATION` for an unknown id, `E_RESTORE_SOURCE_MISSING`
+   naming the record's status for a copy gone from disk (the
+   terminal statuses, or an `ok` row whose file vanished), and the
+   §9.5 write's own codes for a refused write or a byte mismatch
+   (`E_VERIFY_FAILED`); a cancel answers `null`, the written path on
+   success; nothing is journaled, no SYS-005 gate runs, and no row
+   changes. Every further command name is fixed by §7.10
    and belongs to its own task.
 3. On debug builds the specta `Builder` exports `src/bindings.ts`
    (`specta_typescript::Typescript`). The file is **committed** so the
@@ -484,9 +499,11 @@ the process's effective-uid fact, and managed state only, any mode).
 
 The error half of the contract — `AppError` (spec §7.10: every command
 returns `Result<T, AppError>`) — lives in `src-tauri/src/errors.rs`: the
-twenty-code MVP registry of the spec §10 table (`E_SYNC_RUNNING` …
-`E_UPDATE_FAILED`; the two P1 codes of that table are deliberately
-excluded until their tasks land), the stable default `message_key` per
+twenty-one-code registry of the spec §10 table (`E_SYNC_RUNNING` …
+`E_UPDATE_FAILED`, including `E_RESTORE_SOURCE_MISSING`, whose row
+names `backup_save`'s export as its P0 user; the one remaining P1 code
+of that table, `E_IMPORT_INVALID`, is deliberately excluded until its
+task lands), the stable default `message_key` per
 code, interpolation `params`, and structured `details` carrying the OS
 error code/kind/message. It reaches `src/bindings.ts` through the specta
 builder's `typ` registration (kept beside the command registration so a

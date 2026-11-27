@@ -1288,6 +1288,39 @@ export const commands = {
 	 *  journaled.
 	 */
 	backupsList: (projectId: string, options?: InvokeOptions) => __TAURI_INVOKE<BackupCopyRecord_Serialize[]>("backups_list", { projectId }, options),
+	/**
+	 *  Exports one stored copy to a location the OS save dialog chooses
+	 *  (BKP-012): the per-row "Save to a chosen location" action of the
+	 *  Backups tab — a plain verified copy of the stored file, not the P1
+	 *  restore (BKP-007).
+	 * 
+	 *  The dialog opens with the suggested name
+	 *  `<stem>.backup-<stamp>.<ext>` (the copy's file stem and creation
+	 *  stamp, derived from the record's §5.5 `backup_path` through the
+	 *  one grammar that module owns); the answer is the path actually
+	 *  written, or `None` when the user cancelled the dialog
+	 *  (`dialog_pick_folder`'s "nothing on cancel" shape — the user may
+	 *  edit the suggested name, so the written path is the honest answer,
+	 *  not an echo of the suggestion). A save path whose text is not
+	 *  valid UTF-8 is refused before anything is written (the D-086
+	 *  dialog-boundary posture, `dialog_pick_folder`'s twin).
+	 * 
+	 *  SEC-001: the dialog plugin is invoked from this Rust command only
+	 *  (the webview holds no `dialog:` permission), exactly the
+	 *  `dialog_pick_folder` posture. SEC-003 does NOT apply: the session
+	 *  allowlist gates paths the UI SENDS to commands, and this command
+	 *  takes only `id` — the destination is the OS dialog's own answer,
+	 *  produced inside Rust, and nothing later consumes a UI-named
+	 *  export path, so there is nothing to remember and no gate to feed.
+	 *  The answered path is the dialog's spelling verbatim (a fresh save
+	 *  path does not resolve yet — canonicalizing it would fail), and the
+	 *  write targets exactly what the dialog named.
+	 * 
+	 *  No journal entry, no SYS-005 gate, no row change: §10's
+	 *  `E_RESTORE_SOURCE_MISSING` row keeps the record at its stored
+	 *  status even when the copy is gone.
+	 */
+	backupSave: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<string | null>("backup_save", { id }, options),
 };
 
 /** Events */
@@ -1763,7 +1796,7 @@ export type AppError = AppError_Serialize | AppError_Deserialize;
  */
 export type AppError_Deserialize = {
 	/**
-	 *  What happened — one of the twenty MVP codes (spec §10), serialized
+	 *  What happened — one of the registry's codes (spec §10), serialized
 	 *  as the code's spec literal.
 	 */
 	code: ErrorCode,
@@ -1800,7 +1833,7 @@ export type AppError_Deserialize = {
  */
 export type AppError_Serialize = {
 	/**
-	 *  What happened — one of the twenty MVP codes (spec §10), serialized
+	 *  What happened — one of the registry's codes (spec §10), serialized
 	 *  as the code's spec literal.
 	 */
 	code: ErrorCode,
@@ -2254,13 +2287,16 @@ export type DirtyEvent = {
 };
 
 /**
- *  The closed registry of MVP error codes — the `Code` column of the
- *  spec §10 table, exactly the twenty codes the T-013 card lists.
+ *  The closed registry of error codes — the `Code` column of the spec
+ *  §10 table this app's landed features reach: the twenty codes the
+ *  T-013 card listed plus `E_RESTORE_SOURCE_MISSING`, whose §10 row
+ *  the P0 export `backup_save` (BKP-012, T-353) turned on.
  * 
  *  Each variant serializes to its spec §10 literal; those strings are
  *  the wire and log contract (§7.10, §10) and are pinned in
- *  `src/bindings.ts` by `errors_tests.rs`. The two P1 codes of the §10
- *  table are deliberately absent — see the module docs for the boundary.
+ *  `src/bindings.ts` by `errors_tests.rs`. The one remaining P1 code
+ *  of the §10 table (`E_IMPORT_INVALID`, library import) is
+ *  deliberately absent — see the module docs for the boundary.
  */
 export type ErrorCode = 
 /**  A second sync run, or a project edit during a sync. */
@@ -2301,6 +2337,11 @@ export type ErrorCode =
 "E_DB_CORRUPT" | 
 /**  The database was created by a newer app version. */
 "E_DB_TOO_NEW" | 
+/**
+ *  The backup file behind a `backup_save` export (BKP-012) or the
+ *  P1 restore (BKP-007) is missing on disk.
+ */
+"E_RESTORE_SOURCE_MISSING" | 
 /**  The update check or installation failed. */
 "E_UPDATE_FAILED";
 

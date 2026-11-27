@@ -244,6 +244,17 @@ pub enum BackupNameError {
         /// The offending digest string.
         value: String,
     },
+    /// The stored path is not the §5.5 layout a backup copy's name
+    /// must spell (`backups/<dir>/<file>.<stamp>.<hash8>.bak`) — the
+    /// export-name derivation (BKP-012) refused it instead of guessing
+    /// a suggestion out of a corrupt cell (the D-039 posture).
+    #[error(
+        "backup path {value:?} is not a backup copy name (backups/<dir>/<file>.<stamp>.<hash8>.bak)"
+    )]
+    NotABackupLayout {
+        /// The offending path string.
+        value: String,
+    },
 }
 
 /// Cleans a project name into the backup slug (spec §7.6 BKP-001:
@@ -491,10 +502,154 @@ pub fn backup_relative_path(
     sha256_hex: &str,
 ) -> Result<String, BackupNameError> {
     Ok(format!(
-        "backups/{}/{}",
+        "{BACKUPS_LAYOUT_ROOT}/{}/{}",
         backup_dir_name(project_id, project_name)?,
         backup_file_name(scheme, base_name, time, sha256_hex)?,
     ))
+}
+
+/// The save dialog's suggested export name of one stored copy (spec
+/// §7.10 `backup_save`, BKP-012, D-203 (2)):
+/// `<stem>.backup-<stamp>.<ext>` — the prototype's layout, derived
+/// from the copy's own §5.5 name.
+///
+/// The input is the record's stored `backup_path` cell (the
+/// [`backup_relative_path`] spelling), and the derivation is this
+/// module's own grammar inverted — never a second parser elsewhere:
+/// the layout must be exactly `backups/<dir>/<file>`, and BOTH the
+/// directory and the file component are held to the builders'
+/// charsets (`[0-9A-Za-z_-]` and `[0-9A-Za-z._-]` — the directory
+/// cannot spell a `.`, so a whole `..` component cannot ride in, and
+/// neither component can spell a path separator on ANY platform,
+/// `\` included: a `'/'`-split alone cannot see it but Windows'
+/// `Path` would). The file name is the builder's composition
+/// `<target>.<stamp>.<hash8>.bak` read from the right (the target
+/// file name itself may contain dots). The suggestion then carries
+/// the target's stem and extension with the copy's creation stamp:
+/// `AGENTS.md.20261119T103000123Z.d2a2446b.bak`
+/// → `AGENTS.backup-20261119T103000123Z.md`.
+///
+/// A cell that does not spell the layout is
+/// [`BackupNameError::NotABackupLayout`] — a corrupt cell is refused,
+/// never guessed around (D-039). The command layer maps the refusal;
+/// no `AppError` lives here (D-062's boundary).
+///
+/// # Examples
+///
+/// ```
+/// use eunomia_core::backup_name::export_suggested_name;
+///
+/// let name = export_suggested_name(
+///     "backups/0193f1a0-6d6d-7cce-a3c0-3d1f2a4b5c6d__my-project/\
+///      AGENTS.md.20261119T103000123Z.d2a2446b.bak",
+/// )
+/// .unwrap();
+/// assert_eq!(name, "AGENTS.backup-20261119T103000123Z.md");
+/// assert!(export_suggested_name("backups/../etc/passwd").is_err());
+/// ```
+pub fn export_suggested_name(backup_path: &str) -> Result<String, BackupNameError> {
+    // The refusal is one shape (the variant carries the path); the
+    // doc comments above name the arms this function checks.
+    let refuse = || BackupNameError::NotABackupLayout {
+        value: backup_path.to_owned(),
+    };
+
+    // The §5.5 layout: exactly three '/'-separated components, the
+    // first the `backups` root. Fewer or more (an absolute path, a
+    // nested escape, a bare file name) is not a stored copy's path.
+    let components: Vec<&str> = backup_path.split('/').collect();
+    if components.len() != 3 || components[0] != BACKUPS_LAYOUT_ROOT {
+        return Err(refuse());
+    }
+
+    // The directory component: the builders' charset only — a dot is
+    // unrepresentable, so a whole `..` component cannot ride in and
+    // the layout cannot climb out of the backups tree it names.
+    let directory = components[1];
+    if directory.is_empty()
+        || !directory
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(refuse());
+    }
+
+    // The file component: the builders' charset too —
+    // `[0-9A-Za-z._-]`, the whole vocabulary the four target literals
+    // and the grammar's stamp/hash8/bak segments can spell. No byte
+    // that could parse as a path separator on ANY platform (`\`
+    // included — a `'/'`-split cannot see it, Windows' `Path` would)
+    // can ride in, so the joined path stays inside the backups tree
+    // whatever the stored cell says (the platform-independent
+    // containment rule; the round-1 P1-1 fix).
+    let file_name = components[2];
+    if file_name.is_empty()
+        || !file_name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-' || byte == b'_'
+        })
+    {
+        return Err(refuse());
+    }
+
+    // The file component, read from the right the way it was composed:
+    // <target>.<stamp>.<hash8>.bak — the target may itself contain
+    // dots, so the last three segments are claimed by the grammar and
+    // the rest is the target file name.
+    let segments: Vec<&str> = file_name.split('.').collect();
+    if segments.len() < 4
+        || segments[segments.len() - 1] != "bak"
+        || !is_hash8(segments[segments.len() - 2])
+        || !is_utc_stamp(segments[segments.len() - 3])
+    {
+        return Err(refuse());
+    }
+    let stamp = segments[segments.len() - 3];
+    let target = segments[..segments.len() - 3].join(".");
+    if target.is_empty() {
+        return Err(refuse());
+    }
+
+    // The target's own stem and extension (the builders' four literals
+    // all carry one); a dotless target is not one of them.
+    let Some(dot) = target.rfind('.') else {
+        return Err(refuse());
+    };
+    if dot == 0 || dot + 1 >= target.len() {
+        return Err(refuse());
+    }
+    let (stem, extension) = target.split_at(dot);
+    let extension = &extension[1..];
+
+    Ok(format!("{stem}.backup-{stamp}.{extension}"))
+}
+
+/// The §5.5 layout's root component — the first piece of every path
+/// the builders return, and the one spelling both [`backup_relative_
+/// path`]'s composition and the decomposition ([`export_suggested_
+/// name`]'s layout gate, BKP-012) read (the D-149 one-spelling law,
+/// the round-1 P3-3 fix).
+const BACKUPS_LAYOUT_ROOT: &str = "backups";
+
+/// The `hash8` segment of a copy's file name: exactly 8 ASCII
+/// lowercase hexadecimal characters — the truncation shape
+/// [`hash8_of`] produces.
+fn is_hash8(segment: &str) -> bool {
+    segment.len() == 8
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+/// The `<UTC YYYYMMDDTHHMMSSmmmZ>` segment of a copy's file name: 19
+/// characters — 8 digits, the `T` divider, 9 digits, the `Z` marker —
+/// the exact shape [`utc_stamp`] formats.
+fn is_utc_stamp(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    segment.len() == 19
+        && bytes[8] == b'T'
+        && bytes[18] == b'Z'
+        && bytes[..8].iter().all(u8::is_ascii_digit)
+        && bytes[9..18].iter().all(u8::is_ascii_digit)
 }
 
 /// Gates the project ID: non-empty, every byte in `[0-9A-Za-z_-]`.
@@ -1327,5 +1482,169 @@ mod tests {
         let dir = backup_dir_name(&project(), &"x".repeat(200)).unwrap();
         assert!(dir.len() <= 36 + 2 + SLUG_MAX, "{dir:?}");
         assert_all_normal(&dir);
+    }
+
+    // ---- the export suggestion (BKP-012, D-203 (2)) -----------------
+
+    #[test]
+    fn the_suggestion_carries_the_stem_stamp_and_extension() {
+        // BKP-012's `<stem>.backup-<stamp>.<ext>`: the stem and ext of
+        // the target file, the copy's own creation stamp.
+        assert_eq!(
+            export_suggested_name(
+                "backups/0193f1a0-6d6d-7cce-a3c0-3d1f2a4b5c6d__my-project/\
+                 AGENTS.md.20261119T103000123Z.d2a2446b.bak"
+            )
+            .unwrap(),
+            "AGENTS.backup-20261119T103000123Z.md"
+        );
+        // The scheme C spelling: the target carries its own inner dot,
+        // and the stem keeps it (CLAUDE.project, not CLAUDE).
+        assert_eq!(
+            export_suggested_name(
+                "backups/0193f1a0-6d6d-7cce-a3c0-3d1f2a4b5c6d__my-project/\
+                 CLAUDE.project.md.20260503T070809042Z.ffffffff.bak"
+            )
+            .unwrap(),
+            "CLAUDE.project.backup-20260503T070809042Z.md"
+        );
+    }
+
+    #[test]
+    fn every_builder_output_decomposes_back_into_a_suggestion() {
+        // The round trip the "one grammar" rule buys (no forked
+        // parsing): every name the builders can spell — all six
+        // scheme/base pairs, both grammar-legal digests — yields its
+        // suggestion, and the stamp inside it equals the stamp the
+        // builder was given.
+        for (scheme, base) in [
+            (Scheme::A, BaseName::AgentsMd),
+            (Scheme::A, BaseName::ClaudeMd),
+            (Scheme::B, BaseName::AgentsMd),
+            (Scheme::B, BaseName::ClaudeMd),
+            (Scheme::C, BaseName::AgentsMd),
+            (Scheme::C, BaseName::ClaudeMd),
+        ] {
+            let path = backup_relative_path(
+                &project(),
+                "My Project",
+                scheme,
+                base,
+                time_2026_11_19(),
+                SHA256,
+            )
+            .unwrap();
+            let suggestion = export_suggested_name(&path).unwrap_or_else(|error| {
+                panic!("the builder's own output {path:?} was refused: {error}")
+            });
+            assert!(
+                suggestion.starts_with("AGENTS") || suggestion.starts_with("CLAUDE"),
+                "{suggestion:?} lost the target's stem"
+            );
+            assert!(
+                suggestion.ends_with(".backup-20261119T103000123Z.md"),
+                "{suggestion:?} lost the stamp or the extension"
+            );
+        }
+    }
+
+    #[test]
+    fn cells_that_are_not_the_layout_are_refused_not_guessed() {
+        // D-039: a stored cell outside the grammar is a typed refusal.
+        // Every arm: wrong root, wrong component count, absolute path,
+        // a directory with a dot (the `..` climb), a missing `.bak`,
+        // a bad hash8, a bad stamp, a dotless target, an empty piece —
+        // and the Windows-separator arms (the round-1 P1-1 fix): a
+        // backslash rides in the FILE component, where a `'/'`-split
+        // cannot see it but Windows' `Path` would parse it as a climb;
+        // the file component's charset bars every separator byte on
+        // every platform.
+        for bad in [
+            "AGENTS.md.20261119T103000123Z.d2a2446b.bak", // no layout
+            "db-backups/20261119T103000123Z.d2a2446b.bak", // wrong root
+            "backups/AGENTS.md.20261119T103000123Z.d2a2446b.bak", // 2 components
+            "backups/dir/AGENTS.md.20261119T103000123Z.d2a2446b.bak/x", // 4
+            "/backups/dir/AGENTS.md.20261119T103000123Z.d2a2446b.bak", // absolute
+            "backups/../AGENTS.md.20261119T103000123Z.d2a2446b.bak", // dir climb
+            "backups/dir../AGENTS.md.20261119T103000123Z.d2a2446b.bak",
+            "backups//AGENTS.md.20261119T103000123Z.d2a2446b.bak", // empty dir
+            "backups/dir/AGENTS.md.20261119T103000123Z.d2a2446b",  // no .bak
+            "backups/dir/AGENTS.md.20261119T103000123Z.d2a2446.bak", // 7-hex
+            "backups/dir/AGENTS.md.20261119T103000123Z.D2A2446B.bak", // uppercase
+            "backups/dir/AGENTS.md.20261119103000123Z.d2a2446b.bak", // no T
+            "backups/dir/AGENTS.md.20261119T10300012.d2a2446b.bak", // short stamp
+            "backups/dir/AGENTS.md.2026111XT103000123Z.d2a2446b.bak", // non-digit
+            "backups/dir/20261119T103000123Z.d2a2446b.bak",        // no target
+            "backups/dir/AGENTS..20261119T103000123Z.d2a2446b.bak", // empty ext
+            "backups/dir/AGENTSmd.20261119T103000123Z.d2a2446b.bak", // dotless
+            // The Windows-separator climbs (P1-1): a backslash in the
+            // file component a `'/'`-split leaves in place.
+            "backups/dir/..\\..\\..\\..\\Users\\Public\\secret.md.20261119T103000123Z.d2a2446b.bak",
+            "backups/dir/AGENTS.md\\..\\..\\escape.20261119T103000123Z.d2a2446b.bak",
+            "backups/dir/AGENTS.md.20261119T103000123Z.d2a2446b.ba\\k",
+            "backups/dir/AGENTS\u{0}md.20261119T103000123Z.d2a2446b.bak", // NUL
+            "backups/dir/AGENTS%md.20261119T103000123Z.d2a2446b.bak",     // percent
+            "backups/dir/AGENTS md.20261119T103000123Z.d2a2446b.bak",     // space
+            "backups/dir/Проект.md.20261119T103000123Z.d2a2446b.bak",     // non-ASCII
+            "",
+        ] {
+            assert_eq!(
+                export_suggested_name(bad),
+                Err(BackupNameError::NotABackupLayout {
+                    value: bad.to_owned()
+                }),
+                "cell {bad:?} was not refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_layout_refusal_names_the_shape_it_wants() {
+        // The Display line the command layer logs at the boundary.
+        let error = BackupNameError::NotABackupLayout {
+            value: "/etc/passwd".to_owned(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "backup path \"/etc/passwd\" is not a backup copy name \
+             (backups/<dir>/<file>.<stamp>.<hash8>.bak)"
+        );
+    }
+
+    #[test]
+    fn the_layout_cannot_climb_out_of_the_backups_tree_on_any_platform() {
+        // The P1-1 property, stated on the JOINED path: whatever the
+        // cell says, the layout this module accepts — joined under a
+        // root — stays inside `root/backups/...`, on both separator
+        // spellings (`std::path` parses `\\` as a separator only on
+        // Windows, `/` everywhere: the property is checked by the
+        // charset, not by the platform running the test, so this arm
+        // refuses the hostile cells BEFORE any platform sees them).
+        for hostile in [
+            "..\\..\\..\\..\\Users\\Public\\secret.md.20261119T103000123Z.d2a2446b.bak",
+            "AGENTS.md\\..\\..\\escape.20261119T103000123Z.d2a2446b.bak",
+            "../escape.md.20261119T103000123Z.d2a2446b.bak",
+            "AGENTS.md 20261119T103000123Z.d2a2446b.bak", // a space rides in
+            "AGENTS\u{0}.md.20261119T103000123Z.d2a2446b.bak", // a NUL rides in
+        ] {
+            let cell = format!("backups/{ID}__project/{hostile}");
+            assert!(
+                export_suggested_name(&cell).is_err(),
+                "the tampered cell {cell:?} was accepted"
+            );
+        }
+        // And the grammar's own output joins flat: three Normal
+        // components under every parser std knows.
+        let path = backup_relative_path(
+            &project(),
+            "My Project",
+            Scheme::C,
+            BaseName::ClaudeMd,
+            time_2026_11_19(),
+            SHA256,
+        )
+        .unwrap();
+        assert_all_normal(&path);
+        assert_eq!(Path::new(&path).components().count(), 3);
     }
 }

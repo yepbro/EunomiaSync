@@ -3406,6 +3406,57 @@ export const mockCommands: IpcCommands = {
       )
       .map(toBackupCopyRecord)
   },
+
+  // -------------------------------------------------------------------------
+  // The Backups export (§7.10 Backups module, T-353, BKP-012): the mock
+  // twin of the Rust `backup_save` — the same typed unknown-id refusal,
+  // the same terminal-status refusal (E_RESTORE_SOURCE_MISSING naming
+  // the record's status). The mock world holds no OS dialog and no
+  // copy bytes, so the success arm answers the destination it "would
+  // have" written — the `dialogPickFolder` canned-path pattern —
+  // derived from the row's own §5.5 name through the same
+  // `<stem>.backup-<stamp>.<ext>` decomposition (the compact-stamp
+  // twin's sibling). Read-only: no journal entry, no row change.
+  // -------------------------------------------------------------------------
+
+  /**
+   * `backup_save` (§7.10, BKP-012): exports the id-addressed copy —
+   * the mock answers the would-be destination path; the refusals are
+   * the real shapes.
+   */
+  async backupSave(id) {
+    const state = mockState()
+    const row = state.backupRecords.find((entry) => entry.id === id)
+    if (!row) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        reason: 'no backup record has this id',
+      })
+    }
+    if (row.status !== 'ok') {
+      return rejectWith('E_RESTORE_SOURCE_MISSING', 'errors.restore_source_missing', {
+        status: row.status,
+      })
+    }
+    return `/home/dev/exports/${suggestedExportName(row.backup_path)}`
+  },
+}
+
+/**
+ * The save dialog's suggested export name of one §5.5 backup name
+ * (BKP-012): `<stem>.backup-<stamp>.<ext>` — the mock twin of the core
+ * grammar's `export_suggested_name`, over the mock's own seeded names
+ * (`AGENTS.md.<stamp>.<hash8>.bak` → `AGENTS.backup-<stamp>.md`).
+ */
+function suggestedExportName(backupPath: string): string {
+  const fileName = backupPath.split('/').pop() ?? ''
+  const segments = fileName.split('.')
+  const stamp = segments[segments.length - 3] ?? ''
+  const target = segments.slice(0, -3).join('.')
+  const dot = target.lastIndexOf('.')
+  const stem = dot > 0 ? target.slice(0, dot) : target
+  const extension = dot > 0 ? target.slice(dot + 1) : 'txt'
+  return `${stem}.backup-${stamp}.${extension}`
 }
 
 /**

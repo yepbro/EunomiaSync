@@ -2,12 +2,13 @@
 //! §9.4 phase 2; task T-115): the store's writer for one run's backup
 //! copies and the dedup lookup the phase consults before making one.
 //!
-//! Four entry points. [`insert`] and [`last_checked`] join **the
+//! Five entry points. [`insert`] and [`last_checked`] join **the
 //! caller's** transaction (D-037/D-051, the `sync_runs` shape);
 //! [`all_paths`] runs on the caller's connection and joins nothing —
 //! it is the read-only claim set of the orphan report (T-332/D-190) —
 //! and [`list_for_project`] is the BKP-004 listing read (T-125),
-//! which joins the caller's transaction like the writer does:
+//! which joins the caller's transaction like the writer does, as does
+//! [`get`] — the BKP-012 export's id-addressed lookup (T-353):
 //!
 //! * [`insert`] — one row per copy a run produced. §9.4 phase 2 step 1
 //!   inserts a record only after the BKP-010 size + SHA-256 check
@@ -37,6 +38,11 @@
 //!   (BKP-004, T-125) — the scope is the caller's project id, and the
 //!   read itself never validates it (the command layer does, a
 //!   projects fact, not a backup-records fact).
+//! * [`get`] — one row by its id: the export command's lookup
+//!   (BKP-012, T-353). A pure id keying that never scopes by project
+//!   (the export is id-addressed, D-193's list carrying the handle)
+//!   and never guesses at absence — `None` is the caller's typed
+//!   unknown-id refusal.
 //!
 //! # The writer contracts D-122 fixed (T-114's reader is the oracle)
 //!
@@ -496,6 +502,42 @@ pub fn list_for_project(
         .map(|raw| raw.map_err(BackupRecordsError::from))
         .collect::<Result<Vec<_>, BackupRecordsError>>()?;
     rows.into_iter().map(RawBackupRecord::into_record).collect()
+}
+
+/// Reads one `backup_records` row by its id — the export command's
+/// id-addressed lookup (BKP-012, D-193's row form): every column the
+/// record carries, the status decoded through
+/// [`BackupRecordStatus::from_member`]. `None` when no row holds the
+/// id (the caller's boundary fact — the typed `E_VALIDATION` refusal
+/// of an unknown id, never a silent substitute row).
+///
+/// The read joins **the caller's** transaction (D-037, the
+/// `list_for_project` shape — a pure id keying that never validates
+/// anything else: scoping by project is the listing's fact, not the
+/// export's).
+///
+/// # Errors
+///
+/// Returns [`BackupRecordsError::Member`] when the row's `status`
+/// cell is outside its closed vocabulary (D-039's corrupt-cells
+/// policy — surfaced, never guessed around), and
+/// [`BackupRecordsError::Sql`] when the query fails.
+pub fn get(conn: &Connection, id: &str) -> Result<Option<BackupRecord>, BackupRecordsError> {
+    let found = conn.query_row(
+        "SELECT id, project_id, sync_run_id, source_path, backup_path,
+                size_bytes, sha256, status, created_at
+           FROM backup_records
+          WHERE id = ?1",
+        rusqlite::params![id],
+        RawBackupRecord::from_row,
+    );
+    match found {
+        Ok(raw) => raw.into_record().map(Some),
+        // The honest "no row has this id" answer — the caller decides
+        // what absence means (the command's typed refusal).
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(BackupRecordsError::Sql(err)),
+    }
 }
 
 #[cfg(test)]

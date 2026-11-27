@@ -1,4 +1,4 @@
-//! The IPC error contract: [`AppError`] and the MVP error-code registry
+//! The IPC error contract: [`AppError`] and the error-code registry
 //! (spec §7.10, §10; UI-011; NFR-006/NFR-018 via UI-020).
 //!
 //! Every Tauri command returns `Result<T, AppError>` (§7.10), so this
@@ -22,8 +22,8 @@
 //! - `code` — the stable `E_*` string from the §10 table. Serialized as
 //!   the spec literal (`"E_SYNC_RUNNING"`, …) via per-variant serde
 //!   renames; the strings are a wire contract, and the bindings pin in
-//!   `errors_tests.rs` keeps `src/bindings.ts` carrying exactly the MVP
-//!   set.
+//!   `errors_tests.rs` keeps `src/bindings.ts` carrying exactly the
+//!   registry's set.
 //! - `message_key` — the i18n key the UI resolves (NFR-006/NFR-018). A
 //!   `String`, not an enum: one code can reach several messages (the
 //!   `E_VALIDATION` family names the exact failed field), so the key is
@@ -49,15 +49,20 @@
 //!   the two would force the UI to fish diagnostics out of message
 //!   placeholders.
 //!
-//! # Scope: the 20 MVP codes, exactly
+//! # Scope: the §10 codes the MVP registry carries
 //!
-//! The enum carries exactly the twenty MVP codes of the T-013 card /
-//! §10 table. The two P1 codes from that table —
-//! `E_RESTORE_SOURCE_MISSING` and `E_IMPORT_INVALID` — are **excluded**
-//! on purpose: they belong to P1 features (backup restore, library
-//! import) and join the registry with their own tasks. The bindings pin
-//! enforces the boundary in both directions: all twenty MVP literals
-//! present, no twenty-first `E_*` literal.
+//! The enum carries the twenty codes of the T-013 card's registry
+//! plus `E_RESTORE_SOURCE_MISSING`: the §10 table's row for that code
+//! names `backup_save`'s export (BKP-012, a P0 feature landed with
+//! T-353) as its first user — "The backup file behind a `backup_save`
+//! export (BKP-012) or the P1 restore (BKP-007) is missing on disk" —
+//! so the code joined the registry with that command, exactly the way
+//! this module's docs anticipated ("they join the registry with their
+//! own tasks"). The one remaining P1 code of the §10 table —
+//! `E_IMPORT_INVALID`, the library import — stays **excluded** on
+//! purpose: its feature is P1 (D-18) and joins with its own task. The
+//! bindings pin enforces the boundary in both directions: all
+//! twenty-one registry literals present, no other `E_*` literal.
 //!
 //! # What this module does *not* do
 //!
@@ -81,13 +86,16 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-/// The closed registry of MVP error codes — the `Code` column of the
-/// spec §10 table, exactly the twenty codes the T-013 card lists.
+/// The closed registry of error codes — the `Code` column of the spec
+/// §10 table this app's landed features reach: the twenty codes the
+/// T-013 card listed plus `E_RESTORE_SOURCE_MISSING`, whose §10 row
+/// the P0 export `backup_save` (BKP-012, T-353) turned on.
 ///
 /// Each variant serializes to its spec §10 literal; those strings are
 /// the wire and log contract (§7.10, §10) and are pinned in
-/// `src/bindings.ts` by `errors_tests.rs`. The two P1 codes of the §10
-/// table are deliberately absent — see the module docs for the boundary.
+/// `src/bindings.ts` by `errors_tests.rs`. The one remaining P1 code
+/// of the §10 table (`E_IMPORT_INVALID`, library import) is
+/// deliberately absent — see the module docs for the boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub(crate) enum ErrorCode {
     /// A second sync run, or a project edit during a sync.
@@ -147,6 +155,10 @@ pub(crate) enum ErrorCode {
     /// The database was created by a newer app version.
     #[serde(rename = "E_DB_TOO_NEW")]
     DbTooNew,
+    /// The backup file behind a `backup_save` export (BKP-012) or the
+    /// P1 restore (BKP-007) is missing on disk.
+    #[serde(rename = "E_RESTORE_SOURCE_MISSING")]
+    RestoreSourceMissing,
     /// The update check or installation failed.
     #[serde(rename = "E_UPDATE_FAILED")]
     UpdateFailed,
@@ -157,7 +169,7 @@ impl ErrorCode {
     /// form the serde renames produce and the word §10's log line and
     /// UI-011's "why" carry. Single source for logging helpers and
     /// diagnostics: the facade (D-032) reads the literal from
-    /// here instead of re-matching twenty strings or going through
+    /// here instead of re-matching the literal strings or going through
     /// serde. The literal test pins `as_str`, the serde output and the
     /// spec table to one another, so the three cannot drift.
     pub(crate) const fn as_str(self) -> &'static str {
@@ -181,6 +193,7 @@ impl ErrorCode {
             ErrorCode::DbLocked => "E_DB_LOCKED",
             ErrorCode::DbCorrupt => "E_DB_CORRUPT",
             ErrorCode::DbTooNew => "E_DB_TOO_NEW",
+            ErrorCode::RestoreSourceMissing => "E_RESTORE_SOURCE_MISSING",
             ErrorCode::UpdateFailed => "E_UPDATE_FAILED",
         }
     }
@@ -213,6 +226,7 @@ impl ErrorCode {
             ErrorCode::DbLocked => "errors.db_locked",
             ErrorCode::DbCorrupt => "errors.db_corrupt",
             ErrorCode::DbTooNew => "errors.db_too_new",
+            ErrorCode::RestoreSourceMissing => "errors.restore_source_missing",
             ErrorCode::UpdateFailed => "errors.update_failed",
         }
     }
@@ -277,7 +291,7 @@ impl ErrorDetails {
 /// trusts the pairing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub(crate) struct AppError {
-    /// What happened — one of the twenty MVP codes (spec §10), serialized
+    /// What happened — one of the registry's codes (spec §10), serialized
     /// as the code's spec literal.
     pub(crate) code: ErrorCode,
     /// The i18n key the UI resolves (NFR-006/NFR-018). Defaults to
@@ -330,11 +344,12 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    /// All twenty MVP codes with their spec §10 literals — the card's
-    /// list, in table order. This list is the test-side registry: adding
-    /// an enum variant without extending it (and the bindings pin) is a
-    /// conscious, review-visible act.
-    fn all_mvp_codes() -> [(ErrorCode, &'static str); 20] {
+    /// All twenty-one registry codes with their spec §10 literals —
+    /// the T-013 card's list plus `E_RESTORE_SOURCE_MISSING` (BKP-012,
+    /// T-353), in table order. This list is the test-side registry:
+    /// adding an enum variant without extending it (and the bindings
+    /// pin) is a conscious, review-visible act.
+    fn all_mvp_codes() -> [(ErrorCode, &'static str); 21] {
         [
             (ErrorCode::SyncRunning, "E_SYNC_RUNNING"),
             (ErrorCode::NotARepo, "E_NOT_A_REPO"),
@@ -355,17 +370,19 @@ mod tests {
             (ErrorCode::DbLocked, "E_DB_LOCKED"),
             (ErrorCode::DbCorrupt, "E_DB_CORRUPT"),
             (ErrorCode::DbTooNew, "E_DB_TOO_NEW"),
+            (ErrorCode::RestoreSourceMissing, "E_RESTORE_SOURCE_MISSING"),
             (ErrorCode::UpdateFailed, "E_UPDATE_FAILED"),
         ]
     }
 
     #[test]
     fn every_mvp_code_serializes_to_its_spec_literal() {
-        // Arrange & Act & Assert: each of the twenty codes round-trips
-        // through its §10 literal — the wire form the UI and the log
-        // see — and `as_str`, the serde output and the spec literal are
-        // one and the same string. All twenty literals are distinct (a
-        // duplicated rename would silently merge two codes on the wire).
+        // Arrange & Act & Assert: each of the twenty-one codes
+        // round-trips through its §10 literal — the wire form the UI
+        // and the log see — and `as_str`, the serde output and the
+        // spec literal are one and the same string. All literals are
+        // distinct (a duplicated rename would silently merge two codes
+        // on the wire).
         let mut literals = BTreeSet::new();
         for (code, literal) in all_mvp_codes() {
             assert_eq!(
@@ -385,8 +402,8 @@ mod tests {
         }
         assert_eq!(
             literals.len(),
-            20,
-            "the twenty MVP literals must be distinct"
+            21,
+            "the twenty-one registry literals must be distinct"
         );
     }
 
@@ -417,6 +434,7 @@ mod tests {
             ErrorCode::DbLocked => "errors.db_locked",
             ErrorCode::DbCorrupt => "errors.db_corrupt",
             ErrorCode::DbTooNew => "errors.db_too_new",
+            ErrorCode::RestoreSourceMissing => "errors.restore_source_missing",
             ErrorCode::UpdateFailed => "errors.update_failed",
         }
     }
@@ -438,7 +456,11 @@ mod tests {
             assert_eq!(AppError::new(code).message_key, key);
             keys.insert(key);
         }
-        assert_eq!(keys.len(), 20, "the twenty message keys must be distinct");
+        assert_eq!(
+            keys.len(),
+            21,
+            "the registry's twenty-one message keys must be distinct"
+        );
     }
 
     #[test]
