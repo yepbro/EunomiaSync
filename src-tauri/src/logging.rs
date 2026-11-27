@@ -2261,9 +2261,9 @@ pub(crate) fn scan_progress_emit_failed(error: &tauri::Error) {
 }
 
 // ---------------------------------------------------------------------------
-// The variant commands (T-329, §7.10 Library module): the one failure
-// edge per command, the `projects_reorder_failed` shape over the
-// Library target. The reachable answers are the honest `NoDatabase`
+// The variant commands (T-329/T-351, §7.10 Library module): the one
+// failure edge per command, the `projects_reorder_failed` shape over
+// the Library target. The reachable answers are the honest `NoDatabase`
 // fallback (recovery mode), the typed `E_VALIDATION` field refusals
 // (§6.9 rules, the LIB/DB-010/DB-012 outcomes — nothing was written),
 // `E_CONTENT_RESERVED` for a reserved marker line (DB-016), and the
@@ -2274,8 +2274,26 @@ pub(crate) fn scan_progress_emit_failed(error: &tauri::Error) {
 // wrote none), and a *successful* write is the journal's own
 // `variant.*` entry, written inside the operation's transaction
 // (D-051) — never duplicated into the file log (the info+user+ok
-// unmirrored shape).
+// unmirrored shape). The read (`variant_get`) has no journal half at
+// all: its failures log here, its successes are silent.
 // ---------------------------------------------------------------------------
+
+/// The `variant_get` command failed (T-351, §10's every-error rule):
+/// the honest `NoDatabase` fallback, the typed `E_VALIDATION`
+/// unknown-id refusal (nothing was written), or the classified store
+/// error inside the read transaction — a successful read is silent
+/// (a read journals nothing, D-051, so there is no event to mirror).
+pub(crate) fn variant_get_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::library",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "reading a variant failed"
+    );
+}
 
 /// The `variant_create` command failed (T-329, §10's every-error
 /// rule).

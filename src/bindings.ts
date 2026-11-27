@@ -1087,6 +1087,42 @@ export const commands = {
 	 */
 	variantDelete: (id: string, replacement: string | null, options?: InvokeOptions) => __TAURI_INVOKE<VariantRecord_Serialize>("variant_delete", { id, replacement }, options),
 	/**
+	 *  Reads one variant by its row `id` (§7.10 `variant_get`, the
+	 *  contract D-198 fixed, spec-only until this command): answers the
+	 *  STORED row — every §6.2 column the write commands'
+	 *  [`VariantRecord`] carries — plus the derived `is_empty` flag
+	 *  (LIB-014/D-13 through ALG-002's normalize, the same oracle
+	 *  `library_get`'s inline entries carry).
+	 * 
+	 *  The read serves the instruction editor's body (§7.3) and the
+	 *  MAIN-006 tooltip's text half: it takes the identity
+	 *  `library_get`'s inline entries and the other variant commands
+	 *  carry, and answers whatever the row says — an ACTIVE or
+	 *  SOFT-DELETED variant alike, `state` (and `deleted_at`) telling
+	 *  which, so a stale screen re-reading an id that was soft-deleted
+	 *  in another window sees the truth instead of a refusal. An
+	 *  unknown id is the typed `E_VALIDATION` refusal naming `id` (the
+	 *  `exclusion_remove` unknown-id shape — §10 has no not-found code,
+	 *  and the D-037 fallback would misname a stale screen as a
+	 *  database problem).
+	 * 
+	 *  The command never truncates: `content` is the full stored text
+	 *  (DB-006); the tooltip's "first 600 characters, 400 ms delay" is
+	 *  the UI's own clamp over the returned string.
+	 * 
+	 *  A pure read (the `sync_status`/`sync_last_result` shape, D-138):
+	 *  one `Db::run` transaction over the store's by-id reader — no
+	 *  SYS-005 gate (§5.4 scopes it to the project-*changing*
+	 *  commands), no journal (D-051: reads journal nothing), no version,
+	 *  no mirror. Recovery mode (no database) answers the honest
+	 *  [`managed_db`] fallback.
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::variant_get_failed`]); a successful read is silent
+	 *  (nothing happened that the journal would record).
+	 */
+	variantGet: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<VariantGetResult_Serialize>("variant_get", { id }, options),
+	/**
 	 *  Brings a soft-deleted variant back (§7.3 LIB-026/027, the command
 	 *  name fixed by D-009 and §7.10): `state` returns to `active`,
 	 *  `deleted_at` clears, a `restore` version is recorded and a
@@ -4540,6 +4576,129 @@ export type SyncStatus_Serialize = {
 	 *  projects-table row count cannot reach `i32::MAX`).
 	 */
 	dirty_projects: number,
+};
+
+/**
+ *  The `variant_get` answer (§7.10, D-198): the stored row — the
+ *  same nine fields every variant command's [`VariantRecord`]
+ *  carries, mapped by the same one constructor — plus the derived
+ *  `is_empty` flag. The editor's body and the MAIN-006 tooltip read
+ *  this answer; neither field set is forked from the write
+ *  commands' shape, so the two readers of a variant (the inline
+ *  list, the by-id read) cannot disagree about the row.
+ */
+export type VariantGetResult = VariantGetResult_Serialize | VariantGetResult_Deserialize;
+
+/**
+ *  The `variant_get` answer (§7.10, D-198): the stored row — the
+ *  same nine fields every variant command's [`VariantRecord`]
+ *  carries, mapped by the same one constructor — plus the derived
+ *  `is_empty` flag. The editor's body and the MAIN-006 tooltip read
+ *  this answer; neither field set is forked from the write
+ *  commands' shape, so the two readers of a variant (the inline
+ *  list, the by-id read) cannot disagree about the row.
+ */
+export type VariantGetResult_Deserialize = {
+	/**  Row id, UUIDv7 TEXT (DB-002) — the id the caller sent. */
+	id: string,
+	/**  The owning instruction's id. */
+	instruction_id: string,
+	/**
+	 *  The variant name (§6.9, 1–100 characters, unique within the
+	 *  instruction among ACTIVE rows, NOCASE).
+	 */
+	name: string,
+	/**
+	 *  The variant text (DB-006) — the FULL stored text, never
+	 *  truncated: the MAIN-006 tooltip's "first 600 characters" is
+	 *  the UI's own clamp over the returned string, and the editor's
+	 *  body needs the whole text anyway (D-198: one read serves both).
+	 */
+	content: string,
+	/**
+	 *  The main-variant flag (DB-010: exactly one active main per
+	 *  instruction; metadata, not snapshot-visible — D-16).
+	 */
+	is_main: boolean,
+	/**
+	 *  `active` or `deleted` (§6.4's soft delete) — answered AS
+	 *  STORED: a soft-deleted variant is served with `deleted` state
+	 *  and its `deleted_at` set, so a stale screen re-reading a held
+	 *  id sees the truth instead of a refusal (D-198).
+	 */
+	state: string,
+	/**  Creation time, DB-002 UTC ISO-8601. */
+	created_at: string,
+	/**  Last snapshot-visible write of the row. */
+	updated_at: string,
+	/**  When the variant was soft-deleted; `None` while active. */
+	deleted_at?: string | null,
+	/**
+	 *  LIB-014/D-13: this variant is EMPTY in the "outputs no text"
+	 *  sense, decided by the build's own oracle
+	 *  (`normalize::variant_text`, ALG-002) — exactly the derivation
+	 *  `library_get`'s inline entries carry (D-187), so a
+	 *  whitespace-only stored body counts exactly as it counts in a
+	 *  built file. Derived, never stored (the schema has no such
+	 *  column).
+	 */
+	is_empty: boolean,
+};
+
+/**
+ *  The `variant_get` answer (§7.10, D-198): the stored row — the
+ *  same nine fields every variant command's [`VariantRecord`]
+ *  carries, mapped by the same one constructor — plus the derived
+ *  `is_empty` flag. The editor's body and the MAIN-006 tooltip read
+ *  this answer; neither field set is forked from the write
+ *  commands' shape, so the two readers of a variant (the inline
+ *  list, the by-id read) cannot disagree about the row.
+ */
+export type VariantGetResult_Serialize = {
+	/**  Row id, UUIDv7 TEXT (DB-002) — the id the caller sent. */
+	id: string,
+	/**  The owning instruction's id. */
+	instruction_id: string,
+	/**
+	 *  The variant name (§6.9, 1–100 characters, unique within the
+	 *  instruction among ACTIVE rows, NOCASE).
+	 */
+	name: string,
+	/**
+	 *  The variant text (DB-006) — the FULL stored text, never
+	 *  truncated: the MAIN-006 tooltip's "first 600 characters" is
+	 *  the UI's own clamp over the returned string, and the editor's
+	 *  body needs the whole text anyway (D-198: one read serves both).
+	 */
+	content: string,
+	/**
+	 *  The main-variant flag (DB-010: exactly one active main per
+	 *  instruction; metadata, not snapshot-visible — D-16).
+	 */
+	is_main: boolean,
+	/**
+	 *  `active` or `deleted` (§6.4's soft delete) — answered AS
+	 *  STORED: a soft-deleted variant is served with `deleted` state
+	 *  and its `deleted_at` set, so a stale screen re-reading a held
+	 *  id sees the truth instead of a refusal (D-198).
+	 */
+	state: string,
+	/**  Creation time, DB-002 UTC ISO-8601. */
+	created_at: string,
+	/**  Last snapshot-visible write of the row. */
+	updated_at: string,
+	/**  When the variant was soft-deleted; `None` while active. */
+	deleted_at: string | null,
+	/**
+	 *  LIB-014/D-13: this variant is EMPTY in the "outputs no text"
+	 *  sense, decided by the build's own oracle
+	 *  (`normalize::variant_text`, ALG-002) — exactly the derivation
+	 *  `library_get`'s inline entries carry (D-187), so a
+	 *  whitespace-only stored body counts exactly as it counts in a
+	 *  built file. Derived, never stored (the schema has no such
+	 *  column).
+	 */
+	is_empty: boolean,
 };
 
 /**

@@ -75,6 +75,7 @@ export type {
   SyncCloseConfirmationEvent as SyncCloseConfirmationEventWire,
   SyncPhaseWire,
   SyncProgressEvent as SyncProgressEventWire,
+  VariantGetResult_Serialize as VariantGetResultWire,
   VariantRecord_Serialize as VariantRecordWire,
   VariantSource,
 } from '../bindings'

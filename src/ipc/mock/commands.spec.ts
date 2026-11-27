@@ -3800,6 +3800,107 @@ describe('variantRestore', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// `variant_get` (§7.10 Library module, T-351/D-198): the mock twin of the
+// Rust battery — the stored row field by field (active and soft-deleted
+// alike), the derived `is_empty` flag, the unknown-id refusal, and the
+// never-truncated text. Reads journal nothing: the census stays put.
+// ---------------------------------------------------------------------------
+
+describe('variantGet (T-351)', () => {
+  it('answers the stored row field by field, journaling nothing', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    // `copy_main`: a non-main row carrying REAL text — the field set
+    // reads unambiguously (is_main false, is_empty false).
+    const alt = await commands.variantCreate(instruction.id, 'Alt', 'copy_main')
+    const row = liveVariantOf(state, alt.id)
+    if (!row) throw new Error('the created variant must exist')
+    const journalBefore = state.activity.length
+
+    const answer = await commands.variantGet(alt.id)
+
+    // D-198's field-for-field contract, checked against the live row
+    // (the mock store's own truth), every field at once.
+    expect(answer).toEqual({
+      id: row.id,
+      instruction_id: instruction.id,
+      name: row.name,
+      content: row.content,
+      is_main: row.isMain,
+      state: row.state,
+      created_at: row.createdAt,
+      updated_at: row.updatedAt,
+      deleted_at: row.deletedAt,
+      is_empty: false,
+    })
+    expect(answer.content).not.toBe('')
+    expect(state.activity).toHaveLength(journalBefore)
+  })
+
+  it('answers a soft-deleted variant as stored (D-198)', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const alt = await commands.variantCreate(instruction.id, 'Alt', 'empty')
+    await commands.variantDelete(alt.id, null)
+    const row = liveVariantOf(state, alt.id)
+    if (!row) throw new Error('the soft-deleted variant must still exist')
+
+    const answer = await commands.variantGet(alt.id)
+
+    expect(answer.state).toBe('deleted')
+    expect(answer.deleted_at).toBe(row.deletedAt)
+    expect(answer.deleted_at).not.toBeNull()
+    expect(answer.content).toBe(row.content)
+    expect(answer.is_main).toBe(row.isMain)
+    expect(answer.name).toBe(row.name)
+  })
+
+  it('marks empty and whitespace-only text empty, real text not (ALG-002)', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const blank = await commands.variantCreate(instruction.id, 'Blank', 'empty')
+    const padded = await commands.variantCreate(instruction.id, 'Padded', 'empty')
+    await commands.variantUpdate(padded.id, null, ' \n\t ')
+
+    expect((await commands.variantGet(blank.id)).is_empty).toBe(true)
+    expect((await commands.variantGet(padded.id)).is_empty).toBe(true)
+    const main = mainVariantOf(instruction)
+    expect((await commands.variantGet(main.id)).is_empty).toBe(false)
+  })
+
+  it('refuses an unknown id with the typed E_VALIDATION naming id', async () => {
+    const state = mockState()
+    const heading = state.library.find((row) => row.kind === 'heading')
+    if (!heading) throw new Error('the fixture world must hold a heading')
+
+    await expect(commands.variantGet('no-such-variant')).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'id', reason: 'no variant with this id' },
+    })
+    // A heading's id names no variant row either (MAIN-001's
+    // counter-example): the same by-id refusal.
+    await expect(commands.variantGet(heading.id)).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: { field: 'id' },
+    })
+  })
+
+  it('never truncates the full text (DB-006)', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const long = `${'a'.repeat(600)}${'b'.repeat(400)}`
+    const variant = await commands.variantCreate(instruction.id, 'Long', 'empty')
+    await commands.variantUpdate(variant.id, null, long)
+
+    const answer = await commands.variantGet(variant.id)
+
+    expect(answer.content).toBe(long)
+    expect(answer.content).toHaveLength(1000)
+    expect(answer.content.endsWith('b'.repeat(400))).toBe(true)
+  })
+})
+
 describe('assignmentSet (T-331)', () => {
   it('changes one project only, defaults to Main, and journals only real changes', async () => {
     const state = mockState()

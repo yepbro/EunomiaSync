@@ -67,6 +67,7 @@ describe('the mock command surface', () => {
       'syncStatus',
       'variantCreate',
       'variantDelete',
+      'variantGet',
       'variantRestore',
       'variantSetMain',
       'variantUpdate',

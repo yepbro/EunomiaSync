@@ -1,18 +1,32 @@
-//! The five Library-module variant commands (spec §7.10, T-329; the
-//! batch absorbing T-087…T-091): `variant_create`, `variant_update`,
-//! `variant_set_main`, `variant_delete`, `variant_restore` — the
-//! first `src-tauri` consumers of the `eunomia-store` library
-//! repository, the §6.9 library validators, the §9.8 version
-//! recorder and the `variant.*` journal members, in the `scan.rs`
-//! shape of a §7.10 command group living in its own module (D-189).
+//! The Library-module variant commands (spec §7.10): the by-id read
+//! `variant_get` (T-351, D-198) and the five write commands (T-329;
+//! the batch absorbing T-087…T-091) `variant_create`,
+//! `variant_update`, `variant_set_main`, `variant_delete`,
+//! `variant_restore` — the first `src-tauri` consumers of the
+//! `eunomia-store` library repository, the §6.9 library validators,
+//! the §9.8 version recorder and the `variant.*` journal members, in
+//! the `scan.rs` shape of a §7.10 command group living in its own
+//! module (D-189).
 //!
-//! Every command runs ONE `Db::run` transaction (D-037, §6.9's "the
-//! whole operation runs in one transaction"): the store write, the
-//! version row and the journal entry commit or roll back together —
+//! `variant_get` is the family's READ (D-198): one `Db::run`
+//! transaction over the store's by-id reader, answering the stored
+//! row — active or soft-deleted alike, `state` says which — plus the
+//! derived `is_empty` flag (ALG-002's normalize, the same oracle
+//! `library_get`'s inline entries carry). Nothing is written,
+//! journaled or versioned, and the text is never truncated (DB-006:
+//! the MAIN-006 tooltip's "first 600 characters" is the UI's own
+//! clamp over the full returned text).
+//!
+//! Every WRITE command runs ONE `Db::run` transaction (D-037, §6.9's
+//! "the whole operation runs in one transaction"): the store write,
+//! the version row and the journal entry commit or roll back together —
 //! pinned by a staged-trigger test. §6.9 field validation of the
 //! caller's input runs BEFORE the database is even resolved (pure
 //! CPU, no lock, the `scan_commit` gate order), so a refusal names
-//! the field without touching anything.
+//! the field without touching anything. (The read is the exception
+//! on both counts: `variant_get` writes, versions and journals
+//! nothing, and its one refusal — an unknown id — is decided INSIDE
+//! its transaction, where the by-id read runs.)
 //!
 //! **SYS-005 does not apply here** (§5.4's own sentence: "Library
 //! edits during a sync are allowed; they do not go into the current
@@ -115,6 +129,87 @@ impl VariantRecord {
             created_at: variant.created_at,
             updated_at: variant.updated_at,
             deleted_at: variant.deleted_at,
+        }
+    }
+}
+
+/// The `variant_get` answer (§7.10, D-198): the stored row — the
+/// same nine fields every variant command's [`VariantRecord`]
+/// carries, mapped by the same one constructor — plus the derived
+/// `is_empty` flag. The editor's body and the MAIN-006 tooltip read
+/// this answer; neither field set is forked from the write
+/// commands' shape, so the two readers of a variant (the inline
+/// list, the by-id read) cannot disagree about the row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub(crate) struct VariantGetResult {
+    /// Row id, UUIDv7 TEXT (DB-002) — the id the caller sent.
+    pub(crate) id: String,
+    /// The owning instruction's id.
+    pub(crate) instruction_id: String,
+    /// The variant name (§6.9, 1–100 characters, unique within the
+    /// instruction among ACTIVE rows, NOCASE).
+    pub(crate) name: String,
+    /// The variant text (DB-006) — the FULL stored text, never
+    /// truncated: the MAIN-006 tooltip's "first 600 characters" is
+    /// the UI's own clamp over the returned string, and the editor's
+    /// body needs the whole text anyway (D-198: one read serves both).
+    pub(crate) content: String,
+    /// The main-variant flag (DB-010: exactly one active main per
+    /// instruction; metadata, not snapshot-visible — D-16).
+    pub(crate) is_main: bool,
+    /// `active` or `deleted` (§6.4's soft delete) — answered AS
+    /// STORED: a soft-deleted variant is served with `deleted` state
+    /// and its `deleted_at` set, so a stale screen re-reading a held
+    /// id sees the truth instead of a refusal (D-198).
+    pub(crate) state: String,
+    /// Creation time, DB-002 UTC ISO-8601.
+    pub(crate) created_at: String,
+    /// Last snapshot-visible write of the row.
+    pub(crate) updated_at: String,
+    /// When the variant was soft-deleted; `None` while active.
+    pub(crate) deleted_at: Option<String>,
+    /// LIB-014/D-13: this variant is EMPTY in the "outputs no text"
+    /// sense, decided by the build's own oracle
+    /// (`normalize::variant_text`, ALG-002) — exactly the derivation
+    /// `library_get`'s inline entries carry (D-187), so a
+    /// whitespace-only stored body counts exactly as it counts in a
+    /// built file. Derived, never stored (the schema has no such
+    /// column).
+    pub(crate) is_empty: bool,
+}
+
+impl VariantGetResult {
+    /// Shapes a stored variant row into the by-id answer: the
+    /// [`VariantRecord`] mapping (one source for the nine stored
+    /// fields, destructured here rather than re-typed) plus the
+    /// derived emptiness.
+    fn from_store(variant: Variant) -> Self {
+        // The derivation is the `library_get` inline flag's own call
+        // (commands.rs, D-187): ALG-002's normalize decides, so the
+        // two readers of a variant never disagree about "empty".
+        let is_empty = eunomia_core::normalize::variant_text(&variant.content).is_empty();
+        let VariantRecord {
+            id,
+            instruction_id,
+            name,
+            content,
+            is_main,
+            state,
+            created_at,
+            updated_at,
+            deleted_at,
+        } = VariantRecord::from_store(variant);
+        VariantGetResult {
+            id,
+            instruction_id,
+            name,
+            content,
+            is_main,
+            state,
+            created_at,
+            updated_at,
+            deleted_at,
+            is_empty,
         }
     }
 }
@@ -415,6 +510,83 @@ fn journal_variant(
     insert(transaction, &entry).map_err(activity_log_to_app_error)?;
     mirror.record(&entry);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `variant_get` (T-351, §7.10 Library module, §7.3 LIB-002/014,
+// MAIN-006, DB-006; the contract D-198 fixed)
+// ---------------------------------------------------------------------------
+
+/// Reads one variant by its row `id` (§7.10 `variant_get`, the
+/// contract D-198 fixed, spec-only until this command): answers the
+/// STORED row — every §6.2 column the write commands'
+/// [`VariantRecord`] carries — plus the derived `is_empty` flag
+/// (LIB-014/D-13 through ALG-002's normalize, the same oracle
+/// `library_get`'s inline entries carry).
+///
+/// The read serves the instruction editor's body (§7.3) and the
+/// MAIN-006 tooltip's text half: it takes the identity
+/// `library_get`'s inline entries and the other variant commands
+/// carry, and answers whatever the row says — an ACTIVE or
+/// SOFT-DELETED variant alike, `state` (and `deleted_at`) telling
+/// which, so a stale screen re-reading an id that was soft-deleted
+/// in another window sees the truth instead of a refusal. An
+/// unknown id is the typed `E_VALIDATION` refusal naming `id` (the
+/// `exclusion_remove` unknown-id shape — §10 has no not-found code,
+/// and the D-037 fallback would misname a stale screen as a
+/// database problem).
+///
+/// The command never truncates: `content` is the full stored text
+/// (DB-006); the tooltip's "first 600 characters, 400 ms delay" is
+/// the UI's own clamp over the returned string.
+///
+/// A pure read (the `sync_status`/`sync_last_result` shape, D-138):
+/// one `Db::run` transaction over the store's by-id reader — no
+/// SYS-005 gate (§5.4 scopes it to the project-*changing*
+/// commands), no journal (D-051: reads journal nothing), no version,
+/// no mirror. Recovery mode (no database) answers the honest
+/// [`managed_db`] fallback.
+///
+/// Failures reach the log with their §10 code
+/// ([`logging::variant_get_failed`]); a successful read is silent
+/// (nothing happened that the journal would record).
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn variant_get<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<VariantGetResult, AppError> {
+    variant_get_impl(app, id)
+        .await
+        .inspect_err(crate::logging::variant_get_failed)
+}
+
+/// The body of [`variant_get`], split the family way so the one
+/// logging edge covers every failure path: the missing database and
+/// the by-id read.
+///
+/// Complexity over untrusted input: the id is one indexed lookup;
+/// the answer copies the row the store read (linear in the row's own
+/// text, DB-006's bound).
+async fn variant_get_impl<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<VariantGetResult, AppError> {
+    let database = managed_db(&app)?;
+    database
+        .run(move |transaction| {
+            // The store's by-id reader serves active and soft-deleted
+            // rows alike (its own "Restore variant" surface's read):
+            // the answer carries the state, the caller reads it.
+            let variant = get_variant(transaction, &id)
+                .map_err(library_store_to_app_error)?
+                // The typed refusal of the `exclusion_remove`
+                // unknown-id shape (D-198): caller input that names
+                // no row — nothing was written.
+                .ok_or_else(|| rejected_field("id", &id, "no variant with this id"))?;
+            Ok(VariantGetResult::from_store(variant))
+        })
+        .await
 }
 
 // ---------------------------------------------------------------------------

@@ -111,7 +111,7 @@ src-tauri/
   src/sync_phase3.rs       # Sync phase 3: the §9.5 atomic writes (working)
   src/sync_phase4.rs       # Sync phase 4 finish: stamps, retention, verdict, the §7.7 journal with §10's field list (working)
   src/sync_running.rs      # The global sync_running flag (SYS-004) (working)
-  src/variants.rs          # variant_* commands: the Library save surface (working)
+  src/variants.rs          # variant_* commands: the Library save surface and its by-id read (working)
   src/headings.rs          # heading lifecycle + items_move: Library structure (working)
   src/lib.rs               # App builder, specta registration   (working)
 src/                      # Frontend
@@ -190,7 +190,7 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is forty-eight commands — the §7.10 names that
+   The registered set is forty-nine commands — the §7.10 names that
    are implemented so far, matching the `mode.spec` surface list. It comprises the
    recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
@@ -416,6 +416,18 @@ Rust commands are registered through `tauri-specta`:
    the main's current text or starts empty (LIB-017…022); §5.4
    allows library edits during a sync, so none of the five takes the
    SYS-005 gate the project-changing commands do — and the Library
+   module's `variant_get` (T-351, `src-tauri/src/variants.rs`,
+   DECISIONS.md D-198): the family's by-id read, the instruction
+   editor's body and the MAIN-006 tooltip's text source — one
+   `Db::run` transaction over the store's by-id reader answers the
+   stored row (active or soft-deleted alike, `state` and
+   `deleted_at` saying which, so a stale screen re-reading a held id
+   sees the truth) plus the derived `is_empty` flag (ALG-002's
+   normalize, the same oracle `library_get`'s inline entries carry);
+   the full text is served whole (DB-006 — the tooltip's
+   600-character clamp is the UI's own), an unknown id is the typed
+   `E_VALIDATION` refusal naming `id`, and the read journals nothing
+   (D-051) and takes no SYS-005 gate — and the Library
    structure commands `heading_create`/`heading_update`/
    `heading_delete`/`items_move` (T-330, the batch absorbing
    T-092…T-095, `src-tauri/src/headings.rs`): validated heading

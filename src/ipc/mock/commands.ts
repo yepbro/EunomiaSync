@@ -441,7 +441,7 @@ function variantInstructionOf(
 }
 
 /** The variant row with its owning instruction (the by-id lookup the
- * four id-addressed twins share), or null when no instruction holds a
+ * five id-addressed commands share), or null when no instruction holds a
  * variant with this id. */
 function findVariantRow(
   state: MockState,
@@ -3034,14 +3034,43 @@ export const mockCommands: IpcCommands = {
   },
 
   // -------------------------------------------------------------------------
-  // The five variant commands (§7.10 Library module, T-329): mock twins of
+  // The variant commands (§7.10 Library module): the five T-329 writes
+  // and T-351's by-id read — mock twins of
   // the Rust commands over the wired library rows (D-189 reading 8) — the
   // same contracts (NOCASE uniqueness, the exactly-one-main invariant, the
-  // delete/restore flow, the E_* envelopes) over the in-memory store.
+  // delete/restore flow, the E_* envelopes, the by-id read's as-stored
+  // answer and unknown-id refusal) over the in-memory store.
   // Real changes also append history rows for T-331's `revisions_list` /
   // `revision_get`; the no-op detection compares the stored outcome, the
-  // ALG-070 hash gate's mock twin.
+  // ALG-070 hash gate's mock twin. The read journals nothing (D-051).
   // -------------------------------------------------------------------------
+
+  /**
+   * `variant_get` (§7.10, T-351/D-198): the by-id read — the stored
+   * row (active or soft-deleted alike, `state` says which, so a
+   * stale screen re-reading a held id sees the truth) plus the
+   * derived `is_empty` flag, the same `outputsNoText` oracle
+   * `libraryGet`'s inline entries carry (ALG-002's mock twin). The
+   * full text, never truncated (DB-006 — the tooltip's 600-character
+   * clamp is the UI's own); an unknown id is the `E_VALIDATION`
+   * refusal naming `id` (the `exclusion_remove` shape).
+   */
+  async variantGet(id) {
+    const state = mockState()
+    const found = findVariantRow(state, id)
+    if (!found) {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'id',
+        value: id,
+        reason: 'no variant with this id',
+      })
+    }
+    const { instruction, variant } = found
+    return {
+      ...toVariantRecord(instruction, variant),
+      is_empty: outputsNoText(variant.content),
+    }
+  },
 
   /**
    * `variant_create` (§7.10, T-087): the two content sources (a copy of

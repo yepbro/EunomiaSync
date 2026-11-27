@@ -213,8 +213,10 @@ pub(crate) mod file_watch;
 // rule D-100 reserved, fixed in D-179).
 pub(crate) mod scan;
 
-// The five Library-module variant commands (spec §7.10, T-329; the
-// batch absorbing T-087…T-091, D-189): `variant_create`,
+// The Library-module variant commands (spec §7.10): the by-id read
+// `variant_get` (T-351, D-198 — the stored row plus the derived
+// `is_empty`, journals nothing) and the five write commands (T-329;
+// the batch absorbing T-087…T-091, D-189): `variant_create`,
 // `variant_update`, `variant_set_main`, `variant_delete`,
 // `variant_restore` — the command layer over the `eunomia-store`
 // library repository, the §6.9 library validators, the §9.8 version
@@ -340,7 +342,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // `library_get` (T-083, D-187), its instruction
         // lifecycle `instruction_create`/`instruction_update`/
         // `instruction_hide`/`instruction_restore` (T-328) and its
-        // variant commands `variant_create`/`variant_update`/
+        // variant commands — the by-id read `variant_get` (T-351,
+        // D-198) and the writes `variant_create`/`variant_update`/
         // `variant_set_main`/`variant_delete`/`variant_restore`
         // (T-329, the batch absorbing T-087…T-091, D-189), the
         // Library-structure commands `heading_create`/
@@ -408,6 +411,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             sync_reads::sync_status::<tauri::Wry>,
             variants::variant_create::<tauri::Wry>,
             variants::variant_delete::<tauri::Wry>,
+            variants::variant_get::<tauri::Wry>,
             variants::variant_restore::<tauri::Wry>,
             variants::variant_set_main::<tauri::Wry>,
             variants::variant_update::<tauri::Wry>,

@@ -30489,3 +30489,120 @@ the SHA matched against HEAD), and confirmed the round-1 P3-1
 rename landed (`bare_root`/`_empty_nested`). No findings; no fix
 was needed. The mock-divergence follow-up stays the main session's
 board card (both rounds reported it).
+
+### D-232 — T-351: the `variant_get` command — the stored row plus the derived emptiness, one store reader, no journal — 2026-11-27
+
+Problem: the T-348 card landed `variant_get`'s CONTRACT (D-198,
+spec §7.10's command notes) with no implementation — the instruction
+editor's body (§7.3) and the MAIN-006 tooltip's text half still had
+no §7.10 source (D-187's `library_get` deliberately serves no
+variant content). This card lands the command per that contract.
+
+Readings chosen (the contract D-198 fixed governs; the two this
+card's brief left open, recorded before the code):
+
+- **The read path rides the store's existing by-id reader — no new
+  store fn, no app-layer SQL.** `eunomia_store::library::get_variant`
+  (library.rs, "Reads one variant by id — active or soft-deleted")
+  is exactly the read the contract names, so the command is one
+  `Db::run` transaction over it — the `library_get` read shape
+  (D-187), NOT `run_with_mirror` (a read journals nothing, D-051,
+  so there is no mirror entry to buffer — the brief's journaling
+  note stays moot: no journaling site was touched). The T-131/D-230
+  raw-SQL-in-the-app-layer precedent applied to SWEEPS with no
+  repository shape; a by-id variant read has one.
+- **The answer is one DTO, not a wrapped record.**
+  `VariantGetResult` repeats the nine `VariantRecord` fields
+  flatly plus `is_empty`, and its `from_store` builds through
+  `VariantRecord::from_store` (destructured, then re-assembled with
+  the derived flag) so the field mapping has ONE source — the
+  write commands' answer and the by-id read cannot drift apart
+  (the same reasoning D-198 applied to the is_empty oracle). The
+  derivation itself is the exact `library_get` inline call,
+  `eunomia_core::normalize::variant_text(&content).is_empty()`
+  (ALG-002; commands.rs, D-187's round-1 correction) — no fork.
+
+The rest of the surface is D-198 verbatim: the unknown id is
+`rejected_field("id", &id, "no variant with this id")` (the
+`exclusion_remove` shape — the same arm `LibraryError::NotFound`
+maps to, so the family's refusal stays one shape); a soft-deleted
+row is answered as stored (`state`/`deleted_at` say which); the
+text is served whole (DB-006 — the tooltip's 600-character clamp
+is the UI's own, the full-text test uses a 262,144-character cell);
+no SYS-005 (§5.4's library-edits sentence; the read is added to
+the `library_edits_are_allowed_while_a_sync_runs` pin), no version,
+no journal.
+
+Landing: `src-tauri/src/variants.rs` (the command, the DTO, the
+impl split the family way), `logging::variant_get_failed` (the
+one edge; a successful read is silent — nothing journaled, D-051),
+`lib.rs` registration (sorted, after `variant_delete` — the
+registered set forty-nine, ARCHITECTURE.md and `mode.spec`'s
+shipped-set pin both updated), `src/bindings.ts` regenerated
+through the export pin test, the mock layer
+(`src/ipc/mock/commands.ts`'s `variantGet` over `findVariantRow` +
+`toVariantRecord` + the `outputsNoText` twin, `mode.spec`'s list,
+`contract.ts`'s `VariantGetResultWire` re-export), the Rust battery
+in `variants_tests.rs` (five new tests: the field-by-field answer
+against the store's own read, the soft-deleted as stored, the
+emptiness both ways, the unknown-id refusal with a heading id as
+the second arm, the no-truncation full text; the no-database,
+SYS-005 and registration pins extended to six), and the mock
+battery in `commands.spec.ts` (the same five contracts, plus the
+journal census pin).
+
+Checks: `cargo test --no-run -p eunomia-sync`, `cargo nextest run
+--no-fail-fast --test-threads=4` (941/941), `cargo test --doc
+--workspace` (98), `cargo clippy --workspace --all-targets
+-D warnings`, `cargo fmt --all -- --check`, `cargo deny check`,
+`pnpm typecheck`, `pnpm test` (437/437), `pnpm format:check`,
+`pnpm lint` — all exit 0.
+
+Mutation battery (rule 4; each mutant restored byte-for-byte,
+md5-verified against the pristine copies): M1 the naive
+`content.is_empty()` twin for the flag (the whitespace-only test
+red); M2 the flag forced true (the field-by-field, full-text and
+whitespace tests' real-text counterweights red); M3 the refusal's
+field mislabeled `variant_id` (the unknown-id test red); M4 a
+server-side 600-character clamp on the content (the no-truncation
+test red); M5 the soft-deleted row pretended active in the answer
+(the as-stored test red); M6 the `lib.rs` registration dropped (the
+registration pin red). Mock twins: FM1 the naive emptiness twin
+(red), FM2 the refusal's field mislabeled (red), FM3 the
+pretend-active answer (red).
+
+Round-1 review addendum (same task; report
+`.opencode/reviews/t351-round1-report.md`, deepseek-v4.1-flash):
+APPROVE WITH NITS — 0×P0, 0×P1, 0×P2, 3×P3, the test audit its own
+PASS (the reviewer re-ran the 941-test backend suite, the 437-test
+frontend suite, typecheck/lint/format and the export pin — all
+green, tree clean). All three P3s taken (rule 11, doc precision):
+P3-1 the module docs' "Every command runs ONE `Db::run` transaction
+… §6.9 field validation runs BEFORE the database is even resolved"
+was false for the read — now scoped to every WRITE command with the
+read's exception named (its one refusal is decided INSIDE its
+transaction, where the by-id read runs); P3-2/P3-3 the mock's
+`findVariantRow` doc still said "the four id-addressed twins" (the
+read is the fifth) and the section banner said "the five variant
+commands (T-329)" while holding six — both now name the read. The
+audit's two imprecision notes (not findings) also taken: the M2
+wording above now names the real-text counterweight it reddens, and
+the field-by-field test's oracle comment now names the seed's
+returned row (the store's own `create_variant` read-back) plus the
+`stored_variant` byte-identity check, not `stored_variant` alone.
+
+Round-2 review (same task; report
+`.opencode/reviews/t351-round2-report.md`, hy4-flash-free — the next
+different model per the chain): **APPROVE — 0×P0, 0×P1, 0×P2, 0×P3.**
+The reviewer independently verified all five round-1 dispositions as
+genuinely landed (the three P3 doc fixes and the two audit-note
+wording fixes, each grep-checked at its file:line), re-checked every
+special-attention area (the is_empty reuse byte-compared against
+`commands.rs`'s inline call and the mock's shared `outputsNoText`,
+the read-path honesty, SEC-008, the 49-count agreement across
+lib.rs/mode.spec/ARCHITECTURE/bindings, the frozen parallel-task
+files untouched), and the mandatory test audit PASSED again — the
+oracles independent, every D-232 mutant mapped to a present assertion,
+no evasion, and the whitespace-only legality of `" \n\t "` verified
+against `validate_variant_text`'s own source. No findings, so no
+second amend; the review phase is complete after this round.

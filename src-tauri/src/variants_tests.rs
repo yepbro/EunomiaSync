@@ -1,5 +1,6 @@
-//! Mock-runtime tests of the five variant commands (T-329, §7.10
-//! Library module; the batch absorbing T-087…T-091) — the
+//! Mock-runtime tests of the variant commands (§7.10 Library module):
+//! the by-id read `variant_get` (T-351, D-198) and the five write
+//! commands (T-329; the batch absorbing T-087…T-091) — the
 //! `scan_tests.rs` harness shape: a real `Db` over a temp root, the
 //! commands registered over the mock runtime, driven through the real
 //! IPC envelope, with every "nothing was written" claim read back
@@ -7,6 +8,12 @@
 //!
 //! The absorbed cards' definitions of done lead, one battery each:
 //!
+//! - **T-351 `variant_get`** — the stored row answered field by
+//!   field (active and soft-deleted alike, `state` saying which),
+//!   the derived `is_empty` on empty and whitespace-only text
+//!   (ALG-002's normalize, the `library_get` inline flag's own
+//!   oracle), the typed unknown-id refusal, and the full text never
+//!   truncated (DB-006).
 //! - **T-087 `variant_create`** — both creation modes (a copy of the
 //!   main one, and empty) plus the duplicate-name refusal.
 //! - **T-088 `variant_update`** — every save rule (the CRLF→LF fold,
@@ -40,14 +47,14 @@ use eunomia_store::projects::{AddedVia, NewProject};
 use eunomia_store::settings::{BaseName, ExtraFile, Position, Scheme};
 use tauri::Manager;
 
-use crate::variants::VariantRecord;
+use crate::variants::{VariantGetResult, VariantRecord};
 
 // ---------------------------------------------------------------------------
 // The harness
 // ---------------------------------------------------------------------------
 
 /// A mock app in the healthy state the variant commands serve: the
-/// five commands registered over the mock runtime and a fresh
+/// six commands registered over the mock runtime and a fresh
 /// database in a temp root. No `SyncRunning` state is managed — these
 /// are library commands and §5.4's SYS-005 scope never gates them
 /// (pinned by `library_edits_are_allowed_while_a_sync_runs`).
@@ -61,6 +68,7 @@ fn variants_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
         .invoke_handler(tauri::generate_handler![
             crate::variants::variant_create,
             crate::variants::variant_delete,
+            crate::variants::variant_get,
             crate::variants::variant_restore,
             crate::variants::variant_set_main,
             crate::variants::variant_update
@@ -116,6 +124,15 @@ fn invoke<T: serde::de::DeserializeOwned>(
             .expect("the success payload must deserialize into the DTO")),
         Err(error) => Err(error),
     }
+}
+
+/// Invokes `variant_get` with the variant's row id (D-198: one
+/// parameter).
+fn invoke_variant_get(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    id: &str,
+) -> Result<VariantGetResult, serde_json::Value> {
+    invoke(webview, "variant_get", serde_json::json!({ "id": id }))
 }
 
 /// Invokes `variant_create` with the given source spelling.
@@ -508,6 +525,223 @@ fn active_main_count(database: &crate::db::Db, instruction_id: &str) -> i64 {
         .map_err(crate::db::sqlite_error_to_app_error)
     }))
     .expect("counting the active mains must work")
+}
+
+// ---------------------------------------------------------------------------
+// T-351 `variant_get` (D-198): the stored row, field by field, plus
+// the derived emptiness — never a refusal for a soft-deleted row,
+// never a truncation of the text
+// ---------------------------------------------------------------------------
+
+#[test]
+fn variant_get_answers_the_active_row_field_by_field() {
+    // THE card criterion: "the answer's shape field-by-field". The
+    // oracle is the STORE's own row — the seed's returned `Variant`
+    // (what `create_variant` read back after the insert) plus a
+    // `stored_variant` byte-identity check at the end — never the
+    // command's own mapping: every field must ride the answer
+    // exactly as stored (D-198: "answers the stored row"). Both
+    // flag shapes are read — a main and a non-main variant — and
+    // the read writes nothing: the journal census stays empty
+    // (D-051: reads journal nothing).
+    let (_temp, app) = variants_app();
+    let (instruction, main) = seed_instruction(&database_of(&app), 1);
+    let second = seed_variant(&database_of(&app), &instruction.id, "Second", "second text");
+    let webview = main_webview(&app);
+
+    let answer = invoke_variant_get(&webview, &second.id)
+        .expect("the by-id read of an active variant must succeed");
+    assert_eq!(answer.id, second.id);
+    assert_eq!(answer.instruction_id, instruction.id);
+    assert_eq!(answer.name, "Second");
+    assert_eq!(answer.content, "second text");
+    assert!(!answer.is_main, "the second variant is not the main");
+    assert_eq!(answer.state, "active");
+    assert_eq!(
+        answer.created_at, second.created_at,
+        "creation time as stored"
+    );
+    assert_eq!(answer.updated_at, second.updated_at, "last write as stored");
+    assert_eq!(answer.deleted_at, None, "`deleted_at` is null while active");
+    assert!(!answer.is_empty, "a real text outputs text (LIB-014)");
+
+    // The main variant's own read: the same field set, the flag set.
+    let main_answer =
+        invoke_variant_get(&webview, &main.id).expect("the main's read must succeed too");
+    assert_eq!(main_answer.id, main.id);
+    assert!(main_answer.is_main, "DB-010's flag rides the row");
+    assert_eq!(main_answer.content, main.content);
+
+    // The read is pure: nothing journaled (D-051), and the store row
+    // is byte-identical to the seed's own read.
+    assert!(
+        journal_of(&database_of(&app)).is_empty(),
+        "a read journals nothing (D-051)"
+    );
+    assert_eq!(
+        stored_variant(&database_of(&app), &second.id),
+        Some(second.clone()),
+        "the read wrote nothing back"
+    );
+}
+
+#[test]
+fn variant_get_answers_a_soft_deleted_variant_as_stored() {
+    // D-198: "An active or soft-deleted variant is answered as
+    // stored — `state` says which (a stale screen re-reading a held
+    // id sees the truth)". The delete happens through the REAL
+    // command (the world a second window leaves behind), then the
+    // read must answer the stored truth: `deleted` state, the
+    // `deleted_at` the delete wrote, the content unchanged — never a
+    // refusal, never a pretense that the row is still active.
+    let (_temp, app) = variants_app();
+    let (instruction, _) = seed_instruction(&database_of(&app), 1);
+    let second = seed_variant(&database_of(&app), &instruction.id, "Second", "second text");
+    let webview = main_webview(&app);
+    invoke_variant_delete(&webview, &second.id, None)
+        .expect("the delete moves to the main by default (LIB-023)");
+
+    let answer = invoke_variant_get(&webview, &second.id)
+        .expect("a soft-deleted variant is READ, not refused (D-198)");
+    let stored = stored_variant(&database_of(&app), &second.id)
+        .expect("the soft-deleted row still exists (§6.4)");
+    assert_eq!(answer.state, "deleted", "`state` says which (D-198)");
+    assert_eq!(
+        answer.deleted_at, stored.deleted_at,
+        "the delete's `deleted_at` rides the answer as stored"
+    );
+    assert!(
+        answer.deleted_at.is_some(),
+        "`deleted_at` is set while soft-deleted"
+    );
+    assert_eq!(
+        answer.content, "second text",
+        "the text is answered as stored"
+    );
+    assert!(!answer.is_main, "the delete cleared the flag — as stored");
+    assert_eq!(
+        answer.updated_at, stored.updated_at,
+        "the delete restamped the row — as stored"
+    );
+    // Every remaining field still matches the row.
+    assert_eq!(answer.id, stored.id);
+    assert_eq!(answer.instruction_id, stored.instruction_id);
+    assert_eq!(answer.name, stored.name);
+    assert_eq!(answer.created_at, stored.created_at);
+}
+
+#[test]
+fn variant_get_marks_empty_and_whitespace_only_text_empty() {
+    // LIB-014/D-13 through the build's own oracle: "empty" is
+    // "outputs no text", so ALG-002's normalize decides — a
+    // whitespace-only body counts exactly as it counts in a built
+    // file (`library_get`'s inline flag's derivation, D-187/D-198).
+    // The empty text arrives through the REAL create (the editor's
+    // "empty" affordance); the whitespace-only body through the REAL
+    // save (§6.9 allows it: only NUL, markers and the length bound
+    // are refused).
+    let (_temp, app) = variants_app();
+    let (instruction, main) = seed_instruction(&database_of(&app), 1);
+    let webview = main_webview(&app);
+
+    let created = invoke_variant_create(&webview, &instruction.id, "Empty", "empty")
+        .expect("the empty-mode create must succeed (LIB-017…022)");
+    invoke_variant_update(&webview, &created.id, None, Some(" \n\t "))
+        .expect("a whitespace-only save is legal §6.9 text");
+
+    let whitespace =
+        invoke_variant_get(&webview, &created.id).expect("the whitespace-only variant reads back");
+    assert_eq!(
+        whitespace.content, " \n\t ",
+        "the stored text is served as stored"
+    );
+    assert!(
+        whitespace.is_empty,
+        "whitespace-only text outputs no text after ALG-002's normalize (D-13)"
+    );
+
+    // The freshly created empty variant: empty before any save.
+    let empty = invoke_variant_create(&webview, &instruction.id, "Blank", "empty")
+        .expect("the second empty-mode create must succeed");
+    assert!(
+        invoke_variant_get(&webview, &empty.id)
+            .expect("the empty variant reads back")
+            .is_empty,
+        "the empty text outputs no text (D-13)"
+    );
+
+    // The real-text counterweight: the seeded main outputs text.
+    assert!(
+        !invoke_variant_get(&webview, &main.id)
+            .expect("the main reads back")
+            .is_empty,
+        "a variant with text is not empty (LIB-014)"
+    );
+}
+
+#[test]
+fn variant_get_refuses_an_unknown_id() {
+    // D-198: "an unknown id is the typed `E_VALIDATION` refusal
+    // naming `id`" — the `exclusion_remove` unknown-id shape (§10 has
+    // no not-found code). Both arms: an id nothing holds, and an id
+    // that names a row of ANOTHER table (a heading — the store's
+    // by-id variant read finds no row either way).
+    let (_temp, app) = variants_app();
+    let (_, _) = seed_instruction(&database_of(&app), 1);
+    let heading = seed_heading(&database_of(&app));
+    let webview = main_webview(&app);
+
+    let error = invoke_variant_get(&webview, "no-such-variant")
+        .expect_err("an unknown variant id must be refused");
+    assert_eq!(error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(error["params"]["field"], serde_json::json!("id"));
+    assert_eq!(
+        error["params"]["reason"],
+        serde_json::json!("no variant with this id")
+    );
+    assert_eq!(
+        error["params"]["value"],
+        serde_json::json!("no-such-variant"),
+        "the refusal names the id the caller sent"
+    );
+
+    let heading_error =
+        invoke_variant_get(&webview, &heading.id).expect_err("a heading's id names no variant row");
+    assert_eq!(heading_error["code"], serde_json::json!("E_VALIDATION"));
+    assert_eq!(heading_error["params"]["field"], serde_json::json!("id"));
+}
+
+#[test]
+fn variant_get_never_truncates_the_full_text() {
+    // D-198: "The command never truncates" — `content` is the full
+    // stored text (DB-006's 262,144-character bound; the MAIN-006
+    // tooltip's "first 600 characters" is the UI's own clamp). The
+    // stored cell is the schema's own maximum, with a distinct tail:
+    // the answer must carry the whole text — the length, the head
+    // AND the past-the-clamp tail.
+    let (_temp, app) = variants_app();
+    let (instruction, _) = seed_instruction(&database_of(&app), 1);
+    let long = format!("{}{}", "a".repeat(600), "b".repeat(262_144 - 600));
+    let variant = seed_variant(&database_of(&app), &instruction.id, "Long", &long);
+    let webview = main_webview(&app);
+
+    let answer = invoke_variant_get(&webview, &variant.id)
+        .expect("the by-id read of the long variant must succeed");
+    assert_eq!(
+        answer.content.len(),
+        262_144,
+        "the whole DB-006-bounded text is served, no truncation"
+    );
+    assert!(
+        answer.content.starts_with(&"a".repeat(600)),
+        "the head is intact"
+    );
+    assert!(
+        answer.content.ends_with(&"b".repeat(262_144 - 600)),
+        "the tail beyond the tooltip's 600-character clamp is intact"
+    );
+    assert_eq!(answer.content, long, "byte-identical to the stored cell");
+    assert!(!answer.is_empty, "the long text outputs text");
 }
 
 // ---------------------------------------------------------------------------
@@ -1771,6 +2005,11 @@ fn library_edits_are_allowed_while_a_sync_runs() {
     let promoted = invoke_variant_set_main(&webview, &second.id)
         .expect("the promotion is allowed while the sync runs");
     assert!(promoted.is_main);
+    // The read has no gate either (D-138's read-command shape): a
+    // library read during a sync is just a read.
+    let read = invoke_variant_get(&webview, &main.id)
+        .expect("the by-id read is allowed while the sync runs");
+    assert_eq!(read.content, "sync-time text");
     // `second` is main now (promoted above), so its delete names the
     // successor — the card's "deleting the main requires a new main".
     let deleted = invoke_variant_delete(&webview, &second.id, Some(&main.id))
@@ -1795,6 +2034,7 @@ fn the_variant_commands_answer_honestly_without_a_database() {
         .invoke_handler(tauri::generate_handler![
             crate::variants::variant_create,
             crate::variants::variant_delete,
+            crate::variants::variant_get,
             crate::variants::variant_restore,
             crate::variants::variant_set_main,
             crate::variants::variant_update
@@ -1813,6 +2053,7 @@ fn the_variant_commands_answer_honestly_without_a_database() {
         serde_json::json!({ "id": "any" }),
         serde_json::json!({ "id": "any", "replacement": null }),
         serde_json::json!({ "id": "any" }),
+        serde_json::json!({ "id": "any" }),
     ];
     let commands = [
         "variant_create",
@@ -1820,6 +2061,7 @@ fn the_variant_commands_answer_honestly_without_a_database() {
         "variant_set_main",
         "variant_delete",
         "variant_restore",
+        "variant_get",
     ];
     for (command, body) in commands.iter().zip(bodies) {
         let error: Result<VariantRecord, serde_json::Value> = invoke(&webview, command, body);
@@ -1840,7 +2082,7 @@ fn the_variant_commands_answer_honestly_without_a_database() {
 }
 
 #[test]
-fn the_five_variant_commands_are_registered_with_the_specta_builder() {
+fn the_variant_commands_are_registered_with_the_specta_builder() {
     // The §7.10 Library-module names, each registered exactly once —
     // the D-034 wiring-pin rationale: without this, a dropped
     // registration would silently rewrite the committed bindings
@@ -1852,6 +2094,7 @@ fn the_five_variant_commands_are_registered_with_the_specta_builder() {
         "variants::variant_set_main",
         "variants::variant_delete",
         "variants::variant_restore",
+        "variants::variant_get",
     ] {
         assert_eq!(
             lib.matches(name).count(),
