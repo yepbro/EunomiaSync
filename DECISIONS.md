@@ -31029,3 +31029,79 @@ D-234's own Tests paragraph still described the PRE-fix
 "pins an empty journal" wording — is TAKEN: the sentence now states
 the count-based pin. No code change; the review phase ends here
 (two rounds, no third).
+
+### D-235 — CI 46046771869 (macOS legs): the second `generate_context` expansion, the documented `test = true` flag, and the one-expansion pin — 2026-11-27
+
+Problem: the push of main up to 7199498 failed BOTH macOS legs
+(arm64 and intel) at compile time with `error: symbol
+`_EMBED_INFO_PLIST` is already defined` in the `eunomia-sync` lib
+test target. T-133 (64a8511, D-229) had added
+`updater_tests::the_updater_initializes_from_the_real_config`,
+whose mock-runtime app expands `tauri::generate_context!()` a
+SECOND time beside `run()`'s (lib.rs) — and the lib test target
+compiles both: unit tests compile the whole crate (`run()`
+included) plus every `cfg(test)` module, so both expansions land
+in one binary.
+
+Mechanism (rule 2, verified against the installed sources; the
+one honest sentence: macOS collides and the other legs do not
+because the `Info.plist` embedding is generated only when the
+codegen itself is compiled on a macOS host, and only for
+invocations without the `test` flag):
+
+- tauri-codegen 2.7.5 `src/context.rs:283-332` — the
+  `#[cfg(target_os = "macos")]` arm emits
+  `tauri::embed_plist::embed_info_plist!` for every plain
+  invocation when the gate's three conjuncts hold (a macOS target
+  per `TAURI_ENV_TARGET_TRIPLE`, a dev build, no `test` flag); the
+  `#[cfg(not(target_os = "macos"))]` arm emits an empty block (no
+  symbol, no collision — the Linux and Windows legs compiled and
+  passed).
+- embed_plist 1.2.2 `src/lib.rs:435-441` — `embed_info_plist_bytes!`
+  declares `#[used] #[link_section =
+"__TEXT,__info_plist,regular,no_dead_strip"] #[no_mangle] pub
+static _EMBED_INFO_PLIST` — a FIXED symbol name (the crate's own
+  documented "accidental reuse protection ... works even if these
+  macros are reused in different modules"), so a second expansion
+  anywhere in the same binary is a duplicate symbol rustc rejects.
+- tauri-macros 2.7.5 `src/lib.rs:242-250` — the macro's documented
+  `test = true` argument exists for exactly this case: "skips code
+  generation that misbehaves when the context is created inside a
+  test binary - currently the `Info.plist` embedding performed on
+  macOS development builds".
+
+Solution: the TEST-side invocation is the one that declares itself
+a test — `.build(tauri::generate_context!(test = true))` in
+`updater_tests.rs`; `run()`'s production expansion stays unflagged
+(the app keeps its dev-build `Info.plist`). The flag reaches
+exactly one codegen consumer (verified: `running_tests` appears in
+tauri-codegen's `context.rs` at its definition `:146` and its sole
+use, the plist gate `:284`), so the test still compiles the REAL
+`tauri.conf.json` —
+endpoints, key, channel — and `updater()` = `Ok` keeps proving
+exactly what D-229 recorded.
+
+The structural pin
+`the_lib_test_target_has_one_plist_embedding_expansion`
+(`updater_tests.rs`) turns the macOS-only link error into a red
+test on EVERY platform: over the workspace sources (the
+`config_tests.rs` walker, now `pub(crate)` beside `strip_comments`;
+comments stripped the sibling-scan way, string literals kept), the
+production seam `src-tauri/src/lib.rs` must hold exactly one
+UNFLAGGED invocation — and a `test = true` planted there, the
+tempting wrong-side fix that would silently strip the app's
+dev-build plist, is red — while every other file's invocations
+must all be the flagged spelling. The pin's needles are
+`concat!`-built so the pin's own source text cannot count itself
+(the stripper keeps literal contents). Mutation-verified red three
+ways: the flag reverted on the e2e test, a bare invocation planted
+in another test module (the pin names the file), and the flag
+planted on the production seam.
+
+Checks gating this commit: `cargo test --no-run -p eunomia-sync`,
+the updater subset under nextest (7/7), `cargo fmt --all --
+--check`, `cargo clippy -p eunomia-sync --all-targets -- -D
+warnings`; the full workspace chain (nextest all, doc tests,
+workspace clippy, deny) ran on the branch after both CI fixes of
+this run (the path-spelling entry beside this one records it). No
+frontend file changed.

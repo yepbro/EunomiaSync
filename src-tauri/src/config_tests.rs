@@ -437,7 +437,7 @@ fn collect_rust_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>
 /// `src-tauri/tests/` integration suite) must be added here when it
 /// appears — the floor check in the scans (`files` non-empty) cannot
 /// notice its absence.
-fn workspace_rust_sources() -> Vec<std::path::PathBuf> {
+pub(crate) fn workspace_rust_sources() -> Vec<std::path::PathBuf> {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     collect_rust_files(&manifest_dir.join("src"), &mut files);
