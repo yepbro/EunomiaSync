@@ -875,8 +875,10 @@ pub fn stabilized(
             let variant_id = match &assignment.target {
                 crate::library::AssignmentTarget::Variant(variant_id) => variant_id,
                 // The deterministic generator creates variant-backed
-                // assignments only; a custom row is outside its shape.
-                crate::library::AssignmentTarget::Custom(_) => continue,
+                // assignments only; a custom row — replace text or an
+                // extend pair — is outside its shape.
+                crate::library::AssignmentTarget::Custom(_)
+                | crate::library::AssignmentTarget::Extend { .. } => continue,
             };
             if let Some(&(_, variant)) = variant_ordinal.get(variant_id.as_str()) {
                 stabilized_assignments.push(StabilizedAssignment {

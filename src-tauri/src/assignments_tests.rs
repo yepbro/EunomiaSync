@@ -4,7 +4,9 @@
 //! journal, revision count, build snapshot and (for OUT-010) a real project
 //! file back. The absorbed DoDs lead: MAIN-005 isolation/no file writes,
 //! one-transaction 100-pair bulk assignment with rollback, and MAIN-007's
-//! shared-variant-safe idempotent per-project custom edit.
+//! shared-variant-safe idempotent per-project custom edit — plus MAIN-034
+//! (T-356): the extend mode's base resolution, the ALG-023 build
+//! composition and the custom-cell carry-over.
 
 use eunomia_store::action_log::{Action, LogRecord};
 use eunomia_store::library::{
@@ -16,7 +18,9 @@ use eunomia_store::projects::{AddedVia, NewProject};
 use eunomia_store::settings::{BaseName, ExtraFile, Position, Scheme};
 use tauri::Manager;
 
-use crate::assignments::{AssignmentRecord, AssignmentTargetRecord, BulkAssignmentResult};
+use crate::assignments::{
+    AssignmentPair, AssignmentRecord, AssignmentTargetRecord, BulkAssignmentResult,
+};
 
 fn assignments_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
     let temp = tempfile::tempdir().expect("failed to create a temp directory");
@@ -110,6 +114,7 @@ fn invoke_assignment_set_custom(
     project_id: &str,
     instruction_id: &str,
     content: Option<&str>,
+    mode: Option<&str>,
 ) -> Result<Option<AssignmentRecord>, serde_json::Value> {
     invoke(
         webview,
@@ -118,6 +123,7 @@ fn invoke_assignment_set_custom(
             "projectId": project_id,
             "instructionId": instruction_id,
             "content": content,
+            "mode": mode,
         }),
     )
 }
@@ -281,9 +287,15 @@ fn seed_custom(database: &crate::db::Db, project_id: &str, instruction_id: &str,
     let content = content.to_owned();
     let database = database.clone();
     tauri::async_runtime::block_on(database.run(move |tx| {
-        set_custom(tx, &project_id, &instruction_id, Some(&content))
-            .map(|_| ())
-            .map_err(seed_error)
+        set_custom(
+            tx,
+            &project_id,
+            &instruction_id,
+            Some(&content),
+            eunomia_store::library::CustomMode::Replace,
+        )
+        .map(|_| ())
+        .map_err(seed_error)
     }))
     .expect("custom assignment seed creates")
 }
@@ -293,6 +305,25 @@ fn stored_variant(database: &crate::db::Db, id: &str) -> Option<Variant> {
     let database = database.clone();
     tauri::async_runtime::block_on(database.run(move |tx| get_variant(tx, &id).map_err(seed_error)))
         .expect("variant read succeeds")
+}
+
+/// Builds one project's body from the live snapshot and asserts it —
+/// the extend tests' build oracle (ALG-023 over the real DB state).
+fn assert_body_of(database: &crate::db::Db, project_id: &str, expected: &str) {
+    let database = database.clone();
+    let project_id = project_id.to_owned();
+    let expected = expected.to_owned();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        let snapshot = eunomia_store::build_snapshot::read(tx)
+            .map_err(|error| crate::commands::rejected_field("snapshot", "", &error.to_string()))?;
+        let id = eunomia_core::project::ProjectId::new(project_id.clone());
+        assert_eq!(
+            eunomia_core::body::build_body(&snapshot, &id).as_deref(),
+            Some(expected.as_str())
+        );
+        Ok::<_, crate::errors::AppError>(())
+    }))
+    .expect("snapshot and body read");
 }
 
 fn stored_assignment(
@@ -750,18 +781,24 @@ fn assignment_set_custom_is_idempotent_never_forks_and_builds_only_that_projects
     let shared_before = stored_variant(&database, &main.id).expect("main exists");
     let webview = main_webview(&app);
 
-    let first =
-        invoke_assignment_set_custom(&webview, &p1, &instruction.id, Some("project one\r\n"))
-            .expect("custom edit succeeds")
-            .expect("custom row exists");
+    let first = invoke_assignment_set_custom(
+        &webview,
+        &p1,
+        &instruction.id,
+        Some("project one\r\n"),
+        None,
+    )
+    .expect("custom edit succeeds")
+    .expect("custom row exists");
     assert_eq!(
         first.target,
         AssignmentTargetRecord::Custom("project one\n".to_owned())
     );
     let first_row = stored_assignment(&database, &p1, &instruction.id).expect("custom row exists");
-    let same = invoke_assignment_set_custom(&webview, &p1, &instruction.id, Some("project one\n"))
-        .expect("same custom edit succeeds")
-        .expect("custom row exists");
+    let same =
+        invoke_assignment_set_custom(&webview, &p1, &instruction.id, Some("project one\n"), None)
+            .expect("same custom edit succeeds")
+            .expect("custom row exists");
     assert_eq!(
         stored_assignment(&database, &p1, &instruction.id).as_ref(),
         Some(&first_row)
@@ -773,10 +810,15 @@ fn assignment_set_custom_is_idempotent_never_forks_and_builds_only_that_projects
         "same text does not journal twice"
     );
 
-    let second =
-        invoke_assignment_set_custom(&webview, &p1, &instruction.id, Some("project one updated"))
-            .expect("second edit succeeds")
-            .expect("custom row exists");
+    let second = invoke_assignment_set_custom(
+        &webview,
+        &p1,
+        &instruction.id,
+        Some("project one updated"),
+        None,
+    )
+    .expect("second edit succeeds")
+    .expect("custom row exists");
     assert_eq!(
         second.created_at, first.created_at,
         "the second call updates the same assignment"
@@ -823,7 +865,7 @@ fn assignment_set_custom_is_idempotent_never_forks_and_builds_only_that_projects
     }))
     .expect("snapshot and bodies read");
 
-    let cleared = invoke_assignment_set_custom(&webview, &p1, &instruction.id, None)
+    let cleared = invoke_assignment_set_custom(&webview, &p1, &instruction.id, None, None)
         .expect("clear succeeds")
         .expect("row remains assigned");
     assert_eq!(
@@ -847,7 +889,7 @@ fn assignment_set_custom_validates_text_before_the_database_and_never_echoes_it(
 
     for content in ["a\0b", &"x".repeat(262_145)] {
         let error =
-            invoke_assignment_set_custom(&webview, &project, &instruction.id, Some(content))
+            invoke_assignment_set_custom(&webview, &project, &instruction.id, Some(content), None)
                 .expect_err("invalid custom text is refused");
         assert_validation(error.clone(), "custom_text");
         assert!(!error.to_string().contains(&"x".repeat(10)));
@@ -857,6 +899,7 @@ fn assignment_set_custom_validates_text_before_the_database_and_never_echoes_it(
         &project,
         &instruction.id,
         Some("text\n<!-- EUNOMIASYNC:BEGIN -->"),
+        None,
     )
     .expect_err("reserved marker is refused");
     assert_eq!(marker["code"], serde_json::json!("E_CONTENT_RESERVED"));
@@ -864,16 +907,291 @@ fn assignment_set_custom_validates_text_before_the_database_and_never_echoes_it(
     assert!(stored_assignment(&database, &project, &instruction.id).is_none());
     assert!(assignment_journal(&database).is_empty());
 
-    let empty = invoke_assignment_set_custom(&webview, &project, &instruction.id, Some(""))
+    let empty = invoke_assignment_set_custom(&webview, &project, &instruction.id, Some(""), None)
         .expect("empty custom text is legal")
         .expect("row exists");
     assert_eq!(empty.target, AssignmentTargetRecord::Custom(String::new()));
 
     let app_without_db = assignments_app_without_db();
     let webview_without_db = main_webview(&app_without_db);
-    let error = invoke_assignment_set_custom(&webview_without_db, "p", "i", Some("bad\0text"))
-        .expect_err("field validation precedes database resolution");
+    let error =
+        invoke_assignment_set_custom(&webview_without_db, "p", "i", Some("bad\0text"), None)
+            .expect_err("field validation precedes database resolution");
     assert_validation(error, "custom_text");
+}
+
+#[test]
+fn assignment_set_custom_extend_keeps_the_base_composes_at_build_time_and_clears_to_main() {
+    // MAIN-034/ALG-023: the extend write keeps the cell's variant as the
+    // base beside the folded supplement; the build composes the base's
+    // CURRENT text with the supplement (a library edit flows into the
+    // next build); clearing drops the mode and restores the MAIN.
+    let (_temp, app) = assignments_app();
+    let database = database_of(&app);
+    let (instruction, main) = seed_instruction(&database, 1);
+    let alt = seed_variant(&database, &instruction.id, "Alt", "alt shared text");
+    let p1 = seed_project(&database, 1);
+    seed_assignment(&database, &p1, &instruction.id, &alt.id);
+    let webview = main_webview(&app);
+
+    let extend = invoke_assignment_set_custom(
+        &webview,
+        &p1,
+        &instruction.id,
+        Some("supplement\r\n"),
+        Some("extend"),
+    )
+    .expect("extend write succeeds")
+    .expect("row exists");
+    assert_eq!(
+        extend.target,
+        AssignmentTargetRecord::Extend {
+            base: alt.id.clone(),
+            supplement: "supplement\n".to_owned()
+        },
+        "the assigned variant becomes the base, the supplement is folded"
+    );
+    assert_eq!(
+        stored_assignment(&database, &p1, &instruction.id)
+            .expect("row exists")
+            .target,
+        AssignmentTarget::Extend {
+            base: alt.id.clone(),
+            supplement: "supplement\n".to_owned()
+        }
+    );
+    assert_eq!(
+        variant_count(&database, &instruction.id),
+        2,
+        "no fork variant is ever created"
+    );
+    assert_eq!(assignment_journal(&database).len(), 1);
+
+    // The same-content re-send is a no-op: nothing written, nothing
+    // journaled twice.
+    let re_sent = invoke_assignment_set_custom(
+        &webview,
+        &p1,
+        &instruction.id,
+        Some("supplement\n"),
+        Some("extend"),
+    )
+    .expect("same extend write succeeds")
+    .expect("row exists");
+    assert_eq!(re_sent, extend);
+    assert_eq!(assignment_journal(&database).len(), 1);
+
+    // The build composes the base's current text with the supplement.
+    assert_body_of(&database, &p1, "alt shared text\n\nsupplement");
+
+    // ALG-023's build-time read: a library edit to the base variant
+    // flows into the next build without touching the cell.
+    let alt_id = alt.id.clone();
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.execute(
+            "UPDATE instruction_variants SET content = ?1 WHERE id = ?2",
+            rusqlite::params!["edited alt text", alt_id],
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("library edit applies");
+    assert_body_of(&database, &p1, "edited alt text\n\nsupplement");
+    assert_eq!(
+        stored_assignment(&database, &p1, &instruction.id)
+            .expect("row exists")
+            .target,
+        AssignmentTarget::Extend {
+            base: alt.id.clone(),
+            supplement: "supplement\n".to_owned()
+        },
+        "the library edit never rewrites the cell"
+    );
+
+    // Clearing (whatever the mode) restores the MAIN, not the base.
+    let cleared =
+        invoke_assignment_set_custom(&webview, &p1, &instruction.id, None, Some("extend"))
+            .expect("clear succeeds")
+            .expect("row remains assigned");
+    assert_eq!(cleared.target, AssignmentTargetRecord::Variant(main.id));
+    // Two real changes journaled: the extend write and the clear (the
+    // raw library edit is a test fixture, not a command).
+    assert_eq!(assignment_journal(&database).len(), 2);
+}
+
+#[test]
+fn assignment_set_custom_extend_validates_the_supplement_and_adopts_the_main_for_a_variantless_cell()
+ {
+    let (_temp, app) = assignments_app();
+    let database = database_of(&app);
+    let (instruction, main) = seed_instruction(&database, 1);
+    let p1 = seed_project(&database, 1);
+    let p2 = seed_project(&database, 2);
+    let webview = main_webview(&app);
+
+    // DB-016's reserved-marker rule covers the supplement (MAIN-034):
+    // refused before anything runs, no row, no journal.
+    let marker = invoke_assignment_set_custom(
+        &webview,
+        &p1,
+        &instruction.id,
+        Some("text\n<!-- EUNOMIASYNC:BEGIN -->"),
+        Some("extend"),
+    )
+    .expect_err("reserved marker is refused");
+    assert_eq!(marker["code"], serde_json::json!("E_CONTENT_RESERVED"));
+    assert_eq!(marker["params"]["field"], serde_json::json!("custom_text"));
+    assert!(stored_assignment(&database, &p1, &instruction.id).is_none());
+    assert!(assignment_journal(&database).is_empty());
+
+    // An unassigned cell adopts the active main as its base (MAIN-034:
+    // "the main variant for an unassigned cell").
+    let unassigned = invoke_assignment_set_custom(
+        &webview,
+        &p1,
+        &instruction.id,
+        Some("supplement"),
+        Some("extend"),
+    )
+    .expect("extend on an unassigned cell succeeds")
+    .expect("row exists");
+    assert_eq!(
+        unassigned.target,
+        AssignmentTargetRecord::Extend {
+            base: main.id.clone(),
+            supplement: "supplement".to_owned()
+        }
+    );
+
+    // A replace-custom cell has no variant to keep, so it takes the same
+    // main (switching replace → extend keeps nothing of the old shape).
+    let replaced =
+        invoke_assignment_set_custom(&webview, &p2, &instruction.id, Some("whole cell"), None)
+            .expect("replace write succeeds")
+            .expect("row exists");
+    assert_eq!(
+        replaced.target,
+        AssignmentTargetRecord::Custom("whole cell".to_owned())
+    );
+    let extended = invoke_assignment_set_custom(
+        &webview,
+        &p2,
+        &instruction.id,
+        Some("supplement"),
+        Some("extend"),
+    )
+    .expect("extend over a replace cell succeeds")
+    .expect("row exists");
+    assert_eq!(
+        extended.target,
+        AssignmentTargetRecord::Extend {
+            base: main.id.clone(),
+            supplement: "supplement".to_owned()
+        }
+    );
+
+    // DB-010 broken out-of-band (no active main to adopt): the honest
+    // refusal, never a guess.
+    let main_id = main.id.clone();
+    let p3 = seed_project(&database, 3);
+    tauri::async_runtime::block_on(database.run(move |tx| {
+        tx.execute(
+            "UPDATE instruction_variants SET is_main = 0 WHERE id = ?1",
+            rusqlite::params![main_id],
+        )
+        .map_err(crate::db::sqlite_error_to_app_error)
+    }))
+    .expect("out-of-band main flag clear applies");
+    let error =
+        invoke_assignment_set_custom(&webview, &p3, &instruction.id, Some("x"), Some("extend"))
+            .expect_err("no active main to adopt refuses");
+    assert_validation(error, "instruction_id");
+    assert!(stored_assignment(&database, &p3, &instruction.id).is_none());
+}
+
+#[test]
+fn assignment_set_and_bulk_treat_an_extend_cell_as_a_custom_cell() {
+    // D-203 reading 4e: everything already ruled for custom cells carries
+    // over — a null-variant assignment_set is a no-op, an explicit
+    // variant converts the cell (the supplement is dropped), and bulk
+    // work never touches the cell.
+    let (_temp, app) = assignments_app();
+    let database = database_of(&app);
+    let (instruction, main) = seed_instruction(&database, 1);
+    let alt = seed_variant(&database, &instruction.id, "Alt", "alt shared text");
+    let p1 = seed_project(&database, 1);
+    let p2 = seed_project(&database, 2);
+    seed_assignment(&database, &p1, &instruction.id, &alt.id);
+    seed_assignment(&database, &p2, &instruction.id, &alt.id);
+    let webview = main_webview(&app);
+    for project in [&p1, &p2] {
+        invoke_assignment_set_custom(
+            &webview,
+            project,
+            &instruction.id,
+            Some("supplement"),
+            Some("extend"),
+        )
+        .expect("extend write succeeds")
+        .expect("row exists");
+    }
+    let before = stored_assignment(&database, &p1, &instruction.id).expect("row exists");
+    let journal_before = assignment_journal(&database).len();
+
+    // Null variant: a verified no-op — the extend cell is a custom cell.
+    let no_op = invoke_assignment_set(&webview, &p1, &instruction.id, true, None)
+        .expect("null variant is a no-op")
+        .expect("row exists");
+    assert_eq!(
+        no_op.target,
+        AssignmentTargetRecord::Extend {
+            base: alt.id.clone(),
+            supplement: "supplement".to_owned()
+        }
+    );
+    assert_eq!(
+        stored_assignment(&database, &p1, &instruction.id).as_ref(),
+        Some(&before)
+    );
+    assert_eq!(assignment_journal(&database).len(), journal_before);
+
+    // An explicit variant converts the cell: the supplement and the mode
+    // are dropped with the custom shape.
+    let converted = invoke_assignment_set(&webview, &p1, &instruction.id, true, Some(&main.id))
+        .expect("explicit variant converts the extend cell")
+        .expect("row exists");
+    assert_eq!(
+        converted.target,
+        AssignmentTargetRecord::Variant(main.id.clone())
+    );
+    assert_eq!(
+        stored_assignment(&database, &p1, &instruction.id)
+            .expect("row exists")
+            .target,
+        AssignmentTarget::Variant(main.id)
+    );
+    assert_eq!(assignment_journal(&database).len(), journal_before + 1);
+
+    // Bulk clear skips the extend cell.
+    let bulk = invoke_assignments_bulk(&webview, &[&instruction.id], &[&p2], false, None)
+        .expect("bulk clear succeeds");
+    assert_eq!(bulk.changed, 0);
+    assert_eq!(
+        bulk.already_assigned,
+        vec![AssignmentPair {
+            project_id: p2.clone(),
+            instruction_id: instruction.id.clone(),
+        }]
+    );
+    assert_eq!(
+        stored_assignment(&database, &p2, &instruction.id)
+            .expect("row exists")
+            .target,
+        AssignmentTarget::Extend {
+            base: alt.id,
+            supplement: "supplement".to_owned()
+        },
+        "bulk work never touches the extend cell"
+    );
 }
 
 #[test]
@@ -909,7 +1227,7 @@ fn every_assignment_write_rolls_back_when_its_journal_insert_fails() {
         Some(&before)
     );
 
-    let custom = invoke_assignment_set_custom(&webview, &p2, &instruction.id, Some("custom"))
+    let custom = invoke_assignment_set_custom(&webview, &p2, &instruction.id, Some("custom"), None)
         .expect_err("custom upsert fails with its journal");
     assert_eq!(
         custom["details"]["os_kind"],
@@ -939,8 +1257,14 @@ fn assignment_commands_are_allowed_during_sync_and_answer_without_a_database() {
 
     invoke_assignment_set(&webview, &project, &instruction.id, true, None)
         .expect("library edit allowed");
-    invoke_assignment_set_custom(&webview, &project, &instruction.id, Some("during sync"))
-        .expect("custom edit allowed");
+    invoke_assignment_set_custom(
+        &webview,
+        &project,
+        &instruction.id,
+        Some("during sync"),
+        None,
+    )
+    .expect("custom edit allowed");
     invoke_assignments_bulk(&webview, &[&instruction.id], &[&project], true, None)
         .expect("bulk library edit allowed");
     drop(guard);

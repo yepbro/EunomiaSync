@@ -128,8 +128,8 @@ pub enum SnapshotError {
         /// The heading item.
         item_id: ItemId,
     },
-    /// The referenced variant is not an active variant of the
-    /// referenced instruction (DB-012).
+    /// The referenced variant — a variant target or an extend cell's base —
+    /// is not an active variant of the referenced instruction (DB-012).
     #[error("variant {variant_id} is not an active variant of instruction {item_id}")]
     VariantMismatch {
         /// The assigned instruction.
@@ -138,7 +138,7 @@ pub enum SnapshotError {
         variant_id: VariantId,
     },
     /// A project already has an assignment for the instruction
-    /// (D-02: one instruction, at most one variant/custom-text target per project).
+    /// (D-02: one instruction, at most one content target per project).
     #[error("project {project_id} already has an assignment for instruction {item_id}")]
     DuplicateAssignment {
         /// The project with the duplicate.
@@ -273,8 +273,9 @@ impl BuildSnapshot {
     ///   instruction is required
     ///   ([`SnapshotError::AssignmentToHeading`]), a second assignment
     ///   of the same instruction for one project
-    ///   ([`SnapshotError::DuplicateAssignment`], D-02), or a variant
-    ///   that is not one of the instruction's active variants
+    ///   ([`SnapshotError::DuplicateAssignment`], D-02), or a variant —
+    ///   a variant target or an extend cell's base (MAIN-034) — that is
+    ///   not one of the instruction's active variants
     ///   ([`SnapshotError::VariantMismatch`], DB-012).
     ///
     /// Assignments to hidden instructions are valid (D-11, DB-013).
@@ -348,8 +349,14 @@ impl BuildSnapshot {
                     item_id: assignment.instruction_id.clone(),
                 });
             }
-            if let AssignmentTarget::Variant(variant_id) = &assignment.target
-                && !instruction.variants.iter().any(|v| v.id == *variant_id)
+            if let Some(variant_id) = match &assignment.target {
+                // DB-012: a variant target — alone (MAIN-001) or as an
+                // extend cell's base (MAIN-034) — must be one of the
+                // instruction's active variants.
+                AssignmentTarget::Variant(variant_id) => Some(variant_id),
+                AssignmentTarget::Extend { base, .. } => Some(base),
+                AssignmentTarget::Custom(_) => None,
+            } && !instruction.variants.iter().any(|v| v.id == *variant_id)
             {
                 return Err(SnapshotError::VariantMismatch {
                     item_id: assignment.instruction_id.clone(),
@@ -576,6 +583,60 @@ mod tests {
                 variant_id: VariantId::new("v2".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn new_rejects_an_extend_base_that_is_not_the_instructions_variant() {
+        // MAIN-034's DB-012 arm: the extend cell's base is held to the
+        // same active-same-instruction rule as a variant target.
+        let fixture = Fixture::new();
+        let other = LibraryItem::Instruction(Instruction {
+            id: ItemId::new("i2".to_owned()),
+            title: "Run tests".to_owned(),
+            state: InstructionState::Active,
+            variants: vec![Variant {
+                id: VariantId::new("v2".to_owned()),
+                name: "Main".to_owned(),
+                content: "cargo test".to_owned(),
+            }],
+        });
+        let mut assignment = fixture.assignment.clone();
+        assignment.target = AssignmentTarget::Extend {
+            base: VariantId::new("v2".to_owned()),
+            supplement: "supplement".to_owned(),
+        };
+        let error = BuildSnapshot::new(
+            vec![fixture.project],
+            vec![fixture.style, fixture.concise, other],
+            vec![assignment],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            SnapshotError::VariantMismatch {
+                item_id: ItemId::new("i1".to_owned()),
+                variant_id: VariantId::new("v2".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn new_accepts_an_extend_target_over_the_instructions_own_variant() {
+        // The legal complement: the base resolves inside the same
+        // instruction, the snapshot accepts the pair.
+        let fixture = Fixture::new();
+        let mut assignment = fixture.assignment.clone();
+        assignment.target = AssignmentTarget::Extend {
+            base: VariantId::new("v1".to_owned()),
+            supplement: "supplement".to_owned(),
+        };
+        let snapshot = BuildSnapshot::new(
+            vec![fixture.project],
+            vec![fixture.style, fixture.concise],
+            vec![assignment],
+        )
+        .expect("the extend pair over the instruction's own variant is valid");
+        assert_eq!(snapshot.assignments().len(), 1);
     }
 
     #[test]

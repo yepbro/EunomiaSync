@@ -46,7 +46,7 @@
 //! | --------- | -------------- | ------------ |
 //! | DB-010 | per active instruction: at least one active variant, exactly one active main (zero variant rows included — the LEFT JOIN keeps them) | a hidden instruction's variant health (out of the sentence's scope); variant *content* correctness |
 //! | DB-011 | the positions of ALL library rows (one ordered list, headings included) form 1..=N: row k in position order sits at position k | nothing positional beyond that (level structure, section ranges — `gaps.rs`'s own domain) |
-//! | DB-012 | the assignment's target verified as DATA against the sentence's every half: a `variant_id` no row has (missing), a variant of another instruction (foreign — the composite FK's half), or a soft-deleted variant (deleted) | the exactly-one-target half (the v3 CHECK's floor, D-192/D-203) and the extend shape (MAIN-034 is a contract until migration 0004 — the shipped v3 CHECK rejects the row) |
+//! | DB-012 | the assignment's target verified as DATA against the sentence's every half: a `variant_id` no row has (missing), a variant of another instruction (foreign — the composite FK's half), or a soft-deleted variant — the extend cell's base included, its row reading the same `variant_id` column | the "neither" shape (the v4 CHECK's floor, D-203; every writer of this app constructs only the three legal shapes) |
 //! | DB-014 | state ⟺ archived_at coherence per project row — a RELATED store invariant (the archive/restore pair's own), not a clause of DB-014 itself: the row is the only data-checkable fact beside the three behavior clauses | the behavior halves below (a reader must not take this row as full DB-014 coverage) |
 //! | DB-015 | no `path_key` is shared by two project rows, either state | `project_exclusions` (a different table's uniqueness), the restore-offer flow (UI behavior) |
 //! | DB-016 | no stored variant text or per-project custom text contains a line equal to a D-19 marker — the SAME oracle the save path rejects with `E_CONTENT_RESERVED` (ALG-002 normalize + line classification), swept over what is already stored | a marker that is not a whole line (legal text), and NUL/length violations (different rules, DB-006's floor is a CHECK) |
@@ -371,7 +371,9 @@ fn db_011(transaction: &Transaction<'_>) -> Result<Vec<Violation>, rusqlite::Err
 }
 
 /// DB-012: "An assignment points to an active variant of the same
-/// instruction" — verified as DATA, not trusted to the schema. The
+/// instruction — alone, or beside per-project custom text as the extend
+/// cell's base variant — or carries per-project custom text instead of a
+/// variant reference" — verified as DATA, not trusted to the schema. The
 /// sweep's own threat model (module docs) is rows no writer of this
 /// app could produce, and a session that turns the `foreign_keys`
 /// pragma OFF (an external sqlite3 or an import tool — the app's own
@@ -379,9 +381,11 @@ fn db_011(transaction: &Transaction<'_>) -> Result<Vec<Violation>, rusqlite::Err
 /// `SQLITE_DEFAULT_FOREIGN_KEYS=1`) can break all three halves of the
 /// sentence: a `variant_id` naming no row at all, a variant of
 /// ANOTHER instruction (the composite FK's half), or a soft-deleted
-/// variant. The LEFT JOIN keeps every assignment; the verdict is the
-/// sentence's own conjunction, in a fixed priority (missing, then
-/// foreign, then deleted — the more fundamental break first).
+/// variant. An extend cell's base reads the same `variant_id` column,
+/// so it is verified by the same three arms. The LEFT JOIN keeps every
+/// assignment; the verdict is the sentence's own conjunction, in a fixed
+/// priority (missing, then foreign, then deleted — the more fundamental
+/// break first).
 fn db_012(transaction: &Transaction<'_>) -> Result<Vec<Violation>, rusqlite::Error> {
     let mut statement = transaction.prepare(
         "SELECT pi.project_id, pi.instruction_id, pi.variant_id, \
@@ -574,8 +578,9 @@ fn db_016(transaction: &Transaction<'_>) -> Result<Vec<Violation>, rusqlite::Err
             });
         }
     }
-    // The per-project custom texts (MAIN-007's replace shape — the
-    // same rejection the save path applies to them).
+    // The per-project custom texts (MAIN-007's replace text and MAIN-034's
+    // extend supplement alike — the same rejection the save path applies
+    // to both).
     let mut statement = transaction.prepare(
         "SELECT project_id, instruction_id, custom_text FROM project_instructions \
           WHERE custom_text LIKE '%' || ?1 || '%' OR custom_text LIKE '%' || ?2 || '%' \

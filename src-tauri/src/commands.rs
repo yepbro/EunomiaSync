@@ -4935,9 +4935,13 @@ pub(crate) struct LibraryVariantEntry {
 }
 
 /// One project label of an instruction row (LIB-001): the chip's own
-/// facts plus which variant the assignment names, or `None` for a
-/// custom-text cell — the acceptance criterion's pair (labels match
-/// assignments).
+/// facts plus which variant the assignment names — a variant target's
+/// variant or an extend cell's base (MAIN-034), `None` for a
+/// replace-mode custom cell (MAIN-007) — the acceptance criterion's
+/// pair (labels match assignments). The label carries no mode fact of
+/// its own: the cell's replace/extend mode needs a read-side fact the
+/// MAIN-034 UI task will add to this row (or read its own way) — the
+/// recorded defer in D-238.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub(crate) struct ProjectLabelEntry {
     /// The project's id — the identity the matrix column and the
@@ -4950,9 +4954,11 @@ pub(crate) struct ProjectLabelEntry {
     pub(crate) label: String,
     /// The palette member (DB-040) the chip renders.
     pub(crate) color: String,
-    /// The assigned variant's id, or `None` when this project carries
-    /// per-project custom text (MAIN-007). D-02 still allows only one
-    /// assignment target per project/instruction pair.
+    /// The variant the assignment names — a variant target's variant
+    /// (MAIN-001) or an extend cell's base (MAIN-034) — or `None` when
+    /// this project carries replace-mode per-project custom text
+    /// (MAIN-007). D-02 still allows only one assignment target per
+    /// project/instruction pair.
     pub(crate) variant_id: Option<String>,
 }
 
@@ -5164,6 +5170,13 @@ fn assemble_library_tree(read: LibraryRead) -> Vec<LibraryTreeItem> {
                 variant_id: match &assignment.target {
                     eunomia_store::library::AssignmentTarget::Variant(variant_id) => {
                         Some(variant_id.clone())
+                    }
+                    // MAIN-034: an extend cell's assignment names the base
+                    // variant, so the label carries it ("Labels match the
+                    // assignments", LIB-001); a replace cell has no
+                    // variant to name.
+                    eunomia_store::library::AssignmentTarget::Extend { base, .. } => {
+                        Some(base.clone())
                     }
                     eunomia_store::library::AssignmentTarget::Custom(_) => None,
                 },

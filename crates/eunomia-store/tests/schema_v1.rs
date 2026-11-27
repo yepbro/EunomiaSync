@@ -5,9 +5,9 @@
 //!
 //! * the migration applies to an empty database and creates exactly the
 //!   eleven spec tables plus its indexes — the v1 schema of
-//!   `0001_init.sql`, the v2 `backup_records` pair-lookup index and the v3
-//!   variant-or-custom assignment table — with `PRAGMA user_version = 3`
-//!   (spec DB-004);
+//!   `0001_init.sql`, the v2 `backup_records` pair-lookup index, the v3
+//!   variant-or-custom and the v4 extend arm of the assignment table —
+//!   with `PRAGMA user_version = 4` (spec DB-004);
 //! * every CHECK, UNIQUE and foreign-key constraint rejects invalid rows,
 //!   identified by the SQLite extended result code
 //!   (`SQLITE_CONSTRAINT_CHECK`, `_UNIQUE`, `_PRIMARYKEY`,
@@ -494,12 +494,12 @@ fn schema_v1_declares_the_spec_foreign_keys() {
 }
 
 #[test]
-fn a_fully_migrated_database_records_user_version_three() {
+fn a_fully_migrated_database_records_user_version_four() {
     let conn = migrated();
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 3, "schema version must be exactly 3");
+    assert_eq!(user_version, 4, "schema version must be exactly 4");
 }
 
 #[test]
@@ -527,18 +527,18 @@ fn schema_v1_applies_to_a_file_backed_database() {
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 3);
+        assert_eq!(user_version, 4);
     }
 
     // The applied version persists in the file: a reopened database is
-    // already at version 3 and re-running migrations is a no-op.
+    // already at version 4 and re-running migrations is a no-op.
     {
         let mut conn = Connection::open(&path).unwrap();
         run_migrations(&mut conn, &backup_dir).expect("re-running migrations must be a no-op");
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 3);
+        assert_eq!(user_version, 4);
         let tables: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'

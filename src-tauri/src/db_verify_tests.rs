@@ -28,8 +28,10 @@
 //!   session can leave, so their plants go through a RAW side
 //!   connection (the external-writer world, the sweep's own threat
 //!   model); the legal neighbor is the REAL `delete_variant` end
-//!   state (the assignment moved to the main, LIB-023) and the
-//!   custom-text cell (MAIN-007, no variant reference at all).
+//!   state (the assignment moved to the main, LIB-023), the
+//!   custom-text cell (MAIN-007, no variant reference at all) and the
+//!   healthy extend cell (MAIN-034: its base is verified by the same
+//!   arms, the supplement swept by DB-016).
 //! - **DB-014** — both directions of the state/`archived_at`
 //!   disagreement; the legal neighbor is the store's own archive of a
 //!   project that KEEPS its assignment (the "assignments are kept"
@@ -41,7 +43,8 @@
 //!   neighbor is an archived project beside an active one (different
 //!   keys, either state).
 //! - **DB-016** — a marker line in stored variant text and in
-//!   per-project custom text, plus the padded and BOM-hidden forms
+//!   per-project custom text — replace text and an extend supplement
+//!   alike (MAIN-034, T-356) — plus the padded and BOM-hidden forms
 //!   (the save path's own oracle: normalize, then classify each
 //!   line); the legal neighbor is the marker INSIDE a line (legal
 //!   text — the prefilter's candidate that the exact predicate
@@ -341,9 +344,15 @@ fn seed_custom(database: &crate::db::Db, project_id: &str, instruction_id: &str,
     let text = text.to_owned();
     let database = database.clone();
     tauri::async_runtime::block_on(database.run(move |tx| {
-        eunomia_store::library::set_custom(tx, &project_id, &instruction_id, Some(&text))
-            .map_err(seed_error)
-            .map(|_| ())
+        eunomia_store::library::set_custom(
+            tx,
+            &project_id,
+            &instruction_id,
+            Some(&text),
+            eunomia_store::library::CustomMode::Replace,
+        )
+        .map_err(seed_error)
+        .map(|_| ())
     }))
     .expect("seeding custom text must work")
 }
@@ -779,6 +788,109 @@ fn db_012_stays_silent_over_the_real_delete_and_a_custom_cell() {
     drop(temp);
 }
 
+#[test]
+fn db_012_stays_silent_over_a_healthy_extend_cell() {
+    // MAIN-034's arm (T-356): an extend cell's base is a legitimate
+    // `variant_id` target — a healthy base row must not false-positive
+    // the sweep.
+    let (temp, app) = db_verify_app();
+    let database = database_of(&app);
+    let project = seed_project(&database, 1);
+    let (instruction, _main) = seed_instruction(&database, 1);
+    let extra = seed_variant(&database, &instruction.id, "Extra", "extra content");
+    let extend_db = database.clone();
+    let extend_project = project.clone();
+    let extend_instruction = instruction.id.clone();
+    let extend_base = extra.id.clone();
+    tauri::async_runtime::block_on(extend_db.run(move |tx| {
+        eunomia_store::library::assign(
+            tx,
+            &eunomia_store::library::NewAssignment {
+                project_id: &extend_project,
+                instruction_id: &extend_instruction,
+                variant_id: &extend_base,
+            },
+        )
+        .map_err(seed_error)?;
+        eunomia_store::library::set_custom(
+            tx,
+            &extend_project,
+            &extend_instruction,
+            Some("supplement"),
+            eunomia_store::library::CustomMode::Extend,
+        )
+        .map_err(seed_error)
+        .map(|_| ())
+    }))
+    .expect("seeding the extend cell through the store must work");
+
+    let violations = invoke_verify(&main_webview(&app)).expect("the check must answer");
+
+    assert_eq!(violations, Vec::new());
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn db_012_flags_an_extend_cell_whose_base_was_soft_deleted() {
+    // The extend arm's real catch (D-230's data sweep over the v4 shape):
+    // a base soft-deleted out-of-band with NO LIB-023 move — the
+    // supplement stays, the sweep flags the dead base by the row's own
+    // `variant_id` column.
+    let (temp, app) = db_verify_app();
+    let database = database_of(&app);
+    let project = seed_project(&database, 1);
+    let (instruction, _main) = seed_instruction(&database, 1);
+    let extra = seed_variant(&database, &instruction.id, "Extra", "extra content");
+    let extend_db = database.clone();
+    let extend_project = project.clone();
+    let extend_instruction = instruction.id.clone();
+    let extend_base = extra.id.clone();
+    tauri::async_runtime::block_on(extend_db.run(move |tx| {
+        eunomia_store::library::assign(
+            tx,
+            &eunomia_store::library::NewAssignment {
+                project_id: &extend_project,
+                instruction_id: &extend_instruction,
+                variant_id: &extend_base,
+            },
+        )
+        .map_err(seed_error)?;
+        eunomia_store::library::set_custom(
+            tx,
+            &extend_project,
+            &extend_instruction,
+            Some("supplement"),
+            eunomia_store::library::CustomMode::Extend,
+        )
+        .map_err(seed_error)
+        .map(|_| ())
+    }))
+    .expect("seeding the extend cell through the store must work");
+    plant(
+        &database,
+        "UPDATE instruction_variants SET state = 'deleted', deleted_at = '2026-11-27T00:00:00.000Z' WHERE id = ?1",
+        vec![&extra.id],
+    );
+
+    let violations = invoke_verify(&main_webview(&app)).expect("the check must answer");
+
+    assert_eq!(
+        violations,
+        vec![DbVerifyViolation {
+            invariant: "DB-012".to_owned(),
+            entity_type: "assignment".to_owned(),
+            entity_id: format!("{project}/{}", instruction.id),
+            project_id: Some(project),
+            detail: Some(DbViolationDetail::DeletedVariant {
+                variant_id: extra.id,
+            }),
+        }]
+    );
+    drop(app);
+    drop(temp);
+}
+
 // ---------------------------------------------------------------------------
 // DB-014: the archived row's state coherence
 // ---------------------------------------------------------------------------
@@ -1094,6 +1206,56 @@ fn db_016_flags_a_marker_line_in_custom_text() {
         &instruction.id,
         "y\n<!-- EUNOMIASYNC:BEGIN -->",
     );
+
+    let violations = invoke_verify(&main_webview(&app)).expect("the check must answer");
+
+    assert_eq!(
+        violations,
+        vec![DbVerifyViolation {
+            invariant: "DB-016".to_owned(),
+            entity_type: "assignment".to_owned(),
+            entity_id: format!("{project}/{}", instruction.id),
+            project_id: Some(project),
+            detail: Some(DbViolationDetail::MarkerLine {
+                line: 2,
+                marker: "<!-- EUNOMIASYNC:BEGIN -->".to_owned(),
+            }),
+        }]
+    );
+    drop(app);
+    drop(temp);
+}
+
+#[test]
+fn db_016_flags_a_marker_line_in_an_extend_supplement() {
+    // MAIN-034's supplement is swept like replace text (§6.9: "same
+    // rules as variant text — replace text and extend supplement
+    // alike"): an extend cell whose SUPPLEMENT carries a marker line is
+    // the same "another writer" world the sweep exists for.
+    let (temp, app) = db_verify_app();
+    let database = database_of(&app);
+    let project = seed_project(&database, 1);
+    let (instruction, _) = seed_instruction(&database, 1);
+    let extra = seed_variant(&database, &instruction.id, "Extra", "extra content");
+    seed_assignment(&database, &project, &instruction.id, &extra.id);
+    // The extend write through the store: the command boundary would
+    // refuse the marker (the supplement is validated like replace
+    // text); the store writes what it is handed.
+    let extend_db = database.clone();
+    let extend_project = project.clone();
+    let extend_instruction = instruction.id.clone();
+    tauri::async_runtime::block_on(extend_db.run(move |tx| {
+        eunomia_store::library::set_custom(
+            tx,
+            &extend_project,
+            &extend_instruction,
+            Some("y\n<!-- EUNOMIASYNC:BEGIN -->"),
+            eunomia_store::library::CustomMode::Extend,
+        )
+        .map_err(seed_error)
+        .map(|_| ())
+    }))
+    .expect("seeding the extend cell through the store must work");
 
     let violations = invoke_verify(&main_webview(&app)).expect("the check must answer");
 

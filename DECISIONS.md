@@ -31344,3 +31344,238 @@ initial mutants while the commit and the addendum name five — is
 TAKEN: the paragraph now points at the addendum's fifth mutation,
 making the record self-contained. No code change; the review phase
 ends here (two rounds, no third).
+
+### D-238 — T-356: migration 0004 lands the extend cell — the third CHECK arm, the mode parameter, and ALG-023's build-time composition — 2026-11-27
+
+Problem: MAIN-034's extend mode has been a spec contract since D-203
+(reading 4): §6.2's third assignment shape (a base variant BESIDE the
+supplement text) was rejected by the shipped v3 CHECK (D-192's
+exactly-one-target floor), and `assignment_set_custom` (T-331/D-192)
+had no mode parameter. The card: land migration 0004, grow the
+store/core target enums, add the mode to the command, and compose
+base + supplement at build time (ALG-023), closing part of D-125's
+addendum doc-truth debt (the T-327 follow-up: §6.2's floor sentence
+and the 0001_init.sql header "stays inaccurate until landing").
+
+Readings chosen (before implementation, rule 1; D-203's pre-recorded
+readings followed, the new ones recorded here):
+
+- **The CHECK encoding** is the spec §6.2 DDL verbatim — the three
+  arms (variant-only, text-only, both) — so the one illegal shape is
+  "neither" (both columns NULL). The three legal shapes are disjoint
+  and complete: D-192's exactly-one-target rule is superseded for the
+  extend arm only (D-203 reading 4a). SQLite cannot alter a CHECK in
+  place, so 0004 mirrors 0003's rebuild (rename → create → copy → drop
+  → recreate the two §6.2 indexes; no table references
+  `project_instructions`, v3 rows are variant-only or custom-only, the
+  copy is lossless).
+- **The mode wire form** is `mode: Option<CustomTextMode>` — null =
+  replace, §7.10's "the default". The wire enum is
+  `CustomTextMode { Replace, Extend }` (snake_case literals); the store
+  twin is `library::CustomMode`, mapped at the command boundary.
+- **The extend base** (D-203 reading 4c) is resolved at write time by
+  the store: the cell's current variant_id when it has one (a
+  variant-backed or extend cell keeps it), otherwise the instruction's
+  active main ("the main variant for an unassigned cell"; a
+  replace-custom cell has no variant to keep, so it takes the same
+  main). A cell with no main to adopt surfaces `NoActiveMain` (the
+  DB-017 posture; a bug found red: the first draft silently degraded
+  the no-main extend write to replace because `active_main_id(...)?`
+  yields None, not an error — the `.ok_or_else` fix and the
+  plant-the-broken-DB-010 test pin it). The kept base is not
+  re-validated as assignable: it is the cell's own row value, written
+  by a validated writer and maintained by `delete_variant`'s move.
+- **Clearing** (content = null) is mode-independent: any cell with
+  custom text — replace or extend — clears to the ACTIVE MAIN (not the
+  extend cell's base; MAIN-007: "dropping the mode with it").
+- **ALG-023's edges** follow the spec's sentence: the non-empty halves
+  of `normalize(base)` and `normalize(supplement)` joined by exactly
+  one blank line; an empty half contributes nothing (no leading/trailing
+  blank line); both empty → no block (the cell still counts as assigned
+  for ALG-020's headings). The base text is read at BUILD time from the
+  §9.1 snapshot — library edits flow into the next build (a test edits
+  the variant's content between two builds and asserts the new body).
+- **The deletion move needed no production change**: `delete_variant`'s
+  `UPDATE project_instructions SET variant_id = ? WHERE variant_id = ?`
+  already moves every row naming the variant and never touches
+  `custom_text` — an extend cell's base rides it and its supplement
+  stays (DB-012/MAIN-034). `list_assignments_for_variant` (the LIB-023
+  census) counts extend rows because it reads the same column. Tests
+  pin both; the mock's `variantDelete` twin gained the extend arm.
+- **db_verify (D-230) needed no code change either**: DB-012's sweep
+  reads every `variant_id IS NOT NULL` row, so an extend base is
+  verified for missing/foreign/deleted exactly like a variant target
+  (no false positive on healthy extend rows, a real catch on a
+  soft-deleted base — both planted); DB-016's sweep reads every
+  `custom_text` row, so the supplement is covered. The module docs'
+  "cannot catch" row dropped its contract clause and now names the
+  honest residue ("neither" is the v4 CHECK's floor).
+- **D-203 reading 4e's carry-over** is encoded as it reads:
+  `assignment_set` with a null variant on an extend cell is the custom
+  no-op, an explicit variant converts the cell (the supplement drops),
+  both bulk arms skip cells with custom text, and `library_get`'s
+  label carries the extend cell's base variant_id (the assignment
+  names it — "Labels match the assignments", LIB-001). `data_sets`'
+  stabilized view skips extend rows like custom rows (the generator's
+  shape is variant-only).
+
+Solution — the surfaces, each with its tests:
+
+1. **Migration 0004** (`migrations/0004_assignment_extend.sql`) + the
+   `MIGRATIONS` list; `schema_v4.rs` plants v3 data (both v3-legal
+   shapes) and verifies the verbatim upgrade, the three arms live,
+   "neither"/cross-instruction/oversize refused, the indexes rebuilt,
+   and the FK check clean. `schema_v2.rs`'s safety-copies test grew the
+   third copy and probes it (the v3 copy's CHECK still refuses the
+   extend pair — an UPDATE planting text beside the variant fails in
+   that copy); `schema_v1/v2/v3`, `storage_migrations` and
+   `storage_open_db` pins moved 3 → 4 (the synthetic-set tests stay).
+2. **Store**: `AssignmentTarget::Extend { base, supplement }` +
+   `CustomMode`; the row decode maps the both-set pair to it ("neither"
+   stays `Member` corruption — the bypassed-CHECK test now needs
+   `PRAGMA ignore_check_constraints` for its plant, the oracle it
+   always was); `set_custom` takes the mode (base resolution,
+   conversions, idempotence, clear-to-main). Five store tests: base
+   resolution, mode conversions, no-active-main refusal, the deletion
+   move, the decode arms.
+3. **Core**: `AssignmentTarget::Extend` (adjacently tagged, struct
+   content — the serde test pins the JSON), `BuildSnapshot::new`
+   validates the extend base by the same VariantMismatch arm, and
+   `body::build_body` composes via `compose_extend` (the four
+   ALG-023 edge tests + the build-time-read test + the two-project
+   isolation test). The order property tests stay green (the
+   generator's trees are variant-only; the oracle is unchanged).
+4. **Command**: `CustomTextMode` on the wire, `AssignmentTargetRecord::
+Extend`, the mode parameter, the three custom-cell matches widened
+   (`assignment_set`, bulk, the label join). Three command tests: the
+   base/compose/flow/clear cycle (over a real `build_snapshot::read`),
+   the supplement validation + variantless-cell adoption + the
+   no-active-main refusal, and the custom-cell carry-over
+   (no-op/convert/bulk skip). The label pin joined the existing
+   `library_get` custom-label test.
+5. **db_verify**: two plant-and-find tests — a healthy extend cell
+   stays silent, a soft-deleted base fires DeletedVariant.
+6. **Wire**: bindings regenerated through the export pin (red →
+   rewritten → green, D-034); the mock's `assignmentSetCustom` carries
+   the mode (base resolution, conversions, `targetsEqual`
+   idempotence), `variantDelete` moves extend bases, the custom-cell
+   matches and the label join widened; five new mock tests (mode
+   matrix, conversions, supplement validation, the carry-over, the
+   deletion move with the label census).
+
+Rule 11 sweep — every doc that described the v3 floor now tells the
+v4 truth: spec §6.2's closing sentence and DB-012's parenthetical (the
+"contract until migration 0004" markers became "migration 0004/D-238");
+`0001_init.sql`'s header (its `project_instructions` deviation from the
+§6.2 reference is now named with the migrations that close it — the
+T-327 follow-up's promised note); ARCHITECTURE.md (the schema section's
+version-4 paragraph, the Assignments module's mode sentence, the body
+paragraph's ALG-023 clause); the store's `library.rs` module docs; the
+core `assignment.rs`/`body.rs`/`snapshot.rs` docs; `build_snapshot.rs`'s
+docs (which also leave T-358 (`project_build_preview`, MAIN-033) its
+landing zone: the preview is this module's read + `build_body` + the
+§9.3 assembly, and the extend composition already flows through both
+halves); `db_verify.rs`'s module table and the two check doc comments;
+the mock's `state.ts` row doc.
+
+Mutation battery (rule 4, each reddening exactly its own tests, run
+before the final tree):
+
+1. `compose_extend` always joins (empty half included) → the two
+   edge tests red.
+2. `compose_extend` joins with "\n" instead of "\n\n" → the
+   both-halves tests red.
+3. `BuildSnapshot::new` skips the extend-base check → the foreign-base
+   test red.
+4. `set_custom` ignores the mode (always replace) → the store and
+   command extend tests red.
+5. `set_custom`'s no-main extend arm yields None silently (the original
+   bug) → the no-active-main tests red.
+6. Migration 0004's CHECK keeps the v3 two-arm form → the schema_v4
+   three-shapes test red.
+7. The row decode maps both-set to `Member` again → the decode tests
+   red.
+8. The mock's `variantDelete` extend arm dropped → the mock move test
+   red.
+
+D-203's contract is closed by this entry (its reading 4 is the
+implemented behavior); D-125's addendum loses the schema half of its
+doc-truth debt (the §6.2 sentence and the 0001 header are true now).
+The UI half of MAIN-034 (the mode radios, the "+" chip, the editor
+flow) remains the prototype's unlanded surface. Its backend contract
+is complete on the WRITE side (the mode parameter, the extend target
+on the wire, the label carrying the base); the READ side has one open
+gap the round-1 review named (P2-1): `library_get`'s label fact is
+`variant_id` alone, so an extend cell's label is indistinguishable
+from a plain variant cell's for the same variant — the UI task will
+need a mode/custom fact on the label (or its own read), a wire-shape
+choice deliberately left to that task's card (the round-1 review's
+"defer" option; a follow-up is reported for the board). One recorded
+reading the owner should confirm (round-1 P3-6): a saved REPLACE cell
+switching to extend has no variant to keep, so the write adopts the
+active main — MAIN-034's "the base stays fixed while the cell is
+custom" reads naturally only over a cell that HAS a base (the extend
+shape); the spec's row does not say this for the mode-switch path.
+
+**Round-1 review addendum (same task, 2026-11-27; report
+`.opencode/reviews/t356-round1-report.md`, deepseek-v4.1-flash, exit 0):
+APPROVE WITH NITS — 1×P2, 7×P3; the done-when audit and the mutation
+sample both PASS.** All eight findings were re-verified in-session
+before acting; the dispositions:
+
+- _P2-1 TAKEN (the defer half)_ — the extend cell's mode has no
+  read-side fact: `library_get`'s label carries `variant_id` only, so
+  an extend cell is indistinguishable from a plain variant cell. The
+  wire-shape fix (a mode/custom field on `ProjectLabelEntry` or the
+  UI's own read) is deliberately left to the MAIN-034 UI task's card —
+  pre-empting it could land the wrong shape; the D-238 closing claim
+  was corrected (the read-side gap is now named there) and the
+  follow-up is reported for the board.
+- _P3-1 TAKEN_ — `ProjectLabelEntry.variant_id`'s doc (and its
+  bindings twin) now says the truth: a variant target's variant or an
+  extend cell's base, `None` for replace-mode custom text only; the
+  label carries no mode fact (the corrected doc says so explicitly).
+  Bindings regenerated.
+- _P3-2 TAKEN_ — the mock's no-active-main extend refusal gained its
+  test (the main flag cleared on the store's row, the write refused
+  with the DB-010 envelope, no row, no journal).
+- _P3-3 TAKEN_ — DB-016's sweep over the SUPPLEMENT is now planted:
+  an extend cell seeded with a marker-line supplement fires the
+  MarkerLine violation (`db_016_flags_a_marker_line_in_an_extend_supplement`).
+- _P3-4 TAKEN_ — the Rust label test's extend half now uses a
+  NON-main base (reassign to the alt, then extend): a mapping to the
+  active main would fail the assertion.
+- _P3-5 TAKEN_ — the Rule 11 residue: the version-bearing test names
+  (`schema_v1`/`v2`/`v3`) and comments, `storage.rs`'s
+  "Migration 0003 is the rebuild-style case" comment (0004 is the
+  second; four-step set, v1→v4), `library.rs`'s two "exactly-one
+  target" helper comments, the `db_verify_tests` inventory bullets
+  (the extend base and supplement named) and the
+  `assignments_tests` module doc all tell the v4 truth now.
+- _P3-6 REPORTED (owner confirm)_ — a saved replace cell switching to
+  extend adopts the active main (no variant to keep, D-203 4c's
+  reading): recorded in D-238's readings and now flagged for the
+  owner in the entry's closing; no spec edit made (changing
+  MAIN-034's row text is an owner decision).
+- _P3-7 TAKEN_ — the mock's independent label oracle maps extend →
+  base now (the `kind === 'extend'` arm added).
+
+**Round-2 review addendum (same task, 2026-11-27; report
+`.opencode/reviews/t356-round2-report.md`, hy4-flash-free — the next
+different model per the chain, exit 0): APPROVE WITH NITS — no
+P0/P1/P2, two documentation-only P3; every round-1 disposition
+verified as landed, the behavior/test audit its own PASS.** Both
+findings taken; none declined:
+
+- _P3-1 TAKEN_ — `ProjectLabelEntry`'s corrected doc still ended with
+  "read back through this same row's shape when that UI lands", which
+  the row's shape cannot deliver (an extend cell's `Some(base)` is
+  indistinguishable from a plain variant cell's); the clause now
+  points at the recorded defer — the UI task adds the fact to this
+  row (or reads its own way). Bindings regenerated.
+- _P3-2 TAKEN_ — §7.10's first (terse) `assignment_set_custom`
+  sentence gained the mode clause ("carrying the cell's mode
+  (`replace` by default or `extend`, the mode contract in this
+  paragraph's later note, D-203/D-238)"); the detailed note already
+  carried the contract — only the first mention was silent. The
+  review phase ends here (two rounds, no third).

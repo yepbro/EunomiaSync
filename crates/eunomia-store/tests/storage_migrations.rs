@@ -104,9 +104,10 @@ fn migrations_run_on_file_backed_database() {
         run_migrations(&mut conn, &backup_dir(&dir)).unwrap();
     }
 
-    // Reopening must report a fully migrated database: schema version 3
-    // (0001_init.sql, the 0002 pair-lookup index and the 0003 custom-target
-    // assignment table, spec DB-004). The no-op rerun writes no backup copy.
+    // Reopening must report a fully migrated database: schema version 4
+    // (0001_init.sql, the 0002 pair-lookup index, the 0003 custom-target
+    // assignment table and the 0004 extend arm, spec DB-004). The no-op
+    // rerun writes no backup copy.
     {
         let mut conn = Connection::open(&path).unwrap();
         let backups = run_migrations(&mut conn, &backup_dir(&dir))
@@ -114,7 +115,7 @@ fn migrations_run_on_file_backed_database() {
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 3, "schema version must be exactly 3");
+        assert_eq!(user_version, 4, "schema version must be exactly 4");
         assert!(backups.is_empty(), "a no-op run must not produce copies");
         assert!(
             backup_files(&dir).is_empty(),

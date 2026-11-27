@@ -7,7 +7,7 @@
 //! immutable [`BuildSnapshot`](crate::snapshot::BuildSnapshot) — a
 //! pure function with no I/O, like the rest of this crate.
 //!
-//! Rules the body lives by (spec §9.2, ALG-020…022):
+//! Rules the body lives by (spec §9.2, ALG-020…023):
 //!
 //! - **`included`** is the set of instructions that are active AND
 //!   assigned to the project. A hidden instruction keeps its
@@ -17,12 +17,19 @@
 //! - A heading goes in when its section — everything up to the next
 //!   heading of the same or a higher level — holds at least one
 //!   `included` instruction (ALG-020). Parents follow automatically:
-//!   a nested section is inside the parent's range.
+//!   a nested section is inside the parent's range. An assignment
+//!   with per-project custom text counts as assigned the same way —
+//!   replace and extend modes alike (MAIN-007, MAIN-034).
 //! - An instruction with an empty variant is `included`: it keeps its
 //!   heading but contributes no block (spec D-13).
 //! - The instruction's own name never enters the file (ALG-022); only
 //!   the variant text does, after
 //!   [`normalize::variant_text`](crate::normalize::variant_text).
+//! - An extend cell contributes the ALG-023 composition: the NON-EMPTY
+//!   halves of the normalized base-variant text and the normalized
+//!   supplement, joined by exactly one blank line. The base is read
+//!   at build time — the snapshot's current variant text — so library
+//!   edits to the base flow into the cell.
 //! - Blocks are separated by exactly one empty line (two line breaks);
 //!   the body carries no trailing line break of its own.
 //!
@@ -126,14 +133,31 @@ use crate::snapshot::BuildSnapshot;
 /// line breaks = exactly one empty line, ALG-022).
 const BLANK_LINE: &str = "\n\n";
 
+/// The extend cell's effective text (ALG-023, MAIN-034): the NON-EMPTY
+/// halves of the already-normalized base and supplement, joined by
+/// exactly one blank line; an empty half contributes nothing (D-13), and
+/// when both halves are empty the cell contributes nothing — the empty
+/// string, which the block collection skips like any empty variant.
+fn compose_extend(base: &str, supplement: &str) -> String {
+    match (base.is_empty(), supplement.is_empty()) {
+        (false, false) => format!("{base}\n\n{supplement}"),
+        (false, true) => base.to_owned(),
+        (true, false) => supplement.to_owned(),
+        (true, true) => String::new(),
+    }
+}
+
 /// Builds one project's body from the snapshot (spec §9.2).
 ///
 /// The function walks the snapshot's library items in order — the
 /// library's `position` order, which the snapshot preserves (DB-005,
 /// LIB-035, DoD 5) — and collects the blocks the §9.2 pseudocode
 /// collects: headings whose section holds at least one included
-/// instruction (ALG-020) and the normalized texts of the included
-/// instructions' assigned variants. The blocks are joined with one
+/// instruction (ALG-020) and the effective texts of the included
+/// instructions' assignments — the normalized variant text, the
+/// normalized custom text (MAIN-007), or the ALG-023 composition of
+/// an extend cell's base and supplement (MAIN-034). The blocks are
+/// joined with one
 /// empty line between neighbours; the result carries no trailing line
 /// break (the file skeleton of ALG-030 adds everything after the
 /// body).
@@ -153,8 +177,9 @@ const BLANK_LINE: &str = "\n\n";
 ///
 /// # Panics
 ///
-/// Panics if an assignment's variant is missing from its instruction's
-/// variants — impossible for a snapshot built through
+/// Panics if an assignment's variant — a variant target or an extend
+/// cell's base — is missing from its instruction's variants: impossible
+/// for a snapshot built through
 /// [`BuildSnapshot::new`](crate::snapshot::BuildSnapshot::new), which
 /// rejects the shape (DB-012) at assembly; the panic marks a broken
 /// invariant, not a data condition.
@@ -252,6 +277,22 @@ pub fn build_body(snapshot: &BuildSnapshot, project: &ProjectId) -> Option<Strin
                         normalize::variant_text(&variant.content)
                     }
                     AssignmentTarget::Custom(custom) => normalize::variant_text(custom),
+                    AssignmentTarget::Extend { base, supplement } => {
+                        // ALG-023: the base is read at BUILD time — its
+                        // current text in this snapshot — so library
+                        // edits flow into the cell.
+                        let variant = instruction
+                            .variants
+                            .iter()
+                            .find(|variant| variant.id == *base)
+                            .expect(
+                                "snapshot validation guarantees the extend base belongs to its instruction",
+                            );
+                        compose_extend(
+                            &normalize::variant_text(&variant.content),
+                            &normalize::variant_text(supplement),
+                        )
+                    }
                 });
                 if let Some(text) = text
                     && !text.is_empty()
@@ -512,6 +553,145 @@ mod tests {
         );
 
         assert_eq!(body_of(&snapshot, "p1"), "## Style");
+    }
+
+    // ---- MAIN-034 / ALG-023: the extend composition ----------------------
+
+    /// An extend assignment: project p1 supplements `v-<id>` of the
+    /// instruction with the given text.
+    fn extending(instruction_id: &str, base: &str, supplement: &str) -> Assignment {
+        Assignment {
+            project_id: ProjectId::new("p1".to_owned()),
+            instruction_id: ItemId::new(instruction_id.to_owned()),
+            target: AssignmentTarget::Extend {
+                base: VariantId::new(base.to_owned()),
+                supplement: supplement.to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn an_extend_cell_composes_both_normalized_halves_with_exactly_one_blank_line() {
+        // ALG-023: the non-empty halves of normalize(base) and
+        // normalize(supplement), joined by exactly one blank line. The
+        // expected string is written by hand from the spec's sentence —
+        // BOM/CRLF/trailing junk in both halves fall to ALG-002 before
+        // the join.
+        let snapshot = snapshot(
+            vec![project("p1")],
+            vec![instruction(
+                "a",
+                "\u{feff}Base line.\r\nSecond base line.\r\n   ",
+            )],
+            vec![extending(
+                "a",
+                "v-a",
+                "\r\nSupplement one.\r\nSupplement two.\r\n",
+            )],
+        );
+
+        assert_eq!(
+            body_of(&snapshot, "p1"),
+            "Base line.\nSecond base line.\n\nSupplement one.\nSupplement two."
+        );
+    }
+
+    #[test]
+    fn an_extend_cell_with_an_empty_base_contributes_only_the_supplement() {
+        // An empty half contributes nothing (D-13): the supplement alone
+        // builds, with no leading blank line.
+        let snapshot = snapshot(
+            vec![project("p1")],
+            vec![instruction("a", "   \r\n")],
+            vec![extending("a", "v-a", "Supplement only.")],
+        );
+
+        assert_eq!(body_of(&snapshot, "p1"), "Supplement only.");
+    }
+
+    #[test]
+    fn an_extend_cell_with_an_empty_supplement_contributes_only_the_base() {
+        let snapshot = snapshot(
+            vec![project("p1")],
+            vec![instruction("a", "Base only.")],
+            vec![extending("a", "v-a", "")],
+        );
+
+        assert_eq!(body_of(&snapshot, "p1"), "Base only.");
+    }
+
+    #[test]
+    fn an_extend_cell_with_both_halves_empty_contributes_nothing_but_keeps_the_heading() {
+        // Both halves empty: the cell contributes nothing, and it still
+        // counts as assigned for ALG-020's heading rule (MAIN-034).
+        let snapshot = snapshot(
+            vec![project("p1")],
+            vec![
+                heading("h-kept", 2, "Kept"),
+                instruction("empty-base", ""),
+                heading("h-next", 2, "Next"),
+                instruction("full", "Full text."),
+            ],
+            vec![
+                extending("empty-base", "v-empty-base", " \r\n"),
+                assigned("full"),
+            ],
+        );
+
+        assert_eq!(body_of(&snapshot, "p1"), "## Kept\n\n## Next\n\nFull text.");
+    }
+
+    #[test]
+    fn the_extend_base_is_read_at_build_time_library_edits_flow_into_the_cell() {
+        // D-203 reading 4b / ALG-023: the composition reads the base's
+        // CURRENT text — the same extend assignment over an edited
+        // variant builds the edited text (a library edit flows into the
+        // cell until its mode changes or the custom instruction is
+        // deleted).
+        let items = |base_content: &str| vec![instruction("a", base_content)];
+        let assignment = extending("a", "v-a", "supplement");
+
+        let first = snapshot(
+            vec![project("p1")],
+            items("Original base."),
+            vec![assignment.clone()],
+        );
+        assert_eq!(body_of(&first, "p1"), "Original base.\n\nsupplement");
+
+        let second = snapshot(vec![project("p1")], items("Edited base."), vec![assignment]);
+        assert_eq!(body_of(&second, "p1"), "Edited base.\n\nsupplement");
+    }
+
+    #[test]
+    fn two_projects_compose_their_own_supplements_over_the_shared_base() {
+        // MAIN-005's isolation shape for extend cells: one shared base
+        // variant, two per-project supplements.
+        let shared = instruction("a", "Shared base.");
+        let snapshot = snapshot(
+            vec![project("p1"), project("p2")],
+            vec![shared],
+            vec![
+                Assignment {
+                    project_id: ProjectId::new("p1".to_owned()),
+                    instruction_id: ItemId::new("a".to_owned()),
+                    target: AssignmentTarget::Extend {
+                        base: VariantId::new("v-a".to_owned()),
+                        supplement: "p1 supplement".to_owned(),
+                    },
+                },
+                Assignment {
+                    project_id: ProjectId::new("p2".to_owned()),
+                    instruction_id: ItemId::new("a".to_owned()),
+                    target: AssignmentTarget::Extend {
+                        base: VariantId::new("v-a".to_owned()),
+                        supplement: "p2 supplement".to_owned(),
+                    },
+                },
+            ],
+        );
+
+        assert_eq!(body_of(&snapshot, "p1"), "Shared base.\n\np1 supplement");
+        assert_eq!(body_of(&snapshot, "p2"), "Shared base.\n\np2 supplement");
     }
 
     // ---- ALG-020: heading inclusion by section --------------------------

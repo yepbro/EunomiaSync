@@ -38,6 +38,7 @@ export type {
   AssignmentTargetRecord as AssignmentTargetWire,
   BackupCopyRecord_Serialize as BackupCopyRecordWire,
   BulkAssignmentResult as BulkAssignmentResultWire,
+  CustomTextMode as CustomTextModeWire,
   AppError_Serialize as AppErrorWire,
   AppInfo,
   DbBackupInfo,

@@ -23,8 +23,14 @@
 -- Deviations from the reference text: formatting; two strengthened
 -- `library_items` constraints (`position >= 1` and the explicit
 -- `heading_level IS NOT NULL`, both explained above and in DECISIONS.md
--- D-036); and the two extra `project_instructions` indexes required by
--- the §6.2 closing paragraph (index names are an implementation choice).
+-- D-036); the two extra `project_instructions` indexes required by
+-- the §6.2 closing paragraph (index names are an implementation
+-- choice); and this file's `project_instructions` keeps its v1 shape
+-- (a NOT NULL `variant_id`, no `custom_text`, no direct
+-- `instruction_id` FK), because the per-project custom-text model
+-- postdates v1 (D-125's ruling, 2026-11-21) — migrations 0003 (MAIN-007)
+-- and 0004 (the MAIN-034 extend arm, D-238) rebuild the table to the
+-- §6.2 reference, so a fully migrated database matches this schema.
 
 -- Application settings: `key` is a dotted path such as `sync.skip_identical`,
 -- `value` holds the JSON-encoded setting (spec §6.5).

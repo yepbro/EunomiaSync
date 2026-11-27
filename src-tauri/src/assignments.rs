@@ -8,7 +8,11 @@
 //!
 //! D-125's current custom-text model replaces the absorbed card's removed
 //! `variant_fork_for_project`: custom text lives on the assignment itself,
-//! never in a cloned variant. Bulk work is linear in the number of unique
+//! never in a cloned variant. `assignment_set_custom` carries the cell's
+//! mode (MAIN-034, D-203 reading 4d): `replace` — the default — stores
+//! the text alone (MAIN-007), `extend` keeps the cell's base variant
+//! beside the supplement (§6.2's third shape; the build composes the two
+//! by ALG-023). Bulk work is linear in the number of unique
 //! requested row/column pairs plus the active-variant scan (when no variant
 //! is supplied) and validated text length; each pair uses indexed store
 //! reads/writes.
@@ -35,14 +39,48 @@ use crate::errors::{AppError, ErrorCode, ErrorDetails};
 use crate::logging;
 
 /// The assignment's one content target on the wire. The tagged enum keeps
-/// "variant and custom" and "neither" unrepresentable (DB-012).
+/// "neither" unrepresentable (DB-012): a variant, replace-mode text, or
+/// MAIN-034's extend pair (a base variant beside the supplement).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub(crate) enum AssignmentTargetRecord {
     /// An active variant of the assignment's instruction.
     Variant(String),
-    /// Per-project custom text stored on the assignment itself.
+    /// Per-project custom text stored on the assignment itself (replace
+    /// mode, MAIN-007).
     Custom(String),
+    /// MAIN-034's extend cell: the base variant the cell keeps beside the
+    /// supplement text; ALG-023 composes the two at build time.
+    Extend {
+        /// The base variant's id.
+        base: String,
+        /// The per-project supplement text.
+        supplement: String,
+    },
+}
+
+/// The cell's mode on the `assignment_set_custom` wire (§7.10, D-203
+/// reading 4d): `replace` (the default — the text is the whole cell
+/// output, no variant reference) or `extend` (the cell keeps its base
+/// variant beside the supplement text, §6.2's third shape).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CustomTextMode {
+    /// The text is the whole cell output; the row stores no variant.
+    Replace,
+    /// The cell keeps its base variant; ALG-023 composes base +
+    /// supplement.
+    Extend,
+}
+
+impl CustomTextMode {
+    /// Maps the wire mode onto the store's `set_custom` mode.
+    fn into_store(self) -> eunomia_store::library::CustomMode {
+        match self {
+            Self::Replace => eunomia_store::library::CustomMode::Replace,
+            Self::Extend => eunomia_store::library::CustomMode::Extend,
+        }
+    }
 }
 
 /// One assignment row as it stands after the command.
@@ -65,6 +103,9 @@ impl AssignmentRecord {
         let target = match assignment.target {
             AssignmentTarget::Variant(variant_id) => AssignmentTargetRecord::Variant(variant_id),
             AssignmentTarget::Custom(custom_text) => AssignmentTargetRecord::Custom(custom_text),
+            AssignmentTarget::Extend { base, supplement } => {
+                AssignmentTargetRecord::Extend { base, supplement }
+            }
         };
         Self {
             project_id: assignment.project_id,
@@ -287,9 +328,11 @@ fn unique_ids(ids: Vec<String>) -> Vec<String> {
 
 /// Enables/disables one project's assignment and optionally selects its
 /// variant. On an unassigned cell, `variant_id = null` selects the active
-/// main; on an already-enabled custom cell it is a no-op, while an explicit
-/// variant id converts the cell. Disabling removes the row. A same-target
-/// re-send writes/journals nothing.
+/// main; on an already-enabled custom cell — replace or extend (MAIN-034)
+/// — it is a no-op, while an explicit variant id converts the cell (the
+/// extend pair's supplement is dropped with the mode, D-203 reading 4e).
+/// Disabling removes the row. A same-target re-send writes/journals
+/// nothing.
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn assignment_set<R: Runtime>(
@@ -334,7 +377,10 @@ async fn assignment_set_impl<R: Runtime>(
             }
 
             if let Some(current) = &current
-                && matches!(current.target, AssignmentTarget::Custom(_))
+                && matches!(
+                    current.target,
+                    AssignmentTarget::Custom(_) | AssignmentTarget::Extend { .. }
+                )
                 && variant_id.is_none()
             {
                 return Ok(Some(AssignmentRecord::from_store(current.clone())));
@@ -372,9 +418,14 @@ async fn assignment_set_impl<R: Runtime>(
         .await
 }
 
-/// Sets per-project custom text on one assignment. `Some("")` is a legal
-/// custom target; `None` replaces an existing custom target with the active
-/// main and is a no-op for an absent or variant-backed cell.
+/// Sets per-project custom text on one assignment, in the caller's mode
+/// (MAIN-034, §7.10): `replace` (the default when the mode is null — the
+/// text is the whole cell output) or `extend` (the cell keeps its base
+/// variant — the cell's current variant, else the instruction's active
+/// main — beside the supplement). `Some("")` is a legal target in both
+/// modes; `None` replaces an existing custom target — replace or extend
+/// alike — with the active main and is a no-op for an absent or
+/// variant-backed cell.
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn assignment_set_custom<R: Runtime>(
@@ -382,8 +433,9 @@ pub(crate) async fn assignment_set_custom<R: Runtime>(
     project_id: String,
     instruction_id: String,
     content: Option<String>,
+    mode: Option<CustomTextMode>,
 ) -> Result<Option<AssignmentRecord>, AppError> {
-    assignment_set_custom_impl(app, project_id, instruction_id, content)
+    assignment_set_custom_impl(app, project_id, instruction_id, content, mode)
         .await
         .inspect_err(logging::assignment_set_custom_failed)
 }
@@ -393,7 +445,12 @@ async fn assignment_set_custom_impl<R: Runtime>(
     project_id: String,
     instruction_id: String,
     content: Option<String>,
+    mode: Option<CustomTextMode>,
 ) -> Result<Option<AssignmentRecord>, AppError> {
+    // §7.10: replace is the default — a null mode is the replace mode.
+    let mode = mode
+        .map(CustomTextMode::into_store)
+        .unwrap_or(eunomia_store::library::CustomMode::Replace);
     let content = content
         .map(|raw| {
             validate_variant_text(&raw)
@@ -412,6 +469,7 @@ async fn assignment_set_custom_impl<R: Runtime>(
                 &project_id,
                 &instruction_id,
                 content.as_deref(),
+                mode,
             )
             .map_err(store_error)?;
             if before != after {
@@ -521,7 +579,12 @@ async fn assignments_bulk_impl<R: Runtime>(
                         .map_err(store_error)?;
                         changed += 1;
                     } else if let Some(current) = current {
-                        if matches!(current.target, AssignmentTarget::Custom(_)) {
+                        // MAIN-007/MAIN-034: bulk work never touches a
+                        // cell with custom text — replace or extend.
+                        if matches!(
+                            current.target,
+                            AssignmentTarget::Custom(_) | AssignmentTarget::Extend { .. }
+                        ) {
                             already_assigned.push(AssignmentPair {
                                 project_id: (*project_id).to_owned(),
                                 instruction_id: (*instruction_id).to_owned(),

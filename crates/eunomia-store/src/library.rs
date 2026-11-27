@@ -66,6 +66,10 @@
 //! caller's transaction: the assignments of the deleted variant are
 //! re-pointed at the replacement, then the variant soft-deletes. No
 //! assignment disappears silently (the LIB-023 acceptance criterion).
+//! An extend cell's base rides the same move — the row keeps its
+//! supplement and gains the replacement as its base (MAIN-034: "a variant
+//! deletion moves the base with the assignments and keeps the
+//! supplement").
 //! **One** replacement takes over all of the deleted variant's
 //! assignments; LIB-023's per-project choices compose [`reassign`]
 //! calls after the delete, in the same transaction. The dialog's
@@ -83,18 +87,24 @@
 //! # Assignments
 //!
 //! One content target per instruction/project pair (D-02, the composite
-//! PRIMARY KEY): an active variant of this instruction, or per-project
-//! custom text instead of a variant (DB-012/MAIN-007). [`assign`] rejects a
-//! second assignment with [`LibraryError::AlreadyAssigned`]; changing the
-//! variant is [`reassign`] (MAIN-005: other projects keep theirs);
-//! [`set_custom`] upserts custom text and clears it back to the active main;
-//! removing the row is [`unassign`] (LIB-020). A variant must be active and
-//! belong to this instruction ([`LibraryError::VariantNotAssignable`]) —
-//! the foreign keys are the schema floor, the typed pre-check is this
-//! module's contract. Variant deletion and reassignment touch only
-//! variant-backed rows, never custom cells. A hidden instruction keeps and
-//! gains assignments (DB-013); headings have no cells (MAIN-001) and
-//! assigning one is [`LibraryError::NotAnInstruction`].
+//! PRIMARY KEY), in one of §6.2's three shapes (DB-012): an active variant
+//! of this instruction (MAIN-001), per-project custom text instead of a
+//! variant (MAIN-007's replace mode), or a base variant BESIDE per-project
+//! custom text (MAIN-034's extend cell — migration 0004's third CHECK
+//! arm). [`assign`] rejects a second assignment with
+//! [`LibraryError::AlreadyAssigned`]; changing the variant is [`reassign`]
+//! (MAIN-005: other projects keep theirs); [`set_custom`] upserts custom
+//! text in a caller-chosen [`CustomMode`] (replace or extend) and clears
+//! either custom shape back to the active main; removing the row is
+//! [`unassign`] (LIB-020). A variant must be active and belong to this
+//! instruction ([`LibraryError::VariantNotAssignable`]) — the foreign keys
+//! are the schema floor, the typed pre-check is this module's contract.
+//! Variant deletion and reassignment touch only variant-backed rows,
+//! never custom cells — an extend cell's BASE rides the deletion move with
+//! the variant-backed assignments and its supplement stays (MAIN-034).
+//! A hidden instruction keeps and gains assignments (DB-013); headings
+//! have no cells (MAIN-001) and assigning one is
+//! [`LibraryError::NotAnInstruction`].
 //!
 //! # What this module does not do
 //!
@@ -532,17 +542,44 @@ impl VariantRow {
     }
 }
 
-/// The single content target of a stored assignment (DB-012/MAIN-007).
+/// The single content target of a stored assignment (DB-012).
 ///
-/// The enum mirrors the database's exactly-one-target CHECK in Rust, so a
-/// decoded assignment cannot carry both a variant and custom text or
-/// neither. A custom target bypasses the variant model entirely.
+/// The enum mirrors the database's CHECK in Rust, so a decoded assignment
+/// carries exactly one of the three legal §6.2 shapes: a variant alone
+/// (MAIN-001), custom text alone (MAIN-007's replace mode), or a base
+/// variant beside the supplement text (MAIN-034's extend mode) — and never
+/// "neither". A custom target bypasses the variant model entirely; an
+/// extend target keeps one so the build can read the base's current text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignmentTarget {
     /// An active variant of the assignment's instruction.
     Variant(String),
-    /// Per-project text stored on the assignment itself.
+    /// Per-project text stored on the assignment itself (replace mode,
+    /// MAIN-007).
     Custom(String),
+    /// MAIN-034's extend cell: the base variant the cell keeps beside the
+    /// per-project supplement text. The base is an active variant of the
+    /// assignment's instruction (DB-012's extend arm); ALG-023 composes
+    /// `normalize(base text)` and `normalize(supplement)` at build time,
+    /// so library edits to the base flow into the cell.
+    Extend {
+        /// The base variant's id.
+        base: String,
+        /// The per-project supplement text.
+        supplement: String,
+    },
+}
+
+/// The mode of a [`set_custom`] write (MAIN-034, §7.10): `Replace` stores
+/// the text alone (MAIN-007's shape, `variant_id` NULL); `Extend` keeps the
+/// cell's base variant beside the text (§6.2's third shape). `None` content
+/// clears the cell whatever the mode — the mode is dropped with the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomMode {
+    /// The text is the whole cell output; no variant reference.
+    Replace,
+    /// The cell keeps its base variant; ALG-023 composes base + supplement.
+    Extend,
 }
 
 /// The input of [`assign`].
@@ -559,8 +596,9 @@ pub struct NewAssignment<'a> {
     pub variant_id: &'a str,
 }
 
-/// A stored assignment row (§6.2 `project_instructions`, §7.4): one variant
-/// or custom-text target per instruction/project pair (D-02/DB-012).
+/// A stored assignment row (§6.2 `project_instructions`, §7.4): one content
+/// target per instruction/project pair (D-02/DB-012) — a variant, custom
+/// text, or MAIN-034's extend pair (base variant + supplement).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assignment {
     /// The assigned project.
@@ -568,7 +606,8 @@ pub struct Assignment {
     /// The assigned instruction.
     pub instruction_id: String,
     /// The assignment's one content target (DB-012): an active variant
-    /// of `instruction_id`, or per-project custom text.
+    /// of `instruction_id`, per-project custom text, or the extend pair
+    /// (base variant + supplement, MAIN-034).
     pub target: AssignmentTarget,
     /// Creation time, DB-002 UTC.
     pub created_at: String,
@@ -920,23 +959,19 @@ impl AssignmentRow {
     }
 
     /// Decodes the database's nullable target columns into the Rust enum.
-    /// The CHECK makes both/neither unreachable in a healthy database; a
-    /// row written with checks bypassed is corruption, surfaced without
-    /// echoing custom text.
+    /// The CHECK makes "neither" unreachable in a healthy database; a row
+    /// written with checks bypassed is corruption, surfaced without echoing
+    /// custom text. The "both" arm is the extend cell since migration 0004
+    /// (MAIN-034), so it decodes rather than errors.
     fn into_assignment(self) -> Result<Assignment, LibraryError> {
         let target = match (self.variant_id, self.custom_text) {
             (Some(variant_id), None) => AssignmentTarget::Variant(variant_id),
             (None, Some(custom_text)) => AssignmentTarget::Custom(custom_text),
+            (Some(base), Some(supplement)) => AssignmentTarget::Extend { base, supplement },
             (None, None) => {
                 return Err(LibraryError::Member {
                     column: "assignment_target",
                     found: "neither".to_owned(),
-                });
-            }
-            (Some(_), Some(_)) => {
-                return Err(LibraryError::Member {
-                    column: "assignment_target",
-                    found: "both".to_owned(),
                 });
             }
         };
@@ -950,7 +985,7 @@ impl AssignmentRow {
     }
 }
 
-/// Runs a single-row assignment query and decodes its exactly-one target.
+/// Runs a single-row assignment query and decodes its target.
 fn query_optional_assignment(
     conn: &Connection,
     sql: &str,
@@ -964,7 +999,7 @@ fn query_optional_assignment(
         .transpose()
 }
 
-/// Runs an assignment-list query and decodes every exactly-one target.
+/// Runs an assignment-list query and decodes every target.
 fn query_assignments(
     conn: &Connection,
     sql: &str,
@@ -2294,7 +2329,9 @@ pub fn list_assignments_for_active_projects(
 
 /// Lists every assignment of the variant, in creation order
 /// (`created_at, project_id` ties break stably) — the LIB-023 delete
-/// dialog's "which projects are affected" read.
+/// dialog's "which projects are affected" read. An extend cell whose
+/// base is this variant is affected by its deletion too, so it is
+/// listed here (its base rides the move, MAIN-034/DB-012).
 ///
 /// # Errors
 ///
@@ -2370,19 +2407,31 @@ pub fn reassign(
 }
 
 /// Upserts per-project custom text, or clears a custom target back to the
-/// instruction's active main variant (MAIN-007/D-125).
+/// instruction's active main variant (MAIN-007/D-125; MAIN-034's mode).
 ///
-/// `Some(text)` creates or updates the one assignment row; the text is
-/// stored verbatim and folded from CRLF to LF like variant text. Empty text
-/// is a legal assigned target. `None` replaces an existing custom target
-/// with the active main; an absent or variant-backed cell is a verified
-/// no-op. No variant row is created, edited or deleted.
+/// `Some(text)` creates or updates the one assignment row in the write's
+/// [`CustomMode`]: `Replace` stores the text alone (`variant_id` NULL);
+/// `Extend` keeps the cell's base variant beside the text — the cell's
+/// current variant when it has one (a variant-backed or extend cell, D-203
+/// reading 4c), otherwise the instruction's active main ("the main variant
+/// for an unassigned cell"). The text is stored verbatim and folded from
+/// CRLF to LF like variant text; empty text is a legal target in both
+/// modes. `None` replaces an existing custom target — replace or extend
+/// alike — with the active main, dropping the mode with it (MAIN-007), and
+/// is a no-op for an absent or variant-backed cell. No variant row is
+/// created, edited or deleted.
+///
+/// The extend base is not re-validated as assignable: it is the cell's own
+/// row value, written by a validated writer and maintained by
+/// [`delete_variant`]'s move (DB-012); the build snapshot re-checks it at
+/// read time.
 ///
 /// # Errors
 ///
 /// Returns [`LibraryError::NotFound`] for an unknown project/instruction,
 /// [`LibraryError::NotAnInstruction`] for a heading,
-/// [`LibraryError::NoActiveMain`] when a custom cell cannot be cleared
+/// [`LibraryError::NoActiveMain`] when an extend write must adopt the main
+/// variant for a cell without one, or a custom cell cannot be cleared,
 /// because DB-010 is already broken, and [`LibraryError::Sql`] when a
 /// statement or the DB-006 length CHECK fails.
 pub fn set_custom(
@@ -2390,6 +2439,7 @@ pub fn set_custom(
     project_id: &str,
     instruction_id: &str,
     content: Option<&str>,
+    mode: CustomMode,
 ) -> Result<Option<Assignment>, LibraryError> {
     ensure_assignment_pair(conn, project_id, instruction_id)?;
     let current = get_assignment(conn, project_id, instruction_id)?;
@@ -2397,9 +2447,15 @@ pub fn set_custom(
         let Some(current) = current else {
             return Ok(None);
         };
-        let AssignmentTarget::Custom(_) = current.target else {
+        // MAIN-007: clearing assigns the main variant back and drops the
+        // mode with the text — an extend cell clears to the MAIN, not to
+        // its base. Absent or variant-backed cells are verified no-ops.
+        if !matches!(
+            current.target,
+            AssignmentTarget::Custom(_) | AssignmentTarget::Extend { .. }
+        ) {
             return Ok(Some(current));
-        };
+        }
         let main_id =
             active_main_id(conn, instruction_id)?.ok_or_else(|| LibraryError::NoActiveMain {
                 instruction_id: instruction_id.to_owned(),
@@ -2417,20 +2473,48 @@ pub fn set_custom(
     };
 
     let content = fold_crlf(content);
+    // The extend write's base: the variant the cell keeps — its current
+    // variant (a variant-backed or extend cell) or, for a cell without
+    // one, the active main (D-203 reading 4c: "the main for an
+    // unassigned cell"; a replace-custom cell has no variant to keep, so
+    // it takes the same main).
+    let base: Option<String> = match mode {
+        CustomMode::Replace => None,
+        CustomMode::Extend => match current.as_ref().map(|assignment| &assignment.target) {
+            Some(AssignmentTarget::Variant(variant_id)) => Some(variant_id.clone()),
+            Some(AssignmentTarget::Extend { base, .. }) => Some(base.clone()),
+            // The active main, or the honest refusal when DB-010 is
+            // already broken (no active main to adopt).
+            Some(AssignmentTarget::Custom(_)) | None => {
+                Some(active_main_id(conn, instruction_id)?.ok_or_else(|| {
+                    LibraryError::NoActiveMain {
+                        instruction_id: instruction_id.to_owned(),
+                    }
+                })?)
+            }
+        },
+    };
+    let upserted = match &base {
+        Some(base) => AssignmentTarget::Extend {
+            base: base.clone(),
+            supplement: content.clone(),
+        },
+        None => AssignmentTarget::Custom(content.clone()),
+    };
     if let Some(current) = &current
-        && current.target == AssignmentTarget::Custom(content.clone())
+        && current.target == upserted
     {
         return Ok(Some(current.clone()));
     }
     conn.execute(
         "INSERT INTO project_instructions (
              project_id, instruction_id, variant_id, custom_text, created_at, updated_at
-         ) VALUES (?1, ?2, NULL, ?3, ?4, ?4)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
          ON CONFLICT(project_id, instruction_id) DO UPDATE SET
-             variant_id = NULL,
+             variant_id = excluded.variant_id,
              custom_text = excluded.custom_text,
              updated_at = excluded.updated_at",
-        rusqlite::params![project_id, instruction_id, content, now_utc()],
+        rusqlite::params![project_id, instruction_id, base, content, now_utc()],
     )?;
     Ok(Some(
         get_assignment(conn, project_id, instruction_id)?

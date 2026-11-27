@@ -270,7 +270,14 @@ describe('libraryGet (the §7.3 tree, T-083/D-187)', () => {
         const list = expected.get(assignment.instructionId) ?? []
         list.push({
           project_id: project.id,
-          variant_id: assignment.target.kind === 'variant' ? assignment.target.value : null,
+          // MAIN-034: a variant target names its variant, an extend
+          // cell its base; only a replace cell names none.
+          variant_id:
+            assignment.target.kind === 'variant'
+              ? assignment.target.value
+              : assignment.target.kind === 'extend'
+                ? assignment.target.value.base
+                : null,
         })
         expected.set(assignment.instructionId, list)
       }
@@ -4029,7 +4036,7 @@ describe('assignmentSet (T-331)', () => {
     const main = mainVariantOf(instruction)
     const project = state.projects.find((row) => row.state === 'active')
     if (!project) throw new Error('an active project must exist')
-    await commands.assignmentSetCustom(project.id, instruction.id, 'keep custom')
+    await commands.assignmentSetCustom(project.id, instruction.id, 'keep custom', null)
     const journalBefore = state.activity.length
 
     const unchanged = await commands.assignmentSet(project.id, instruction.id, true, null)
@@ -4078,19 +4085,24 @@ describe('assignmentSetCustom (T-331)', () => {
     const sharedBefore = { ...main }
     const journalBefore = state.activity.length
 
-    const first = await commands.assignmentSetCustom(p1.id, instruction.id, 'project one\r\n')
+    const first = await commands.assignmentSetCustom(p1.id, instruction.id, 'project one\r\n', null)
 
     expect(first?.target).toEqual({ kind: 'custom', value: 'project one\n' })
     expect(instruction.variants).toHaveLength(variantCount)
     expect(main).toEqual(sharedBefore)
     expect(state.assignments.find((row) => row.projectId === p2.id)).toEqual(p2Before)
     expect(state.activity).toHaveLength(journalBefore + 1)
-    expect(await commands.assignmentSetCustom(p1.id, instruction.id, 'project one\n')).toEqual(
-      first,
-    )
+    expect(
+      await commands.assignmentSetCustom(p1.id, instruction.id, 'project one\n', null),
+    ).toEqual(first)
     expect(state.activity).toHaveLength(journalBefore + 1)
 
-    const second = await commands.assignmentSetCustom(p1.id, instruction.id, 'project one updated')
+    const second = await commands.assignmentSetCustom(
+      p1.id,
+      instruction.id,
+      'project one updated',
+      null,
+    )
     expect(second?.created_at).toBe(first?.created_at)
     expect(second?.target).toEqual({ kind: 'custom', value: 'project one updated' })
     expect(instruction.variants).toHaveLength(variantCount)
@@ -4104,7 +4116,7 @@ describe('assignmentSetCustom (T-331)', () => {
         : undefined,
     ).toBeNull()
 
-    const cleared = await commands.assignmentSetCustom(p1.id, instruction.id, null)
+    const cleared = await commands.assignmentSetCustom(p1.id, instruction.id, null, null)
     expect(cleared?.target).toEqual({ kind: 'variant', value: main.id })
     expect(state.activity).toHaveLength(journalBefore + 3)
 
@@ -4128,11 +4140,16 @@ describe('assignmentSetCustom (T-331)', () => {
     const journalBefore = state.activity.length
     for (const content of ['bad\0text', 'x'.repeat(262_145)]) {
       await expect(
-        commands.assignmentSetCustom(project.id, instruction.id, content),
+        commands.assignmentSetCustom(project.id, instruction.id, content, null),
       ).rejects.toMatchObject({ code: 'E_VALIDATION', params: { field: 'custom_text' } })
     }
     await expect(
-      commands.assignmentSetCustom(project.id, instruction.id, 'text\n<!-- EUNOMIASYNC:BEGIN -->'),
+      commands.assignmentSetCustom(
+        project.id,
+        instruction.id,
+        'text\n<!-- EUNOMIASYNC:BEGIN -->',
+        null,
+      ),
     ).rejects.toMatchObject({
       code: 'E_CONTENT_RESERVED',
       params: { field: 'custom_text', line: '2' },
@@ -4143,10 +4160,245 @@ describe('assignmentSetCustom (T-331)', () => {
         (row) => row.projectId === project.id && row.instructionId === instruction.id,
       ),
     ).toBe(false)
-    expect((await commands.assignmentSetCustom(project.id, instruction.id, ''))?.target).toEqual({
+    expect(
+      (await commands.assignmentSetCustom(project.id, instruction.id, '', null))?.target,
+    ).toEqual({
       kind: 'custom',
       value: '',
     })
+  })
+})
+
+describe('assignmentSetCustom extend (T-356, MAIN-034)', () => {
+  it("keeps the cell's variant as the base, adopts the main for a variantless cell, and re-sends journal nothing", async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    const alt = await commands.variantCreate(instruction.id, 'Alt', 'empty')
+    const projects = state.projects.filter((row) => row.state === 'active').slice(0, 2)
+    const [p1, p2] = projects
+    if (!p1 || !p2) throw new Error('two active projects must exist')
+    await commands.assignmentSet(p1.id, instruction.id, true, alt.id)
+    const journalBefore = state.activity.length
+
+    // The variant-backed cell keeps its variant as the base; the
+    // supplement is folded like variant text.
+    const kept = await commands.assignmentSetCustom(p1.id, instruction.id, 'plus\r\n', 'extend')
+    expect(kept?.target).toEqual({
+      kind: 'extend',
+      value: { base: alt.id, supplement: 'plus\n' },
+    })
+
+    // The unassigned cell adopts the active main (MAIN-034: "the main
+    // variant for an unassigned cell").
+    const adopted = await commands.assignmentSetCustom(p2.id, instruction.id, 'plus two', 'extend')
+    expect(adopted?.target).toEqual({
+      kind: 'extend',
+      value: { base: main.id, supplement: 'plus two' },
+    })
+    expect(state.activity).toHaveLength(journalBefore + 2)
+
+    // A same-mode, same-content re-send journals nothing.
+    const reSent = await commands.assignmentSetCustom(p1.id, instruction.id, 'plus\n', 'extend')
+    expect(reSent).toEqual(kept)
+    expect(state.activity).toHaveLength(journalBefore + 2)
+
+    // The mock store rows carry the extend pair itself.
+    expect(
+      state.assignments.find(
+        (row) => row.projectId === p1.id && row.instructionId === instruction.id,
+      )?.target,
+    ).toEqual({ kind: 'extend', value: { base: alt.id, supplement: 'plus\n' } })
+  })
+
+  it('switches modes both ways and clears to the main, not the base', async () => {
+    const state = mockState()
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    const alt = await commands.variantCreate(instruction.id, 'Alt', 'empty')
+    const project = state.projects.find((row) => row.state === 'active')
+    if (!project) throw new Error('an active project must exist')
+    await commands.assignmentSet(project.id, instruction.id, true, alt.id)
+
+    const extend = await commands.assignmentSetCustom(
+      project.id,
+      instruction.id,
+      'supplement',
+      'extend',
+    )
+    expect(extend?.target).toEqual({
+      kind: 'extend',
+      value: { base: alt.id, supplement: 'supplement' },
+    })
+
+    // Extend → replace: the base reference is dropped, the text stays.
+    const replaced = await commands.assignmentSetCustom(
+      project.id,
+      instruction.id,
+      'whole cell',
+      'replace',
+    )
+    expect(replaced?.target).toEqual({ kind: 'custom', value: 'whole cell' })
+
+    // Replace → extend: no variant to keep, the main becomes the base.
+    const extended = await commands.assignmentSetCustom(
+      project.id,
+      instruction.id,
+      'supplement',
+      'extend',
+    )
+    expect(extended?.target).toEqual({
+      kind: 'extend',
+      value: { base: main.id, supplement: 'supplement' },
+    })
+
+    // Clearing drops the mode with the text and restores the MAIN, not
+    // the base (MAIN-007).
+    const cleared = await commands.assignmentSetCustom(project.id, instruction.id, null, 'extend')
+    expect(cleared?.target).toEqual({ kind: 'variant', value: main.id })
+  })
+
+  it('validates the supplement like replace text before writing', async () => {
+    const state = mockState()
+    state.assignments = []
+    const instruction = firstInstructionOf(state)
+    const project = state.projects.find((row) => row.state === 'active')
+    if (!project) throw new Error('an active project must exist')
+    const journalBefore = state.activity.length
+    for (const content of ['bad\0text', 'x'.repeat(262_145)]) {
+      await expect(
+        commands.assignmentSetCustom(project.id, instruction.id, content, 'extend'),
+      ).rejects.toMatchObject({ code: 'E_VALIDATION', params: { field: 'custom_text' } })
+    }
+    // DB-016's reserved-marker rule covers the supplement (MAIN-034).
+    await expect(
+      commands.assignmentSetCustom(
+        project.id,
+        instruction.id,
+        'text\n<!-- EUNOMIASYNC:BEGIN -->',
+        'extend',
+      ),
+    ).rejects.toMatchObject({
+      code: 'E_CONTENT_RESERVED',
+      params: { field: 'custom_text', line: '2' },
+    })
+    expect(state.activity).toHaveLength(journalBefore)
+    expect(
+      state.assignments.some(
+        (row) => row.projectId === project.id && row.instructionId === instruction.id,
+      ),
+    ).toBe(false)
+  })
+
+  it('refuses an extend write with no active main instead of degrading to replace', async () => {
+    // The twin of the store bug D-238 records as found-red: a cell
+    // without a variant must adopt the active main, and DB-010 broken
+    // out-of-band (the main flag cleared on the store's own row) is
+    // the honest refusal — never a silent replace write.
+    const state = mockState()
+    state.assignments = []
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    main.isMain = false
+    const project = state.projects.find((row) => row.state === 'active')
+    if (!project) throw new Error('an active project must exist')
+    const journalBefore = state.activity.length
+
+    await expect(
+      commands.assignmentSetCustom(project.id, instruction.id, 'supplement', 'extend'),
+    ).rejects.toMatchObject({
+      code: 'E_VALIDATION',
+      params: {
+        field: 'instruction_id',
+        reason: 'the instruction has no active main variant (DB-010)',
+      },
+    })
+    expect(
+      state.assignments.some(
+        (row) => row.projectId === project.id && row.instructionId === instruction.id,
+      ),
+    ).toBe(false)
+    expect(state.activity).toHaveLength(journalBefore)
+  })
+
+  it('treats an extend cell as a custom cell: a null variant is a no-op, an explicit variant converts, bulk skips it', async () => {
+    const state = mockState()
+    state.assignments = []
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    const alt = await commands.variantCreate(instruction.id, 'Alt', 'empty')
+    const projects = state.projects.filter((row) => row.state === 'active').slice(0, 2)
+    const [p1, p2] = projects
+    if (!p1 || !p2) throw new Error('two active projects must exist')
+    await commands.assignmentSet(p1.id, instruction.id, true, alt.id)
+    await commands.assignmentSet(p2.id, instruction.id, true, alt.id)
+    await commands.assignmentSetCustom(p1.id, instruction.id, 'supplement', 'extend')
+    await commands.assignmentSetCustom(p2.id, instruction.id, 'supplement', 'extend')
+    const journalBefore = state.activity.length
+
+    // A null variant is the verified no-op a custom cell gets.
+    const noOp = await commands.assignmentSet(p1.id, instruction.id, true, null)
+    expect(noOp?.target).toEqual({
+      kind: 'extend',
+      value: { base: alt.id, supplement: 'supplement' },
+    })
+    expect(state.activity).toHaveLength(journalBefore)
+
+    // An explicit variant converts the cell: the supplement and the
+    // mode are dropped.
+    const converted = await commands.assignmentSet(p1.id, instruction.id, true, main.id)
+    expect(converted?.target).toEqual({ kind: 'variant', value: main.id })
+    expect(state.activity).toHaveLength(journalBefore + 1)
+
+    // Bulk clear skips the extend cell.
+    const bulk = await commands.assignmentsBulk([instruction.id], [p2.id], false, null)
+    expect(bulk.changed).toBe(0)
+    expect(bulk.already_assigned).toEqual([{ project_id: p2.id, instruction_id: instruction.id }])
+    expect(state.assignments.find((row) => row.projectId === p2.id)?.target).toEqual({
+      kind: 'extend',
+      value: { base: alt.id, supplement: 'supplement' },
+    })
+  })
+
+  it("variant_delete moves an extend cell's base and keeps the supplement", async () => {
+    const state = mockState()
+    state.assignments = []
+    const instruction = firstInstructionOf(state)
+    const main = mainVariantOf(instruction)
+    const alt = await commands.variantCreate(instruction.id, 'Alt', 'empty')
+    const project = state.projects.find((row) => row.state === 'active')
+    if (!project) throw new Error('an active project must exist')
+    await commands.assignmentSet(project.id, instruction.id, true, alt.id)
+    await commands.assignmentSetCustom(project.id, instruction.id, 'supplement', 'extend')
+
+    // The label carries the base before the delete (LIB-001).
+    const labeledBefore = (await commands.libraryGet(null)).tree.find(
+      (entry) => entry.kind === 'instruction' && entry.id === instruction.id,
+    )
+    expect(
+      labeledBefore?.kind === 'instruction'
+        ? labeledBefore.project_labels.find((label) => label.project_id === project.id)?.variant_id
+        : undefined,
+    ).toBe(alt.id)
+
+    const journalBefore = state.activity.length
+    await commands.variantDelete(alt.id, null)
+
+    // The base moved to the main; the supplement stayed.
+    expect(state.assignments.find((row) => row.projectId === project.id)?.target).toEqual({
+      kind: 'extend',
+      value: { base: main.id, supplement: 'supplement' },
+    })
+    // The move's Bulk payload counts the extend cell as affected
+    // (LIB-023/MAIN-034).
+    const deleteEntry = state.activity[state.activity.length - 1]
+    expect(journalBefore).toBeLessThan(state.activity.length)
+    expect(deleteEntry).toMatchObject({
+      action: 'variant.deleted',
+      entity_type: 'variant',
+      entity_id: alt.id,
+    })
+    expect(JSON.parse(String(deleteEntry.details))).toEqual({ changed: 1 })
   })
 })
 
@@ -4161,7 +4413,7 @@ describe('assignmentsBulk (T-331)', () => {
     const [p1, p2, p3] = projects
     if (!p1 || !p2 || !p3) throw new Error('three active projects must exist')
     await commands.assignmentSet(p1.id, instruction.id, true, alt.id)
-    await commands.assignmentSetCustom(p2.id, instruction.id, 'keep custom')
+    await commands.assignmentSetCustom(p2.id, instruction.id, 'keep custom', null)
     const p1Before = state.assignments.find((row) => row.projectId === p1.id)
     const p2Before = state.assignments.find((row) => row.projectId === p2.id)
     const journalBefore = state.activity.length

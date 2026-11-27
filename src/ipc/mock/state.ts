@@ -219,8 +219,9 @@ export type MockVariantRow = {
 }
 
 /** One `project_instructions` row in the mock store (§6.2, D-02/DB-012):
- * one variant or custom-text target per project/instruction pair. The
- * union makes "both" and "neither" unrepresentable in TypeScript too. */
+ * one of the three target shapes per project/instruction pair — a
+ * variant, replace text, or MAIN-034's extend pair (base variant +
+ * supplement). "Neither" stays unrepresentable in TypeScript too. */
 export type MockAssignmentRow = {
   projectId: string
   instructionId: string
@@ -248,10 +249,7 @@ export function toAssignmentRecord(row: MockAssignmentRow): AssignmentRecordWire
   return {
     project_id: row.projectId,
     instruction_id: row.instructionId,
-    target:
-      row.target.kind === 'variant'
-        ? { kind: 'variant', value: row.target.value }
-        : { kind: 'custom', value: row.target.value },
+    target: row.target,
     created_at: row.createdAt,
     updated_at: row.updatedAt,
   }

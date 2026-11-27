@@ -9,7 +9,10 @@
 //! (`migrations/0002_backup_records_pair_index.sql`) adds the
 //! `backup_records` per-pair lookup index; version 3
 //! (`migrations/0003_assignment_custom_text.sql`) rebuilds
-//! `project_instructions` for MAIN-007's variant-or-custom-text target.
+//! `project_instructions` for MAIN-007's variant-or-custom-text target;
+//! version 4 (`migrations/0004_assignment_extend.sql`) widens the same
+//! table's CHECK for MAIN-034's extend cell (a base variant beside the
+//! supplement).
 //!
 //! Before every migration applied to an existing database,
 //! [`run_migrations`] writes a safety copy of the current state into a
@@ -74,11 +77,20 @@ use crate::settings::SettingsError;
 /// (DB-012/MAIN-007). Existing variant-backed rows copy verbatim. After it
 /// runs, `PRAGMA user_version` is 3.
 ///
+/// Version 4 (`migrations/0004_assignment_extend.sql`, T-356/D-203) rebuilds
+/// the same table again to widen the CHECK's third arm (MAIN-034): a row
+/// may now keep a base `variant_id` BESIDE `custom_text` — the extend cell.
+/// D-192's exactly-one-target floor is superseded for that arm only;
+/// "neither" (both columns NULL) stays the one illegal shape. Existing v3
+/// rows are variant-only or custom-only, so the copy is lossless. After it
+/// runs, `PRAGMA user_version` is 4.
+///
 /// [`last_checked`]: crate::backup_records::last_checked
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_backup_records_pair_index.sql"),
     include_str!("../migrations/0003_assignment_custom_text.sql"),
+    include_str!("../migrations/0004_assignment_extend.sql"),
 ];
 
 /// Builds the [`Migrations`] set from the embedded SQL files.
@@ -534,14 +546,15 @@ pub fn open_db(path: &Path) -> Result<Connection, StorageError> {
 /// set is rejected (the app layer turns this into the "update the app"
 /// message, spec DB-004/NFR-010).
 ///
-/// The connection's pragmas are left as-is. Migration 0003 is the
-/// rebuild-style case (SQLite's twelve-step `ALTER TABLE` procedure): it
-/// keeps `foreign_keys=ON` throughout, renames only the child
-/// `project_instructions` table (nothing references it), copies the rows and
-/// drops the old table inside the one migration transaction. The populated
-/// v2→v3 test (`tests/schema_v3.rs`) verifies the copy plus
-/// `PRAGMA foreign_key_check`; this is D-030's foreign-keys policy for v3,
-/// recorded in DECISIONS.md D-192.
+/// The connection's pragmas are left as-is. Migrations 0003 and 0004 are
+/// the rebuild-style cases (SQLite's twelve-step `ALTER TABLE`
+/// procedure): each keeps `foreign_keys=ON` throughout, renames only the
+/// child `project_instructions` table (nothing references it), copies the
+/// rows and drops the old table inside the one migration transaction. The
+/// populated v2→v4 test (`tests/schema_v3.rs`) and the v3-data test
+/// (`tests/schema_v4.rs`) verify the copy plus
+/// `PRAGMA foreign_key_check`; this is D-030's foreign-keys policy for the
+/// rebuild steps, recorded in DECISIONS.md D-192 and D-238.
 ///
 /// # Returns
 ///
@@ -569,8 +582,9 @@ pub fn run_migrations(
 ///
 /// Split out from [`run_migrations`] so the backup and per-step semantics
 /// can be tested against synthetic multi-step migration sets — the
-/// embedded set's real v1→v3 upgrade hops are covered through the public
-/// API by `tests/schema_v2.rs` and `tests/schema_v3.rs`; synthetic sets keep
+/// embedded set's real v1→v4 upgrade hops are covered through the public
+/// API by `tests/schema_v2.rs`, `tests/schema_v3.rs` and
+/// `tests/schema_v4.rs`; synthetic sets keep
 /// the broken-step cases independent of the shipped SQL.
 ///
 /// Migration runs are expected to be serialized by the caller (the app
@@ -1094,9 +1108,9 @@ mod tests {
 
     /// Builds a synthetic migration set (real SQL, applied to real
     /// databases) — these tests need multi-step hops and broken steps,
-    /// independent of the three-step embedded set (its real v1→v3 path is
-    /// covered through the public API by `tests/schema_v2.rs` and
-    /// `tests/schema_v3.rs`).
+    /// independent of the four-step embedded set (its real v1→v4 path is
+    /// covered through the public API by `tests/schema_v2.rs`,
+    /// `tests/schema_v3.rs` and `tests/schema_v4.rs`).
     fn set_of(sqls: &[&'static str]) -> Migrations<'static> {
         Migrations::new(sqls.iter().map(|sql| M::up(sql)).collect())
     }

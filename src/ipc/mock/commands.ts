@@ -479,6 +479,27 @@ function foldCrlf(text: string): string {
   return text.replace(/\r\n/g, '\n')
 }
 
+/** Structural equality of two wire targets — `assignmentSetCustom`'s
+ * idempotence oracle (a same-mode, same-text re-send journals nothing). */
+function targetsEqual(left: AssignmentTargetWire, right: AssignmentTargetWire): boolean {
+  if (left.kind === 'variant') return right.kind === 'variant' && left.value === right.value
+  if (left.kind === 'custom') return right.kind === 'custom' && left.value === right.value
+  return (
+    right.kind === 'extend' &&
+    left.value.base === right.value.base &&
+    left.value.supplement === right.value.supplement
+  )
+}
+
+/** Whether a wire target names this variant — as a variant target or as
+ * an extend cell's base (the variant-deletion census and move). */
+function targetsVariant(target: AssignmentTargetWire, variantId: string): boolean {
+  return (
+    (target.kind === 'variant' && target.value === variantId) ||
+    (target.kind === 'extend' && target.value.base === variantId)
+  )
+}
+
 /** The custom-text field's §6.9 verdict, with no text echo. */
 function customTextRejection(text: string): Promise<never> | null {
   const verdict = variantTextRejection(text)
@@ -1157,7 +1178,14 @@ export const mockCommands: IpcCommands = {
           name: project.name,
           label: project.label,
           color: project.color,
-          variant_id: assignment.target.kind === 'variant' ? assignment.target.value : null,
+          // MAIN-034: an extend cell's assignment names its base variant,
+          // so the label carries it; a replace cell names none.
+          variant_id:
+            assignment.target.kind === 'variant'
+              ? assignment.target.value
+              : assignment.target.kind === 'extend'
+                ? assignment.target.value.base
+                : null,
         })
         labelsByInstruction.set(assignment.instructionId, labels)
       }
@@ -2787,7 +2815,13 @@ export const mockCommands: IpcCommands = {
       journalAssignment(projectId, instructionId, 1)
       return null
     }
-    if (current?.target.kind === 'custom' && variantId === null) {
+    // A custom cell — replace or extend (MAIN-034) — is a no-op without
+    // an explicit variant id; an explicit id converts it.
+    if (
+      current &&
+      (current.target.kind === 'custom' || current.target.kind === 'extend') &&
+      variantId === null
+    ) {
       return toAssignmentRecord(current)
     }
     const targetVariant =
@@ -2826,8 +2860,9 @@ export const mockCommands: IpcCommands = {
     return toAssignmentRecord(row)
   },
 
-  /** `assignment_set_custom`: per-project text, never a cloned variant. */
-  async assignmentSetCustom(projectId, instructionId, content) {
+  /** `assignment_set_custom`: per-project text in the cell's mode —
+   * replace (the default) or extend (MAIN-034) — never a cloned variant. */
+  async assignmentSetCustom(projectId, instructionId, content, mode) {
     if (content !== null) {
       const rejection = customTextRejection(content)
       if (rejection) return rejection
@@ -2857,18 +2892,41 @@ export const mockCommands: IpcCommands = {
           reason: 'the instruction has no active main variant (DB-010)',
         })
       }
+      // MAIN-007: clearing drops the mode with the text and restores the
+      // active MAIN — not the extend cell's base.
       current.target = { kind: 'variant', value: main.id }
       current.updatedAt = new Date().toISOString()
       journalAssignment(projectId, instructionId, 1)
       return toAssignmentRecord(current)
     }
     const folded = foldCrlf(content)
-    if (current?.target.kind === 'custom' && current.target.value === folded) {
+    // The extend write's base (D-203 reading 4c): the variant the cell
+    // keeps — its current variant or extend base — or, for a cell
+    // without one, the active main.
+    const extendBase =
+      mode === 'extend'
+        ? current?.target.kind === 'variant'
+          ? current.target.value
+          : current?.target.kind === 'extend'
+            ? current.target.value.base
+            : (activeMainOf(instruction.variants)?.id ?? null)
+        : null
+    if (extendBase === null && mode === 'extend') {
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'instruction_id',
+        reason: 'the instruction has no active main variant (DB-010)',
+      })
+    }
+    const target: AssignmentTargetWire =
+      mode === 'extend' && extendBase !== null
+        ? { kind: 'extend', value: { base: extendBase, supplement: folded } }
+        : { kind: 'custom', value: folded }
+    if (current && targetsEqual(current.target, target)) {
       return toAssignmentRecord(current)
     }
     const now = new Date().toISOString()
     if (current) {
-      current.target = { kind: 'custom', value: folded }
+      current.target = target
       current.updatedAt = now
       journalAssignment(projectId, instructionId, 1)
       return toAssignmentRecord(current)
@@ -2876,7 +2934,7 @@ export const mockCommands: IpcCommands = {
     const row: MockAssignmentRow = {
       projectId,
       instructionId,
-      target: { kind: 'custom', value: folded },
+      target,
       createdAt: now,
       updatedAt: now,
     }
@@ -2968,7 +3026,9 @@ export const mockCommands: IpcCommands = {
           })
           changed++
         } else if (current) {
-          if (current.target.kind === 'custom') {
+          // A cell with custom text — replace or extend — is never
+          // cleared by bulk work (MAIN-007/MAIN-034).
+          if (current.target.kind === 'custom' || current.target.kind === 'extend') {
             already.push({ project_id: projectId, instruction_id: instructionId })
             continue
           }
@@ -3322,12 +3382,21 @@ export const mockCommands: IpcCommands = {
       }
       successor = candidate
     }
-    const moved = state.assignments.filter(
-      (assignment) => assignment.target.kind === 'variant' && assignment.target.value === row.id,
+    const moved = state.assignments.filter((assignment) =>
+      targetsVariant(assignment.target, row.id),
     ).length
     for (const assignment of state.assignments) {
+      // DB-012/MAIN-034: every row naming the deleted variant moves — a
+      // variant-backed target wholesale, an extend cell's BASE only (the
+      // supplement stays).
       if (assignment.target.kind === 'variant' && assignment.target.value === row.id) {
         assignment.target = { kind: 'variant', value: successor.id }
+        assignment.updatedAt = new Date().toISOString()
+      } else if (assignment.target.kind === 'extend' && assignment.target.value.base === row.id) {
+        assignment.target = {
+          kind: 'extend',
+          value: { base: successor.id, supplement: assignment.target.value.supplement },
+        }
         assignment.updatedAt = new Date().toISOString()
       }
     }

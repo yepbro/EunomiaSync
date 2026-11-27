@@ -570,19 +570,69 @@ fn library_get_labels_a_custom_assignment_without_inventing_a_variant_id() {
             &project_for_custom,
             &instruction_for_custom,
             Some("per-project text"),
+            eunomia_store::library::CustomMode::Replace,
         )
         .map(|_| ())
         .map_err(crate::commands::library_store_to_app_error)
     }))
     .expect("custom assignment seed succeeds");
 
-    let tree = invoke_library_get(&main_webview(&app), serde_json::Value::Null)
+    let webview = main_webview(&app);
+    let tree = invoke_library_get(&webview, serde_json::Value::Null)
         .expect("library read succeeds")
         .tree;
     let entry = instruction_by_title(&tree, "Custom target");
     assert_eq!(entry.project_labels.len(), 1);
     assert_eq!(entry.project_labels[0].project_id, project);
     assert_eq!(entry.project_labels[0].variant_id, None);
+
+    // MAIN-034: an extend cell's label carries its BASE variant id
+    // ("Labels match the assignments", LIB-001): the assignment names
+    // the base beside the supplement. The base is a NON-main variant so
+    // the assertion distinguishes the base from the main (a mapping to
+    // the active main would fail it).
+    let alt = seed_variant(&database, instruction.clone(), "Alt", "alt shared text");
+    let database_for_assign = database.clone();
+    let project_for_assign = project.clone();
+    let instruction_for_assign = instruction.clone();
+    let alt_for_assign = alt.clone();
+    tauri::async_runtime::block_on(database_for_assign.run(move |tx| {
+        // reassign converts the replace cell to the alt variant (the
+        // explicit-variant conversion), so the extend write below keeps
+        // the alt as its base.
+        eunomia_store::library::reassign(
+            tx,
+            &project_for_assign,
+            &instruction_for_assign,
+            &alt_for_assign,
+        )
+        .map_err(crate::commands::library_store_to_app_error)
+        .map(|_| ())
+    }))
+    .expect("alt reassignment seed succeeds");
+    let database_for_extend = database.clone();
+    let project_for_extend = project.clone();
+    let instruction_for_extend = instruction.clone();
+    tauri::async_runtime::block_on(database_for_extend.run(move |tx| {
+        eunomia_store::library::set_custom(
+            tx,
+            &project_for_extend,
+            &instruction_for_extend,
+            Some("supplement"),
+            eunomia_store::library::CustomMode::Extend,
+        )
+        .map(|_| ())
+        .map_err(crate::commands::library_store_to_app_error)
+    }))
+    .expect("extend assignment seed succeeds");
+
+    let tree = invoke_library_get(&webview, serde_json::Value::Null)
+        .expect("library read succeeds")
+        .tree;
+    let entry = instruction_by_title(&tree, "Custom target");
+    assert_eq!(entry.project_labels.len(), 1);
+    assert_eq!(entry.project_labels[0].project_id, project);
+    assert_eq!(entry.project_labels[0].variant_id, Some(alt));
 }
 
 #[test]

@@ -12,9 +12,10 @@
 //! Pinned behavior:
 //!
 //! * a version-1 database with rows upgrades through version 2 to the
-//!   current version 3 and keeps every seeded row verbatim — v2 adds the
-//!   index and v3 rebuilds only assignment rows;
-//! * a fresh database reaches `PRAGMA user_version = 3` with the v2 index
+//!   current version 4 and keeps every seeded row verbatim — v2 adds the
+//!   index, v3 and v4 rebuild only assignment rows (v4 adds MAIN-034's
+//!   extend arm, T-356);
+//! * a fresh database reaches `PRAGMA user_version = 4` with the v2 index
 //!   present, and `PRAGMA index_info` pins its columns to exactly the
 //!   approved set, in order (an independent oracle: the task card's
 //!   decision, not whatever the SQL happens to say). The same shape is
@@ -228,7 +229,7 @@ fn pair_index_exists(conn: &Connection) -> bool {
 }
 
 #[test]
-fn a_v1_database_with_rows_upgrades_to_v3_and_preserves_them() {
+fn a_v1_database_with_rows_upgrades_to_v4_and_preserves_them() {
     let (db, backup_dir, _guard) = temp_data_dir("upgrade");
     let db_path = db.join("eunomiasync.sqlite3");
     seed_v1_schema(&db_path);
@@ -240,9 +241,13 @@ fn a_v1_database_with_rows_upgrades_to_v3_and_preserves_them() {
     // The production upgrade shape: `open_db` (the DB-001 pragma set),
     // then `run_migrations` on the same connection (DB-004).
     let mut conn = open_db(&db_path).expect("the v1 database should open");
-    run_migrations(&mut conn, &backup_dir).expect("the v1→v3 upgrade should apply cleanly");
+    run_migrations(&mut conn, &backup_dir).expect("the v1→v4 upgrade should apply cleanly");
 
-    assert_eq!(user_version(&conn), 3, "the upgraded database is at v3");
+    assert_eq!(
+        user_version(&conn),
+        4,
+        "the upgraded database is at v4 (the extend arm, T-356)"
+    );
     assert!(
         pair_index_exists(&conn),
         "the upgraded database has the pair index"
@@ -375,7 +380,7 @@ fn a_v1_database_with_rows_upgrades_to_v3_and_preserves_them() {
 }
 
 #[test]
-fn a_fresh_database_reaches_user_version_three_with_the_pair_index() {
+fn a_fresh_database_reaches_user_version_four_with_the_pair_index() {
     let (db, _backup_dir, _guard) = temp_data_dir("fresh");
     let db_path = db.join("eunomiasync.sqlite3");
     let mut conn = open_db(&db_path).expect("a fresh database should open");
@@ -384,8 +389,8 @@ fn a_fresh_database_reaches_user_version_three_with_the_pair_index() {
 
     assert_eq!(
         user_version(&conn),
-        3,
-        "a fully migrated database is at version 3"
+        4,
+        "a fully migrated database is at version 4"
     );
     assert!(
         pair_index_exists(&conn),
@@ -463,17 +468,20 @@ fn upgrading_from_v1_writes_a_valid_pre_migration_copy_of_the_v1_state() {
     {
         let conn = Connection::open(&db_path).unwrap();
         seed_v1_rows(&conn);
+        seed_v1_library_rows(&conn);
     }
 
     let backups = {
         let mut conn = open_db(&db_path).expect("the v1 database should open");
         run_migrations(&mut conn, &backup_dir)
-            .expect("the v1→v3 upgrade with its safety copies should succeed")
+            .expect("the v1→v4 upgrade with its safety copies should succeed")
     };
 
-    // Two pending steps, two copies, each named for the state it preserves
-    // (D-038: `pre-migration-v1-…`, then `pre-migration-v2-…`).
-    assert_eq!(backups.len(), 2, "two upgrade steps, two copies");
+    // Three pending steps, three copies, each named for the state it
+    // preserves (D-038: `pre-migration-v1-…`, `pre-migration-v2-…`,
+    // `pre-migration-v3-…`).
+    assert_eq!(backups.len(), 3, "three upgrade steps, three copies");
+
     let backup = &backups[0];
     let name = backup
         .file_name()
@@ -532,6 +540,55 @@ fn upgrading_from_v1_writes_a_valid_pre_migration_copy_of_the_v1_state() {
         "the v2 copy predates the custom-target column"
     );
 
+    // The third copy is the v3 state: the custom-target rebuild has run,
+    // the extend CHECK has not (T-356).
+    let v3_name = backups[2]
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("the v3 copy name should be UTF-8");
+    assert!(
+        v3_name.starts_with("pre-migration-v3-"),
+        "copy name: {v3_name}"
+    );
+    let v3_copy = Connection::open(&backups[2]).expect("the v3 copy should open");
+    assert_eq!(
+        user_version(&v3_copy),
+        3,
+        "the third copy is the version-3 state"
+    );
+    let v3_custom_columns: i64 = v3_copy
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('project_instructions') WHERE name = 'custom_text'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("v3 table info reads");
+    assert_eq!(
+        v3_custom_columns, 1,
+        "the v3 copy carries the custom-target column"
+    );
+    // The v3 CHECK still refuses the extend pair in that copy: adding
+    // text beside the variant (0004's widened arm) violates the v3
+    // two-arm floor — the copy is genuinely pre-0004.
+    assert!(
+        v3_copy
+            .execute(
+                "UPDATE project_instructions SET custom_text = 'supplement'",
+                [],
+            )
+            .is_err(),
+        "the v3 copy's CHECK rejects the extend pair (variant_id + custom_text)"
+    );
+    assert_eq!(
+        v3_copy
+            .query_row("SELECT COUNT(*) FROM project_instructions", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("assignment count reads"),
+        1,
+        "the seeded variant-only assignment survived into the copy"
+    );
+
     // No staging debris survives the run.
     let mut names: Vec<String> = std::fs::read_dir(&backup_dir)
         .unwrap()
@@ -540,10 +597,39 @@ fn upgrading_from_v1_writes_a_valid_pre_migration_copy_of_the_v1_state() {
     names.sort();
     assert_eq!(
         names,
-        vec![name.to_owned(), v2_name.to_owned()],
-        "exactly the two pre-migration copies, no staging debris"
+        vec![name.to_owned(), v2_name.to_owned(), v3_name.to_owned()],
+        "exactly the three pre-migration copies, no staging debris"
     );
 }
+
+/// Seeds one v1-legal library pair — an instruction, its main variant,
+/// and the project's variant-only assignment — so the pre-migration
+/// copies carry assignment rows the CHECK floors can be probed on.
+fn seed_v1_library_rows(conn: &Connection) {
+    conn.execute_batch(&format!(
+        "INSERT INTO library_items (
+             id, kind, position, heading_level, title, state, created_at, updated_at
+         ) VALUES (
+             '{LIB_ITEM_ID}', 'instruction', 1, NULL, 'One instruction', 'active', {TS}, {TS}
+         );
+         INSERT INTO instruction_variants (
+             id, instruction_id, name, content, is_main, state, created_at, updated_at
+         ) VALUES (
+             '{LIB_VARIANT_ID}', '{LIB_ITEM_ID}', 'Main', 'shared text', 1, 'active', {TS}, {TS}
+         );
+         INSERT INTO project_instructions (
+             project_id, instruction_id, variant_id, created_at, updated_at
+         ) VALUES (
+             '{PROJECT_ID}', '{LIB_ITEM_ID}', '{LIB_VARIANT_ID}', {TS}, {TS}
+         );"
+    ))
+    .expect("the v1 library rows should seed");
+}
+
+/// The seeded instruction's id (UUIDv7-shaped, unique in the file).
+const LIB_ITEM_ID: &str = "i-00000000-0000-7000-8000-000000000001";
+/// The seeded instruction's main variant id.
+const LIB_VARIANT_ID: &str = "v-00000000-0000-7000-8000-000000000001";
 
 /// Asserts the D-038 stamp shape of a backup file name:
 /// `YYYYMMDDTHHMMSSSSSZ` — 19 characters: 8 of date, `T`, 6 of time,

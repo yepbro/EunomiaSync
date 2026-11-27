@@ -43,12 +43,13 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use eunomia_store::library::{
-    AssignmentTarget, ItemKind, ItemScope, ItemState, ItemUpdate, LibraryError, LibraryItem,
-    NewAssignment, NewLibraryItem, NewVariant, Variant, VariantState, VariantUpdate, assign,
-    count_items, create_item, create_variant, delete_heading, delete_variant, get_assignment,
-    get_item, get_variant, hide_item, list_assignments_for_project, list_assignments_for_variant,
-    list_items, list_variants, move_item, reassign, restore_item, restore_variant, set_custom,
-    set_item_order, set_main_variant, unassign, update_item, update_variant,
+    AssignmentTarget, CustomMode, ItemKind, ItemScope, ItemState, ItemUpdate, LibraryError,
+    LibraryItem, NewAssignment, NewLibraryItem, NewVariant, Variant, VariantState, VariantUpdate,
+    assign, count_items, create_item, create_variant, delete_heading, delete_variant,
+    get_assignment, get_item, get_variant, hide_item, list_assignments_for_project,
+    list_assignments_for_variant, list_items, list_variants, move_item, reassign, restore_item,
+    restore_variant, set_custom, set_item_order, set_main_variant, unassign, update_item,
+    update_variant,
 };
 use eunomia_store::projects as project_repo;
 use eunomia_store::projects::{AddedVia, NewProject, Project};
@@ -2502,7 +2503,7 @@ fn delete_variant_inside_a_transaction_rolls_back_everything() {
 }
 
 #[test]
-fn assignment_decode_surfaces_bypassed_exactly_one_checks_without_echoing_text() {
+fn assignment_decode_surfaces_the_bypassed_neither_target_without_echoing_text() {
     let (conn, _dir) = library_db("custom-target-corrupt");
     let (item, main) = seed_instruction(&conn, 1);
     let project = seed_project(&conn, 1);
@@ -2522,11 +2523,20 @@ fn assignment_decode_surfaces_bypassed_exactly_one_checks_without_echoing_text()
         "UPDATE project_instructions SET custom_text = 'PRIVATE-BOTH' WHERE project_id = ?1",
         [&project.id],
     )
-    .expect("both-target corruption applies");
-    assert!(matches!(
-        get_assignment(&conn, &project.id, &item.id),
-        Err(LibraryError::Member { column: "assignment_target", found }) if found == "both"
-    ));
+    .expect("both-target pair applies");
+    // Since migration 0004 (T-356/MAIN-034) the both-set pair is the
+    // extend cell, so it decodes instead of erroring: the bypassed-CHECK
+    // corruption this test surfaces is the "neither" half below.
+    assert_eq!(
+        get_assignment(&conn, &project.id, &item.id)
+            .expect("the extend pair decodes")
+            .expect("row exists")
+            .target,
+        AssignmentTarget::Extend {
+            base: main.id.clone(),
+            supplement: "PRIVATE-BOTH".to_owned()
+        }
+    );
 
     conn.execute(
         "UPDATE project_instructions SET variant_id = NULL, custom_text = NULL WHERE project_id = ?1",
@@ -2569,9 +2579,15 @@ fn custom_text_upserts_idempotently_and_clearing_restores_only_that_projects_mai
     )
     .expect("project two assignment creates");
 
-    let custom = set_custom(&conn, &p1.id, &item.id, Some("project one\r\n"))
-        .expect("custom target upserts")
-        .expect("a custom target is present");
+    let custom = set_custom(
+        &conn,
+        &p1.id,
+        &item.id,
+        Some("project one\r\n"),
+        CustomMode::Replace,
+    )
+    .expect("custom target upserts")
+    .expect("a custom target is present");
     assert_eq!(
         custom.target,
         AssignmentTarget::Custom("project one\n".to_owned())
@@ -2583,13 +2599,25 @@ fn custom_text_upserts_idempotently_and_clearing_restores_only_that_projects_mai
         .expect("assignment count reads");
     assert_eq!(count, 2, "the custom cell adds one row, never a variant");
 
-    let same = set_custom(&conn, &p1.id, &item.id, Some("project one\n"))
-        .expect("same custom text is a no-op")
-        .expect("the assignment remains");
+    let same = set_custom(
+        &conn,
+        &p1.id,
+        &item.id,
+        Some("project one\n"),
+        CustomMode::Replace,
+    )
+    .expect("same custom text is a no-op")
+    .expect("the assignment remains");
     assert_eq!(same, custom, "same text does not restamp the row");
-    let changed = set_custom(&conn, &p1.id, &item.id, Some("project two"))
-        .expect("custom text updates")
-        .expect("the assignment remains");
+    let changed = set_custom(
+        &conn,
+        &p1.id,
+        &item.id,
+        Some("project two"),
+        CustomMode::Replace,
+    )
+    .expect("custom text updates")
+    .expect("the assignment remains");
     assert_eq!(
         changed.target,
         AssignmentTarget::Custom("project two".to_owned())
@@ -2599,11 +2627,11 @@ fn custom_text_upserts_idempotently_and_clearing_restores_only_that_projects_mai
         "the same assignment row is updated"
     );
 
-    let cleared = set_custom(&conn, &p1.id, &item.id, None)
+    let cleared = set_custom(&conn, &p1.id, &item.id, None, CustomMode::Replace)
         .expect("clearing custom text restores main")
         .expect("the assignment remains");
     assert_eq!(cleared.target, AssignmentTarget::Variant(main.id.clone()));
-    let cleared_again = set_custom(&conn, &p1.id, &item.id, None)
+    let cleared_again = set_custom(&conn, &p1.id, &item.id, None, CustomMode::Replace)
         .expect("clearing a variant-backed cell is a no-op")
         .expect("the assignment remains");
     assert_eq!(cleared_again, cleared);
@@ -2637,21 +2665,21 @@ fn custom_text_allows_empty_and_refuses_unknown_or_heading_targets() {
     let heading = seed_heading(&conn, 1, 2);
     let project = seed_project(&conn, 1);
 
-    let empty = set_custom(&conn, &project.id, &item.id, Some(""))
+    let empty = set_custom(&conn, &project.id, &item.id, Some(""), CustomMode::Replace)
         .expect("empty custom text is legal")
         .expect("custom row exists");
     assert_eq!(empty.target, AssignmentTarget::Custom(String::new()));
 
     assert!(matches!(
-        set_custom(&conn, "missing", &item.id, Some("x")),
+        set_custom(&conn, "missing", &item.id, Some("x"), CustomMode::Replace),
         Err(LibraryError::NotFound { id }) if id == "missing"
     ));
     assert!(matches!(
-        set_custom(&conn, &project.id, "missing", Some("x")),
+        set_custom(&conn, &project.id, "missing", Some("x"), CustomMode::Replace),
         Err(LibraryError::NotFound { id }) if id == "missing"
     ));
     assert!(matches!(
-        set_custom(&conn, &project.id, &heading.id, Some("x")),
+        set_custom(&conn, &project.id, &heading.id, Some("x"), CustomMode::Replace),
         Err(LibraryError::NotAnInstruction { id }) if id == heading.id
     ));
     assert_eq!(
@@ -2662,7 +2690,7 @@ fn custom_text_allows_empty_and_refuses_unknown_or_heading_targets() {
         "every refusal leaves the custom row untouched"
     );
     assert_eq!(
-        set_custom(&conn, &project.id, &item.id, None)
+        set_custom(&conn, &project.id, &item.id, None, CustomMode::Replace)
             .expect("clear succeeds")
             .expect("row exists")
             .target,
@@ -2696,9 +2724,15 @@ fn deleting_or_reassigning_a_variant_never_rewrites_custom_cells() {
         },
     )
     .expect("variant assignment creates");
-    let custom = set_custom(&conn, &p2.id, &item.id, Some("only project two"))
-        .expect("custom assignment creates")
-        .expect("custom row exists");
+    let custom = set_custom(
+        &conn,
+        &p2.id,
+        &item.id,
+        Some("only project two"),
+        CustomMode::Replace,
+    )
+    .expect("custom assignment creates")
+    .expect("custom row exists");
 
     delete_variant(&conn, &alt.id, None).expect("non-main variant deletes");
     assert_eq!(
@@ -2717,7 +2751,14 @@ fn deleting_or_reassigning_a_variant_never_rewrites_custom_cells() {
     );
 
     let p3 = seed_project(&conn, 3);
-    set_custom(&conn, &p3.id, &item.id, Some("project three")).expect("custom assignment creates");
+    set_custom(
+        &conn,
+        &p3.id,
+        &item.id,
+        Some("project three"),
+        CustomMode::Replace,
+    )
+    .expect("custom assignment creates");
     reassign(&conn, &p3.id, &item.id, &main.id).expect("custom cell can return to a variant");
     assert_eq!(
         get_assignment(&conn, &p3.id, &item.id)
@@ -2732,4 +2773,402 @@ fn deleting_or_reassigning_a_variant_never_rewrites_custom_cells() {
             .expect("row exists"),
         custom
     );
+}
+
+// ---- MAIN-034: the extend target (T-356) -----------------------------------
+
+/// The extend write's base resolution (D-203 reading 4c): the cell's own
+/// variant when it has one, the active main otherwise — and the base is
+/// KEPT by a later extend write on the same cell.
+#[test]
+fn extend_custom_text_keeps_the_cells_variant_as_base_or_adopts_the_main() {
+    let (conn, _dir) = library_db("extend-base");
+    let (item, main) = seed_instruction(&conn, 1);
+    let alt = create_variant(
+        &conn,
+        &NewVariant {
+            instruction_id: &item.id,
+            name: "Alt",
+            content: "alt shared text",
+            is_main: false,
+        },
+    )
+    .expect("alternate variant creates");
+    let p1 = seed_project(&conn, 1);
+    let p2 = seed_project(&conn, 2);
+    let p3 = seed_project(&conn, 3);
+
+    // A variant-backed cell keeps its variant as the base.
+    assign(
+        &conn,
+        &NewAssignment {
+            project_id: &p1.id,
+            instruction_id: &item.id,
+            variant_id: &alt.id,
+        },
+    )
+    .expect("variant assignment creates");
+    let from_variant = set_custom(
+        &conn,
+        &p1.id,
+        &item.id,
+        Some("plus one\r\n"),
+        CustomMode::Extend,
+    )
+    .expect("extend over a variant cell succeeds")
+    .expect("the row exists");
+    assert_eq!(
+        from_variant.target,
+        AssignmentTarget::Extend {
+            base: alt.id.clone(),
+            supplement: "plus one\n".to_owned()
+        },
+        "the assigned variant becomes the base, the text is folded"
+    );
+
+    // An unassigned cell adopts the active main (MAIN-034: "the main
+    // variant for an unassigned cell").
+    let from_unassigned = set_custom(
+        &conn,
+        &p2.id,
+        &item.id,
+        Some("plus two"),
+        CustomMode::Extend,
+    )
+    .expect("extend on an unassigned cell succeeds")
+    .expect("the row exists");
+    assert_eq!(
+        from_unassigned.target,
+        AssignmentTarget::Extend {
+            base: main.id.clone(),
+            supplement: "plus two".to_owned()
+        }
+    );
+
+    // A replace-custom cell has no variant to keep, so it takes the same
+    // main.
+    set_custom(
+        &conn,
+        &p3.id,
+        &item.id,
+        Some("replaced"),
+        CustomMode::Replace,
+    )
+    .expect("replace write succeeds");
+    let from_replace = set_custom(
+        &conn,
+        &p3.id,
+        &item.id,
+        Some("plus three"),
+        CustomMode::Extend,
+    )
+    .expect("extend over a replace cell succeeds")
+    .expect("the row exists");
+    assert_eq!(
+        from_replace.target,
+        AssignmentTarget::Extend {
+            base: main.id.clone(),
+            supplement: "plus three".to_owned()
+        }
+    );
+
+    // A later extend write on the same cell keeps the base and updates
+    // only the supplement; a same-content re-send restamps nothing.
+    let re_saved = set_custom(
+        &conn,
+        &p1.id,
+        &item.id,
+        Some("plus one updated"),
+        CustomMode::Extend,
+    )
+    .expect("second extend write succeeds")
+    .expect("the row exists");
+    assert_eq!(
+        re_saved.target,
+        AssignmentTarget::Extend {
+            base: alt.id.clone(),
+            supplement: "plus one updated".to_owned()
+        },
+        "the base is fixed while the cell is custom"
+    );
+    assert_eq!(
+        re_saved.created_at, from_variant.created_at,
+        "the same assignment row is updated"
+    );
+    let re_sent = set_custom(
+        &conn,
+        &p1.id,
+        &item.id,
+        Some("plus one updated"),
+        CustomMode::Extend,
+    )
+    .expect("same-content re-send succeeds")
+    .expect("the row exists");
+    assert_eq!(re_sent, re_saved, "an identical extend write is a no-op");
+}
+
+/// The mode conversions: extend ↔ replace rewrite the row's shape, and
+/// clearing (None) restores the active MAIN whatever mode the cell was
+/// in — the mode is dropped with the text (MAIN-007).
+#[test]
+fn extend_custom_text_converts_between_modes_and_clears_to_the_main() {
+    let (conn, _dir) = library_db("extend-conversion");
+    let (item, main) = seed_instruction(&conn, 1);
+    let alt = create_variant(
+        &conn,
+        &NewVariant {
+            instruction_id: &item.id,
+            name: "Alt",
+            content: "alt shared text",
+            is_main: false,
+        },
+    )
+    .expect("alternate variant creates");
+    let project = seed_project(&conn, 1);
+    assign(
+        &conn,
+        &NewAssignment {
+            project_id: &project.id,
+            instruction_id: &item.id,
+            variant_id: &alt.id,
+        },
+    )
+    .expect("variant assignment creates");
+
+    let extend = set_custom(
+        &conn,
+        &project.id,
+        &item.id,
+        Some("supplement"),
+        CustomMode::Extend,
+    )
+    .expect("extend write succeeds")
+    .expect("the row exists");
+    assert_eq!(
+        extend.target,
+        AssignmentTarget::Extend {
+            base: alt.id.clone(),
+            supplement: "supplement".to_owned()
+        }
+    );
+
+    // Extend → replace: the base reference is dropped, the text stays.
+    let back_to_replace = set_custom(
+        &conn,
+        &project.id,
+        &item.id,
+        Some("whole cell"),
+        CustomMode::Replace,
+    )
+    .expect("replace write succeeds")
+    .expect("the row exists");
+    assert_eq!(
+        back_to_replace.target,
+        AssignmentTarget::Custom("whole cell".to_owned())
+    );
+
+    // Replace → extend: no variant to keep, the active main becomes the
+    // base.
+    let back_to_extend = set_custom(
+        &conn,
+        &project.id,
+        &item.id,
+        Some("supplement"),
+        CustomMode::Extend,
+    )
+    .expect("extend write succeeds")
+    .expect("the row exists");
+    assert_eq!(
+        back_to_extend.target,
+        AssignmentTarget::Extend {
+            base: main.id.clone(),
+            supplement: "supplement".to_owned()
+        }
+    );
+
+    // Clearing an extend cell goes to the MAIN, not to the base: the
+    // mode is dropped with the text (MAIN-007). Rebuild an alt-based
+    // extend cell through the store's own writers (reassign drops the
+    // custom text, so the shape is rebuilt from the variant cell).
+    reassign(&conn, &project.id, &item.id, &alt.id).expect("back to the alt variant");
+    let alt_based = set_custom(
+        &conn,
+        &project.id,
+        &item.id,
+        Some("supplement"),
+        CustomMode::Extend,
+    )
+    .expect("extend over the alt cell succeeds")
+    .expect("the row exists");
+    assert_eq!(
+        alt_based.target,
+        AssignmentTarget::Extend {
+            base: alt.id,
+            supplement: "supplement".to_owned()
+        }
+    );
+    let cleared = set_custom(&conn, &project.id, &item.id, None, CustomMode::Extend)
+        .expect("clearing an extend cell succeeds")
+        .expect("the row remains assigned");
+    assert_eq!(
+        cleared.target,
+        AssignmentTarget::Variant(main.id),
+        "clearing drops the mode and the supplement, restoring the main"
+    );
+}
+
+/// An extend write that must adopt a main for a cell without one refuses
+/// honestly when DB-010 is already broken out-of-band (no active main) —
+/// the DB-017 posture, never a guess.
+#[test]
+fn extend_custom_text_without_an_active_main_refuses_instead_of_guessing() {
+    let (conn, _dir) = library_db("extend-no-main");
+    let (item, main) = seed_instruction(&conn, 1);
+    let project = seed_project(&conn, 1);
+    // Break DB-010 out-of-band: no CHECK covers the main flag's presence.
+    conn.execute(
+        "UPDATE instruction_variants SET is_main = 0 WHERE id = ?1",
+        [&main.id],
+    )
+    .expect("out-of-band main flag clear works");
+
+    assert!(matches!(
+        set_custom(&conn, &project.id, &item.id, Some("supplement"), CustomMode::Extend),
+        Err(LibraryError::NoActiveMain { instruction_id }) if instruction_id == item.id
+    ));
+    assert!(
+        get_assignment(&conn, &project.id, &item.id)
+            .expect("read succeeds")
+            .is_none(),
+        "the refused write leaves no row"
+    );
+}
+
+/// DB-012/MAIN-034: deleting a variant moves an extend cell's BASE with
+/// the other assignments and keeps the supplement; the LIB-023 affected
+/// read counts the extend cell too.
+#[test]
+fn deleting_a_variant_moves_the_extend_base_and_keeps_the_supplement() {
+    let (conn, _dir) = library_db("extend-delete-move");
+    let (item, main) = seed_instruction(&conn, 1);
+    let alt = create_variant(
+        &conn,
+        &NewVariant {
+            instruction_id: &item.id,
+            name: "Alt",
+            content: "alt shared text",
+            is_main: false,
+        },
+    )
+    .expect("alternate variant creates");
+    let p1 = seed_project(&conn, 1);
+    let p2 = seed_project(&conn, 2);
+    assign(
+        &conn,
+        &NewAssignment {
+            project_id: &p1.id,
+            instruction_id: &item.id,
+            variant_id: &alt.id,
+        },
+    )
+    .expect("variant assignment creates");
+    let extend = set_custom(
+        &conn,
+        &p1.id,
+        &item.id,
+        Some("supplement"),
+        CustomMode::Extend,
+    )
+    .expect("extend over the alt cell succeeds")
+    .expect("the row exists");
+    assert_eq!(
+        extend.target,
+        AssignmentTarget::Extend {
+            base: alt.id.clone(),
+            supplement: "supplement".to_owned()
+        }
+    );
+    let custom = set_custom(
+        &conn,
+        &p2.id,
+        &item.id,
+        Some("replace text"),
+        CustomMode::Replace,
+    )
+    .expect("replace cell creates")
+    .expect("the row exists");
+
+    // The LIB-023 census counts the extend cell: its base is the deleted
+    // variant, so the project is affected.
+    let affected = list_assignments_for_variant(&conn, &alt.id).expect("census reads");
+    assert_eq!(affected.len(), 1, "the extend cell is the one affected row");
+    assert_eq!(affected[0].project_id, p1.id);
+
+    delete_variant(&conn, &alt.id, None).expect("non-main variant deletes");
+
+    assert_eq!(
+        get_assignment(&conn, &p1.id, &item.id)
+            .expect("read succeeds")
+            .expect("row exists")
+            .target,
+        AssignmentTarget::Extend {
+            base: main.id.clone(),
+            supplement: "supplement".to_owned()
+        },
+        "the base moved to the main, the supplement stayed"
+    );
+    assert_eq!(
+        get_assignment(&conn, &p2.id, &item.id)
+            .expect("read succeeds")
+            .expect("row exists"),
+        custom,
+        "the replace cell stays untouched"
+    );
+}
+
+/// A row written with checks bypassed decodes through the v4 CHECK's
+/// three arms: the "both" pair is the extend cell now, and "neither"
+/// stays corruption (the decode keeps its Member refusal — the only way
+/// to plant it is `ignore_check_constraints`, the bypassed-CHECK
+/// oracle).
+#[test]
+fn assignment_rows_decode_through_the_three_v4_check_arms() {
+    let (conn, _dir) = library_db("v4-decode");
+    let (item, _main) = seed_instruction(&conn, 1);
+    let project = seed_project(&conn, 1);
+    // The extend pair, planted through the store's own writer.
+    set_custom(
+        &conn,
+        &project.id,
+        &item.id,
+        Some("supplement"),
+        CustomMode::Extend,
+    )
+    .expect("extend write succeeds");
+    let variant_id: Option<String> = conn
+        .query_row(
+            "SELECT variant_id FROM project_instructions WHERE project_id = ?1",
+            [&project.id],
+            |row| row.get(0),
+        )
+        .expect("raw variant_id reads");
+    assert!(variant_id.is_some(), "the extend row stores its base");
+
+    // "Neither", written with checks bypassed, is still corruption.
+    let orphan = seed_project(&conn, 2);
+    conn.execute_batch("PRAGMA ignore_check_constraints = 1;")
+        .expect("CHECK bypass enables");
+    conn.execute(
+        "INSERT INTO project_instructions (
+             project_id, instruction_id, variant_id, custom_text, created_at, updated_at
+         ) VALUES (?1, ?2, NULL, NULL, '2026-11-27T00:00:00.000Z', '2026-11-27T00:00:00.000Z')",
+        rusqlite::params![orphan.id, item.id],
+    )
+    .expect("checks-bypassed insert works outside the store's writers");
+    conn.execute_batch("PRAGMA ignore_check_constraints = 0;")
+        .expect("CHECK bypass disables");
+    assert!(matches!(
+        get_assignment(&conn, &orphan.id, &item.id),
+        Err(LibraryError::Member { column, .. }) if column == "assignment_target"
+    ));
 }

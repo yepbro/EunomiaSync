@@ -63,12 +63,23 @@
 //!   instruction's variants in creation order (soft-deleted variants
 //!   never reach a build);
 //! * the assignments of the active projects, ordered by project
-//!   `sort_order`, then by the assigned instruction's `position`.
+//!   `sort_order`, then by the assigned instruction's `position` — each
+//!   one of the three §6.2 target shapes (a variant, MAIN-007's replace
+//!   text, or MAIN-034's extend pair; the extend base rides the same
+//!   active-variant validation a variant target gets, and the build
+//!   reads its CURRENT text at build time, ALG-023).
 //!
 //! Variant texts ride the snapshot **as stored**: the save-time
 //! CRLF→LF fold already happened at the write boundary (D-076/D-097),
 //! and the ALG-002 normalization is a build-pipeline step, not a
 //! snapshot concern.
+//!
+//! The future `project_build_preview` command (MAIN-033, §7.10 —
+//! T-358) is the read-side consumer of exactly this value: the next
+//! sync's managed content is `build_snapshot::read` +
+//! `eunomia_core::body::build_body` + the §9.3 scheme assembly in one
+//! read transaction, and the extend composition already flows through
+//! both halves — no new build path is needed for it.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -219,6 +230,10 @@ pub fn read(conn: &Connection) -> Result<BuildSnapshot, BuildSnapshotError> {
                     CoreTarget::Variant(VariantId::new(variant_id))
                 }
                 library::AssignmentTarget::Custom(custom_text) => CoreTarget::Custom(custom_text),
+                library::AssignmentTarget::Extend { base, supplement } => CoreTarget::Extend {
+                    base: VariantId::new(base),
+                    supplement,
+                },
             },
         })
         .collect::<Vec<_>>();

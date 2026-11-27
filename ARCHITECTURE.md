@@ -161,11 +161,15 @@ snapshot raw and are normalized per ALG-002 before reaching a file
 BOM and the block's leading empty lines and trailing whitespace are
 dropped, everything inside the text is untouched; spec D-22, recorded
 in DECISIONS.md D-044). The project body assembly of spec §9.2 lives in
-`body::build_body` (ALG-020…022): a pure function over the snapshot and
+`body::build_body` (ALG-020…023): a pure function over the snapshot and
 a project id that walks the library order once, keeps the headings whose
 section holds an assigned active instruction (a hidden instruction keeps
-no heading, DB-013; an empty variant keeps it, D-13), normalizes each
-selected variant's text, and joins the blocks with exactly one empty
+no heading, DB-013; an empty variant keeps it, D-13), resolves each
+included assignment's effective text — the normalized variant text, the
+normalized custom text (MAIN-007), or MAIN-034's ALG-023 composition
+(the non-empty halves of the normalized base-variant text and supplement
+joined by one blank line, the base read at build time) — and joins the
+blocks with exactly one empty
 line — the same body for schemes A, B and C, with no trailing line
 break. SQLite storage lives in `eunomia-store` (see
 DECISIONS.md D-010), which is free of Tauri dependencies for the same
@@ -453,12 +457,19 @@ Rust commands are registered through `tauri-specta`:
    2–6 are `E_VALIDATION` — and the Assignments module's
    `assignment_set`/`assignments_bulk`/`assignment_set_custom` (T-331,
    `src-tauri/src/assignments.rs`): a single toggle/select, one-transaction
-   row/column products, and D-125's per-project custom-text target. A real
+   row/column products, and D-125's per-project custom-text target in
+   the cell's mode (MAIN-034, T-356): `replace` — the default — stores
+   the text alone; `extend` keeps the cell's base variant (its current
+   variant, else the instruction's active main) beside the supplement —
+   §6.2's third shape, ALG-023 composing the two at build time. A real
    write carries one `assignment.changed` entry with its changed count;
-   existing pairs (including custom cells) are returned as already assigned
-   and never replaced by bulk work. Custom text is validated by §6.9, lives
-   on the assignment rather than a forked variant, and clearing it restores
-   the active main. No assignment command touches a project file. The
+   existing pairs (including custom cells — replace or extend) are
+   returned as already assigned
+   and never replaced by bulk work. Custom text is validated by §6.9
+   (the supplement under the same DB-016 reserved-marker rule), lives
+   on the assignment rather than a forked variant, and clearing it
+   restores the active main, dropping the mode with the text. No
+   assignment command touches a project file. The
    History module's `revisions_list`/`revision_get` (T-331,
    `src-tauri/src/revisions.rs`) read instruction+variant summaries
    newest-first without materializing snapshots, or one full revision by id,
@@ -672,12 +683,16 @@ sync run (D-132's follow-up); version 3
 (`migrations/0003_assignment_custom_text.sql`, T-331) rebuilds
 `project_instructions` with the direct instruction FK, nullable variant,
 nullable custom text and the exactly-one-target CHECK (DB-012/MAIN-007),
-copying existing variant-backed rows verbatim. Tests run against in-memory
+copying existing variant-backed rows verbatim; version 4
+(`migrations/0004_assignment_extend.sql`, T-356) rebuilds the same table
+once more to widen the CHECK's third arm — MAIN-034's extend cell, a base
+variant BESIDE the supplement (D-203/D-238) — so the one illegal target
+shape is "neither", and v3 rows copy verbatim. Tests run against in-memory
 SQLite and file-backed databases through the public API, including the real
-v1→v3 upgrade path and both pre-migration copies (`tests/schema_v2.rs` and
-`tests/schema_v3.rs` build their source databases from the real 0001/0002
-SQL); broken-step paths go through a private seam with synthetic migration
-sets (D-038).
+v1→v4 upgrade path and its pre-migration copies (`tests/schema_v2.rs`,
+`tests/schema_v3.rs` and `tests/schema_v4.rs` build their source databases
+from the real 0001/0002/0003 SQL); broken-step paths go through a private
+seam with synthetic migration sets (D-038).
 
 The app side of that storage is `src-tauri/src/db.rs` (DECISIONS.md
 D-037): `Db` — the managed state — holds the **one** connection

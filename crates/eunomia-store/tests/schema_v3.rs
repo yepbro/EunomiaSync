@@ -2,9 +2,13 @@
 //! per-project custom-text assignment target.
 //!
 //! The oracle is the current spec §6.2/DB-012 shape, not the migration's
-//! own text: an assignment has a direct instruction FK, exactly one of a
-//! same-instruction variant or custom text, and custom text obeys DB-006.
-//! Existing variant-backed rows must survive the v2→v3 rebuild verbatim.
+//! own text: an assignment has a direct instruction FK, one of the three
+//! legal §6.2 target shapes, and custom text obeys DB-006. Existing
+//! variant-backed rows must survive the v2→v3 and v3→v4 rebuilds verbatim. The
+//! "both targets" pair this test once refused became MAIN-034's legal
+//! extend cell with migration 0004 (T-356) — `schema_v4.rs` pins that
+//! arm; what stays illegal here is "neither", the cross-instruction
+//! pair and oversize text.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -112,7 +116,7 @@ fn seed_assignment(conn: &Connection, project_id: &str, instruction_id: &str, va
 }
 
 #[test]
-fn v2_assignments_upgrade_verbatim_to_the_v3_target_shape() {
+fn v2_assignments_upgrade_verbatim_through_v3_to_v4() {
     let temp = temp_dir("upgrade");
     let db_path = temp.path().join("db.sqlite3");
     let backup_dir = temp.path().join("db-backups");
@@ -120,12 +124,12 @@ fn v2_assignments_upgrade_verbatim_to_the_v3_target_shape() {
     let mut conn = open_db(&db_path).expect("database opens");
     seed_v2(&conn);
 
-    run_migrations(&mut conn, &backup_dir).expect("the v2→v3 upgrade applies");
+    run_migrations(&mut conn, &backup_dir).expect("the v2→v4 upgrade applies");
 
     assert_eq!(
         user_version(&conn),
-        3,
-        "the spec's custom-target schema is v3"
+        4,
+        "the full v2 set now migrates through v3's rebuild to v4 (the extend arm, T-356)"
     );
     let columns: Vec<(String, i64)> = conn
         .prepare("PRAGMA table_info(project_instructions)")
@@ -189,7 +193,6 @@ fn v3_rejects_illegal_targets_cross_instruction_variants_and_oversize_custom_tex
 
     for (project_id, instruction_id, variant_id, custom_text) in [
         ("p1", "i1", None, None),
-        ("p2", "i1", Some("v1"), Some("both targets")),
         ("p3", "i1", Some("v2"), None),
         ("p4", "i1", None, Some(&"x".repeat(262_145))),
     ] {

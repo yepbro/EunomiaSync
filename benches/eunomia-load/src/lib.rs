@@ -547,7 +547,11 @@ impl AssignmentToggle {
             })?;
         let held = match current.target {
             AssignmentTarget::Variant(variant_id) => variant_id,
-            AssignmentTarget::Custom(_) => String::new(),
+            // A cell with custom text — replace or extend (MAIN-034) —
+            // holds no variant for the toggle's premise; the generator
+            // never creates one, so this arm is a drifted world's
+            // premise failure.
+            AssignmentTarget::Custom(_) | AssignmentTarget::Extend { .. } => String::new(),
         };
         if held != pair.2 {
             return Err(LoadError::TogglePremise {
@@ -896,7 +900,7 @@ impl SyncFixture {
             })?;
             let held = match current.target {
                 AssignmentTarget::Variant(variant_id) => variant_id,
-                AssignmentTarget::Custom(_) => String::new(),
+                AssignmentTarget::Custom(_) | AssignmentTarget::Extend { .. } => String::new(),
             };
             if held != toggle.variant_a {
                 return Err(LoadError::TogglePremise {
