@@ -2945,6 +2945,27 @@ pub(crate) fn backups_list_failed(error: &AppError) {
     );
 }
 
+/// The `db_verify` command — or the startup's session-tail arm of the
+/// same check — failed to RUN (T-131, §10's every-error rule): the
+/// payload is the error's own §7.10 vocabulary, in the
+/// `backups_list_failed` shape. This line is the failure of the CHECK
+/// itself (a SQL error), never the finding of a violation: a
+/// violation writes its own error-level journal entry and mirror
+/// line (DB-017, `db_verify.rs`), and a clean check deliberately logs
+/// nothing (the `mark_interrupted_runs` zero-case pattern — a healthy
+/// startup is silent).
+pub(crate) fn db_verify_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::db_verify",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "running the DB invariant checks failed"
+    );
+}
+
 /// The shared half of the file-log test harness (T-324/D-228): the
 /// helpers the module's own suite has always used, plus the
 /// mirror-emission recorder the db suite (the flush's acceptance

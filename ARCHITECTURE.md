@@ -86,6 +86,7 @@ src-tauri/
   src/config.rs            # config.toml load-or-create; broken file falls back to defaults (working)
   src/data_dirs.rs         # Data-directory layout + SEC-007 Unix modes (working)
   src/db.rs                # DB state + one-transaction executor   (working)
+  src/db_verify.rs         # DB invariant checks + db_verify: §6.3 sweep, DB-017 journal (working)
   src/dirty_recalc.rs      # Background dirty recalc, state://dirty events (working)
   src/errors.rs            # AppError + MVP error-code registry  (working)
   src/file_watch.rs        # Target-file watch service, state://file-changed (working)
@@ -189,11 +190,20 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is forty-seven commands — the §7.10 names that
+   The registered set is forty-eight commands — the §7.10 names that
    are implemented so far, matching the `mode.spec` surface list. It comprises the
    recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
-   `db_backups_list`, `db_restore_backup`, `db_recreate` — plus the
+   `db_backups_list`, `db_restore_backup`, `db_recreate` — the
+   System module's `db_verify` (T-131, `src-tauri/src/db_verify.rs`):
+   §6.3's invariant check on demand — one `Db::run_with_mirror`
+   transaction runs the DB-010…016 data sweeps, journals each found
+   violation as an `error.reported` entry at the error level (DB-017,
+   the T-324/D-228 mirror buffer flushed only after the commit) and
+   answers the typed violation list; the same pass runs at session
+   start (the
+   shared tail's degrade-never-abort arm — violations never abort the
+   launch, no automatic repair) — plus the
    History module's `activity_list` (T-027): the "Activity" window's
    filtered, paginated journal query over the `Db::run` executor, with
    LOG-005's visibility rule (user entries by default, `diagnostic`
@@ -790,11 +800,18 @@ cap, so the task that builds LOG-007 must read the overall time from
 comment on `action_log` still says "append-only" — the migration
 file is frozen (D-010/D-036), and since T-029 this retention cleanup
 is the one deliberate deleter. The startup wiring (open → the §9.4
-interrupted-runs sweep → the DB-022 commit hook → daily copy →
-manage → retention spawn) is pinned by the two text pins — the
+interrupted-runs sweep → the DB-022 commit hook → daily copy → the
+§6.3 invariant check (T-131: `db_verify::startup_check` — one
+`Db::run_with_mirror` pass through `block_on`, journals every found
+violation at the error level, degrades never aborts) → manage → retention spawn)
+is pinned by the two text pins — the
 extended `db_tests.rs` one for open → daily copy → manage →
 retention spawn, and the `ipc_tests.rs` pin added with the sweep
-(T-258) for open → the sweep → the commit hook → manage.
+(T-258) for open → the sweep → the commit hook → manage — both
+order-based, so the invariant-check arm between the daily copy and
+the manage step leaves them green; the arm's own teeth are the
+`db_verify_tests.rs` startup tests (a planted violation journaled,
+the launch continuing — the mutation-verified wiring pin).
 
 **Recovery mode** (spec §10 `E_DB_CORRUPT` row, §7.10 command notes;
 DECISIONS.md D-049): when the startup open fails the quick_check gate,

@@ -302,6 +302,14 @@ pub(crate) mod revisions;
 // per-project read on the one `Db::run` transaction executor.
 pub(crate) mod backups;
 
+// The DB invariant checks and the `db_verify` command (spec §6.3
+// DB-010…017, §7.10's System row, T-131): the consistency sweep that
+// runs beside the open-time corruption gate — read-only SQL over the
+// live connection, one journal entry per found violation at the
+// error level (DB-017), the typed answer for diagnostics, no
+// repair. Wired into the session tail below.
+pub(crate) mod db_verify;
+
 // File logging with daily rotation (spec §5.3, §7.7; SEC-008) — needed on
 // every platform, exactly like the app itself.
 pub(crate) mod logging;
@@ -356,7 +364,9 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // the Sync module's `sync_confirm_exit` (T-123, D-219),
         // the Sync module's `sync_status`/`sync_last_result` (T-121,
         // D-217) and the Backups module's `backups_list` (T-125,
-        // D-193 — the project-settings "Backups" tab's read). Every
+        // D-193 — the project-settings "Backups" tab's read), and the
+        // System module's `db_verify` (T-131 — the §6.3 invariant
+        // check's on-demand half, `db_verify.rs`). Every
         // later command task lists its own §7.10 names here.
         // The commands are runtime-generic (the tauri-specta shape for
         // commands that take an `AppHandle`), so the registration pins
@@ -369,6 +379,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::db_backups_list::<tauri::Wry>,
             commands::db_restore_backup::<tauri::Wry>,
             commands::db_recreate::<tauri::Wry>,
+            db_verify::db_verify::<tauri::Wry>,
             commands::dialog_pick_folder::<tauri::Wry>,
             commands::exclusion_remove::<tauri::Wry>,
             commands::exclusions_list::<tauri::Wry>,
@@ -1019,6 +1030,23 @@ pub(crate) fn start_database_session<R: Runtime>(app: &AppHandle<R>, mut databas
         Ok(eunomia_store::storage::DailyBackupOutcome::AlreadyPresent(_)) => {}
         Err(error) => logging::db_backup_daily_failed(&error),
     }
+    // §6.3's startup invariant check (T-131, DB-017): the consistency
+    // sweep beside the open-time corruption gate — every DB-010…016
+    // data check over the session's database, each found violation
+    // journaled at the error level (diagnostic visibility, the
+    // file-log mirror naming rule and row) inside the one
+    // `Db::run_with_mirror` transaction. **Degrade, never abort** —
+    // the tail's own D-046/D-054 posture and DB-017's "no automatic
+    // repair": a violation is a recorded fact, the launch continues
+    // (the diagnostics answer is `db_verify`'s, on demand); a failure
+    // of the check itself logs through the facade and the launch
+    // continues too. After the daily copy above (the copy stays the
+    // day's as-found snapshot — the entries it writes come after it)
+    // and after the commit hook (its journal writes ride the seam
+    // like every writer's).
+    if let Err(error) = db_verify::startup_check(&database) {
+        logging::db_verify_failed(&error);
+    }
     // The retention task's handle is cloned AFTER the hook, the
     // shape the hook always had: the hook is a per-clone field of `Db`
     // (`Db::set_commit_hook`), so a clone taken earlier would run the
@@ -1185,6 +1213,9 @@ mod revisions_tests;
 
 #[cfg(test)]
 mod backups_tests;
+
+#[cfg(test)]
+mod db_verify_tests;
 
 #[cfg(test)]
 mod tests {

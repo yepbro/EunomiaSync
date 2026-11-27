@@ -32,6 +32,7 @@ import type {
   AssignmentTargetWire,
   BulkAssignmentResultWire,
   AppInfo,
+  DbVerifyViolationWire,
   ExclusionEntry,
   ExistingProject,
   HeadingRecordWire,
@@ -2127,6 +2128,17 @@ export const mockCommands: IpcCommands = {
   /** `db_recreate` (§7.10/§10): resolves; the mock store stays as-is. */
   async dbRecreate() {
     return null
+  },
+
+  /**
+   * `db_verify` (§7.10/§10, §6.3): the mock's in-memory store is the
+   * healthy world the fixtures build — no invariant violations, so the
+   * answer is the honest empty list (the mock layer has no second
+   * database to corrupt; the real command's planted-violation
+   * behavior is pinned by the Rust suite).
+   */
+  async dbVerify(): Promise<DbVerifyViolationWire[]> {
+    return []
   },
 
   /**

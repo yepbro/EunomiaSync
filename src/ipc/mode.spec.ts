@@ -32,6 +32,7 @@ describe('the mock command surface', () => {
       'dbBackupsList',
       'dbRecreate',
       'dbRestoreBackup',
+      'dbVerify',
       'dialogPickFolder',
       'exclusionRemove',
       'exclusionsList',

@@ -30107,3 +30107,253 @@ all independently re-verified green) — the findings processed:
 
 Rejected: none — every round-1 finding was confirmed against the
 plugin's installed sources before the fix.
+
+### D-230 — T-131: the §6.3 invariant checks — the six data sweeps, the error-level journal rows, the `db_verify` command, and the startup arm that never aborts — 2026-11-27
+
+Problem: the card ("[Backend] Verify DB invariants and add the
+db_verify command"; spec §6.3 DB-010…017, §7.10's System row) asks
+for the consistency sweep beside the open-time corruption gate:
+checked at startup and on demand, violations journaled at the error
+level and returned for diagnostics, no automatic repair. Rule 2
+inventory first: `Db::open` already owns the fatal half — the
+too-new gate and `PRAGMA quick_check` (E_DB_CORRUPT, T-F11) — while
+the schema's own constraints carry most of the invariant floor
+(the `ux_variant_main` partial index caps DB-010's "exactly one main"
+at one, the composite FK holds DB-012's same-instruction half, the
+v3 CHECK holds the exactly-one-target floor D-192/D-203, the
+`path_key` UNIQUE holds DB-015 for every writer this app has). What
+existed nowhere: a sweep over the STORED data (the world a newer
+schema, an import, or direct SQL can leave behind), the journal
+vocabulary's fault row, the command, and the startup arm. Eight
+readings were open; the chosen readings, written here BEFORE the
+implementation (the rule-1 discipline):
+
+1. **Startup placement — the session tail, not `Db::open`, and
+   never fatal.** §6.3 says "checked at startup (quick_check AND an
+   invariant check)", but the two checks are different animals:
+   quick_check's verdict is §10's `E_DB_CORRUPT` (fatal, recovery
+   mode), while DB-017's own words make a violation "written to the
+   log … and shown in diagnostics" with "no automatic data repair" —
+   a recorded fact, never an abort. The check therefore lives in
+   `start_database_session` (the shared tail — the healthy launch
+   AND the recovery reopens both run it), after the ERR-001 daily
+   copy (the copy stays the day's as-found snapshot; the entries it
+   writes come after it) and after the DB-022 commit hook (its
+   journal writes ride the seam like every writer's), with the
+   tail's D-046/D-054 degrade-never-abort posture: a violation
+   journals and the launch continues; a failure of the CHECK itself
+   logs through the facade (`logging::db_verify_failed`) and the
+   launch continues too. The two existing wiring text pins
+   (`db_tests.rs`, `ipc_tests.rs`) are order-based, so the new arm
+   between daily copy and manage leaves them green (ARCHITECTURE.md
+   updated with the step).
+2. **The execution shape — `block_on` over the one `Db::run`
+   executor.** The tail is synchronous but its SQL half is not its
+   own: `startup_check` parks on `tauri::async_runtime::block_on
+(database.run(verify_and_journal))` — the same one-transaction
+   executor, busy ladder and commit seam the command uses (SYS-001/
+   SYS-002/NFR-008, D-037), not a bespoke sync path. (The executor's
+   name is now `run_with_mirror` — the round-1 rebase onto T-324
+   migrated the call, recorded in the addendum below; the shape this
+   reading decided — `block_on` over the shared executor, never a
+   bespoke sync path — is unchanged.) Verified
+   against the vendored tokio 1.54.1 sources: `block_on` from a
+   `spawn_blocking` thread (exactly the recovery command's tail
+   call site) is legal — the "Cannot start a runtime from within a
+   runtime" panic fires only inside an `enter_runtime` scope
+   (block_on/block_in_place), which the blocking pool's
+   `Handle::enter()` does not set; the parked blocking thread waits
+   for the nested blocking task on another pool thread.
+3. **DB-013 — no data invariant, stated as such.** "A hidden
+   instruction can have assignments" is a permission (an assignment
+   to a hidden instruction is legal rows — nothing to require), and
+   "is not included in the build" is build behavior, owned and
+   pinned by `eunomia_core`'s body builder (the `is_active`
+   selection, `body.rs`'s own DB-013/D-11 test). `db_verify`
+   answers nothing for DB-013; the clean-world test seeds exactly
+   its legal state (a hidden instruction WITH an assignment) to pin
+   that the sweep does not invent a check.
+4. **DB-014 — the data-checkable half is the state/`archived_at`
+   coherence.** The store's own archive/restore pair maintains
+   `archived_at IS NOT NULL ⟺ state = 'archived'` (projects.rs's
+   documented invariant); that pair is the sweep. "Keeps its
+   assignments" is the absence of a delete path (the FK is
+   `ON DELETE RESTRICT`, archiving touches only the project row);
+   "does not take part in syncs" and "not counted as dirty" are
+   behavior (the §9.1 snapshot reads active projects only; the
+   dirty recalculation lists `ListScope::Active`) — none of those
+   is a row this SQL could read.
+5. **The action vocabulary fit — `ErrorReported`, no new §10
+   code, the rule code in the entity id.** `Action::ErrorReported`
+   already exists and its doc names DB-017 invariant violations as
+   its purpose — the entry is `error.reported` at `Level::Error`,
+   `Visibility::Diagnostic` (LOG-005: the file log's error-level
+   mirror line and diagnostics), `Outcome::Error`. §10 has no code
+   for a violation and inventing one (an `E_DB_INVARIANT`) is an
+   owner-scope decision, declined here — recorded as a follow-up
+   candidate, not made. The invariant's own id travels as the
+   journal entity id's first segment: `"DB-0NN/<row ids>"` — the
+   compound-id convention the assignment journal established
+   (`"{project_id}/{instruction_id}"`), extended by one segment, so
+   the durable record AND its file-log mirror line name the RULE
+   and the ROW (identifier-only content, SEC-008; `details` stays
+   `None` — the closed `Details` enum has no rule-code variant,
+   D-051). The §7.10 answer carries the same facts typed
+   (`invariant`, the row's kind and id unprefixed, the project when
+   scoped, a machine detail — counts, positions, the D-19 marker
+   literal and line).
+6. **The module boundary — `db_verify.rs`, D-189's reading 1.**
+   The whole feature lives in `src-tauri/src/db_verify.rs` (checks,
+   typed report, journaling, command, `startup_check`), tests in
+   `db_verify_tests.rs`: the parallel-task conflict surface is
+   minimal (T-324 owns `commands.rs`'s journaling call sites —
+   `commands.rs` is untouched; the one registration line and the
+   one tail arm are additive in `lib.rs`; `logging.rs` gains only
+   the standalone `db_verify_failed` helper, far from the
+   action_logged mirror machinery). The checks are raw SQL over the
+   live connection plus the store's journal inserts — the
+   `recovery.rs`/command-closure shapes; the store crate stays
+   untouched (D-017/D-051's scope line).
+7. **`db_verify` is a read command — no SYS-005 gate.** The sync
+   pipeline never writes the library/assignment/project rows these
+   checks read (its writes are runs, journal and backups — the
+   `sync_status`/`sync_last_result` reading), and the journal
+   inserts serialize on the one connection like every writer's;
+   without a database the command refuses with the honest
+   recovery-mode envelope (`managed_db`'s `E_DB_LOCKED` +
+   `NoDatabase`), never a fake report. (Corrected 2026-11-27, the
+   round-1 review's P2-1: the sync DOES write `projects` — phase
+   4's `record_last_synced` stamps `last_synced_at`/`
+last_synced_hash`. The conclusion stands, the stated scope did
+   not: the honest claim is about the checked COLUMNS — `state`,
+   `archived_at`, `path_key`, `id` are never the sync's, the library
+   and assignment tables are the library repository's alone, and a
+   check during a run reads one consistent snapshot. The module
+   docs now carry the corrected sentence.)
+8. **Journaling semantics — in-transaction, silent when clean,
+   repeated on re-runs.** The entries ride the check's own one
+   transaction (D-051: a check that fails mid-way rolls its earlier
+   entries back — an incomplete check claims nothing); a clean
+   database writes NOTHING (the `mark_interrupted_runs` zero-case
+   pattern — a healthy startup is silent); a repeat run re-finds
+   and re-journals the same violations — the journal is the history
+   of checks, not a state store, and DB-017 demands no dedup
+   machinery (pinned by the repeat-run test).
+
+Solution: the module above, 25 tests, and the honest per-invariant
+boundaries (each check's SQL verifies its §6.3 sentence's data half;
+what it cannot catch is recorded in the module docs' table — e.g.
+DB-010 scopes to ACTIVE instructions only, DB-011's arithmetic
+covers duplicates/holes/overshoots as one row-position walk, DB-012
+is the soft-deleted-variant half the composite FK cannot see, DB-016
+reuses the save path's own oracle (ALG-002 normalize + per-line
+classification, so a marker behind a BOM or a lone CR is caught
+exactly as saving would) behind a sound `LIKE '%literal%'`
+prefilter). The DB-015 test plants its duplicate by rebuilding the
+`projects` table without the UNIQUE constraint — the migration 0003
+rebuild technique, the only honest way past a schema-level
+constraint, and exactly the foreign-data world the sweep exists
+for. Mutation discipline (each reverted byte-for-byte): the DB-010/
+DB-011 verdicts neutralized → their flags tests red; DB-012's state
+filter neutralized → its flags test red; DB-014's active arm
+dropped → the active-with-stamp test red; DB-015's
+first-of-group rule inverted → its flags test red; DB-016's
+normalize pass removed → the BOM test red (the padded form stays
+green — trimming covers it) and the LIKE prefilter collapsed → both
+variant flags tests red; the journal insert skipped → the journal/
+repeat/startup tests red; the tail's arm removed → the session-start
+test red; DB-011's verdict inverted → the clean-world and both
+stays-silent tests red (the no-false-positive teeth). Frontend:
+`dbVerify` joins the generated bindings, the mock layer (the healthy
+mock answers the honest empty list) and the `mode.spec.ts` surface
+pin; the registered set is forty-eight commands (ARCHITECTURE.md).
+
+Follow-ups: (1) the T-324 alignment — RESOLVED IN COMMIT by the
+rebase onto main's 3e7dbf8 (the round-1 review's P1-1, taken with
+the orchestrator's mid-cycle instruction): the branch was rebased
+onto the landed T-324, `verify_and_journal` migrated to the
+`Db::run_with_mirror(|(tx, mirror)| …)` shape with `mirror.record`
+after each `action_log::insert` (the command AND the startup arm —
+`logging::action_logged` is private on main, and the D-228
+commit-aware flush is the mirror contract the DB-017 file-log half
+now rides; the D-223/T-124 precedent shape, ordered by the
+orchestrator). (2) The owner-decision candidate from reading 5: if
+a §10 code for invariant violations is ever wanted (e.g. an
+`E_DB_INVARIANT` in `details`), the registry change is the owner's
+call — the entry shape above was chosen to need none. (3) A
+diagnostics UI task will consume `dbVerify`'s typed answer; no UI
+work was in this card.
+
+Round-1 review addendum (D-230, same task; report
+`.opencode/reviews/t131-round1-report.md`, deepseek-v4.1-flash,
+VERDICT: CHANGES REQUESTED — 0 × P0, 2 × P1, 2 × P2, 2 × P3; the
+reviewer independently verified the T-324 boundary (zero edits to
+the owned files, `commands.rs` untouched, DECISIONS.md append-only),
+the `block_on`-from-`spawn_blocking` legality against the vendored
+tokio sources, the SEC-008 field inventory, the DB-016 prefilter's
+soundness and the DB-011/DB-015 arithmetic, and re-ran the suite
+green) — findings processed:
+
+- **P1-1 (the journaling sites incompatible with main's landed
+  T-324 — `action_logged` demoted to private, the mirror now
+  buffered per attempt and flushed only after the commit) TAKEN**,
+  together with the orchestrator's mid-cycle instruction: the branch
+  is rebased onto main's 3e7dbf8 (the DECISIONS.md tail conflict
+  resolved as the union — D-228 first, D-230 after; the logging.rs
+  conflict the same way, `db_verify_failed` beside its production
+  sibling, main's test_support module below it), and the journaling
+  migrated to `run_with_mirror` + `mirror.record` (follow-up 1
+  above). The pre-rebase commit ran the review; the post-rebase
+  shape is what round 2 reviews.
+- **P1-2 (DB-012's sweep trusted the composite FK — a dangling
+  `variant_id` and a cross-instruction target were answered clean,
+  inconsistent with DB-015's own rebuild-the-table plant) TAKEN.**
+  The check now verifies the sentence as data: a LEFT JOIN on the
+  variant id alone, the verdict split into three arms with a fixed
+  priority — missing (`MissingVariant`), foreign
+  (`ForeignVariant`, naming the variant's real instruction), then
+  deleted (`DeletedVariant`) — plus two new detail members on the
+  wire and two new tests. Their plants need a foreign-keys-OFF
+  session (the bundled library compiles with
+  `SQLITE_DEFAULT_FOREIGN_KEYS=1`, so the raw side connection
+  explicitly turns the pragma off — the external-writer world the
+  threat model names); the two LEFT-JOIN mutations (DB-010's and
+  DB-012's, INNER instead) each redden exactly their new test.
+- **P2-1 (the "no SYS-005" justification misstated the sync's
+  writes — `record_last_synced` DOES write `projects`) TAKEN** —
+  the corrected column-scoped sentence in the module docs and the
+  dated correction in reading 7 above (the D-222 posture: point,
+  never rewrite silently).
+- **P2-2 (DB-010's zero-variant LEFT-JOIN branch untested) TAKEN**
+  — the new bare-instruction test (the store's own allowed shape),
+  with the LEFT→INNER mutation reddening it.
+- **P3-1 (`db_010`'s unspecified row order) TAKEN** — `ORDER BY
+i.id` joins every other check's deterministic order.
+- **P3-2 (DB-014's check is a related store invariant, not a
+  clause of DB-014 — nobody should read the row as full coverage)
+  TAKEN** — the module docs' table row now says so explicitly.
+
+The battery is now 28 tests (the three above added); the mutation
+inventory eleven (the two LEFT-JOIN ones added).
+
+Round-2 review addendum (D-230, same task; report
+`.opencode/reviews/t131-round2-report.md`, hy4-flash-free, VERDICT:
+APPROVE — 0×P0, 0×P1, 0×P2, 1×P3; the reviewer independently
+verified all six round-1 resolutions as genuinely landed — the
+mirror-migration sites byte-compared against the migrated siblings,
+the rebase union (D-228 intact before D-230, `action_logged` still
+private, `test_support` kept, `commands.rs` untouched), the DB-012
+three-arm priority and its wire members' SEC-008 shape, the
+foreign-keys-off plant's honesty (WAL, one statement, between
+executor transactions), the re-enumerated 28-test audit, and the
+startup/fatal-gate separation) — the one finding processed:
+
+- **P3-1 (three present-tense doc sentences still named the plain
+  `Db::run` executor after the T-324 migration — the lib.rs startup
+  arm's comment, ARCHITECTURE.md's command description and startup
+  wiring sentence; Rule 11) TAKEN** — all three now name
+  `Db::run_with_mirror` (the ARCHITECTURE command sentence also
+  carrying the D-228 flush contract), and reading 2 above gained
+  the superseded-pointer parenthetical (the D-226 dated-record
+  posture) noting the executor's new name while pointing at the
+  addendum that records the migration.

@@ -77,6 +77,15 @@ export const commands = {
 	 */
 	dbRecreate: (options?: InvokeOptions) => __TAURI_INVOKE<null>("db_recreate", undefined, options),
 	/**
+	 *  The diagnostics section's on-demand invariant check (§6.3, §7.10
+	 *  System row): one `Db::run_with_mirror` transaction runs every
+	 *  check, journals each violation it finds (DB-017) with its mirror
+	 *  line buffered for the post-commit flush (T-324/D-228), and answers
+	 *  the typed list. A read by the §5.4 gate's own scope — no SYS-005,
+	 *  the journal writes serialize on the one connection (module docs).
+	 */
+	dbVerify: (options?: InvokeOptions) => __TAURI_INVOKE<DbVerifyViolation_Serialize[]>("db_verify", undefined, options),
+	/**
 	 *  Opens the system folder picker from Rust (§7.10 System module
 	 *  `dialog_pick_folder`, the D-009 fixed name; §5.6) and remembers
 	 *  the picked folder for the session: the answer is the picked path
@@ -2018,6 +2027,168 @@ export type DbBackupInfo = {
 	 */
 	modified_utc: string,
 };
+
+/**
+ *  One violated invariant instance — the diagnostics half of DB-017:
+ *  what the `db_verify` answer carries (the journal entry is the
+ *  durable half). Every field is an identifier, a count, a position
+ *  or a fixed D-19 literal (SEC-008: stored text never crosses).
+ */
+export type DbVerifyViolation = DbVerifyViolation_Serialize | DbVerifyViolation_Deserialize;
+
+/**
+ *  One violated invariant instance — the diagnostics half of DB-017:
+ *  what the `db_verify` answer carries (the journal entry is the
+ *  durable half). Every field is an identifier, a count, a position
+ *  or a fixed D-19 literal (SEC-008: stored text never crosses).
+ */
+export type DbVerifyViolation_Deserialize = {
+	/**
+	 *  The invariant's spec id — `"DB-010"` … `"DB-016"` (DB-013 has
+	 *  no data check; see the module docs).
+	 */
+	invariant: string,
+	/**
+	 *  The offending row's kind, in the action-log entity vocabulary
+	 *  (`"instruction"`, `"variant"`, `"assignment"`, `"project"`).
+	 */
+	entity_type: string,
+	/**
+	 *  The offending row's identifier — the row's own id, or the
+	 *  compound `"{project_id}/{instruction_id}"` for assignment rows
+	 *  (the journal's convention for the id-less table).
+	 */
+	entity_id: string,
+	/**
+	 *  The project the violation is scoped to, when it is (the
+	 *  assignment, archived-state and path-key rows).
+	 */
+	project_id?: string | null,
+	/**
+	 *  The machine fact pinning the violation beyond the row itself,
+	 *  when one exists.
+	 */
+	detail?: DbViolationDetail | null,
+};
+
+/**
+ *  One violated invariant instance — the diagnostics half of DB-017:
+ *  what the `db_verify` answer carries (the journal entry is the
+ *  durable half). Every field is an identifier, a count, a position
+ *  or a fixed D-19 literal (SEC-008: stored text never crosses).
+ */
+export type DbVerifyViolation_Serialize = {
+	/**
+	 *  The invariant's spec id — `"DB-010"` … `"DB-016"` (DB-013 has
+	 *  no data check; see the module docs).
+	 */
+	invariant: string,
+	/**
+	 *  The offending row's kind, in the action-log entity vocabulary
+	 *  (`"instruction"`, `"variant"`, `"assignment"`, `"project"`).
+	 */
+	entity_type: string,
+	/**
+	 *  The offending row's identifier — the row's own id, or the
+	 *  compound `"{project_id}/{instruction_id}"` for assignment rows
+	 *  (the journal's convention for the id-less table).
+	 */
+	entity_id: string,
+	/**
+	 *  The project the violation is scoped to, when it is (the
+	 *  assignment, archived-state and path-key rows).
+	 */
+	project_id: string | null,
+	/**
+	 *  The machine fact pinning the violation beyond the row itself,
+	 *  when one exists.
+	 */
+	detail: DbViolationDetail | null,
+};
+
+/**
+ *  The typed "what exactly is wrong" of a violation — the same facts
+ *  the check's SQL computed, narrowed to numbers, ids and the fixed
+ *  marker literals (specta forbids 64-bit integers on the TS wire —
+ *  counts and positions saturate at `u32::MAX`, the D-049 decision).
+ */
+export type DbViolationDetail = 
+/**
+ *  DB-010: the instruction's variant counts — the pair that broke
+ *  "at least one active variant and exactly one active main"
+ *  (zero actives, zero mains, or more than one main).
+ */
+{ kind: "variantCounts"; 
+/**  The instruction's active variants. */
+active: number; 
+/**  The active variants flagged main among them. */
+active_main: number } | 
+/**
+ *  DB-011: the row sits at `position` where the 1..=N row puts
+ *  `expected` — a duplicate, a hole or an overshoot, one number
+ *  each.
+ */
+{ kind: "position"; 
+/**  The position the row actually holds. */
+position: number; 
+/**
+ *  The position the 1..=N row assigns this row (its 1-based
+ *  place in position order).
+ */
+expected: number } | 
+/**
+ *  DB-012: the assignment still points at this soft-deleted
+ *  variant (LIB-023's move never ran over it).
+ */
+{ kind: "deletedVariant"; 
+/**  The soft-deleted variant's row id. */
+variant_id: string } | 
+/**
+ *  DB-012: the assignment's `variant_id` names no variant row at
+ *  all — a target only foreign data can leave behind (the
+ *  composite FK holds every writer this app has).
+ */
+{ kind: "missingVariant"; 
+/**  The variant id the assignment names (no row has it). */
+variant_id: string } | 
+/**
+ *  DB-012: the variant the assignment points at belongs to
+ *  ANOTHER instruction — the same-instruction half of the
+ *  sentence, verified as data (the composite FK's half).
+ */
+{ kind: "foreignVariant"; 
+/**  The variant id the assignment points at. */
+variant_id: string; 
+/**  The instruction the variant actually belongs to. */
+instruction_id: string } | 
+/**
+ *  DB-014: which half of the state/`archived_at` pair contradicts
+ *  the other — `true`: an active row carrying a stamped
+ *  `archived_at`; `false`: an archived row with none.
+ */
+{ kind: "archivedAtMismatch"; 
+/**  Whether the contradicting row is the active one. */
+on_active: boolean } | 
+/**
+ *  DB-015: the canonical path key more than one project row
+ *  shares (a path form, SEC-008's allowed class).
+ */
+{ kind: "sharedPathKey"; 
+/**  The duplicated `path_key`. */
+path_key: string } | 
+/**
+ *  DB-016: the reserved marker line the stored text contains —
+ *  which D-19 literal, and its 1-based line in the built form.
+ */
+{ kind: "markerLine"; 
+/**  The 1-based line the marker sits on. */
+line: number; 
+/**
+ *  The fixed marker literal (`<!-- EUNOMIASYNC:BEGIN -->` or
+ *  `<!-- EUNOMIASYNC:END -->` — a D-19 constant, not stored
+ *  text).
+ */
+marker: string };
 
 /**
  *  The `state://dirty` event payload (§7.10): only the projects whose

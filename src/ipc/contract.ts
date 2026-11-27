@@ -41,6 +41,7 @@ export type {
   AppError_Serialize as AppErrorWire,
   AppInfo,
   DbBackupInfo,
+  DbVerifyViolation_Serialize as DbVerifyViolationWire,
   ErrorCode,
   ExclusionEntry,
   ExistingProject,
