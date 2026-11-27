@@ -31105,3 +31105,92 @@ warnings`; the full workspace chain (nextest all, doc tests,
 workspace clippy, deny) ran on the branch after both CI fixes of
 this run (the path-spelling entry beside this one records it). No
 frontend file changed.
+
+### D-236 — CI 46046771869 (Windows leg): the backup copy's on-disk path is the OS's own spelling — per-component joins, not the §5.5 layout string — 2026-11-27
+
+Problem: the same run's `test-matrix windows-latest` job failed
+`sync_phase2_tests::ready_projects_with_files_get_verified_copies_and_ok_records`
+at the `Details::File carries the copy's on-disk path` assert: the
+journal entry's path was
+`C:\…\.tmpFFhqLl\backups/01a21e38-…/CLAUDE.project.md….bak` while
+the test's expected path was all native backslashes. The mixed
+separators came from `eunomia-fs`'s `backup_target_file`:
+`let copy_path = data_dir.join(&relative_path)` — joining the §5.5
+layout STRING (`backups/<dir>/<file>`, `/` separators; its own
+docs: "the spec's relative layout, not an OS path") under the data
+directory in ONE call. On Windows, `Path::join` pushes a
+`/`-separated string verbatim, so the copy's on-disk path carried
+the layout's forward slashes after the native prefix. T-124's
+producer (cc5e236, D-223) had never been CI-run on Windows before
+this push — the first exposure.
+
+Ruling — which side is honest (the evidence, not taste): the
+failing assert's left side IS the constructor's own output — the
+journal detail is a JSON string, so the comparison is
+byte-level, the one place spelling cannot hide (a `Path`/`PathBuf`
+comparison could not have caught this: std's `Path` equality
+compares COMPONENTS and Windows accepts both separators, which is
+why the same test's `PathBuf`-based asserts passed under either
+spelling — they were never evidence of the disk's spelling). The
+copy itself was readable at the native spelling (`fs::read`
+through the natively-built expectation succeeded), and D-223's
+reading 2 — "`Details::File { path }` over the copy's on-disk
+path", in a journal whose other file details (phase 4's
+`target_path`) are native absolute paths — names the OS's
+spelling. Production was the wrong side; the mixed form was the
+constructor's artifact.
+
+Solution: the construction in `eunomia-fs/src/backup.rs` pushes
+the layout under the data directory COMPONENT BY COMPONENT
+(`data_dir` then each `/`-split component; the builders guarantee
+every component is a single path-safe name — the ID gate, the
+slug's `[a-z0-9-]`, the enum file name), so `BackupCopy::path` is
+the OS's own spelling on every platform: byte-identical to the old
+form on Unix (`/` is native there — which is exactly why Linux
+never saw the bug), native separators on Windows. The value flows
+unchanged through the record's `copy_path`, the journal's
+`Details::File`, and phase 2's own copy sweeps — the
+aborted-transaction orphan removal and the dedup re-check, which
+compare `record.copy_path` values from this same construction.
+`backup_orphans.rs` never sees `BackupCopy::path` at all: it
+rebuilds layout strings from `read_dir` names and matches them
+against DB strings, staying wholly in the spec-string domain. That
+domain is untouched and keeps the documented `/` spelling:
+`backup_records.backup_path` (the column, the retention prunes'
+`<data_dir>/<backup_path>` targets, the orphans matcher) — those
+ADDRESS or match the layout and are never displayed; the phase-2
+dedup probe (`data_dir.join(&checked.backup_path).is_file()`)
+likewise still addresses the file correctly with either spelling
+and is deliberately left as the string join (noting it here: a
+future shared "layout string → OS path" helper could unify the
+probes and the constructor's split, but no displayed or stored
+value depends on them).
+
+Tests: `eunomia-fs` —
+`a_created_copys_path_is_the_os_spelling_not_the_layout_string`
+(the layout this module builds under the data directory —
+`strip_prefix`-ed out of the absolute path, so the root's own
+spelling, the caller's, cannot red it — must carry only the
+native separator; the honest boundary is stated in the test: on
+Unix the old one-join produced the same bytes, so this pin's
+teeth are the Windows legs)
+and `the_native_separator_check_separates_the_two_spellings` (the
+check rejects the CI failure's exact mixed literal and accepts the
+native spelling — the pair keeps the check falsifiable on every
+platform). The e2e assert (the one CI failed) is unchanged — its
+natively-built expectation was always the honest oracle — with its
+comment now recording the spelling contract and the CI event.
+Mutations: injecting a non-native separator into the construction
+turns the fs pin RED on Linux (the checker is live in the
+construction→value→check pipeline); reverting to the one-join keeps
+the pin green ON LINUX — stated as the platform boundary, with the
+Windows CI leg itself as that construction's demonstrated red.
+
+Checks (the full chain, on the ci-fix branch after both fixes of
+this run): `cargo test --no-run -p eunomia-sync`;
+`cargo nextest run --no-fail-fast --test-threads=4`;
+`cargo test --doc --workspace`;
+`cargo clippy --workspace --all-targets -- -D warnings`;
+`cargo fmt --all -- --check`; `cargo deny check` — all exit 0;
+no frontend file changed (the pre-commit hook's eslint, prettier
+and vue-tsc gates ran on both commits).

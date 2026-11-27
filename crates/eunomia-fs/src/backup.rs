@@ -207,8 +207,12 @@ pub struct BackupCopy {
     /// (`backups/<project_id>__<slug>/<file>.<UTC>.<hash8>.bak`,
     /// `/` separators — the spec string, not an OS path).
     pub relative_path: String,
-    /// The copy's path on disk (the layout joined under the data
-    /// directory that was handed in).
+    /// The copy's path on disk — the §5.5 layout joined under the
+    /// data directory that was handed in, component by component, so
+    /// it is the OS's own spelling (native separators on every
+    /// platform; never the layout string's `/` form on Windows). The
+    /// sync journal's `Details::File` carries this path verbatim
+    /// (D-119/D-223: "the copy's on-disk path").
     pub path: PathBuf,
     /// The copy's size in bytes — equal to the source's size at
     /// snapshot time (that equality is the check that passed).
@@ -361,7 +365,25 @@ pub fn backup_target_file(target: &BackupTarget<'_>) -> Result<BackupOutcome, Ba
         &sha256_hex,
     )
     .map_err(|source| BackupError::NameFailed { source })?;
-    let copy_path = data_dir.join(&relative_path);
+    // The copy's on-disk path: the §5.5 layout joined under the data
+    // directory COMPONENT BY COMPONENT, never the layout string in one
+    // `join`. `relative_path` is the spec's spelling — `/` separators,
+    // "the spec's relative layout, not an OS path" (its own docs) —
+    // and on Windows a one-call `join` pushes a `/`-separated string
+    // verbatim, yielding `C:\…\backups/<dir>/<file>`: a path that
+    // still addresses the file but is not the OS's own spelling of
+    // it, and this path IS what the journal's `Details::File` carries
+    // as "the copy's on-disk path" (D-119/D-223) — CI run 46046771869
+    // failed the Windows leg on exactly that spelling. The builders
+    // guarantee every component of the layout is a single path-safe
+    // name (the ID gate, the slug's `[a-z0-9-]`, the enum file name),
+    // so the split is over safe components only; the pushes spell the
+    // path natively on every platform (byte-identical to the old
+    // one-join on Unix, where `/` already is the native separator).
+    let mut copy_path = data_dir.to_path_buf();
+    for component in relative_path.split('/') {
+        copy_path.push(component);
+    }
     ensure_backup_folders(data_dir, &copy_path)?;
 
     // Pass 2: the copy — fresh file, settled bytes; a partial write
@@ -966,6 +988,105 @@ mod tests {
         assert_eq!(
             backup_listing(&data_dir),
             vec![expected_file_name(&ABC_DIGEST[..8])]
+        );
+    }
+
+    // ---- the on-disk spelling (CI run 46046771869, Windows leg) ----
+
+    /// The separator that is NOT this platform's native path
+    /// separator: `/` on Windows, `\` elsewhere. A path the OS's
+    /// own per-component joins spell never contains it.
+    fn non_native_separator() -> char {
+        if cfg!(windows) { '/' } else { '\\' }
+    }
+
+    #[test]
+    fn a_created_copys_path_is_the_os_spelling_not_the_layout_string() {
+        // `BackupCopy::path` is what the sync journal's `Details::File`
+        // carries as "the copy's on-disk path" (D-119/D-223), and CI
+        // run 46046771869 failed the Windows leg because it was built
+        // by joining the §5.5 layout STRING (`backups/<dir>/<file>`,
+        // `/` separators — the spec's spelling, "not an OS path" per
+        // its own docs) under the data directory in ONE call: on
+        // Windows `Path::join` pushes a `/`-separated string
+        // verbatim, so the path came out `C:\…\backups/<dir>/<file>`
+        // — it addresses the file (the e2e test read the copy back
+        // through the natively-built expectation), but it is not the
+        // OS's own spelling of it: the journal's STRING assert — the
+        // one comparison spelling can hide from, since `Path`
+        // equality compares components and accepts both separators
+        // on Windows — failed on exactly the constructor's output.
+        // The construction now pushes component
+        // by component, so the path carries only the native
+        // separator. Honest boundary: on Unix `/` IS the native
+        // separator, so the old one-join form produced the same
+        // bytes as the component pushes — this pin cannot go red
+        // there for the old bug (the mixed spelling only exists
+        // where the two separators differ); its teeth are the
+        // Windows legs, and the calibration test below pins the
+        // check itself against the CI failure's exact shape on
+        // every platform.
+        let dir = TempDir::new().expect("a temporary directory must be creatable");
+        let data_dir = dir.path().join("data");
+        fs::create_dir(&data_dir).expect("creating the fixture data dir must work");
+        let source = write_source(&data_dir, b"abc");
+
+        let outcome = backup_call(&source, &data_dir, None).expect("the backup must be created");
+        let BackupOutcome::Created(copy) = outcome else {
+            panic!("the first backup must be Created, got: {outcome:?}");
+        };
+
+        // The pin judges only what THIS module builds: the layout
+        // under the data directory, `strip_prefix`-ed out of the
+        // absolute path — the root's own spelling is the caller's
+        // (a `TMP=C:/Temp`-style root on Windows or a `\`-bearing
+        // `TMPDIR` on Unix is legitimate and must not red this pin).
+        let built = copy
+            .path
+            .strip_prefix(&data_dir)
+            .expect("the copy's path is the layout under the data dir");
+        let text = built.to_str().expect("the fixture paths are UTF-8");
+        assert!(
+            !text.contains(non_native_separator()),
+            "the copy's on-disk path must be the OS's own spelling (no \
+             non-native separators): the journal's `Details::File` \
+             carries it (D-119/D-223, CI run 46046771869); \
+             got: {text}"
+        );
+    }
+
+    #[test]
+    fn the_native_separator_check_separates_the_two_spellings() {
+        // The check the regression pin applies to `copy.path` must
+        // REJECT the CI failure's mixed spelling and ACCEPT the
+        // native spelling. The mixed literal is the exact shape CI
+        // run 46046771869 reported on the Windows leg (a native
+        // Windows data-directory prefix, then the §5.5 layout's
+        // forward slashes); on Unix the real construction cannot
+        // produce that form, so this pair of literals is what keeps
+        // the check falsifiable on every platform.
+        let mixed = "C:\\Users\\RUNNER~1\\Temp\\.tmpFFhqLl\\backups/\
+                     01a21e38-0d6f-7cce-a3c0-3d1f2a4b5c6d__project-1/\
+                     AGENTS.md.20261121T103000123Z.ba7816bf.bak";
+        let native = if cfg!(windows) {
+            "C:\\Users\\RUNNER~1\\Temp\\.tmpFFhqLl\\backups\\
+             01a21e38-0d6f-7cce-a3c0-3d1f2a4b5c6d__project-1\\
+             AGENTS.md.20261121T103000123Z.ba7816bf.bak"
+        } else {
+            "/home/user/.local/share/eunomiasync/backups/\
+             01a21e38-0d6f-7cce-a3c0-3d1f2a4b5c6d__project-1/\
+             AGENTS.md.20261121T103000123Z.ba7816bf.bak"
+        };
+        assert!(
+            mixed.contains(non_native_separator()),
+            "the CI failure's mixed spelling must trip the \
+             non-native-separator check on this platform — the check \
+             has lost its teeth"
+        );
+        assert!(
+            !native.contains(non_native_separator()),
+            "a natively-spelled path must pass the check — a \
+             platform-correct path is being rejected"
         );
     }
 

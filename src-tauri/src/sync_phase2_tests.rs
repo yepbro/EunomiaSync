@@ -614,7 +614,15 @@ fn ready_projects_with_files_get_verified_copies_and_ok_records() {
     // carries each copy's on-disk path — the absolute fact, parallel
     // to the target-file entries' paths. Pairing by the project
     // column (the newest-first journal order is the reverse of the
-    // records' insert order).
+    // records' insert order). The expected paths here are built the
+    // way the OS spells them (per-component joins), and that is the
+    // contract: the journal's path is the copy's NATIVE spelling —
+    // CI run 46046771869 failed this very assert on the Windows leg
+    // when the fs layer built the path from the §5.5 layout string
+    // in one `join` (`backups/<dir>/<file>` kept its forward
+    // slashes after the native prefix); `eunomia-fs`'s backup.rs
+    // now pushes component by component, and this assert — plus the
+    // fs layer's own spelling pin — keeps it that way.
     let records = records_of(&app, &phase1.run_id);
     let copies_by_project = [
         (first.as_str(), &first_copy),
