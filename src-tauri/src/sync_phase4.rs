@@ -121,8 +121,11 @@
 //! `phase1`/`phase3` parameters), absent from the JSON when no
 //! syscall backs the refusal. Every entry is
 //! [`Visibility::User`] (§7.7's Activity window groups Sync), and
-//! each successfully inserted entry is mirrored once through
-//! [`logging::action_logged`] (D-051's call-once rule).
+//! each successfully inserted entry is recorded into the
+//! transaction's [`crate::logging::MirrorBuffer`] — the executor
+//! flushes the mirror lines only after the verdict transaction
+//! commits (T-324/D-228, D-051's call-once rule made
+//! commit-aware).
 //!
 //! **Recovery mode** (no database) answers the honest `NoDatabase`
 //! fallback through [`managed_db`], like every phase — nothing runs.
@@ -308,7 +311,7 @@ where
     let run_id = phase3.run_id.clone();
     let data_dir = data_dir.to_path_buf();
     let (run, retention, journal) = database
-        .run(move |tx| {
+        .run_with_mirror(move |tx, mirror| {
             // Step A — the committed truth: the run's own rows, in
             // `sort_order`. Everything this phase writes derives
             // from them (the counted verdict reads the same rows
@@ -440,9 +443,13 @@ where
                 match action_log::insert(tx, &entry) {
                     Ok(_) => {
                         journal.written += 1;
-                        // The D-051 call-once mirror (the facade
-                        // decides whether the line lands).
-                        crate::logging::action_logged(&entry);
+                        // The T-324/D-228 mirror records inside the
+                        // closure; the executor flushes it only after
+                        // the verdict transaction commits (the facade
+                        // decides whether the line lands — a
+                        // rolled-back verdict takes its mirror with
+                        // it, D-051's rule on the file-log half).
+                        mirror.record(&entry);
                     }
                     Err(error) => {
                         journal.failures.push(format!(
@@ -467,7 +474,10 @@ where
             match action_log::insert(tx, &entry) {
                 Ok(_) => {
                     journal.written += 1;
-                    crate::logging::action_logged(&entry);
+                    // The T-324/D-228 mirror records inside the
+                    // closure; the flush rides the commit (the
+                    // facade decides whether the line lands).
+                    mirror.record(&entry);
                 }
                 Err(error) => {
                     journal

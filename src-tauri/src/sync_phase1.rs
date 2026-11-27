@@ -481,7 +481,7 @@ where
         let abort_details = numbers.clone();
         let abort_run_id = phase0.run.id.clone();
         database
-            .run(move |transaction| {
+            .run_with_mirror(move |transaction, mirror| {
                 abort_run(
                     transaction,
                     &abort_run_id,
@@ -494,8 +494,11 @@ where
                 // the same transaction that aborts the row claims the
                 // abort — error/error, the §10 literal in details, and
                 // the honest partial field list (a space comparison
-                // offers no path, project or OS code). The D-051
-                // call-once mirror fires inside the closure.
+                // offers no path, project or OS code). The T-324/D-228
+                // mirror records inside the closure; the executor
+                // flushes it with this transaction's own commit (the
+                // abort transaction commits by design — the
+                // fail-then-log shape, D-051).
                 let mut entry = eunomia_store::action_log::LogEntry::new(
                     eunomia_store::action_log::Action::SyncRunAborted,
                     eunomia_store::action_log::Level::Error,
@@ -522,7 +525,7 @@ where
                         });
                 eunomia_store::action_log::insert(transaction, &entry)
                     .map_err(crate::commands::activity_log_to_app_error)?;
-                crate::logging::action_logged(&entry);
+                mirror.record(&entry);
                 Ok(())
             })
             .await?;

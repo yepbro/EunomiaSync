@@ -1613,3 +1613,130 @@ fn an_unreadable_retention_setting_is_swallowed_into_the_report() {
     );
     assert_eq!(run_row_of(&app, &run_id).status, SyncRunStatus::Success);
 }
+// ---- T-324: the partial run's mirror through the real phase -----
+
+/// T-324/D-228, end to end through the real phase: a `partial` run
+/// journals its skipped project at `warn` and its `sync.run_finished`
+/// summary at `warn`, and those — and ONLY those — reach the file
+/// log, exactly once each: the flush happens after the verdict
+/// transaction commits, on the executor's blocking thread, so the
+/// observation goes through the `cfg(test)` emission recorder in
+/// `logging::test_support` (a process-global subscriber cannot serve
+/// two tests in a same-process `cargo test` run, the CI gate's
+/// shape), with every assert scoped by the runs' own unique ids —
+/// the fixture's real UUIDv7 run ids, immune to any parallel test's
+/// emissions. The unmirrored half is pinned too: the info/user/ok
+/// shapes of the same run (`sync.run_started`, the written/unchanged
+/// project entries) produce no emission, and the first (fully
+/// successful) run's phase-4 entries are absent for the same reason.
+#[test]
+fn a_partial_run_mirrors_its_warn_entries_exactly_once() {
+    // The partial-run fixture of
+    // `a_partial_run_keeps_the_overall_success_time_and_restamps_the_
+    // unchanged`: two projects, run 1 writes both, run 2 skips one
+    // (its folder is gone) and finds the other unchanged.
+    let (temp, app, repos) = phase4_app();
+    const SECOND_FINISH_AT: &str = "2026-11-21T12:15:00.789Z";
+    let (first_id, _first_repo) = seed_repo_project(&app, &repos, 1);
+    let (second_id, second_repo) = seed_repo_project(&app, &repos, 2);
+    seed_assigned_instruction(&app, &first_id, "First body.");
+    seed_assigned_instruction(&app, &second_id, "Second body.");
+
+    // Run 1: both written, finished — all info/user/ok shapes, no
+    // mirror emission of theirs may exist.
+    let (first_run, first_phase1) = chain_through_phase3(&app, temp.path());
+    let (_first_outcome, _first_dirty, _first_seam) = run_phase4_counting(
+        &app,
+        &first_phase1,
+        &first_run,
+        temp.path(),
+        first_finish_instant(),
+    );
+
+    // Run 2: the second project's folder is gone — `skipped` at warn,
+    // the run's verdict `partial`.
+    fs::remove_dir_all(&second_repo).expect("removing the repo folder must work");
+    let (second_run, second_phase1) = chain_through_phase3(&app, temp.path());
+    let (second_outcome, _second_dirty, _second_seam) = run_phase4_counting(
+        &app,
+        &second_phase1,
+        &second_run,
+        temp.path(),
+        SECOND_FINISH_AT
+            .parse()
+            .expect("the second finish instant must parse"),
+    );
+    assert_eq!(second_outcome.run.status, SyncRunStatus::Partial);
+
+    // The journal side: the run's entries exist (the mirror's
+    // referents) — the warn summary, the skipped project's warn row,
+    // the unchanged project's info row, and the run's bracket opener
+    // (info/user/ok).
+    let journal = journal_of(&app, &second_run);
+    assert_eq!(
+        journal,
+        vec![
+            (Action::SyncRunFinished, Level::Warn, Outcome::Skipped),
+            (Action::SyncProjectResult, Level::Warn, Outcome::Skipped),
+            (Action::SyncProjectResult, Level::Info, Outcome::Ok),
+            (Action::SyncRunStarted, Level::Info, Outcome::Ok),
+        ],
+        "the partial run's journal: the warn summary, the skipped \
+         project's warn row, the unchanged project's info row, the \
+         run's opener"
+    );
+
+    // The emission side: exactly one line per warn entry, with the
+    // run's and project's own ids — and nothing from the unmirrored
+    // shapes.
+    let emitted = crate::logging::test_support::emitted_mirror_lines();
+    let first_run_lines: Vec<_> = emitted
+        .iter()
+        .filter(|line| line.sync_run_id == first_run)
+        .collect();
+    assert!(
+        first_run_lines.is_empty(),
+        "the fully successful run's info/user/ok entries mirror nothing \
+         (the policy half, end to end), got: {first_run_lines:?}"
+    );
+    let second_run_lines: Vec<_> = emitted
+        .iter()
+        .filter(|line| line.sync_run_id == second_run)
+        .collect();
+    assert_eq!(
+        second_run_lines.len(),
+        2,
+        "exactly two mirror lines for the partial run — the skipped \
+         project's warn row and the warn summary (T-324/D-228), got: \
+         {second_run_lines:?}"
+    );
+    let project_lines: Vec<_> = second_run_lines
+        .iter()
+        .filter(|line| line.action == "sync.project_result")
+        .collect();
+    assert_eq!(project_lines.len(), 1, "one project-result line");
+    assert_eq!(project_lines[0].level, tracing::Level::WARN);
+    assert_eq!(project_lines[0].result, "skipped");
+    assert_eq!(project_lines[0].entity_type, "project");
+    assert_eq!(
+        project_lines[0].entity_id, second_id,
+        "the skipped project's line names its project"
+    );
+    assert_eq!(project_lines[0].project_id, second_id);
+    let summary_lines: Vec<_> = second_run_lines
+        .iter()
+        .filter(|line| line.action == "sync.run_finished")
+        .collect();
+    assert_eq!(summary_lines.len(), 1, "one run-finished line");
+    assert_eq!(summary_lines[0].level, tracing::Level::WARN);
+    assert_eq!(summary_lines[0].result, "skipped");
+    assert!(
+        second_run_lines
+            .iter()
+            .all(|line| line.action != "sync.run_started"),
+        "the run's info/user/ok opener stays unmirrored, got: \
+         {second_run_lines:?}"
+    );
+    drop(app);
+    drop(temp);
+}

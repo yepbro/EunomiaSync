@@ -135,12 +135,16 @@
 //! fallback). The gap is revisited when the registry grows a fitting
 //! code.
 //!
-//! This module logs exactly one kind of event itself: the §10/§9.5
-//! retry attempts ([`crate::logging::db_busy_retry`], a `warn` per
-//! attempt) — invisible to every other layer, so nobody else could
-//! log them; SEC-008 keeps their payload numeric. §10's "every error
-//! is written to the log" belongs to the producing command tasks,
-//! which know the project/path context the log line must carry
+//! This module logs two kinds of events itself: the §10/§9.5 retry
+//! attempts ([`crate::logging::db_busy_retry`], a `warn` per attempt)
+//! — invisible to every other layer, so nobody else could log them;
+//! SEC-008 keeps their payload numeric — and the action-log mirror
+//! flush ([`crate::logging::MirrorBuffer::flush_committed`], T-324/
+//! D-228): the journal entries a committed operation buffered ride
+//! their mirror lines out at the same boundary that knows they
+//! committed — here, and only here. §10's "every error is written to
+//! the log" belongs to the producing command tasks for everything
+//! else, which know the project/path context the log line must carry
 //! (SEC-008's facade vocabulary, D-032); the executor has none of it.
 //!
 //! # Consumed today
@@ -150,7 +154,9 @@
 //! and the store-backed commands (`projects_list`, `activity_list`,
 //! `scan_start`, `settings_get`/`settings_set`, the project/exclusion
 //! mutations) read and write through it, mapping their store errors
-//! through the classifier below. The `db_*` recovery pair and
+//! through the classifier below — the journaling operations among
+//! them through [`Db::run_with_mirror`] (T-324/D-228), whose buffer
+//! the executor flushes after the commit. The `db_*` recovery pair and
 //! `db_backups_list` do not: they handle the database file itself,
 //! not its contents. The behavior tests below exercise the same
 //! seam against real database files — the same shape `errors.rs`
@@ -497,7 +503,33 @@ impl Db {
 
     /// Runs `operation` on the blocking pool inside one transaction
     /// and returns its result as the §7.10 wire value (SYS-001,
-    /// SYS-002, NFR-008).
+    /// SYS-002, NFR-008) — the plain form of [`Db::run_with_mirror`]:
+    /// the operation cannot journal-and-mirror, so the mirror buffer
+    /// the cycle still creates stays empty and its post-commit flush
+    /// emits nothing. See [`Db::run_with_mirror`] for the cycle; the
+    /// mirror half never engages here.
+    pub(crate) async fn run<T, F>(&self, operation: F) -> Result<T, AppError>
+    where
+        F: FnMut(&Transaction<'_>) -> Result<T, AppError> + Send + 'static,
+        T: Send + 'static,
+    {
+        // One cycle, one implementation: the same attempt/retry loop
+        // with a buffer the closure never records into. The shadowing
+        // `mut` rebinds the moved capture so the adapter closure can
+        // call the FnMut operation once per attempt — the same idiom
+        // the retry loop itself uses.
+        let mut operation = operation;
+        self.run_with_mirror(move |tx, _mirror| operation(tx)).await
+    }
+
+    /// The journaling form of [`Db::run`] (T-324/D-228): the operation
+    /// receives, beside the `&Transaction`, a
+    /// [`crate::logging::MirrorBuffer`] — every `action_log` entry it
+    /// inserts it records with
+    /// [`MirrorBuffer::record`](crate::logging::MirrorBuffer::record)
+    /// — and the executor flushes the buffer **only after the
+    /// transaction commits**, through
+    /// [`MirrorBuffer::flush_committed`](crate::logging::MirrorBuffer::flush_committed).
     ///
     /// The operation sees a `&Transaction`: every statement it runs
     /// joins the one open transaction, and a nested `BEGIN` is rejected
@@ -507,6 +539,34 @@ impl Db {
     /// operation back. The connection mutex serializes operations:
     /// two `run` calls may sit on the blocking pool concurrently, but
     /// their transactions never interleave on the connection.
+    ///
+    /// # The mirror invariant (why the buffer exists)
+    ///
+    /// The journal's transactional semantics (D-051: a rolled-back
+    /// operation leaves no entry claiming it happened) extend to the
+    /// journal's file-log echo: a mirror line emitted while the
+    /// transaction is still open names a row that a rollback erases,
+    /// and a busy retry would re-run the insert AND the mirror call,
+    /// duplicating the line. The buffer closes both holes by moving
+    /// the WHEN to the one place that knows the commit happened:
+    ///
+    /// - a **fresh buffer per attempt** — a busy retry re-runs the
+    ///   whole closure, and the failed attempt's records die with its
+    ///   rollback: only the successful attempt's buffer is flushed,
+    ///   exactly one mirror line per committed row;
+    /// - the **flush after `commit()` succeeds** — on the blocking
+    ///   thread, under the connection guard (the same lock state the
+    ///   pre-T-324 sites emitted their lines under; the tracing call
+    ///   itself is the only work, and the DB-022 commit hook that
+    ///   follows it runs under the same rule). The lines ride the
+    ///   process-global subscriber, so they land wherever the file
+    ///   log's worker takes them — the thread they are emitted from
+    ///   is not observable in the file.
+    ///
+    /// A fail-then-log producer (D-051's error half) is served by the
+    /// same rule, not exempt from it: its error entry rides a
+    /// transaction that commits — the abort/next transaction — so its
+    /// own buffer flushes with that commit.
     ///
     /// # Busy retries (§10 `E_DB_LOCKED`)
     ///
@@ -536,18 +596,21 @@ impl Db {
     /// the idempotency mechanism: a replay either re-derives its result
     /// on the new state or fails cleanly on it. The body must read its
     /// inputs inside the transaction (never cache them across
-    /// attempts), and a body with side effects *outside* the
-    /// transaction must make them idempotent itself (§9.5-staged
-    /// writes being the house pattern).
+    /// attempts), and the journal mirror was
+    /// the one in-transaction side effect that needed its own
+    /// discipline — the buffer makes it transactional like everything
+    /// else; a body with side effects *outside* the transaction must
+    /// still make them idempotent itself (§9.5-staged writes being the
+    /// house pattern).
     ///
     /// The cycle is not cancellable: dropping the future the caller
     /// awaits does not stop the underlying `spawn_blocking` run — its
-    /// retries (and, on an eventual success, its commit) run to
-    /// completion, which a dropped command future may observe only
-    /// later. A command task must not assume a cancelled call left
-    /// the database untouched (this predates the retries — one
-    /// attempt could already outlive its future — the cycle only
-    /// widens the window to the §9.5 worst case).
+    /// retries (and, on an eventual success, its commit and its
+    /// mirror flush) run to completion, which a dropped command future
+    /// may observe only later. A command task must not assume a
+    /// cancelled call left the database untouched (this predates the
+    /// retries — one attempt could already outlive its future — the
+    /// cycle only widens the window to the §9.5 worst case).
     ///
     /// A panic inside the operation does not poison anything the next
     /// operation would notice: the unwinding rolls the transaction
@@ -556,9 +619,11 @@ impl Db {
     /// `AppError` carrying the panic message — in release builds the
     /// workspace's `panic = "abort"` ends the process before this
     /// mapping could run, so that branch is a dev/test path.
-    pub(crate) async fn run<T, F>(&self, operation: F) -> Result<T, AppError>
+    pub(crate) async fn run_with_mirror<T, F>(&self, operation: F) -> Result<T, AppError>
     where
-        F: FnMut(&Transaction<'_>) -> Result<T, AppError> + Send + 'static,
+        F: FnMut(&Transaction<'_>, &mut crate::logging::MirrorBuffer) -> Result<T, AppError>
+            + Send
+            + 'static,
         T: Send + 'static,
     {
         // Clone the handle before entering the closure: the closure
@@ -638,13 +703,26 @@ impl Db {
 /// attempt reaches this branch), and a rolled-back attempt never
 /// fires. The hook runs with the mutex still held (the guard drops at
 /// the function's end), so it must never block.
+///
+/// The attempt's [`crate::logging::MirrorBuffer`] is created here,
+/// fresh, per attempt (T-324/D-228): the operation records its
+/// journal entries into it, and ONLY the successful-commit branch
+/// flushes it — the rollback paths (an `Err` body, a failed commit,
+/// a busy verdict) drop it unflushed, records and rolled-back rows
+/// together. The flush runs under the same guard as the commit hook
+/// (the tracing calls are the only work) and BEFORE the hook: the
+/// mirror is the journal's own echo of the commit, the hook the
+/// derived UI consequence. The buffer dying here is the whole
+/// discipline — a retry's fresh attempt cannot inherit the failed
+/// attempt's records, which is what keeps a busy retry to exactly
+/// one mirror line per committed row.
 fn attempt_once<T, F>(
     connection: &Mutex<Connection>,
     commit_hook: Option<&Arc<dyn Fn() + Send + Sync>>,
     operation: &mut F,
 ) -> AttemptOutcome<T>
 where
-    F: FnMut(&Transaction<'_>) -> Result<T, AppError>,
+    F: FnMut(&Transaction<'_>, &mut crate::logging::MirrorBuffer) -> Result<T, AppError>,
 {
     let guard = lock_recovering_poison(connection);
     // The row-change baseline of this attempt: `total_changes` counts
@@ -662,12 +740,21 @@ where
         }
         Err(error) => return AttemptOutcome::Failed(sqlite_error_to_app_error(error)),
     };
-    match operation(&transaction) {
+    // Fresh per attempt: a busy retry's closure re-runs over a fresh
+    // buffer, never over the failed attempt's records.
+    let mut mirror = crate::logging::MirrorBuffer::new();
+    match operation(&transaction, &mut mirror) {
         Ok(value) => match transaction.commit() {
             // A failed commit also drops the transaction (rusqlite
             // sends the ROLLBACK), so nothing half-applied stays
             // behind on that path either.
             Ok(()) => {
+                // The commit happened: the journal entries the
+                // operation recorded exist, so their mirror lines
+                // may exist — before this point a line would name a
+                // row a rollback could still erase (D-051's rule,
+                // the mirror half).
+                mirror.flush_committed();
                 if guard.total_changes() != changes_before
                     && let Some(hook) = commit_hook
                 {

@@ -433,7 +433,7 @@ where
                 .collect::<Vec<_>>();
             let run_id = phase1.run_id.clone();
             let written = database
-                .run(move |transaction| {
+                .run_with_mirror(move |transaction, mirror| {
                     for record in &records {
                         let record_id = insert_record(
                             transaction,
@@ -445,8 +445,9 @@ where
                         // journal insert rolls the record back with
                         // it. `copy_path` is `Some` for every record
                         // the pass made (dedup claims never reach
-                        // this list); the D-051 call-once mirror
-                        // fires inside the closure.
+                        // this list); the T-324/D-228 mirror records
+                        // inside the closure and flushes only after
+                        // the commit.
                         let mut entry = LogEntry::new(
                             Action::BackupCreated,
                             Level::Info,
@@ -464,7 +465,7 @@ where
                         });
                         insert_journal_entry(transaction, &entry)
                             .map_err(activity_log_to_app_error)?;
-                        crate::logging::action_logged(&entry);
+                        mirror.record(&entry);
                     }
                     Ok(())
                 })
@@ -556,7 +557,7 @@ where
             let failed_source = failed.source.clone();
             let failed_os_code = error.os_code();
             let aborted = database
-                .run(move |transaction| {
+                .run_with_mirror(move |transaction, mirror| {
                     for record in &made {
                         let deleted = record.copy_path.as_deref().is_some_and(|path| {
                             deletions
@@ -594,8 +595,12 @@ where
                     // entries on this path: this run's copies were
                     // deleted before any record committed, and an
                     // entry saying "backup created" for a copy
-                    // born-deleted would lie. The D-051 call-once
-                    // mirror fires inside the closure.
+                    // born-deleted would lie. The T-324/D-228 mirror
+                    // records inside the closure; the executor
+                    // flushes it with this abort transaction's own
+                    // commit (the fail-then-log shape, D-051 — the
+                    // failed copy pass rolled back, this transaction
+                    // is where the error's durable claims land).
                     let mut entry = LogEntry::new(
                         Action::SyncRunAborted,
                         Level::Error,
@@ -623,7 +628,7 @@ where
                                 os_code: failed_os_code,
                             });
                     insert_journal_entry(transaction, &entry).map_err(activity_log_to_app_error)?;
-                    crate::logging::action_logged(&entry);
+                    mirror.record(&entry);
                     Ok(())
                 })
                 .await;

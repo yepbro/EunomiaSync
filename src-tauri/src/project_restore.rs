@@ -127,7 +127,7 @@ async fn project_restore_impl<R: Runtime>(
     reject_during_sync(&app)?;
     let database = managed_db(&app)?;
     let committed = database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // The row first: the by-id read decides the idempotence
             // branch and carries the identity key the exclusion half
             // needs. The refusal echoes the caller's id bounded
@@ -196,9 +196,10 @@ async fn project_restore_impl<R: Runtime>(
             });
             entry.project_id = Some(restored.id.as_str());
             insert(transaction, &entry).map_err(activity_log_to_app_error)?;
-            // The D-051 mirror contract: one call per written entry
-            // (info+user+ok is the unmirrored shape today).
-            logging::action_logged(&entry);
+            // The T-324/D-228 mirror contract: record inside the
+            // transaction, flush only after the commit (info+user+ok
+            // is the unmirrored shape today).
+            mirror.record(&entry);
             Ok(true)
         })
         .await?;

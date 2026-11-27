@@ -2026,7 +2026,7 @@ async fn stop_run_if_running<R: Runtime>(
     let details = details.to_owned();
     let finished_at = eunomia_store::values::now_utc();
     managed_db(app)?
-        .run(move |tx| {
+        .run_with_mirror(move |tx, mirror| {
             let running = eunomia_store::sync_runs::get(tx, &run_id)
                 .map_err(db::sync_runs_to_app_error)?
                 .is_some_and(|row| row.status == eunomia_store::sync_runs::SyncRunStatus::Running);
@@ -2041,8 +2041,11 @@ async fn stop_run_if_running<R: Runtime>(
             // error's, and the shape failure of a non-§10 `code`
             // (tampering only — every `ErrorCode` literal is registry
             // shaped, pinned by the errors suite) keeps the entry at
-            // the cost of the payload. The D-051 call-once mirror
-            // fires inside the closure.
+            // the cost of the payload. The T-324/D-228 mirror records
+            // inside the closure; the executor flushes it with this
+            // abort transaction's own commit (the fail-then-log
+            // shape, D-051 — the failed phase rolled back, this
+            // transaction is where the error's durable claims land).
             let mut entry = eunomia_store::action_log::LogEntry::new(
                 eunomia_store::action_log::Action::SyncRunAborted,
                 eunomia_store::action_log::Level::Error,
@@ -2062,7 +2065,7 @@ async fn stop_run_if_running<R: Runtime>(
                     os_code,
                 });
             eunomia_store::action_log::insert(tx, &entry).map_err(activity_log_to_app_error)?;
-            logging::action_logged(&entry);
+            mirror.record(&entry);
             Ok(true)
         })
         .await
@@ -2511,7 +2514,7 @@ async fn settings_set_impl<R: Runtime>(
     let validated = validated_settings_changes(changes)?;
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             for (key, value) in &validated {
                 eunomia_store::settings::set(transaction, *key, value.clone())
                     .map_err(settings_write_to_app_error)?;
@@ -2544,12 +2547,13 @@ async fn settings_set_impl<R: Runtime>(
                 // failure out of the settings fallback's
                 // `other.to_string()` (whose `Display` can embed
                 // stored text — SEC-008's os_message surface).
-                // The D-051 mirror contract: one call per written
-                // entry — a no-op for this info+user+ok shape (the
-                // journal already holds it; `mirror_level` decides),
-                // and the single place a future level/visibility
-                // change would pick up its mirroring.
-                logging::action_logged(&entry);
+                // The T-324/D-228 mirror contract: record inside the
+                // transaction, flush only after the commit — a no-op
+                // for this info+user+ok shape (the journal already
+                // holds it; `mirror_level` decides at flush), and the
+                // single place a future level/visibility change
+                // would pick up its mirroring.
+                mirror.record(&entry);
             }
             // The applied state, read in the same transaction: the
             // answer describes exactly what committed.
@@ -3597,7 +3601,7 @@ pub(crate) async fn project_add_manual_impl<R: Runtime>(
     // outside.
     let probe_root = root.clone();
     let outcome = database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // DB-015: the key is unique across active AND archived
             // rows, and the check runs inside the operation's own
             // transaction — the same single-connection serialization
@@ -3620,6 +3624,7 @@ pub(crate) async fn project_add_manual_impl<R: Runtime>(
             Ok(
                 match register_project(
                     transaction,
+                    mirror,
                     &fields,
                     eunomia_store::projects::AddedVia::Manual,
                     &defaults,
@@ -3961,7 +3966,8 @@ pub(crate) enum Registered {
 /// `sort_order`), and the `project.added` journal entry (LOG-001…004,
 /// info/user/ok, entity and project naming the new row) inside the
 /// SAME transaction (D-051) — a rolled-back operation leaves no entry
-/// claiming it happened.
+/// claiming it happened, and the T-324/D-228 mirror buffer holds the
+/// entry's record until the commit flushes it.
 ///
 /// The caller owns the duplicate check ([`eunomia_store::projects::
 /// find_by_path_key`], DB-015) and maps its typed answer; this step
@@ -3976,6 +3982,7 @@ pub(crate) enum Registered {
 /// D-037 fallback when a duplicate conflict vanishes on the re-read.
 pub(crate) fn register_project(
     transaction: &rusqlite::Transaction<'_>,
+    mirror: &mut crate::logging::MirrorBuffer,
     fields: &ProjectFields,
     added_via: eunomia_store::projects::AddedVia,
     defaults: &WriteDefaults,
@@ -4038,9 +4045,10 @@ pub(crate) fn register_project(
     });
     entry.project_id = Some(created.id.as_str());
     insert(transaction, &entry).map_err(activity_log_to_app_error)?;
-    // The D-051 mirror contract: one call per written entry (info+user+ok
-    // is the unmirrored shape today).
-    logging::action_logged(&entry);
+    // The T-324/D-228 mirror contract: record inside the transaction,
+    // flush only after the commit (info+user+ok is the unmirrored
+    // shape today).
+    mirror.record(&entry);
     // The row and its entry both exist (uncommitted): its color is
     // occupied from here on — recorded only now, so every recorded
     // color belongs to a fully written row whatever failed earlier.
@@ -4381,7 +4389,7 @@ async fn exclusion_remove_impl<R: Runtime>(app: AppHandle<R>, id: String) -> Res
     reject_during_sync(&app)?;
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // The by-id lookup: the store's public face is the ordered
             // list (D-093 — no by-id read), which is exactly the data
             // the exclusions screen itself renders, so the find is
@@ -4422,9 +4430,10 @@ async fn exclusion_remove_impl<R: Runtime>(app: AppHandle<R>, id: String) -> Res
                 path: PathBuf::from(&exclusion.path),
             });
             insert(transaction, &entry).map_err(activity_log_to_app_error)?;
-            // The D-051 mirror contract: one call per written entry
-            // (info+user+ok is the unmirrored shape today).
-            logging::action_logged(&entry);
+            // The T-324/D-228 mirror contract: record inside the
+            // transaction, flush only after the commit (info+user+ok
+            // is the unmirrored shape today).
+            mirror.record(&entry);
             Ok(())
         })
         .await
@@ -4645,7 +4654,7 @@ async fn projects_reorder_impl<R: Runtime>(
     reject_during_sync(&app)?;
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // D-093: positions are table-wide, so the whole table in
             // its current order is the base the move is spliced into —
             // `list(Active)` alone is never a valid permutation.
@@ -4728,9 +4737,10 @@ async fn projects_reorder_impl<R: Runtime>(
                 changed: u64::try_from(changed).expect("a table wider than u64 rows is impossible"),
             });
             insert(transaction, &entry).map_err(activity_log_to_app_error)?;
-            // The D-051 mirror contract: one call per written entry
-            // (info+user+ok is the unmirrored shape today).
-            logging::action_logged(&entry);
+            // The T-324/D-228 mirror contract: record inside the
+            // transaction, flush only after the commit (info+user+ok
+            // is the unmirrored shape today).
+            mirror.record(&entry);
             Ok(())
         })
         .await
@@ -5758,7 +5768,7 @@ async fn instruction_create_impl<R: Runtime>(
     validate_variant_text(&text).map_err(rejected_text_field)?;
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // The D-188 section rule, computed over the ordered list
             // the store's own read serves — BEFORE the row exists: the
             // target is a position in `1..=M+1` (M = the current row
@@ -5799,7 +5809,7 @@ async fn instruction_create_impl<R: Runtime>(
             record_variant_version(transaction, &variant, VariantOp::Create, max_revisions)?;
             // LOG-001…004 (D-051): the pair's birth is ONE user action
             // — one entry naming the instruction.
-            journal_instruction(transaction, Action::InstructionCreated, &placed.id)?;
+            journal_instruction(transaction, mirror, Action::InstructionCreated, &placed.id)?;
             Ok(InstructionCreated {
                 instruction_id: placed.id,
                 variant_id: variant.id,
@@ -5838,7 +5848,7 @@ async fn instruction_update_impl<R: Runtime>(
         .map_err(|error| rejected_title_field(&sent_name, &error))?;
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // The rename's own by-id read: MAIN-015's identity split
             // (a heading's rename is `heading_update`, §7.10) and the
             // verified no-op's comparison input.
@@ -5870,7 +5880,7 @@ async fn instruction_update_impl<R: Runtime>(
                 InstructionOp::Update,
                 max_revisions,
             )?;
-            journal_instruction(transaction, Action::InstructionChanged, &updated.id)?;
+            journal_instruction(transaction, mirror, Action::InstructionChanged, &updated.id)?;
             Ok(())
         })
         .await
@@ -5897,7 +5907,7 @@ pub(crate) async fn instruction_hide<R: Runtime>(
 async fn instruction_hide_impl<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), AppError> {
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             let item = instruction_of(transaction, &id)?;
             // D-188's verified no-op: an already-hidden instruction
             // hides nothing. The store's own idempotence would write
@@ -5911,7 +5921,7 @@ async fn instruction_hide_impl<R: Runtime>(app: AppHandle<R>, id: String) -> Res
                 .map_err(library_store_to_app_error)?;
             let max_revisions = history_max_revisions(transaction)?;
             record_instruction_version(transaction, &hidden, InstructionOp::Hide, max_revisions)?;
-            journal_instruction(transaction, Action::InstructionHidden, &hidden.id)?;
+            journal_instruction(transaction, mirror, Action::InstructionHidden, &hidden.id)?;
             Ok(())
         })
         .await
@@ -5941,7 +5951,7 @@ async fn instruction_restore_impl<R: Runtime>(
 ) -> Result<(), AppError> {
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             let item = instruction_of(transaction, &id)?;
             // The verified no-op twin: an active instruction restores
             // nothing (a heading is already refused above — it can
@@ -5963,7 +5973,12 @@ async fn instruction_restore_impl<R: Runtime>(
                 InstructionOp::Restore,
                 max_revisions,
             )?;
-            journal_instruction(transaction, Action::InstructionRestored, &restored.id)?;
+            journal_instruction(
+                transaction,
+                mirror,
+                Action::InstructionRestored,
+                &restored.id,
+            )?;
             Ok(())
         })
         .await
@@ -6188,10 +6203,13 @@ fn record_variant_version(
 /// Writes one library lifecycle journal entry (LOG-001…004, D-051)
 /// inside the operation's own transaction: the instruction action at
 /// info/user/ok, the instruction's id as the entity — the identity
-/// the Activity window's Library group filters on. A refusal is the
-/// command's `Err`, never a journal entry.
+/// the Activity window's Library group filters on — and records it
+/// into the transaction's mirror buffer (T-324/D-228: the flush rides
+/// the commit). A refusal is the command's `Err`, never a journal
+/// entry.
 fn journal_instruction(
     transaction: &rusqlite::Transaction<'_>,
+    mirror: &mut crate::logging::MirrorBuffer,
     action: Action,
     instruction_id: &str,
 ) -> Result<(), AppError> {
@@ -6201,11 +6219,12 @@ fn journal_instruction(
         id: instruction_id,
     });
     insert(transaction, &entry).map_err(activity_log_to_app_error)?;
-    // The D-051 mirror contract: one call per written entry — a no-op
-    // for this info+user+ok shape (the journal already holds it;
-    // `mirror_level` decides), and the single place a future
-    // level/visibility change would pick up its mirroring.
-    logging::action_logged(&entry);
+    // The T-324/D-228 mirror contract: record inside the transaction,
+    // flush only after the commit — a no-op for this info+user+ok
+    // shape (the journal already holds it; `mirror_level` decides at
+    // flush), and the single place a future level/visibility change
+    // would pick up its mirroring.
+    mirror.record(&entry);
     Ok(())
 }
 

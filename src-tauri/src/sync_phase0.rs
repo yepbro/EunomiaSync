@@ -277,7 +277,7 @@ pub(crate) async fn record_run<R: Runtime>(
 ) -> Result<SyncRun, AppError> {
     let database = managed_db(app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             let rows = inputs
                 .iter()
                 .map(|(project_id, target_path, build_hash)| NewSyncRunProject {
@@ -289,9 +289,10 @@ pub(crate) async fn record_run<R: Runtime>(
             let run = eunomia_store::sync_runs::create_running(transaction, &started_at, &rows)
                 .map_err(sync_runs_to_app_error)?;
             // The bracket opener, after the row it describes: the
-            // D-051 call-once mirror fires inside the closure (the
-            // phase-4 posture), and the info/user/ok shape is the
-            // unmirrored one — no file-log line per run start.
+            // T-324/D-228 mirror records inside the closure and the
+            // executor flushes only after the commit (the phase-4
+            // posture), and the info/user/ok shape is the unmirrored
+            // one — no file-log line per run start.
             let mut entry = eunomia_store::action_log::LogEntry::new(
                 eunomia_store::action_log::Action::SyncRunStarted,
                 eunomia_store::action_log::Level::Info,
@@ -305,7 +306,7 @@ pub(crate) async fn record_run<R: Runtime>(
             entry.sync_run_id = Some(run.id.as_str());
             eunomia_store::action_log::insert(transaction, &entry)
                 .map_err(crate::commands::activity_log_to_app_error)?;
-            crate::logging::action_logged(&entry);
+            mirror.record(&entry);
             Ok(run)
         })
         .await

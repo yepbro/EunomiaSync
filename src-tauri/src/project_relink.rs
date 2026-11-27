@@ -193,7 +193,7 @@ async fn project_relink_impl<R: Runtime>(
         .map_err(|source| rejected_non_utf8_path(source.path()))?;
     let database = managed_db(&app)?;
     let committed = database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // The row first: the by-id read decides the stale-screen
             // branch and carries the stored identity the convergence
             // and collision arms compare against. The refusal echoes
@@ -280,9 +280,10 @@ async fn project_relink_impl<R: Runtime>(
             });
             entry.project_id = Some(relinked.id.as_str());
             insert(transaction, &entry).map_err(activity_log_to_app_error)?;
-            // The D-051 mirror contract: one call per written entry
-            // (info+user+ok is the unmirrored shape today).
-            logging::action_logged(&entry);
+            // The T-324/D-228 mirror contract: record inside the
+            // transaction, flush only after the commit (info+user+ok
+            // is the unmirrored shape today).
+            mirror.record(&entry);
             Ok(true)
         })
         .await?;

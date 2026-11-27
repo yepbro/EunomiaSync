@@ -3081,3 +3081,270 @@ fn the_interrupted_sweep_marks_corpse_rows_over_the_db_seam() {
     );
     drop(db);
 }
+// ---- T-324: the commit-aware journal mirror (D-228) ------------------------
+
+/// The shared arrange step of the three mirror-acceptance tests: a
+/// probe database, with the emission recorder of
+/// `logging::test_support` as the observation. The discipline under
+/// test is the executor's (WHEN the flush happens), and the
+/// observable is the emission itself, recorded by the `cfg(test)`
+/// seam — the flush fires on the blocking-pool thread, where a
+/// thread-local `with_default` cannot reach, and a process-global
+/// subscriber cannot be installed by more than one test in a
+/// same-process run (`cargo test --workspace`, the CI gate, runs the
+/// suite exactly that way), so the recorder is the
+/// runner-independent observation: each test's asserts snapshot the
+/// recorder and filter by their own unique entry ids, immune to any
+/// parallel test's emissions in either runner.
+fn mirror_probe_db() -> (tempfile::TempDir, Db) {
+    probe_db()
+}
+
+/// The journal's newest rows as `(action, level, result)` triples —
+/// the read a command would do, through the executor, on the same
+/// connection.
+fn journal_recent(
+    db: &Db,
+) -> Vec<(
+    eunomia_store::action_log::Action,
+    eunomia_store::action_log::Level,
+    eunomia_store::action_log::Outcome,
+)> {
+    let db = db.clone();
+    async_runtime::block_on(db.run(|tx| {
+        eunomia_store::action_log::recent(tx, 100).map_err(|error| {
+            sqlite_error_to_app_error(match error {
+                eunomia_store::storage::StorageError::Sql(sql) => sql,
+                other => rusqlite::Error::InvalidParameterName(other.to_string()),
+            })
+        })
+    }))
+    .expect("reading the journal must work")
+    .into_iter()
+    .map(|record| (record.action, record.level, record.result))
+    .collect()
+}
+
+/// The mirror lines the test's own drive emitted, by its unique
+/// sync-run id — every other line (a parallel test's, in a
+/// same-process runner) is filtered out before any assert sees it.
+fn mirror_lines_for(run_id: &str) -> Vec<crate::logging::test_support::EmittedMirrorLine> {
+    crate::logging::test_support::emitted_mirror_lines()
+        .into_iter()
+        .filter(|line| line.sync_run_id == run_id)
+        .collect()
+}
+
+/// The T-324 acceptance test, rollback half: an operation that
+/// journals an entry, records it, and then fails — the executor
+/// rolls the transaction back, and the entry's file-log mirror must
+/// vanish with the row: no emitted line, and no row in the journal
+/// (D-051's "the journal must not claim an action that never
+/// happened", now holding for the journal's echo too).
+#[test]
+fn a_rolled_back_operation_leaves_no_mirror_line_and_no_journal_row() {
+    use crate::commands::activity_log_to_app_error;
+    use eunomia_store::action_log::{
+        Action, Details, Entity, EntityType, FailureCode, Level, LogEntry, Outcome, Visibility,
+    };
+    const RUN_ID: &str = "t324-rollback-run";
+    const PROJECT_ID: &str = "t324-rollback-project";
+
+    let (_db_temp, db) = mirror_probe_db();
+    let run_db = db.clone();
+    let error = async_runtime::block_on(run_db.run_with_mirror(move |tx, mirror| {
+        let mut entry = LogEntry::new(
+            Action::SyncProjectResult,
+            Level::Warn,
+            Visibility::User,
+            Outcome::Skipped,
+        );
+        entry.entity = Some(Entity {
+            kind: EntityType::Project,
+            id: PROJECT_ID,
+        });
+        entry.project_id = Some(PROJECT_ID);
+        entry.sync_run_id = Some(RUN_ID);
+        entry.details = Some(Details::Failure {
+            code: FailureCode::new("E_FILE_LOCKED").expect("the §10 literal must be shaped"),
+            path: None,
+            os_code: None,
+        });
+        eunomia_store::action_log::insert(tx, &entry).map_err(activity_log_to_app_error)?;
+        // The entry is buffered, NOT mirrored: a direct mirror call
+        // here is the bug the buffer exists for.
+        mirror.record(&entry);
+        // A non-busy failure: the first attempt is the verdict.
+        Err::<(), _>(AppError::new(crate::errors::ErrorCode::Validation))
+    }))
+    .expect_err("the operation's refusal must surface (non-busy failures never retry)");
+    assert_eq!(
+        error.code,
+        crate::errors::ErrorCode::Validation,
+        "the surfaced failure is the operation's own, not a transaction-edge one"
+    );
+
+    // The journal half: no row claims the action.
+    let journal = journal_recent(&db);
+    assert!(
+        journal.is_empty(),
+        "a rolled-back operation leaves no journal row (D-051), got: {journal:?}"
+    );
+
+    // The mirror half: no emission names it — the rollback took the
+    // buffer with it. Id-scoped, so nothing a parallel test emitted
+    // can satisfy or break this.
+    let lines = mirror_lines_for(RUN_ID);
+    assert!(
+        lines.is_empty(),
+        "a rolled-back entry must not be mirrored (T-324/D-228), got: {lines:?}"
+    );
+    drop(db);
+}
+
+/// The T-324 acceptance test, commit half: a successful journaling
+/// operation writes its row and mirrors EXACTLY ONE line for it —
+/// with the full payload (level, action/result codes, entity,
+/// project and run ids), the same line the pre-T-324 direct call
+/// produced, just after the commit instead of before it. The
+/// exactly-once count is the oracle: a doubled flush, or a flush
+/// that also drained a failed attempt's records, would double it.
+#[test]
+fn a_committed_operation_mirrors_exactly_one_line_per_journal_entry() {
+    use crate::commands::activity_log_to_app_error;
+    use eunomia_store::action_log::{
+        Action, Entity, EntityType, Level, LogEntry, Outcome, Visibility,
+    };
+    const RUN_ID: &str = "t324-commit-run";
+    const PROJECT_ID: &str = "t324-commit-project";
+
+    let (_db_temp, db) = mirror_probe_db();
+    let run_db = db.clone();
+    async_runtime::block_on(run_db.run_with_mirror(move |tx, mirror| {
+        let mut entry = LogEntry::new(
+            Action::SyncProjectResult,
+            Level::Warn,
+            Visibility::User,
+            Outcome::Skipped,
+        );
+        entry.entity = Some(Entity {
+            kind: EntityType::Project,
+            id: PROJECT_ID,
+        });
+        entry.project_id = Some(PROJECT_ID);
+        entry.sync_run_id = Some(RUN_ID);
+        eunomia_store::action_log::insert(tx, &entry).map_err(activity_log_to_app_error)?;
+        mirror.record(&entry);
+        Ok(())
+    }))
+    .expect("the journaling operation must commit");
+
+    // The journal row exists — the mirror's referent.
+    let journal = journal_recent(&db);
+    assert_eq!(
+        journal.len(),
+        1,
+        "the committed operation journals exactly one row, got: {journal:?}"
+    );
+    assert_eq!(
+        journal[0],
+        (Action::SyncProjectResult, Level::Warn, Outcome::Skipped)
+    );
+
+    // And exactly one mirror line names it, at WARN, with the full
+    // payload — the owned record kept every field.
+    let lines = mirror_lines_for(RUN_ID);
+    assert_eq!(
+        lines.len(),
+        1,
+        "a committed entry mirrors exactly one line (T-324/D-228), got: {lines:?}"
+    );
+    assert_eq!(lines[0].level, tracing::Level::WARN);
+    assert_eq!(lines[0].action, "sync.project_result");
+    assert_eq!(lines[0].result, "skipped");
+    assert_eq!(lines[0].entity_type, "project");
+    assert_eq!(lines[0].entity_id, PROJECT_ID);
+    assert_eq!(lines[0].project_id, PROJECT_ID);
+    drop(db);
+}
+
+/// The T-324 acceptance test, busy-retry half: the failed attempt's
+/// buffer dies with its rollback, and only the successful attempt's
+/// flushes — exactly one mirror line despite two attempts, each of
+/// which recorded the entry. The first attempt's busy failure is the
+/// body-path shape the executor trusts (`details.os_kind` from the
+/// shared classifier, the way a real busy statement surfaces): it is
+/// returned by the operation after its insert+record rather than
+/// produced by a statement, because a REAL mid-transaction busy is
+/// structurally unreachable — once this transaction owns the WAL
+/// write lock no other connection can make its statements fail, and
+/// a busy BEFORE the insert (an external holder, the other busy
+/// tests' shape) leaves the failed attempt's buffer empty, which
+/// would make the discard discipline this test pins unobservable.
+#[test]
+fn a_busy_retry_flushes_only_the_successful_attempt() {
+    use crate::commands::activity_log_to_app_error;
+    use eunomia_store::action_log::{
+        Action, Entity, EntityType, Level, LogEntry, Outcome, Visibility,
+    };
+    const RUN_ID: &str = "t324-busy-run";
+    const PROJECT_ID: &str = "t324-busy-project";
+
+    let (_db_temp, db) = mirror_probe_db();
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let run_db = db.clone();
+    let seen_by_operation = std::sync::Arc::clone(&attempts);
+    async_runtime::block_on(run_db.run_with_mirror(move |tx, mirror| {
+        let attempt = seen_by_operation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut entry = LogEntry::new(
+            Action::SyncProjectResult,
+            Level::Warn,
+            Visibility::User,
+            Outcome::Skipped,
+        );
+        entry.entity = Some(Entity {
+            kind: EntityType::Project,
+            id: PROJECT_ID,
+        });
+        entry.project_id = Some(PROJECT_ID);
+        entry.sync_run_id = Some(RUN_ID);
+        eunomia_store::action_log::insert(tx, &entry).map_err(activity_log_to_app_error)?;
+        // BOTH attempts record: the first attempt's buffer must die
+        // with its rollback for the count below to stay one.
+        mirror.record(&entry);
+        if attempt == 0 {
+            // A busy failure the way a failed statement would report
+            // it: the real SQLite code through the shared classifier.
+            let busy = sqlite_error_to_app_error(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                None,
+            ));
+            return Err(busy);
+        }
+        Ok(())
+    }))
+    .expect("the retry (§10's up to 3) must commit once the busy clears");
+
+    // Two attempts ran — the busy one rolled back, the retry
+    // committed; both recorded their entry, but the flush saw only
+    // the successful attempt's buffer.
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the executor must re-run the whole closure once (busy class, §10 E_DB_LOCKED)"
+    );
+    let journal = journal_recent(&db);
+    assert_eq!(
+        journal.len(),
+        1,
+        "the rolled-back attempt's row is gone; the retry's is the one row, got: {journal:?}"
+    );
+    let lines = mirror_lines_for(RUN_ID);
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one mirror line despite two recording attempts — the failed attempt's \
+         buffer died with its rollback (T-324/D-228), got: {lines:?}"
+    );
+    drop(db);
+}

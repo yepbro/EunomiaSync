@@ -397,9 +397,11 @@ fn record_version(
 /// Writes the operation's journal entry inside its own transaction
 /// (D-051) — the `variant.*` member at info/user/ok naming the
 /// variant's entity columns, with the optional typed payload — and
-/// mirrors it through the facade's one-call contract.
+/// records it into the transaction's mirror buffer (T-324/D-228:
+/// the executor flushes only after the commit).
 fn journal_variant(
     transaction: &rusqlite::Transaction<'_>,
+    mirror: &mut crate::logging::MirrorBuffer,
     action: Action,
     variant: &Variant,
     details: Option<Details>,
@@ -411,7 +413,7 @@ fn journal_variant(
     });
     entry.details = details;
     insert(transaction, &entry).map_err(activity_log_to_app_error)?;
-    crate::logging::action_logged(&entry);
+    mirror.record(&entry);
     Ok(())
 }
 
@@ -483,7 +485,7 @@ async fn variant_create_impl<R: Runtime>(
     let validated_name = validate_variant_name(&name).map_err(library_field_to_app_error)?;
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // The instruction must exist and be an instruction — the
             // pre-read the copy mode needs anyway (the store's own
             // check is the same rule one layer down; the pre-read
@@ -540,7 +542,7 @@ async fn variant_create_impl<R: Runtime>(
             // §9.8: the create is the entity's first version — the
             // hash gate always inserts here (no prior version).
             record_version(transaction, &variant, VariantOp::Create)?;
-            journal_variant(transaction, Action::VariantCreated, &variant, None)?;
+            journal_variant(transaction, mirror, Action::VariantCreated, &variant, None)?;
             Ok(VariantRecord::from_store(variant))
         })
         .await
@@ -625,7 +627,7 @@ async fn variant_update_impl<R: Runtime>(
     };
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             let update = VariantUpdate {
                 name: validated_name.as_deref(),
                 content: validated_content.as_deref(),
@@ -638,7 +640,7 @@ async fn variant_update_impl<R: Runtime>(
             // exists only for a real change of the snapshot (D-16).
             match record_version(transaction, &variant, VariantOp::Update)? {
                 Recorded::Inserted { .. } => {
-                    journal_variant(transaction, Action::VariantChanged, &variant, None)?;
+                    journal_variant(transaction, mirror, Action::VariantChanged, &variant, None)?;
                 }
                 // A save whose folded outcome equals the stored
                 // values: no version, no journal (the D-051
@@ -695,7 +697,7 @@ async fn variant_set_main_impl<R: Runtime>(
 ) -> Result<VariantRecord, AppError> {
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // The pre-read: the by-id refusal and the verified no-op
             // (promoting the current main is a net nothing — the
             // store would demote and re-promote it).
@@ -711,7 +713,7 @@ async fn variant_set_main_impl<R: Runtime>(
                 set_main_variant(transaction, &id).map_err(library_store_to_app_error)?;
             // D-16: no version for a main-flag change — the journal's
             // "main choice" member is the whole record.
-            journal_variant(transaction, Action::VariantChanged, &promoted, None)?;
+            journal_variant(transaction, mirror, Action::VariantChanged, &promoted, None)?;
             Ok(VariantRecord::from_store(promoted))
         })
         .await
@@ -781,7 +783,7 @@ async fn variant_delete_impl<R: Runtime>(
 ) -> Result<VariantRecord, AppError> {
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // The pre-read: the by-id refusal and the verified no-op
             // (the store's delete is idempotent; the journal must not
             // claim a second transition that did not happen).
@@ -807,6 +809,7 @@ async fn variant_delete_impl<R: Runtime>(
             record_version(transaction, &deleted, VariantOp::Delete)?;
             journal_variant(
                 transaction,
+                mirror,
                 Action::VariantDeleted,
                 &deleted,
                 Some(Details::Bulk {
@@ -864,7 +867,7 @@ async fn variant_restore_impl<R: Runtime>(
 ) -> Result<VariantRecord, AppError> {
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // The pre-read: the by-id refusal and the verified no-op
             // (the store's restore is idempotent over an active row).
             let variant = get_variant(transaction, &id)
@@ -881,7 +884,13 @@ async fn variant_restore_impl<R: Runtime>(
             // it alternates with delete, so a genuine transition
             // always records).
             record_version(transaction, &restored, VariantOp::Restore)?;
-            journal_variant(transaction, Action::VariantRestored, &restored, None)?;
+            journal_variant(
+                transaction,
+                mirror,
+                Action::VariantRestored,
+                &restored,
+                None,
+            )?;
             Ok(VariantRecord::from_store(restored))
         })
         .await

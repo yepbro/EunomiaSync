@@ -29730,3 +29730,166 @@ baseline) and left the worktree clean) — the one finding processed:
   (the dated-record posture: point, never rewrite; the D-226
   precedent), so a future reader cannot re-tighten the relaxed
   assert against the record.
+
+### D-228 — T-324: the action-log mirror goes commit-aware — a per-attempt `MirrorBuffer` at the `Db::run` boundary, flushed only after the commit — 2026-11-27
+
+Source: the 2026-11-23 project review's P3-1 (verified PARTIAL). The
+shape: journaling sites called `logging::action_logged(&entry)`
+immediately after `action_log::insert(tx, &entry)` while the
+transaction was still open. D-051 had already given the JOURNAL its
+transactional semantics (a success entry rides the operation's
+transaction, so a rollback erases the claim; an error entry rides the
+next transaction that commits), but the journal's file-log echo broke
+the same invariant: a rollback left a file line naming a row that
+never existed, and a busy retry re-ran the insert AND the mirror
+call, duplicating the line. The review named six sites; the
+implementation-time inventory reconciles to **twenty** physical call
+sites across twelve files (`sync_phase0`/`1`/`2`/`4`, `scan`,
+`commands` ×6, `variants`, `headings`, `assignments`,
+`project_update`/`restore`/`archive`/`relink`) — sixteen of them the
+info+user+ok no-op shape (nothing observable), four the observable
+warn/error half (`sync_phase4`'s per-project and summary entries, the
+`sync_phase1` space abort, the `sync_phase2` copy-fail abort,
+`commands`' `stop_run_if_running` abort).
+
+Design: the owner ruling of 2026-11-26 — **option 2, a commit-aware
+mirror buffer at the `Db::run` boundary** — after an options review
+that rejected per-site call-after-commit discipline (the bug is
+repeatable by future callers), post-hoc file↔DB reconciliation (the
+file log is append-only), and SQLite hooks/triggers (infeasible).
+
+- _The collector._ `logging::MirrorBuffer`: a journaling operation
+  records each entry it inserts with `mirror.record(&entry)`, inside
+  the transaction closure, and the executor flushes after the commit.
+  The borrow knot (`LogEntry` borrows `&str` ids from the operation's
+  locals, which do not outlive the closure) is resolved with an owned
+  avatar, `MirrorRecord` — the mirror's own projection of the entry:
+  the four Copy vocabularies (level/visibility/action/result) plus
+  owned entity/project/sync-run ids, exactly the fields the mirrored
+  line carries. `details` is deliberately NOT carried: the mirror
+  provably never reads it (D-051 — "the payload stays in the database
+  journal alone"), so the projection is lossless for the mirror by
+  construction, and SEC-008 holds structurally (the record's strings
+  are ids, never content). Copying is linear in id lengths, bounded
+  by UUIDv7/dotted-key shapes, so a buffer is bounded by its
+  operation's entry count times small ids.
+- _The boundary._ `Db::run_with_mirror` — the journaling form whose
+  closure receives `(&Transaction, &mut MirrorBuffer)`; `Db::run`
+  becomes a thin adapter over it (one retry loop, one implementation;
+  the plain form's buffer stays empty and its flush emits nothing).
+  `attempt_once` creates a **fresh buffer per attempt** and flushes
+  **only after `transaction.commit()` succeeds** — before the DB-022
+  commit hook, under the connection guard on the blocking-pool
+  thread, which is the same lock state and thread the pre-T-324
+  sites emitted their lines under (the tracing calls are the only
+  work; the hook already runs under the same "must never block"
+  rule). A rolled-back or busy-failed attempt's buffer dies unflushed
+  with its rollback; a busy retry's closure re-runs over a fresh
+  buffer — only the successful attempt's records flush, exactly one
+  mirror line per committed row. The fail-then-log producers
+  (`sync_phase1`'s space abort, `sync_phase2`'s copy-fail abort,
+  `stop_run_if_running`) are served by the same rule, not exempt:
+  their error entries ride transactions that commit (the abort
+  transaction IS D-051's "next transaction"), so their own buffers
+  flush with those commits.
+- _The structural guard._ `action_logged` is demoted from `pub(crate)`
+  to private in `logging.rs` — the direct pre-commit mirror call, the
+  exact path the bug lived on, no longer exists outside the module;
+  the only caller is the flush (plus the logging tests). The honest
+  visibility limit: Rust cannot express "visible to `crate::db` alone"
+  from `crate::logging`, so `new`/`flush_committed` are `pub(crate)`
+  with an executor-only contract in their docs — the mitigations are
+  the private `action_logged` (a repeat of the original bug has no
+  one-step path), the acceptance tests below (a flush moved ahead of
+  the commit reddens them), and review. `mirror_level` and the
+  mirror policy are unchanged — only WHEN changed, as the ruling
+  pinned.
+- _The store crate is untouched_ (the D-055 freeze posture): the
+  buffer, the avatar and the flush all live in the app layer.
+
+Site migration: all twenty sites moved to
+`run_with_mirror`/`mirror.record`, five in-transaction helpers gained
+the buffer parameter (`commands::register_project` with its three
+callers across `commands`/`scan`, `commands::journal_instruction`
+with four, `variants::journal_variant` with five, `headings::journal`
+with six calls over four closures, `assignments::journal` with four
+over three closures), and every D-051 "call-once" site comment was
+rewritten to the record-and-flush contract (Rule 11 — the module docs
+of `sync_phase4`, `logging` and `db`, and ARCHITECTURE's journal
+section, were updated in the same change).
+
+Observation seam (the round-1 review's P0, fixed): the flush fires
+on the blocking-pool thread, where the suite's thread-local
+`with_default` subscriber cannot reach, and a process-global
+subscriber cannot serve more than one test in a same-process run —
+the first version of the acceptance tests installed it anyway and
+relied on nextest's process-per-test, which the round-1 review
+measured red under `cargo test --workspace` (the CI gate's exact
+command, `ci.yml`'s test step — nextest is the local runner, libtest
+is the gate). The fix is the house idiom for a thread-crossing edge
+(`Db::set_busy_timeout_for_tests`'s shape): a `cfg(test)` emission
+recorder in `logging::test_support` — `action_logged` appends each
+emitted line's field set to a process-wide static, the discipline
+suites snapshot it and filter by their own unique entry ids, so
+neither runner's parallelism can satisfy or fail another test's
+counts (the snapshot is deliberately non-destructive: a draining read
+would let one test steal a parallel test's not-yet-read lines). The
+split of labor: the discipline suites pin WHEN and WHAT through the
+recorder; the logging suite keeps pinning that an emission becomes a
+real file line through its thread-local subscriber (and its payload
+asserts are the recorder↔macro field-set drift guard).
+
+Tests: five new, all mutation-verified (break → red → revert
+byte-for-byte; re-verified after the round-1 harness fix). The
+logging half (`the_mirror_buffer_owns_its_records_and_flushes_them`:
+entries borrowing from locals whose scope ENDS before the flush — the
+buffer compiles only because it owns its data — with the policy
+applied per record and the full id payload on the real file lines).
+The executor half, in `db_tests.rs` through the real
+`Db::run_with_mirror` over a real migrated database, observing the
+recorder: `a_rolled_back_operation_leaves_no_mirror_line_and_no_
+journal_row` (a journaling operation that fails after insert+record
+leaves no row and no emission — M1, the pre-commit flush mutation,
+reddens it, and the busy test too), `a_committed_operation_mirrors_
+exactly_one_line_per_journal_entry` (one row, one emission, full
+payload — M2, a doubled flush, reddens it at 2, and M4, a dropped
+record field, reddens its payload assert), and `a_busy_retry_flushes_
+only_the_successful_attempt` (a body-path busy failure after
+insert+record — the real SQLite BUSY through the shared classifier,
+returned by the operation because a real mid-transaction busy is
+structurally unreachable once the transaction owns the WAL write
+lock, and a pre-insert busy leaves the failed attempt's buffer empty,
+which would make the discard discipline untestable — then the retry
+commits: two recording attempts, one emission; M3, the buffer carried
+across attempts instead of fresh per attempt, reddens it at 2). The
+end-to-end half (`sync_phase4_tests::a_partial_run_mirrors_its_warn_
+entries_exactly_once`): the real partial-run fixture through the real
+phase — exactly two emissions scoped by the run's real UUIDv7 id
+(the skipped project's warn row with its own project id, and the
+partial `sync.run_finished` summary), the fully successful first
+run's info/user/ok shapes emitting nothing, and the run's opener
+staying unmirrored (M5, the records removed at the phase's two sites,
+reddens it at 0). The sixteen no-op sites' migration is type-checked
+by the compiler (the `record` signature) and rides the same tested
+flush; a future level/visibility change at any of them picks up its
+mirroring through the same path. Residual (the round-1 review's P3-4,
+accepted): the helper-threaded sites' own record calls have no
+assertion — their shapes are info+user+ok, so nothing observable
+exists to assert until a level change lands; the boundary tests carry
+the discipline, and a `journal_and_record` pairing helper (the
+review's P2-1) is the recorded follow-up if the insert↔record pairing
+ever needs to become structural.
+
+The round-1 review (deepseek-v4.1-flash, REJECT→fixed) also produced:
+the P0 above (the global-subscriber harness — fixed with the
+recorder), P2-1 (the pairing hole — noted here and deferred to a
+follow-up card), P2-2 (two harness comments understating the failure
+— rewritten truthfully with the fix), P3-1 (the non-draining
+`flush_committed` now says so in its docs — the behavior is
+deliberate, it is what gives M2 its teeth), P3-2 (`as_entry`'s
+"exact" now scoped to the mirror's current payload), P3-3 (the
+`file_event` doc's twin sentence aligned with ARCHITECTURE's), P3-5
+(the e2e's coarse level assert — superseded by the recorder's
+structural level equality). No new dependencies, no unsafe, the store
+crate untouched, the frontend untouched (no pnpm checks — stated,
+not run).

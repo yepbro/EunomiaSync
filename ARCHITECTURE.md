@@ -977,16 +977,25 @@ visibility (an `info` row whose result is an error included), a
 diagnostic `info` mirrors, and the one shape that does not is an
 `info` + `user` + non-error row — the Activity window's own data,
 already in the database journal. The payload is codes and ids only
-(the policy reasoning lives with the function). LOG-006's retention/cleanup
+(the policy reasoning lives with the function). The WHEN is
+commit-aware (T-324/D-228): a journaling operation records each entry
+it inserts into a `logging::MirrorBuffer` handed to it by
+`Db::run_with_mirror`, and the executor flushes the buffer only
+after the transaction commits — a rollback erases the mirror lines
+with their rows, and a busy retry's fresh buffer keeps the count at
+one line per committed row (D-051's journal semantics extended to the
+journal's file-log echo; the acceptance tests in `db_tests.rs` pin
+all three halves). LOG-006's retention/cleanup
 lives in the same module since T-029: `cleanup(conn, limits, now)`
 enforces the §6.4 "Log and runs" row over the caller's transaction
 (see the Database section above for the full semantics and the
 startup wiring). The first producer is wired (T-030): `settings_set`
 writes its `settings.changed` entries through `insert` inside the
-operation's transaction and mirrors them through
-`logging::action_logged` (a no-op for the info+user+ok shape, per
+operation's transaction and records them into its mirror buffer (a
+no-op flush for the info+user+ok shape, per
 the policy above); the fail-then-log half stays with the first
-operation that fails after writing.
+operation that fails after writing — its error entry rides the next
+transaction that commits, whose own buffer flushes by the same rule.
 
 ## Config
 
@@ -1085,8 +1094,9 @@ everywhere else by a `config_tests.rs` text pin, and the facade's
 text or file content. The primitive is a tested, still-unused facet
 (`#[allow(dead_code)]`, the keep ruling D-163): the sync and backup
 tasks landed without it — sync journals its file-write outcomes in
-the `action_log` journal mirrored by `action_logged` (D-051) plus
-the `sync_*` diagnostic facets, and the phase-2 backups record
+the `action_log` journal mirrored commit-aware through the mirror
+buffer (D-051/D-228) plus the `sync_*` diagnostic facets, and the
+phase-2 backups record
 theirs in `backup_records` rows — and the facet's prospective
 consumers are the pending file-operation producers outside the sync
 journal (the variant library tasks, `backup_restore`/BKP-007); the

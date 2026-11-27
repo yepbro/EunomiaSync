@@ -304,7 +304,7 @@ async fn project_update_impl<R: Runtime>(
     };
     let database = managed_db(&app)?;
     let watch_inputs_changed = database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // The row first: the by-id read decides the stale-screen
             // branch and carries the stored values the patch is
             // compared against. The refusal echoes the caller's id
@@ -384,9 +384,10 @@ async fn project_update_impl<R: Runtime>(
             });
             entry.project_id = Some(updated.id.as_str());
             insert(transaction, &entry).map_err(activity_log_to_app_error)?;
-            // The D-051 mirror contract: one call per written entry
-            // (info+user+ok is the unmirrored shape today).
-            logging::action_logged(&entry);
+            // The T-324/D-228 mirror contract: record inside the
+            // transaction, flush only after the commit (info+user+ok
+            // is the unmirrored shape today).
+            mirror.record(&entry);
             Ok(watch_inputs_changed)
         })
         .await?;

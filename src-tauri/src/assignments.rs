@@ -256,6 +256,7 @@ fn ensure_assignable(
 
 fn journal(
     transaction: &rusqlite::Transaction<'_>,
+    mirror: &mut crate::logging::MirrorBuffer,
     project_id: Option<&str>,
     entity_id: Option<&str>,
     changed: u64,
@@ -273,7 +274,7 @@ fn journal(
     entry.project_id = project_id;
     entry.details = Some(Details::Bulk { changed });
     insert(transaction, &entry).map_err(activity_log_to_app_error)?;
-    logging::action_logged(&entry);
+    mirror.record(&entry);
     Ok(())
 }
 
@@ -318,7 +319,7 @@ async fn assignment_set_impl<R: Runtime>(
     }
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             ensure_pair(transaction, &project_id, &instruction_id)?;
             let current =
                 get_assignment(transaction, &project_id, &instruction_id).map_err(store_error)?;
@@ -328,7 +329,7 @@ async fn assignment_set_impl<R: Runtime>(
                 }
                 unassign(transaction, &project_id, &instruction_id).map_err(store_error)?;
                 let entity_id = format!("{project_id}/{instruction_id}");
-                journal(transaction, Some(&project_id), Some(&entity_id), 1)?;
+                journal(transaction, mirror, Some(&project_id), Some(&entity_id), 1)?;
                 return Ok(None);
             }
 
@@ -365,7 +366,7 @@ async fn assignment_set_impl<R: Runtime>(
             }
             .map_err(store_error)?;
             let entity_id = format!("{project_id}/{instruction_id}");
-            journal(transaction, Some(&project_id), Some(&entity_id), 1)?;
+            journal(transaction, mirror, Some(&project_id), Some(&entity_id), 1)?;
             Ok(Some(AssignmentRecord::from_store(assignment)))
         })
         .await
@@ -402,7 +403,7 @@ async fn assignment_set_custom_impl<R: Runtime>(
         .transpose()?;
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             ensure_pair(transaction, &project_id, &instruction_id)?;
             let before =
                 get_assignment(transaction, &project_id, &instruction_id).map_err(store_error)?;
@@ -415,7 +416,7 @@ async fn assignment_set_custom_impl<R: Runtime>(
             .map_err(store_error)?;
             if before != after {
                 let entity_id = format!("{project_id}/{instruction_id}");
-                journal(transaction, Some(&project_id), Some(&entity_id), 1)?;
+                journal(transaction, mirror, Some(&project_id), Some(&entity_id), 1)?;
             }
             Ok(after.map(AssignmentRecord::from_store))
         })
@@ -459,7 +460,7 @@ async fn assignments_bulk_impl<R: Runtime>(
     }
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             // Validate the complete request before the first write. The
             // transaction is still the atomicity floor if a later store
             // statement or the journal refuses.
@@ -535,6 +536,7 @@ async fn assignments_bulk_impl<R: Runtime>(
             if changed > 0 {
                 journal(
                     transaction,
+                    mirror,
                     None,
                     None,
                     u64::try_from(changed).expect("an assignment batch cannot exceed u64 rows"),

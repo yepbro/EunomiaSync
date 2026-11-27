@@ -118,6 +118,24 @@
 //! through `[lints] workspace = true`), the structural encoding of the
 //! D-032/D-129 Windows analysis.
 //!
+//! The `action_log` journal's file-log half is the
+//! [`MirrorBuffer`](MirrorBuffer) + [`action_logged`] pair: a
+//! journaling operation records each entry it inserts into the
+//! buffer (inside the transaction), and the DB executor — the only
+//! code that knows commit from rollback — flushes the buffer after
+//! the commit (T-324/D-228). The buffer owns its records (the
+//! entries borrow their ids from the operation's locals), and the
+//! mirror policy stays here, decided at flush time. The suite's
+//! thread-local `with_default` subscriber cannot observe that flush
+//! (the executor emits it from the blocking-pool thread, the same
+//! thread the pre-T-324 sites emitted from), and a process-global
+//! subscriber cannot be installed by more than one test in a
+//! same-process run — so the acceptance tests that pin the flush
+//! discipline (rollback leaves no line, commit exactly one, busy
+//! retry exactly one) and the sync-phase-4 end-to-end pin observe
+//! the emission through the `cfg(test)` recorder in
+//! [`test_support`], asserting per-test unique ids.
+//!
 //! # SEC-008: events are constructed here, and only here
 //!
 //! SEC-008 (P0): *instruction text and file content never go into logs;
@@ -167,9 +185,14 @@
 //! drives the writer directly on the test thread instead, and only the
 //! production global-install path carries the line; and the global
 //! install itself ([`tracing::subscriber::set_global_default`]) is
-//! process-global, so installing it inside the parallel test suite is
-//! not observable there; the `setup` wiring is pinned textually in
-//! `config_tests.rs` instead.
+//! process-global — a second install in the same process fails
+//! outright, so no suite may rely on it (`cargo test --workspace`
+//! runs the suite in one process; the CI gate is exactly that
+//! command). The mirror-flush acceptance suites therefore observe the
+//! emission through the `cfg(test)` recorder in
+//! [`test_support`] instead — the buffer paragraph above names the
+//! split of labor — and the `setup` wiring is pinned textually in
+//! `config_tests.rs` either way.
 
 use std::fmt;
 use std::fs::{self, File};
@@ -1113,9 +1136,11 @@ pub(crate) fn db_busy_retry(attempt: usize, pause_ms: u64) {
     );
 }
 
-/// An `action_log` entry was written to the database journal (spec
-/// §7.7) and, when the selection policy below picks it, mirrored into
-/// the file log — the journal's diagnostic half. Not every entry
+/// One buffered journal entry reaches the file log (spec §7.7): the
+/// emission half of [`MirrorBuffer::flush_committed`], which is this
+/// function's only caller — since T-324/D-228 the per-entry mirror
+/// call is executor-owned, fired after the entry's transaction
+/// committed (the buffer's docs record why). Not every entry
 /// mirrors: the policy is this function's, not the callers'. The
 /// entry itself is the payload: the action code, the result
 /// code, and the object/project/run IDs it carries, all already
@@ -1124,8 +1149,8 @@ pub(crate) fn db_busy_retry(attempt: usize, pause_ms: u64) {
 /// does not repeat even that: codes and IDs only).
 ///
 /// **What is mirrored, and what is not.** The policy lives here, not
-/// at the callers: they call this once per written entry, and this
-/// function decides.
+/// at the callers: the flush calls this once per buffered entry, and
+/// this function decides.
 ///
 /// - `error` and `warn` entries mirror regardless of visibility — a
 ///   degradation or failure is what the file log exists for, and a
@@ -1147,20 +1172,27 @@ pub(crate) fn db_busy_retry(attempt: usize, pause_ms: u64) {
 ///
 /// The first production caller is `settings_set` (T-030), which
 /// journals its `settings.changed` entries inside the operation's
-/// transaction and calls this once per entry — the info+user+ok shape,
-/// i.e. the unmirrored one. The sync pipeline (phase 4) is the
-/// warn/error producer today: each `sync.project_result` row and the
-/// `sync.run_finished` summary ride their outcome's level at user
-/// visibility (`project_entry_shape`), so the mirror arms serve it —
-/// a skipped or failed row's warning or error reaches the file log
-/// through them.
-pub(crate) fn action_logged(entry: &eunomia_store::action_log::LogEntry<'_>) {
+/// transaction and buffers each one for the executor's post-commit
+/// flush — the info+user+ok shape, i.e. the unmirrored one. The sync
+/// pipeline (phase 4) is the warn/error producer today: each
+/// `sync.project_result` row and the `sync.run_finished` summary ride
+/// their outcome's level at user visibility (`project_entry_shape`),
+/// so the mirror arms serve it — a skipped or failed row's warning or
+/// error reaches the file log through them.
+fn action_logged(entry: &eunomia_store::action_log::LogEntry<'_>) {
     // The payload block is repeated across the three level arms: the
     // tracing macro requires a constant level (its callsite caches
     // the level at compile time), and the house style is one explicit
     // macro per level — keep the three blocks identical.
     let entity = entry.entity;
-    match mirror_level(entry) {
+    let level = mirror_level(entry);
+    // The discipline suites' seam (cfg(test)): record the emission's
+    // field set — see `test_support`. Compiled out in production.
+    #[cfg(test)]
+    if let Some(emitted_at) = level {
+        test_support::note_emission(emitted_at, entry);
+    }
+    match level {
         None => {}
         Some(tracing::Level::ERROR) => tracing::error!(
             target: "eunomia::action_log",
@@ -1212,6 +1244,168 @@ fn mirror_level(entry: &eunomia_store::action_log::LogEntry<'_>) -> Option<traci
         (Level::Info, Visibility::Diagnostic, _) => Some(tracing::Level::INFO),
         // The Activity window's own data; not mirrored.
         (Level::Info, Visibility::User, _) => None,
+    }
+}
+
+// ---- the commit-aware mirror buffer (T-324, D-228) -------------------------
+//
+// D-051 gave the journal its transactional semantics — a success entry
+// rides the operation's own transaction (a rollback erases the claim),
+// an error entry rides the next transaction that commits — but the
+// MIRROR half broke the same invariant: sites called
+// [`action_logged`] right after `action_log::insert` while the
+// transaction was still open, so a rollback left a file-log line
+// naming a row that never existed, and a busy retry duplicated lines
+// (a fresh attempt re-ran the insert AND the mirror call). T-324
+// closes the gap by moving the WHEN from the sites to the executor:
+// an operation journals its entry and records it here, and the
+// executor — the only code that knows commit from rollback — flushes
+// the buffer after the transaction commits. The WHAT (the policy) is
+// unchanged: `mirror_level` still decides, at flush time, exactly as
+// it decided at insert time.
+
+/// The mirror's own projection of one journal entry: the fields the
+/// mirrored line carries, owned. [`LogEntry`] borrows its `&str` ids
+/// from the operation's locals, which do not outlive the transaction
+/// closure — the buffer must survive it, so each record copies the
+/// ids once (linear in their length; ids are bounded — UUIDv7 row ids
+/// and dotted settings keys — so an operation's buffer is bounded by
+/// its entry count times small ids). `details` is deliberately NOT
+/// carried: the mirror line never reads it (D-051 — the payload
+/// stays in the database journal alone), so the projection is
+/// lossless for the mirror by construction, and SEC-008 holds the
+/// same way it does for the line itself: the record's strings are
+/// entity/project/run ids, never content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MirrorRecord {
+    /// The severity.
+    level: eunomia_store::action_log::Level,
+    /// Who the entry is for (LOG-005).
+    visibility: eunomia_store::action_log::Visibility,
+    /// What happened.
+    action: eunomia_store::action_log::Action,
+    /// The object it happened to, when the entry names one.
+    entity: Option<(eunomia_store::action_log::EntityType, String)>,
+    /// The project involved, when the entry names one.
+    project_id: Option<String>,
+    /// The sync run involved, when the entry names one.
+    sync_run_id: Option<String>,
+    /// The operation's outcome.
+    result: eunomia_store::action_log::Outcome,
+}
+
+impl MirrorRecord {
+    /// Rebuilds the borrowed entry the facade emits from — the
+    /// record's own fields are the entry's mirror-relevant half, so
+    /// the reconstruction is exact FOR THE MIRROR'S CURRENT PAYLOAD:
+    /// a field the emitted line ever grows must be added here and to
+    /// [`MirrorRecord`] too (the buffer suite's payload asserts are
+    /// the drift guard; see the struct docs for why `details` is not
+    /// part of it today).
+    fn as_entry(&self) -> eunomia_store::action_log::LogEntry<'_> {
+        eunomia_store::action_log::LogEntry {
+            level: self.level,
+            visibility: self.visibility,
+            action: self.action,
+            entity: self
+                .entity
+                .as_ref()
+                .map(|(kind, id)| eunomia_store::action_log::Entity {
+                    kind: *kind,
+                    id: id.as_str(),
+                }),
+            project_id: self.project_id.as_deref(),
+            sync_run_id: self.sync_run_id.as_deref(),
+            result: self.result,
+            details: None,
+        }
+    }
+}
+
+/// The per-attempt mirror collector (T-324, D-228): a journaling
+/// operation records each entry it inserts — inside the transaction,
+/// right after the insert — and the executor flushes the buffer
+/// **only after the transaction commits**. The buffer is the mirror's
+/// commit-awareness: a rolled-back attempt takes its records with it
+/// (the journal must not claim an action that never happened — D-051's
+/// rule, extended from the journal to its file-log echo), and a busy
+/// retry starts from a fresh buffer, so only the successful attempt's
+/// records reach the file — exactly one mirrored line per committed
+/// row.
+///
+/// Who may do what (the closest Rust visibility gets to the
+/// ownership this type encodes):
+///
+/// - **Sites record** — any code inside a transaction closure may
+///   call [`record`](Self::record): it mutates only the buffer.
+///   Journaling operations reach the buffer as the second closure
+///   parameter of [`crate::db::Db::run_with_mirror`].
+/// - **The executor constructs and flushes** — `new` and
+///   `flush_committed` are crate-visible only because Rust cannot
+///   express "visible to `crate::db` alone" from this module; the
+///   contract is that `crate::db::attempt_once` is their only
+///   production caller (a fresh buffer per attempt, the flush after
+///   `commit()` succeeds). The acceptance tests in `db_tests.rs`
+///   pin both halves: a rollback leaves no line, a commit exactly
+///   one, a busy retry exactly one.
+/// - **The direct pre-commit call is gone** — `action_logged` is
+///   private to this module, so the bug this buffer exists for
+///   (mirroring while the transaction is still open) has no callable
+///   path left; repeating it means deliberately flushing a buffer
+///   ahead of a commit, which review sees as a `flush_committed`
+///   call outside the executor.
+pub(crate) struct MirrorBuffer {
+    /// The recorded entries, in insert order.
+    records: Vec<MirrorRecord>,
+}
+
+impl MirrorBuffer {
+    /// The empty buffer an attempt starts from. Executor-owned: see
+    /// the type's docs — a busy retry gets a FRESH buffer, never a
+    /// carried-over one.
+    pub(crate) fn new() -> Self {
+        MirrorBuffer {
+            records: Vec::new(),
+        }
+    }
+
+    /// Buffers one just-inserted journal entry for the post-commit
+    /// flush. The site's contract is one call per entry it wrote
+    /// through `action_log::insert` in the same transaction — the
+    /// flush then mirrors exactly the entries that committed. The
+    /// entry's mirror-relevant fields are copied into the owned
+    /// record (see [`MirrorRecord`]); the policy decision happens at
+    /// flush time, unchanged.
+    pub(crate) fn record(&mut self, entry: &eunomia_store::action_log::LogEntry<'_>) {
+        self.records.push(MirrorRecord {
+            level: entry.level,
+            visibility: entry.visibility,
+            action: entry.action,
+            entity: entry
+                .entity
+                .map(|entity| (entity.kind, entity.id.to_owned())),
+            project_id: entry.project_id.map(str::to_owned),
+            sync_run_id: entry.sync_run_id.map(str::to_owned),
+            result: entry.result,
+        });
+    }
+
+    /// Emits the buffered mirror lines — one
+    /// [`action_logged`] call per record, in insert order. ONLY the
+    /// executor calls this, and only after the attempt's transaction
+    /// committed: a rolled-back or busy-failed attempt's buffer is
+    /// dropped unflushed. An empty buffer (the plain
+    /// [`crate::db::Db::run`] shape, or an operation that journaled
+    /// nothing) emits nothing. The flush deliberately does NOT drain
+    /// the buffer — an attempt is flushed once, and the executor
+    /// drops the whole buffer right after; a second flush on the
+    /// same buffer would re-emit every line, which the exactly-once
+    /// acceptance tests treat as the bug it is (the `&mut` is the
+    /// executor's ownership of the state, not a promise to consume).
+    pub(crate) fn flush_committed(&mut self) {
+        for record in &self.records {
+            action_logged(&record.as_entry());
+        }
     }
 }
 
@@ -2420,8 +2614,9 @@ pub(crate) fn file_watch_mutation_refresh_degraded(error: &AppError) {
 ///
 /// A tested, still-unused facet (the keep ruling D-163): the sync and
 /// backup tasks landed without it — sync journals its file-write
-/// outcomes in the `action_log` journal mirrored by [`action_logged`]
-/// plus the `sync_*` diagnostic facets, and the phase-2 backups record
+/// outcomes in the `action_log` journal, mirrored commit-aware
+/// through the mirror buffer (D-051/D-228), plus the `sync_*`
+/// diagnostic facets, and the phase-2 backups record
 /// theirs in `backup_records` rows — so the prospective consumers are
 /// the pending file-operation producers outside the sync journal (the
 /// variant library tasks, `backup_restore`/BKP-007). The first such
@@ -2750,42 +2945,48 @@ pub(crate) fn backups_list_failed(error: &AppError) {
     );
 }
 
+/// The shared half of the file-log test harness (T-324/D-228): the
+/// helpers the module's own suite has always used, plus the
+/// mirror-emission recorder the db suite (the flush's acceptance
+/// tests) and the sync phase-4 suite (the end-to-end mirror pin)
+/// assert through. Those suites drive the flush through the real
+/// executor, which emits from the `spawn_blocking` thread: a
+/// thread-local `with_default` cannot cover that thread, and a
+/// process-global subscriber cannot be installed by more than one
+/// test in a same-process run (`cargo test --workspace` — the CI
+/// gate — runs the suite exactly that way), so the recorder is the
+/// runner-independent seam: `action_logged` appends each emitted
+/// line's field set here, and the discipline tests assert on the
+/// recorded emissions, scoped by their own unique entry ids so
+/// parallel tests' emissions cannot interfere. The logging suite
+/// itself keeps observing the REAL file through the thread-local
+/// subscriber — the recorder↔file split of labor: the discipline
+/// suites pin WHEN and WHAT, this suite pins that an emission
+/// becomes a line. Only compiled for tests; production visibility is
+/// unchanged.
 #[cfg(test)]
-mod tests {
-    //! Behavior tests of the subscriber seam: a real subscriber is built
-    //! over a `tempfile` directory, real events are driven through it
-    //! with `tracing::subscriber::with_default` (the thread-local default
-    //! — the global default cannot be installed from the parallel test
-    //! suite), the writer guard is dropped to flush, and the actual log
-    //! file is read back. What is asserted is what any reader of the log
-    //! sees: the file name and folder, which events survived the level
-    //! filter, and which values the events carry (the SEC-008 contract).
-    //!
-    //! Expected names are pinned as literals, never derived from
-    //! [`super::LOG_FILE_PREFIX`]/[`super::LOG_FILE_SUFFIX`] — a mutated
-    //! constant must fail its own test (the same trick as the
-    //! `data_dirs.rs` and `config.rs` suites).
-
-    use super::*;
-    use std::error::Error as _;
+pub(crate) mod test_support {
     use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
 
-    /// A `logs/` directory under a temp root, as the layout step leaves
-    /// it. The `TempDir` is returned alongside so it stays alive.
-    fn logs_dir() -> (tempfile::TempDir, PathBuf) {
+    /// A `logs/` directory under a temp root, as the layout step
+    /// leaves it. The `TempDir` is returned alongside so it stays
+    /// alive.
+    pub(crate) fn logs_dir() -> (tempfile::TempDir, PathBuf) {
         let temp = tempfile::tempdir().expect("failed to create a temp directory");
         let root = temp.path().join("logs");
         fs::create_dir(&root).expect("creating the temp logs directory must work");
         (temp, root)
     }
 
-    /// The log files currently in `dir` — every entry whose name matches
-    /// the spec §5.5 shape `eunomiasync.<date>.log` with a `YYYY-MM-DD`
-    /// date stamp. The date shape is checked character by character
-    /// (digits, dashes at 4 and 7) rather than parsed as a real calendar
-    /// date: the requirement is the file *name* format, and the appender
-    /// guarantees a real date.
-    fn dated_log_files(dir: &Path) -> Vec<PathBuf> {
+    /// The log files currently in `dir` — every entry whose name
+    /// matches the spec §5.5 shape `eunomiasync.<date>.log` with a
+    /// `YYYY-MM-DD` date stamp. The date shape is checked character
+    /// by character (digits, dashes at 4 and 7) rather than parsed as
+    /// a real calendar date: the requirement is the file *name*
+    /// format, and the appender guarantees a real date.
+    pub(crate) fn dated_log_files(dir: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         for entry in fs::read_dir(dir).expect("the logs directory must be readable") {
             let path = entry.expect("every logs entry must be readable").path();
@@ -2814,11 +3015,11 @@ mod tests {
         files
     }
 
-    /// Reads the single log file the tests expect to exist, asserting
-    /// there is exactly one dated file (a second one would mean the
-    /// rotation or naming regressed into something the tests did not
-    /// drive).
-    fn read_log_file(dir: &Path) -> String {
+    /// Reads the single log file the tests expect to exist,
+    /// asserting there is exactly one dated file (a second one would
+    /// mean the rotation or naming regressed into something the
+    /// tests did not drive).
+    pub(crate) fn read_log_file(dir: &Path) -> String {
         let files = dated_log_files(dir);
         assert_eq!(
             files.len(),
@@ -2827,6 +3028,102 @@ mod tests {
         );
         fs::read_to_string(&files[0]).expect("the log file must be readable")
     }
+
+    /// One mirror line the facade emitted — the field set of the
+    /// `action_logged` macros, recorded for the discipline suites.
+    /// Keep the field list in lockstep with the macro payload: a
+    /// field the macros grow must land here too, and the buffer
+    /// suite's file-vs-payload asserts are the drift guard.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct EmittedMirrorLine {
+        /// The tracing level the line was emitted at.
+        pub(crate) level: tracing::Level,
+        /// The action code.
+        pub(crate) action: String,
+        /// The result code.
+        pub(crate) result: String,
+        /// The entity type code ("" when the entry named none).
+        pub(crate) entity_type: String,
+        /// The entity id ("" when the entry named none).
+        pub(crate) entity_id: String,
+        /// The project id ("" when the entry named none).
+        pub(crate) project_id: String,
+        /// The sync-run id ("" when the entry named none).
+        pub(crate) sync_run_id: String,
+    }
+
+    /// The emissions recorded so far. A process-wide `cfg(test)`
+    /// static: `action_logged` appends from whatever thread the flush
+    /// runs on, and the suites READ WITHOUT DRAINING — the snapshot
+    /// is filtered by each test's own unique entry ids, so neither a
+    /// parallel test's emissions (same-process `cargo test`) nor this
+    /// test's own earlier lines can satisfy or fail its counts, and
+    /// no test can steal another's not-yet-read lines (a draining
+    /// read would).
+    static EMITTED: Mutex<Vec<EmittedMirrorLine>> = Mutex::new(Vec::new());
+
+    /// Records one emission — the seam's write half, called only by
+    /// `action_logged` under `cfg(test)`, the house idiom of
+    /// `Db::set_busy_timeout_for_tests` (a thread-crossing edge a
+    /// test must observe deterministically).
+    pub(crate) fn note_emission(
+        level: tracing::Level,
+        entry: &eunomia_store::action_log::LogEntry<'_>,
+    ) {
+        EMITTED
+            .lock()
+            .expect("the emission recorder must not be poisoned")
+            .push(EmittedMirrorLine {
+                level,
+                action: entry.action.as_str().to_owned(),
+                result: entry.result.as_str().to_owned(),
+                entity_type: entry
+                    .entity
+                    .map(|entity| entity.kind.as_str())
+                    .unwrap_or("")
+                    .to_owned(),
+                entity_id: entry
+                    .entity
+                    .map(|entity| entity.id)
+                    .unwrap_or("")
+                    .to_owned(),
+                project_id: entry.project_id.unwrap_or("").to_owned(),
+                sync_run_id: entry.sync_run_id.unwrap_or("").to_owned(),
+            });
+    }
+
+    /// Snapshots the recorded emissions — non-destructive on purpose
+    /// (see the static's docs): a suite reads, filters by its own
+    /// unique ids, and asserts; nothing it does can affect another
+    /// suite's read.
+    pub(crate) fn emitted_mirror_lines() -> Vec<EmittedMirrorLine> {
+        EMITTED
+            .lock()
+            .expect("the emission recorder must not be poisoned")
+            .clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Behavior tests of the subscriber seam: a real subscriber is built
+    //! over a `tempfile` directory, real events are driven through it
+    //! with `tracing::subscriber::with_default` (the thread-local default
+    //! — the global default cannot be installed from the parallel test
+    //! suite), the writer guard is dropped to flush, and the actual log
+    //! file is read back. What is asserted is what any reader of the log
+    //! sees: the file name and folder, which events survived the level
+    //! filter, and which values the events carry (the SEC-008 contract).
+    //!
+    //! Expected names are pinned as literals, never derived from
+    //! [`super::LOG_FILE_PREFIX`]/[`super::LOG_FILE_SUFFIX`] — a mutated
+    //! constant must fail its own test (the same trick as the
+    //! `data_dirs.rs` and `config.rs` suites).
+
+    use super::test_support::{dated_log_files, logs_dir, read_log_file};
+    use super::*;
+    use std::error::Error as _;
+    use std::fs;
 
     /// Emits one event per tracing level, each with a message unique to
     /// its level, plus a path field on one of them — the payload shape
@@ -3300,8 +3597,11 @@ mod tests {
         let project_id = "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f";
         let sync_run_id = "0193a2cc-2222-7333-9c6d-1a2b3c4d5e6f";
 
-        // Act: the journal-write call a command task makes once per
-        // entry; the facade decides what reaches the file.
+        // Act: the emission the executor's post-commit flush makes
+        // once per buffered entry (T-324/D-228); the facade decides
+        // what reaches the file — the policy half, driven directly
+        // here because the buffer's own test above already pins
+        // record→flush.
         tracing::subscriber::with_default(subscriber, || {
             use eunomia_store::action_log::{
                 Action, Details, Entity, EntityType, FailureCode, Level, LogEntry, Outcome,
@@ -3424,6 +3724,114 @@ mod tests {
                  line (`{marker}`), got: {log}"
             );
         }
+        drop(temp);
+    }
+
+    #[test]
+    fn the_mirror_buffer_owns_its_records_and_flushes_them() {
+        // T-324/D-228, the logging half: `record` copies the entry's
+        // mirror-relevant fields into an owned record — the entries
+        // borrow their ids from operation locals that end with the
+        // transaction closure — and `flush_committed` emits each
+        // record through the facade's unchanged policy. The ownership
+        // is proven structurally: the entries below borrow from locals
+        // whose scope ENDS before the flush, so the buffer compiles
+        // only because it owns its data; the payload fidelity is
+        // proven by the mirrored line's own fields.
+        use eunomia_store::action_log::{
+            Action, Entity, EntityType, Level, LogEntry, Outcome, Visibility,
+        };
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Info)
+            .expect("building the subscriber must work");
+        let entity_id = "0193a2aa-6c9e-7c8e-9c6d-1a2b3c4d5e6f".to_owned();
+        let project_id = "0193a2bb-1111-7222-9c6d-1a2b3c4d5e6f".to_owned();
+        let sync_run_id = "0193a2cc-2222-7333-9c6d-1a2b3c4d5e6f".to_owned();
+
+        let mut buffer = MirrorBuffer::new();
+        {
+            // The borrowed halves, in a scope that ends before the
+            // flush: the strings above outlive it, but the entries'
+            // borrows do not.
+            let entity_id = entity_id.as_str();
+            let project_id = project_id.as_str();
+            let sync_run_id = sync_run_id.as_str();
+            let mut skipped = LogEntry::new(
+                Action::SyncProjectResult,
+                Level::Warn,
+                Visibility::User,
+                Outcome::Skipped,
+            );
+            skipped.entity = Some(Entity {
+                kind: EntityType::Project,
+                id: project_id,
+            });
+            skipped.project_id = Some(project_id);
+            skipped.sync_run_id = Some(sync_run_id);
+            let activity = LogEntry::new(
+                Action::SettingsChanged,
+                Level::Info,
+                Visibility::User,
+                Outcome::Ok,
+            );
+            let mut failed = LogEntry::new(
+                Action::SyncRunFinished,
+                Level::Error,
+                Visibility::User,
+                Outcome::Error,
+            );
+            failed.entity = Some(Entity {
+                kind: EntityType::SyncRun,
+                id: entity_id,
+            });
+            failed.sync_run_id = Some(sync_run_id);
+            buffer.record(&skipped);
+            buffer.record(&activity);
+            buffer.record(&failed);
+        }
+        // The borrows are gone; the flush runs on the buffer's own
+        // data — on this test thread, so the thread-local default
+        // covers it.
+        tracing::subscriber::with_default(subscriber, || {
+            buffer.flush_committed();
+        });
+        drop(guard);
+
+        // Assert: the policy applies per record — the warn and error
+        // records mirror exactly once with their full id payload (the
+        // owned avatar carried it), and the info+user+ok record does
+        // not mirror at all. Exactly-once, not "present": a doubled
+        // flush would double the lines and fail the count.
+        let log = read_log_file(&root);
+        assert_eq!(
+            log.matches("action=\"sync.project_result\"").count(),
+            1,
+            "the recorded warn entry must mirror exactly once, got: {log}"
+        );
+        assert_eq!(
+            log.matches("action=\"sync.run_finished\"").count(),
+            1,
+            "the recorded error entry must mirror exactly once, got: {log}"
+        );
+        assert!(
+            log.contains("result=\"skipped\"") && log.contains("result=\"error\""),
+            "the mirrored lines must carry their result codes, got: {log}"
+        );
+        assert!(
+            log.contains(&format!("entity_id=\"{project_id}\""))
+                && log.contains(&format!("entity_id=\"{entity_id}\"")),
+            "the mirrored lines must carry the owned entity ids, got: {log}"
+        );
+        assert!(
+            log.contains(&format!("sync_run_id=\"{sync_run_id}\""))
+                && log.contains(&format!("project_id=\"{project_id}\"")),
+            "the mirrored lines must carry the owned sync-run and \
+             project ids, got: {log}"
+        );
+        assert!(
+            !log.contains("action=\"settings.changed\""),
+            "the info+user+ok record must not mirror, got: {log}"
+        );
         drop(temp);
     }
 

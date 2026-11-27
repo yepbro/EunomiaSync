@@ -1136,7 +1136,7 @@ pub(crate) async fn scan_commit_impl<R: Runtime>(
     // closure reads it reads inside the transaction, so a busy retry
     // replays it over the committed state.
     let slots = database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             let defaults = WriteDefaults::load(transaction)?;
             let mut occupancy = ColorOccupancy::load(transaction)?;
             let mut slots: Vec<CommitSlot> = Vec::with_capacity(fields.len());
@@ -1178,6 +1178,7 @@ pub(crate) async fn scan_commit_impl<R: Runtime>(
                     // filter attributes the lift to it.
                     let registered = register_project(
                         transaction,
+                        mirror,
                         candidate,
                         AddedVia::Scan,
                         &defaults,
@@ -1216,14 +1217,16 @@ pub(crate) async fn scan_commit_impl<R: Runtime>(
                     // row to name.
                     lifted.project_id = created_id.as_deref();
                     insert(transaction, &lifted).map_err(activity_log_to_app_error)?;
-                    // The D-051 mirror contract: one call per written
-                    // entry (info+user+ok is the unmirrored shape).
-                    logging::action_logged(&lifted);
+                    // The T-324/D-228 mirror contract: record inside
+                    // the transaction, flush only after the commit
+                    // (info+user+ok is the unmirrored shape).
+                    mirror.record(&lifted);
                     slots.push(slot);
                     continue;
                 }
                 match register_project(
                     transaction,
+                    mirror,
                     candidate,
                     AddedVia::Scan,
                     &defaults,

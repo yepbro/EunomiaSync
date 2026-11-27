@@ -448,9 +448,12 @@ fn apply_core_items(
 }
 
 /// Writes one successful structure action inside the caller's
-/// transaction and applies the D-051 mirror policy.
+/// transaction and records it into the transaction's mirror buffer
+/// (T-324/D-228: the executor applies the D-051 mirror policy at the
+/// post-commit flush).
 fn journal(
     transaction: &rusqlite::Transaction<'_>,
+    mirror: &mut crate::logging::MirrorBuffer,
     action: Action,
     entity_type: EntityType,
     entity_id: &str,
@@ -463,7 +466,7 @@ fn journal(
     });
     entry.details = details;
     insert(transaction, &entry).map_err(activity_log_to_app_error)?;
-    logging::action_logged(&entry);
+    mirror.record(&entry);
     Ok(())
 }
 
@@ -514,7 +517,7 @@ async fn heading_create_impl<R: Runtime>(
     })?;
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             let rows = list_items(transaction, ItemScope::All).map_err(library_error)?;
             let target = match parent.as_deref() {
                 None => rows.len() as i64 + 1,
@@ -543,6 +546,7 @@ async fn heading_create_impl<R: Runtime>(
             };
             journal(
                 transaction,
+                mirror,
                 Action::HeadingCreated,
                 EntityType::Heading,
                 &placed.id,
@@ -590,7 +594,7 @@ async fn heading_update_impl<R: Runtime>(
     };
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             let heading = heading_of(transaction, &id)?;
             match update {
                 HeadingUpdate::Rename(_) => {
@@ -609,6 +613,7 @@ async fn heading_update_impl<R: Runtime>(
                     .map_err(library_error)?;
                     journal(
                         transaction,
+                        mirror,
                         Action::HeadingChanged,
                         EntityType::Heading,
                         &updated.id,
@@ -653,6 +658,7 @@ async fn heading_update_impl<R: Runtime>(
                     .map_err(library_error)?;
                     journal(
                         transaction,
+                        mirror,
                         Action::HeadingChanged,
                         EntityType::Heading,
                         &updated.id,
@@ -685,6 +691,7 @@ async fn heading_update_impl<R: Runtime>(
                     let updated = heading_of(transaction, &id)?;
                     journal(
                         transaction,
+                        mirror,
                         Action::HeadingChanged,
                         EntityType::Heading,
                         &updated.id,
@@ -723,11 +730,12 @@ pub(crate) async fn heading_delete<R: Runtime>(
 async fn heading_delete_impl<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), AppError> {
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             heading_of(transaction, &id)?;
             delete_heading(transaction, &id).map_err(library_error)?;
             journal(
                 transaction,
+                mirror,
                 Action::HeadingDeleted,
                 EntityType::Heading,
                 &id,
@@ -773,7 +781,7 @@ async fn items_move_impl<R: Runtime>(
 ) -> Result<(), AppError> {
     let database = managed_db(&app)?;
     database
-        .run(move |transaction| {
+        .run_with_mirror(move |transaction, mirror| {
             let rows = list_items(transaction, ItemScope::All).map_err(library_error)?;
             let source_index = index_of(&rows, &id, "id")?;
             let source_is_heading = rows[source_index].kind == ItemKind::Heading;
@@ -845,6 +853,7 @@ async fn items_move_impl<R: Runtime>(
             };
             journal(
                 transaction,
+                mirror,
                 action,
                 entity_type,
                 &id,
