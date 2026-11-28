@@ -32072,3 +32072,179 @@ one precision note (explicitly not a finding) was taken: this
 addendum's column-shift number corrected from three to four (the
 measured `#` offset). The review phase ends here (two rounds, no
 third).
+
+### D-242 — T-269: the owner's TOCTOU ruling on scheme B's phase-3 splice — the plan is trusted, the between-phases window is a silent lost update (never corruption), and the v1 scope owns it — 2026-11-28
+
+Problem: T-116's round-1 review (P3-3, declined there and carded to
+the owner; D-133) asked whether §9.4 phase 3 should re-read a
+scheme-B target before splicing. The pipeline's own phases open the
+window: phase 1 reads the file and builds the `WritePlan` (§9.4 phase
+1 step 4, `docs/spec.md:676`), phase 3 writes by that plan (§9.4
+phase 3, `docs/spec.md:689-693`) — and between the read and the write
+the file can change externally. Options: (a) leave as is — trust the
+plan, the watcher owns external edits; (b) phase 3 re-reads the
+target and verifies the span before splicing, a mismatch refusing as
+a `failed` row with a §10 code.
+
+Solution: the owner ruled on 2026-11-28 — **(a), the plan stays
+trusted.** No code changes; this entry is the record of the confirmed
+reading. The facts below were verified against the sources at
+8b6ab0f and re-verified at 465c719 after the rebase (T-356/T-358
+touch the build side, not the splice — every cited line held).
+
+- _The deciding fact: phase 3 re-derives nothing from disk._ The
+  `WritePlan::Splice` variant carries the file's whole text as read
+  (`content`) plus the marker span parsed from that same string
+  (`span`): phase 1's `std::fs::read` (`sync_phase1.rs:620`), the
+  UTF-8 gate (`:643-657`), `parse_markers(&content)` (`:658-663`),
+  the plan (`:664-670`; the type's own doc: "phase 3 splices …
+  WITHOUT re-reading the file", `:216-218`). Phase 3 consumes only
+  the plan plus the run's one marker line — `final_bytes`
+  (`sync_phase3.rs:319`, `:433-442`; module docs `:29-35`; D-133:
+  "D-131's plan carries the read content/span so phase 3 never
+  re-reads the file"). The splice itself is byte-offset arithmetic
+  over the in-memory snapshot —
+  `content[..span.managed_start] + block + content[span.managed_end..]`
+  (`assembly_b.rs:203-207`, offsets at `markers.rs:128-142`) — and
+  the assembled whole string is laid down by §9.5's whole-file
+  atomic replace
+  (`production_write` → `write_target_file`, `sync_phase3.rs:323-330`
+  and `:408-427`; `atomic.rs:214-219`). There is no marker lookup at
+  splice time at all: the review card's binary — re-scan the file by
+  content at splice time, or trust the phase-1 offsets — resolves to
+  trust: both the offsets and the bytes they index are phase 1's.
+- _What the window actually does today._ Corruption is IMPOSSIBLE:
+  the offsets and the content come from one read, so they are always
+  mutually consistent, and the written file is a well-formed splice
+  (head + new block + tail, re-parsable — `assembly_b`'s own pins).
+  The failure mode is a silent LOST UPDATE: the atomic replace lays
+  the phase-1-based assembly over whatever is on disk, and the
+  external edit vanishes with no `failed` row and no lost-update
+  signal — the run records the project `written` and its summary
+  says nothing (the watcher, which the run does not pause, can mark
+  the edit externally modified for the moment before the write; the
+  after-sync pass clears it). No guard covers the window: §9.5 step
+  6's verify compares the disk against the bytes the run itself just
+  wrote (post-rename only — `atomic.rs:329-332` and `:413-432`; the
+  "Races are honest" doctrine names exactly that window,
+  `:132-141`), and phase 2's backup is a point-in-time copy, never
+  compared against phase 1's read (`sync_phase2.rs:3-9`). SYS-008's
+  "right after a sync" full pass recomputes the
+  external-modification state over the file AS WRITTEN
+  (`file_watch.rs:1376-1382`) — it now matches the build, so the
+  state shows clean and nothing records that an edit was discarded.
+  A mid-run DELETION of the target is likewise undone: the write
+  takes the mode copy's NotFound arm (`atomic.rs:576-581`) and
+  `rename(2)` creates the missing destination, so the file returns
+  from the phase-1 snapshot — where the same deletion landing
+  between syncs would make scheme B's next sync skip it
+  (`E_MARKERS_INVALID`, `docs/spec.md:204`).
+- _Recoverability is split, and the window is machine-scale._ An edit
+  landing BEFORE phase 2's copy is in the backup (recoverable by
+  hand through BKP-012's export, `docs/spec.md:551`; BKP-007's UI
+  restore is P1, `:550`); an edit landing AFTER the copy — between
+  the backup and the rename — is on disk nowhere and in no backup:
+  unrecoverable. D-133's P3-3 rationale "the backup covers the
+  window" is therefore half-true, corrected by this entry (the
+  historical record stays as written). The window spans ONE command
+  invocation — phase 2's copy loop, the verdict transactions, phase
+  3's writes in `sort_order` — and the D-25 gate does not widen it:
+  `NeedsConfirmation` aborts the run (`commands.rs:1676-1694`) and
+  the confirmed re-call is a fresh invocation with a fresh phase 0 /
+  phase 1 (a re-read). Schemes A and C share the same silent loss
+  (whole-file rebuild by design), but they never promised
+  outside-byte preservation.
+- _Why (a) is the ruling._ §1.3 scopes merging out of v1: "external
+  changes are detected and shown, section 5.7, and the next sync
+  overwrites them" (`docs/spec.md:29`) — and §5.7's detection
+  posture (`:200-205`) covers edits BETWEEN syncs (startup, watch
+  events, right after a sync), which the next sync then overwrites
+  after having READ them (its splice preserves the edited outside
+  byte for byte). An edit landing inside a running sync is
+  overwritten by the CURRENT sync without the run's own detection —
+  a bounded, corruption-free loss the v1 scope accepts, in a
+  seconds-wide window where the app's own write is the dominant
+  writer of these files. The ruling keeps §9.4's literal design (D-131's recorded
+  reading, `:11537-11546`) and the D-133 declination as the law of
+  record.
+- _Why (b) was declined._ A re-read-and-verify step is new §9.4
+  behavior (phase 3 step 1 says only "Atomic write (9.5)") and a new
+  refusal surface (a §10 code decision, the D-099 discipline); it
+  narrows the race but cannot close it (a window remains between the
+  re-read and the rename — the same honest residual `atomic.rs`
+  accepts for its own steps); it costs an extra full read and
+  re-parse of every scheme-B target per run; and it touches
+  `sync_phase3`/`assembly_b` while the parallel T-356 moved the
+  neighboring build composition
+  (`crates/eunomia-core/src/body.rs`,
+  `crates/eunomia-store/src/build_snapshot.rs` — the managed text's
+  source, not the splice files), which is why the implementation
+  half was queued behind T-356's merge. A future stage wanting (b) —
+  a merge/conflict stage beyond v1 (P1 holds none of it,
+  `docs/spec.md:27`) — is a fresh card.
+- _Rule 11 precision points (recorded here; no spec edits — the spec
+  is the owner's document)._ §7.5's "content outside the markers …
+  is kept byte for byte" (`docs/spec.md:533`, ALG-031 `:660`, T-F12
+  `:955`) is true over the READ input and silent on a concurrent
+  mid-run edit (the on-disk outside at write time is replaced by the
+  phase-1-read outside); §5.7's "so that external changes are
+  visible before the next sync overwrites them" (`:200`) — an
+  in-run edit is overwritten by the current sync; the SYS-008
+  watcher can flash the external-modification state if a debounced
+  pass lands before the write, and the after-sync pass clears it, so
+  nothing records that the edit was discarded. Neither sentence
+  claims a guard that does not exist; this entry is the caveat of
+  record.
+
+No code changes: DECISIONS.md is the whole diff (the md-only flash
+cycle — tests NOT run, per the md-only exception; prettier checked;
+one commit, one review round).
+
+Round-1 review addendum (D-242, same task; report
+`.opencode/reviews/t269-round1-report.md`, deepseek-v4.1-flash —
+1×P1, 2×P2, 5×P3, REQUEST CHANGES; all verified against the sources
+before fixing): findings fixed here —
+
+- P1-1 (taken): "no event, no signal" / "without ever being
+  visible" was an overclaim — the watcher has NO sync gate
+  ("no ticket guard", `file_watch.rs:142-147`): a debounced pass
+  landing between the edit and that project's write emits
+  `state://file-changed` with `external_changed: true` (the
+  multi-project window easily exceeds §5.7's 300 ms), and only the
+  after-sync pass clears the marking. The three wordings are
+  narrowed to the truth the entry needs: the RUN's records carry no
+  lost-update signal (no `failed` row, `written` + a silent
+  summary); the commit message mirrored.
+- P2-1 (taken): "P1's conflict tooling" attributed to P1 what P1
+  does not hold (`docs/spec.md:27` — diff/rollback, backup restore,
+  JSON export); reworded to "a merge/conflict stage beyond v1".
+- P2-2 (taken): the T-356 appositive ("the sync-build path T-356
+  was changing") named files T-356 did not touch — `7236ae2` changed
+  `body.rs`/`build_snapshot.rs` and neighbors, not
+  `sync_phase3.rs`/`assembly_b.rs` — and contradicted this entry's
+  own "the build side, not the splice"; reworded to the concurrent
+  build-composition move.
+- P3-1 (taken): the Cyrillic option letters `(а)`/`(б)` (the task
+  card's own spelling) became the file's Latin `(a)`/`(b)`.
+- P3-2 (taken, restructured): the reviewer's two-space indent for
+  the lazy-continuation line is prettier's own un-indent target —
+  the formatter strips exactly that indent (verified by check), so
+  the sentence was restructured with the code span unbroken on its
+  own line instead; the formatter owns the wrap.
+- P3-3 (taken): `atomic.rs:416-437` → `:413-432` and
+  `file_watch.rs:1376-1392` → `:1376-1382` — the ranges now end
+  where the cited material does.
+- P3-4 (taken, with a discovery): the mid-run DELETION sub-case is
+  now recorded (recreated from the snapshot, versus SYS-009's
+  between-syncs `E_MARKERS_INVALID` skip) — and verifying it found
+  that the mode-copy comment's parenthetical ("a target that
+  vanished mid-run fails honestly at the replace instead",
+  `atomic.rs:578-580`) is itself false: `rename(2)` CREATES the
+  missing destination (verified on the host), the same path the
+  new-file happy-path tests and D-133's creation-case behavior pin.
+  The stale `.rs` comment is a follow-up card (fixing it here would
+  break the md-only diff; Rule 11 owns the correction).
+- P3-5 (taken): the quoted "re-scan by content vs trust phase-1
+  offsets" phrase has no in-repo anchor (the card lives on the
+  board, not in the repo); now a paraphrase without quotation
+  marks.
