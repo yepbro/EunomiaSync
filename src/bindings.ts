@@ -423,6 +423,28 @@ export const commands = {
 	 */
 	projectArchive: (projectId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("project_archive", { projectId }, options),
 	/**
+	 *  Answers what the next sync would write to the project's managed
+	 *  area (spec §7.10 `project_build_preview`, MAIN-033): the target
+	 *  path and the current managed content — §9.2/§9.3 built from one
+	 *  §9.1 snapshot read, WITHOUT the creation marker; scheme B answers
+	 *  the managed block only.
+	 * 
+	 *  A read: no SYS-005 gate (the `sync_status` posture — SYS-005's
+	 *  list is the project-*changing* commands), no journal, no write of
+	 *  any kind. The one refusal besides the executor's own is the
+	 *  `project_update` id shape: an id no ACTIVE project answers —
+	 *  unknown, or archived — is the typed `E_VALIDATION` envelope naming
+	 *  `project_id` with the caller's id echoed bounded (D-115's cap),
+	 *  and nothing is built. Recovery mode answers the honest
+	 *  `NoDatabase` fallback.
+	 * 
+	 *  Failures reach the log with their §10 code
+	 *  ([`logging::project_build_preview_failed`]); a successful read is
+	 *  never journaled and logs nothing (reading is not an event — the
+	 *  `activity_list` rationale).
+	 */
+	projectBuildPreview: (projectId: string, options?: InvokeOptions) => __TAURI_INVOKE<BuildPreview>("project_build_preview", { projectId }, options),
+	/**
 	 *  Re-points the project with this id at a newly picked folder (D-09's
 	 *  "Locate…": the action an unavailable column offers beside
 	 *  "Archive"): the picked folder must pass the SEC-003 session gate
@@ -2083,6 +2105,33 @@ export type BackupCopyRecord_Serialize = {
 	 *  name carries).
 	 */
 	created_at: string,
+};
+
+/**
+ *  The `project_build_preview` answer (§7.10, MAIN-033): where the
+ *  next sync would write, and the managed content it would lay down
+ *  there minus the creation marker.
+ */
+export type BuildPreview = {
+	/**
+	 *  The target file's path — §9.4 phase 1 step 2's spelling: the
+	 *  stored (canonical) project root joined with the scheme's file
+	 *  name, BEFORE any symlink resolution (the preview is a read; it
+	 *  never touches the filesystem). UTF-8 TEXT by construction —
+	 *  the stored path was validated at its write boundary and the
+	 *  file name is one of four static ASCII literals.
+	 */
+	target_path: string,
+	/**
+	 *  The managed content (§9.2/§9.3), creation marker excluded:
+	 *  scheme A the D-21 reading lines spliced around the §9.2 body,
+	 *  schemes B and C the body alone (scheme B's managed block —
+	 *  the block the next run writes between the markers, never the
+	 *  file's outside). An empty build is the empty string, the text
+	 *  MAIN-033's "a note instead of an empty document" note replaces
+	 *  on the UI side.
+	 */
+	text: string,
 };
 
 /**  The measured result of one bulk operation. */

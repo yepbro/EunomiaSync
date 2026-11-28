@@ -247,6 +247,15 @@ pub(crate) mod assignments;
 // no file I/O at all, and the SYS-005 gate first.
 pub(crate) mod project_archive;
 
+// The Projects module's `project_build_preview` command (spec §7.10,
+// MAIN-033, T-358): the READ that answers what the next sync would
+// write — the target path and the managed content (§9.2/§9.3) built
+// from one §9.1 snapshot read (the `build_snapshot` landing zone),
+// without the creation marker, scheme B answering the managed block
+// only. No SYS-005, no journal, no write; an id naming no active
+// project is the `project_update` refusal shape.
+pub(crate) mod project_build_preview;
+
 // The Projects module's `project_relink` command (spec §7.10, T-110;
 // D-09, DB-015, SYS-005, SYS-007; the contract is D-208): the add
 // flow's gate order — SYS-005, the SEC-003 session gate, the `.git`
@@ -358,6 +367,9 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         // module's `dialog_pick_folder` (T-073), the Projects
         // module's `project_add_manual` (T-074), the Projects
         // module's `project_archive` (T-108, D-194), the Projects
+        // module's `project_build_preview` (T-358, MAIN-033 — the
+        // File-preview modal's read: the next sync's managed content,
+        // marker excluded), the Projects
         // module's `project_relink` (T-110, D-208), the Projects
         // module's `project_restore` (T-109, D-205), the Projects
         // module's `project_update` (T-106, D-201), the Projects
@@ -398,6 +410,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::markdown_preview,
             commands::project_add_manual::<tauri::Wry>,
             project_archive::project_archive::<tauri::Wry>,
+            project_build_preview::project_build_preview::<tauri::Wry>,
             project_relink::project_relink::<tauri::Wry>,
             project_restore::project_restore::<tauri::Wry>,
             project_update::project_update::<tauri::Wry>,
@@ -1223,6 +1236,9 @@ mod assignments_tests;
 
 #[cfg(test)]
 mod project_archive_tests;
+
+#[cfg(test)]
+mod project_build_preview_tests;
 
 #[cfg(test)]
 mod project_relink_tests;

@@ -37,6 +37,7 @@ export type {
   AssignmentRecord as AssignmentRecordWire,
   AssignmentTargetRecord as AssignmentTargetWire,
   BackupCopyRecord_Serialize as BackupCopyRecordWire,
+  BuildPreview,
   BulkAssignmentResult as BulkAssignmentResultWire,
   CustomTextMode as CustomTextModeWire,
   AppError_Serialize as AppErrorWire,

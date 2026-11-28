@@ -313,7 +313,9 @@ pub(crate) async fn record_run<R: Runtime>(
 }
 
 /// The TEXT spelling of a built target path for the
-/// `sync_run_projects.target_path` column.
+/// `sync_run_projects.target_path` column — and of the same join for
+/// every later reader of the built path (T-358's
+/// `project_build_preview` answer; the D-149 one-spelling law).
 ///
 /// Total by construction, not a hopeful conversion: the snapshot's
 /// root comes from `projects.path` — TEXT, therefore UTF-8, and
@@ -323,8 +325,9 @@ pub(crate) async fn record_run<R: Runtime>(
 /// joined path is valid UTF-8 on every platform this app builds for.
 /// A `None` here names a broken invariant of that chain, the
 /// reasoned-panic posture (D-061) — never a lossy `to_string_lossy`
-/// that would silently rewrite the stored path.
-fn target_path_text(path: &std::path::Path) -> Result<String, AppError> {
+/// that would silently rewrite the stored path. `pub(crate)`: the
+/// preview command reads the same spelling the run row records.
+pub(crate) fn target_path_text(path: &std::path::Path) -> Result<String, AppError> {
     path.to_str().map(str::to_owned).ok_or_else(|| {
         // Class-only diagnostics (SEC-008): the bytes of a broken
         // path never enter the message.

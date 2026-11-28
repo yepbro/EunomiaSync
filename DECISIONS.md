@@ -31902,3 +31902,173 @@ tests (exit 0), clippy `--workspace --all-targets -- -D warnings`
 prettier on `ARCHITECTURE.md`/`DECISIONS.md` (exit 0); the
 frontend untouched (no `.ts`/`.vue` change; the bindings export pin
 green inside the battery), so the pnpm trio does not apply.
+
+### D-240 — T-358: the `project_build_preview` command — MAIN-033's read over the build_snapshot landing zone, the markerless text, and the scheme-B managed-block answer — 2026-11-27
+
+Problem: MAIN-033's File-preview modal (the P0 acceptance "the preview
+matches the next sync's managed content") had a spec contract (§7.10's
+`project_build_preview` note, D-203's read of the prototype) and no
+§7.10 source: the modal needs the target path and the next sync's
+managed content, built from the CURRENT database state, without the
+creation marker. T-356's landing deliberately left the seam:
+`build_snapshot.rs`'s docs named this task as the read-side consumer
+of the §9.1 value.
+
+Readings chosen (before implementation, rule 1):
+
+- **The answer's text is ALG-030's `managed` — the D-064 markerless
+  seam — for every scheme, not the file bytes.** §7.10 says "the
+  current managed content (§9.2/9.3, without the creation marker;
+  scheme B answers the managed block only)": §9.3 defines `managed =
+join(parts, BLANK_LINE)` and then the FILE as `managed` + an empty
+  line + the marker + one break, so "the managed content without the
+  marker" is the join; the trailing empty line is the marker's own
+  framing (ALG-030's file layout), not content, and MAIN-033 renders
+  the text as Markdown where it would be invisible either way.
+  Scheme B's clause answers the same value: its managed block "is the
+  body alone" (`assembly_b`'s rule) — the block the next run writes
+  between the markers, never the file's outside and never the
+  line-break conversion (a write-time, file-dependent detail; the
+  preview answers the content). The identity with the sync is exact:
+  `build_projects` composes the same `build_body` +
+  `extra_file_lines` + `managed_text` per project, so the preview is
+  the sync's own build minus the one thing that does not exist yet
+  (ALG-032's per-run wall-clock marker). No build path is forked.
+- **The composition runs INSIDE the one `Db::run` read transaction**
+  (the landing-zone note's own spelling): the executor already runs
+  the closure on the blocking pool (SYS-001), and ONE project's build
+  is linear in the snapshot's item and assignment counts plus the
+  assigned texts' lengths — the same order every command's
+  transaction holds. Phase 0's spawn-blocking-AFTER-the-transaction
+  shape (D-096) exists for the ALL-projects pass, not for one
+  project's linear share.
+- **The id refusal is decided by the snapshot's ACTIVE list, not a
+  second read.** `build_snapshot::read` filters the archived rows
+  (DB-014, `ListScope::Active`), so one lookup over
+  `snapshot.projects()` answers §7.10's "an id naming no active
+  project (unknown, or archived)" both ways: the refusal is the
+  `project_update` envelope (`rejected_field("project_id", bounded,
+"no active project has this id")`), decided inside the transaction
+  where the read runs. The mutation proof for the archived arm
+  therefore lives at the store's scope (`ListScope::Active` → `All`
+  reddens the test) — the decision point is inherited, not local.
+- **The target path is phase 0's own TEXT spelling, reused**:
+  `sync_phase0::target_path_text` went `pub(crate)` (the D-149
+  one-spelling law) and the join is the same
+  `root.join(target_file_name(scheme, base_name))` §9.4 phase 1
+  step 2 spells — before symlink resolution (the preview never
+  touches the filesystem).
+- **No SYS-005, no journal, no mirror** (the `sync_status`/D-138
+  read-command shape): failures reach the file log through one
+  `project_build_preview_failed` facade edge (the
+  `projects_list_failed` shape, projects target) — including the id
+  refusal, the honest `NoDatabase` recovery answer, and the snapshot
+  read's classified store errors; a successful read is silent.
+
+Landing: `src-tauri/src/project_build_preview.rs` (the command, the
+`BuildPreview { target_path, text }` DTO, the impl split the family
+way), `logging::project_build_preview_failed` (the one edge, with its
+pin test), `lib.rs` registration (the fifty-first, sorted after
+`project_archive`; module docs and the command-list comment grown),
+`src/bindings.ts` regenerated through the export pin (red → rewritten
+→ green, D-034), `sync_phase0.rs`'s `target_path_text` shared, the
+wire frontend (`contract.ts`'s `BuildPreview` re-export, the mock
+layer's `projectBuildPreview` — the ALG-002/020…023/030 twins over
+`MockState` (`normalizeVariantText`, `composeExtend`,
+`readingLineOf`, `managedTextOf`, `buildMockBody`) plus the
+`mockTargetPath` helper the `syncRun` stand-in now shares (one
+spelling, mock edition) — and `mode.spec`'s surface list at 51),
+ARCHITECTURE.md's module table, count and the command's IPC-section
+sentence, and `build_snapshot.rs`'s landing-zone note turned from
+"the future command" into "the read-side consumer" (rule 11: the
+marker was true until it landed).
+
+The battery (`project_build_preview_tests.rs`, mock-IPC): the
+done-when's own oracle — three tests drive a REAL sync (§9.4 phases
+0–3 over a temp Git repository, the real §9.5 write, the fixed
+marker clock) per scheme and compare the written FILE byte for byte
+with the answer the command gave before the run — scheme A with BOTH
+reading lines enabled (the D-21 lines flow through preview and write
+alike, the file is `text + empty line + marker + break`), scheme C
+(the extras stored but gated out by ALG-030's "(A only)", the target
+`<STEM>.project.md`), scheme B (the phase-3 suite's splice literal
+over the preview's text — the block between the markers, never the
+outside); the extend composition (both halves joined, the empty
+supplement contributing nothing), the empty column (empty text, path
+still answered), the refusal (archived, unknown, and the 64-code
+point bounded echo), the held-sync read (no SYS-005), the
+recovery-mode answer, and the registration pin. The mock battery
+(`commands.spec.ts`): scheme A's composed text + path + journal
+untouched, scheme B's managed-block-only answer, scheme C's path and
+empty column, the ALG-002 twin over edge-whitespace content (the
+first content line's leading spaces survive — the core rule, first
+run red on a wrong expectation, fixed against the rule not the
+twin), and the refusal trio.
+
+Mutation battery (rule 4; each mutant restored byte-for-byte, the
+restore diff-verified): M1 the extras dropped from the assembly (the
+scheme-A real-sync test red); M2 the refusal's field mislabeled `id`
+(the refusal test red); M3 `build_snapshot::read`'s scope `Active` →
+`All` (the archived arm red — the decision point is the store's, the
+mutation also reddens the store's own scope pins, the inherited-
+behavior posture); M4 the target path joining `base_name` under every
+scheme (the scheme-C test red); M5 a SYS-005 gate wrongly added (the
+held-sync test red); M6 a marker line appended to the text (all three
+real-sync tests red — the byte-exact equality IS the no-marker pin).
+Mock twins: FM1 the normalize twin skipped (the compose and
+normalize tests red); FM2 the refusal's field mislabeled (the
+refusal test red); FM3 the scheme gate dropped from the parts
+(the scheme-B test red).
+
+The UI half of MAIN-033 — the File-preview modal itself (the shared
+modal, the monospace path, the `markdown_preview` rendering, the
+empty-column note, the two entry points) — is the UI task's scope,
+reported as a follow-up; this task's contract is the read the modal
+will call.
+
+**Round-1 review addendum (same task, 2026-11-27; report
+`.opencode/reviews/t358-round1-report.md`, deepseek-v4.1-flash, exit 0):
+APPROVE WITH NITS — 0×P0, 0×P1, 0×P2, 4×P3; the done-when audit and
+the test audit both PASS.** All four findings were re-verified
+in-session before acting; the dispositions:
+
+- _P3-1 TAKEN_ — the mock refusal's `message_key` drifted
+  (`validation.invalid_value`, the `projectArchive` arm's older
+  spelling) where the real `rejected_field` refusal — and the
+  `projectUpdate` twin's own round-1 correction — carry
+  `errors.validation`; the new arm now mirrors its backend, with the
+  comment naming the carded mock-wide sweep.
+- _P3-2 REJECTED (reason recorded)_ — ARCHITECTURE.md's module-table
+  row for `src/project_build_preview.rs` pushes the comment column
+  four places right: the file name (24 characters) is wider than the
+  table's fixed comment column, so no padding can align it, and the
+  alternatives — renaming the file or re-flowing thirty-five
+  untouched rows — cost more than the cosmetic break they fix. The
+  row keeps its single space.
+- _P3-3 TAKEN_ — the read's "no write of any kind, no journal" was
+  structural only (the reviewer's exact framing: a preview-side write
+  would be masked by the sync that follows). The battery gained the
+  pins: the scheme-A drive asserts the journal row count around the
+  call and the target's absence after it, scheme C and the empty
+  column the target's absence, and scheme B (whose target exists —
+  the marked fixture) byte equality around the call. Two new
+  mutations verify them: M7 a rogue `std::fs::write` in the command
+  reddens exactly the four pin-carrying tests, M8 a rogue
+  `action_log::insert` inside the read's transaction reddens the
+  journal pin.
+- _P3-4 TAKEN_ — the real-sync oracle now seeds a `## Style` heading
+  over the assigned instruction in the scheme-A drive (the round's
+  exact fix), so MAIN-033's "headings by ALG-020" sentence rides the
+  byte-exact file comparison too, not only the mock twin.
+
+**Round-2 review addendum (same task, 2026-11-27; report
+`.opencode/reviews/t358-round2-report.md`, hy4-flash-free — the next
+different model per the chain, exit 0): APPROVE — 0×P0/P1/P2/P3.**
+Every round-1 disposition was independently re-verified as landed
+(including the P3-2 rejection's reason — the name cell really is
+wider than the table's fixed column), the done-when audit and the
+test audit both PASS again, and no finding was raised. The round's
+one precision note (explicitly not a finding) was taken: this
+addendum's column-shift number corrected from three to four (the
+measured `#` offset). The review phase ends here (two rounds, no
+third).

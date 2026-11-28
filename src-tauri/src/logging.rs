@@ -1829,6 +1829,33 @@ pub(crate) fn project_update_failed(error: &AppError) {
     );
 }
 
+/// The `project_build_preview` command failed (T-358, §10's
+/// every-error rule): the `projects_list_failed` shape over this
+/// command's own reachable classes — a READ's failure edge, so the
+/// reachable §10 answers are the typed `E_VALIDATION` refusal of an
+/// id no ACTIVE row matches (unknown, or archived — the
+/// `project_update` envelope, decided inside the one read
+/// transaction), the honest `NoDatabase` fallback (recovery mode),
+/// and the classified store errors of the snapshot read
+/// ([`crate::dirty_recalc::build_snapshot_to_app_error`]'s arms —
+/// the shared SQLite base classifier for `Sql`, the D-037 fallback
+/// for a corrupt vocabulary cell, class-only text, SEC-008's rule:
+/// stored library text never reaches the log line). A successful
+/// read is never journaled and logs nothing (reading is not an event
+/// — the `activity_list` rationale); the answer's text is content,
+/// not a diagnostic, and never rides a log line either.
+pub(crate) fn project_build_preview_failed(error: &AppError) {
+    tracing::error!(
+        target: "eunomia::projects",
+        code = error.code.as_str(),
+        params = ?error.params,
+        os_code = ?error.details.as_ref().and_then(|details| details.os_code),
+        os_kind = ?error.details.as_ref().and_then(|details| details.os_kind.as_deref()),
+        os_message = ?error.details.as_ref().and_then(|details| details.os_message.as_deref()),
+        "building the project preview failed"
+    );
+}
+
 /// The `projects_list` command failed (T-244, §10's every-error rule,
 /// closing the gap D-096 recorded for T-072): the
 /// `projects_reorder_failed` shape — the reachable §10 answers are the
@@ -5209,6 +5236,52 @@ mod tests {
                 && log
                     .contains("os_message=Some(\"a stored state cell is outside its vocabulary\")"),
             "the corrupt-cell line carries the corrupt-cell diagnostic, got: {log}"
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn the_project_build_preview_failure_line_carries_the_code_and_payload() {
+        // The preview read's §10 edge (T-358), in the
+        // `projects_list` pin shape: the reachable classes are the
+        // typed refusal of a stale screen's id (E_VALIDATION naming
+        // `project_id` — the `project_update` envelope) and the
+        // honest no-database fallback (E_DB_LOCKED with the
+        // `NoDatabase` diagnostic). A successful read logs nothing;
+        // that half is structural (no tracing call exists on the
+        // answer path — the command returns before the edge).
+        let (temp, root) = logs_dir();
+        let (subscriber, guard) = build_file_subscriber(&root, LogLevel::Error)
+            .expect("building the subscriber must work");
+        let refusal = crate::commands::rejected_field(
+            "project_id",
+            "stale-id",
+            "no active project has this id",
+        );
+        let mut no_database = AppError::new(crate::errors::ErrorCode::DbLocked);
+        no_database.details = Some(crate::errors::ErrorDetails {
+            os_code: None,
+            os_kind: Some("NoDatabase".to_owned()),
+            os_message: Some("no database is running (recovery mode?)".to_owned()),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            project_build_preview_failed(&refusal);
+            project_build_preview_failed(&no_database);
+        });
+        drop(guard);
+
+        let log = read_log_file(&root);
+        assert!(
+            log.contains("building the project preview failed")
+                && log.matches("code=\"E_VALIDATION\"").count() == 1
+                && log.contains("\"field\": \"project_id\"")
+                && log.contains("\"value\": \"stale-id\"")
+                && log.contains("\"reason\": \"no active project has this id\"")
+                && log.contains("code=\"E_DB_LOCKED\"")
+                && log.contains("os_kind=Some(\"NoDatabase\")"),
+            "both preview read edges carry their own message, the code \
+             literal and their params, got: {log}"
         );
         drop(temp);
     }

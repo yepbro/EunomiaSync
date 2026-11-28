@@ -74,12 +74,12 @@
 //! and the ALG-002 normalization is a build-pipeline step, not a
 //! snapshot concern.
 //!
-//! The future `project_build_preview` command (MAIN-033, §7.10 —
-//! T-358) is the read-side consumer of exactly this value: the next
-//! sync's managed content is `build_snapshot::read` +
+//! The `project_build_preview` command (MAIN-033, §7.10 — T-358) is
+//! the read-side consumer of exactly this value: the next sync's
+//! managed content is `build_snapshot::read` +
 //! `eunomia_core::body::build_body` + the §9.3 scheme assembly in one
 //! read transaction, and the extend composition already flows through
-//! both halves — no new build path is needed for it.
+//! both halves — no new build path was needed for it.
 
 use std::collections::HashMap;
 use std::fmt;

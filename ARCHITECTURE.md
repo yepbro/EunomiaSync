@@ -93,6 +93,7 @@ src-tauri/
   src/logging.rs           # File log: daily + 10 MB rotation, 5-file cap (working)
   src/markdown.rs          # Markdown preview renderer (pulldown-cmark; preview only) (working)
   src/project_archive.rs   # project_archive command: §6.4 row transition + PRJ-017 exclusion (working)
+  src/project_build_preview.rs # project_build_preview command: MAIN-033's read — the next sync's managed text, marker excluded (working)
   src/project_relink.rs    # project_relink command: D-09 Locate path transition + project.changed journal + mutation-seam watch refresh (working)
   src/project_restore.rs   # project_restore command: §6.4 row transition back + reason-agnostic exclusion removal + mutation-seam watch refresh (working)
   src/project_update.rs    # project_update command: PRJ-008/PRJ-012 patch + project.changed journal + mutation-seam watch refresh (working)
@@ -194,7 +195,7 @@ Rust commands are registered through `tauri-specta`:
    registration pins the concrete runtime (`::<tauri::Wry>`).
 2. The command is added to `collect_commands![...]` in
    `src-tauri/src/lib.rs`.
-   The registered set is fifty commands — the §7.10 names that
+   The registered set is fifty-one commands — the §7.10 names that
    are implemented so far, matching the `mode.spec` surface list. It comprises the
    recovery-screen group of
    the System module (spec §7.10/D-009): `app_open_data_folder`,
@@ -247,6 +248,17 @@ Rust commands are registered through `tauri-specta`:
    assignments, the stored sync hash and the folder are untouched
    (DB-014), and the SYS-005 gate answers `E_SYNC_RUNNING` while a
    sync holds the flag — the Projects module's
+   `project_build_preview` (T-358,
+   `src-tauri/src/project_build_preview.rs`, MAIN-033): the READ
+   behind the File-preview modal — one `Db::run` transaction reads
+   the §9.1 build snapshot (the `build_snapshot` landing zone) and
+   builds the managed content over it (§9.2/§9.3, the same
+   `build_body`/`managed_text` seams the sync's own build composes),
+   answering the target path (§9.4 phase 1 step 2's spelling) and
+   the text WITHOUT the creation marker; scheme B answers the
+   managed block only; no SYS-005 gate, no journal, and an id naming
+   no active project (unknown, or archived) is the `project_update`
+   `E_VALIDATION` refusal — the Projects module's
    `project_restore` (T-109, `src-tauri/src/project_restore.rs`,
    DECISIONS.md D-205): the §6.4 restore — one id-addressed
    `Db::run` transaction returning the row to `active` (its

@@ -1107,6 +1107,155 @@ function sameStructure(left: readonly MockLibraryRow[], right: readonly MockLibr
 const OUTPUTS_NO_TEXT = /^(\u{FEFF}|[ \t\f\r ]*\n)*[ \t\f\r ]*$/u
 const outputsNoText = (content: string): boolean => OUTPUTS_NO_TEXT.test(content)
 
+// ---------------------------------------------------------------------------
+// The build-preview twins (T-358): ALG-002/020…023/030 over the mock store,
+// the Rust pipeline's own composition mirrored from `MockState` — no core
+// exists on this side of the wire, so each rule is a small twin of the
+// crate's, its contract pinned by the mock battery's literals.
+// ---------------------------------------------------------------------------
+
+/**
+ * ALG-002's twin (`eunomia_core::normalize::variant_text`): CRLF and a
+ * lone CR become LF, the leading BOM run and empty lines are dropped
+ * (interleaved — a BOM can hide behind an empty line), all trailing
+ * ASCII whitespace of the block goes, and everything inside the text
+ * survives untouched.
+ */
+function normalizeVariantText(content: string): string {
+  const converted = content.replace(/\r\n|\r/g, '\n')
+  let text = converted.replace(/[ \t\n\f\r]+$/u, '')
+  // The leading-edge fixed point: {strip the BOM run, drop the empty
+  // lines} until neither consumes anything (an empty line is one whose
+  // characters are all ASCII whitespace).
+  for (;;) {
+    const withoutBom = text.replace(/^\u{FEFF}+/u, '')
+    const withoutEmptyLines = withoutBom.replace(/^(?:[ \t\f\r]*\n)*/u, '')
+    if (withoutEmptyLines === text) break
+    text = withoutEmptyLines
+  }
+  return text
+}
+
+/**
+ * ALG-023's twin (`body::compose_extend`): the non-empty halves of the
+ * normalized base and supplement joined by exactly one blank line; an
+ * empty half contributes nothing, both empty contribute nothing.
+ */
+function composeExtend(base: string, supplement: string): string {
+  if (base === '' && supplement === '') return ''
+  if (supplement === '') return base
+  if (base === '') return supplement
+  return `${base}\n\n${supplement}`
+}
+
+/** The D-21 reading-line sentence for one extra-file name (the
+ * `extra_files::reading_line` twin): the stem is AGENTS or CLAUDE. */
+function readingLineOf(baseName: MockProjectBaseName, suffix: '.project.md' | '.local.md'): string {
+  const stem = baseName === 'AGENTS.md' ? 'AGENTS' : 'CLAUDE'
+  return `If ${stem}${suffix} exists in the repository root, read it before starting work and follow its instructions.`
+}
+
+/**
+ * ALG-030's part list over the mock row (the `target_file::
+ * managed_text` twin): scheme A splices the enabled reading lines
+ * around the body — ONE position's lines are ONE part of adjacent
+ * lines (`.project.md` before `.local.md` in a shared position,
+ * §7.5; only neighbouring parts get the empty line) — schemes B and C
+ * take the body alone, and a part that does not exist (a disabled
+ * option, an empty body) leaves no trace.
+ */
+function managedTextOf(row: MockProjectRow, body: string): string {
+  const parts: string[] = []
+  if (row.scheme === 'A') {
+    const linesAt = (position: MockHintPosition): string[] => {
+      const lines: string[] = []
+      if (row.extraProjectEnabled && row.extraProjectPosition === position) {
+        lines.push(readingLineOf(row.baseName, '.project.md'))
+      }
+      if (row.extraLocalEnabled && row.extraLocalPosition === position) {
+        lines.push(readingLineOf(row.baseName, '.local.md'))
+      }
+      return lines
+    }
+    const start = linesAt('start')
+    if (start.length > 0) parts.push(start.join('\n'))
+    if (body !== '') parts.push(body)
+    const end = linesAt('end')
+    if (end.length > 0) parts.push(end.join('\n'))
+  } else if (body !== '') {
+    parts.push(body)
+  }
+  return parts.join('\n\n')
+}
+
+/**
+ * The §9.2 body over the mock store (the `body::build_body` twin):
+ * headings whose section holds at least one ACTIVE assigned
+ * instruction (ALG-020 — an empty or custom/extend cell counts alike),
+ * each included instruction's effective text after ALG-002 (a variant
+ * target's current text, the custom text, or the ALG-023 composition
+ * of an extend cell whose base is read NOW), no instruction names
+ * (ALG-022), blocks joined by exactly one empty line.
+ */
+function buildMockBody(state: MockState, projectId: string): string {
+  const assigned = new Map<string, AssignmentTargetWire>()
+  for (const row of state.assignments) {
+    if (row.projectId === projectId) assigned.set(row.instructionId, row.target)
+  }
+  const rows = orderedLibrary(state)
+  const blocks: string[] = []
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]
+    if (row.kind === 'heading') {
+      // ALG-020: the section runs to the next heading of the same or
+      // a higher level; the heading goes in when any item inside is
+      // an included instruction.
+      let end = rows.length
+      for (let later = index + 1; later < rows.length; later += 1) {
+        const candidate = rows[later]
+        if (candidate.kind === 'heading' && candidate.headingLevel <= row.headingLevel) {
+          end = later
+          break
+        }
+      }
+      const includes = rows
+        .slice(index + 1, end)
+        .some(
+          (item) => item.kind === 'instruction' && item.state === 'active' && assigned.has(item.id),
+        )
+      if (includes) blocks.push('#'.repeat(row.headingLevel) + ' ' + row.title)
+    } else if (row.state === 'active' && assigned.has(row.id)) {
+      const target = assigned.get(row.id)
+      if (!target) continue
+      const variantContent = (variantId: string): string =>
+        row.variants.find((variant) => variant.id === variantId && variant.state === 'active')
+          ?.content ?? ''
+      const text =
+        target.kind === 'variant'
+          ? normalizeVariantText(variantContent(target.value))
+          : target.kind === 'custom'
+            ? normalizeVariantText(target.value)
+            : composeExtend(
+                normalizeVariantText(variantContent(target.value.base)),
+                normalizeVariantText(target.value.supplement),
+              )
+      if (text !== '') blocks.push(text)
+    }
+  }
+  return blocks.join('\n\n')
+}
+
+/**
+ * The built target path of a mock project row — the §9.4 phase-1
+ * step-2 spelling (`<root>/<base_name>` or `<root>/<STEM>.project.md`
+ * under scheme C), the one join the `syncRun` stand-in's rows and the
+ * preview answer share (the D-149 one-spelling law, mock edition).
+ */
+function mockTargetPath(row: MockProjectRow): string {
+  const fileName = row.scheme === 'C' ? row.baseName.replace(/\.md$/, '.project.md') : row.baseName
+  return `${row.path.replace(/\/$/, '')}/${fileName}`
+}
+
 export const mockCommands: IpcCommands = {
   /** `projects_list` (§7.10): column order is `sort_order` (ALG-001). */
   async projectsList(includeArchived) {
@@ -1621,6 +1770,42 @@ export const mockCommands: IpcCommands = {
       projectId: row.id,
     })
     return null
+  },
+
+  /**
+   * `project_build_preview` (§7.10, MAIN-033, T-358): the read that
+   * answers what the next sync would write — the target path and the
+   * current managed content built from the mock store (§9.2/§9.3 over
+   * the mock's own rows, the ALG-002/020…023/030 twins above), WITHOUT
+   * the creation marker; scheme B answers the managed block only (no
+   * file exists here to splice, so the block IS the answer). The
+   * unknown-or-archived arm is the `project_update` refusal shape
+   * (E_VALIDATION naming `project_id`, the id echoed bounded); a read
+   * journals nothing and never touches the `E_SYNC_RUNNING` gate (no
+   * flag state exists here — the real command has none either: §7.10
+   * says "a read, no SYS-005 gate").
+   */
+  async projectBuildPreview(projectId) {
+    const state = mockState()
+    const row = state.projects.find((row) => row.id === projectId && row.state === 'active')
+    if (!row) {
+      // The real `rejected_field` refusal's own key (the
+      // `projectUpdate` twin's correction, round 1's P3-1 here:
+      // `errors.validation`, not the older id arms' drifted
+      // `validation.invalid_value` — a mock-wide sweep is carded,
+      // this command mirrors its own backend) — and D-115's cap: the
+      // real refusal echoes the caller's id bounded.
+      return rejectWith('E_VALIDATION', 'errors.validation', {
+        field: 'project_id',
+        value: boundedEcho(projectId),
+        reason: 'no active project has this id',
+      })
+    }
+    const body = buildMockBody(state, row.id)
+    return {
+      target_path: mockTargetPath(row),
+      text: managedTextOf(row, body),
+    }
   },
 
   /**
@@ -2629,9 +2814,7 @@ export const mockCommands: IpcCommands = {
     const now = new Date().toISOString()
     const runId = freshRowId()
     const projects = rows.map((row) => {
-      const fileName =
-        row.scheme === 'C' ? row.baseName.replace(/\.md$/, '.project.md') : row.baseName
-      const target = `${row.path.replace(/\/$/, '')}/${fileName}`
+      const target = mockTargetPath(row)
       if (!row.available) {
         journal('sync.project_result', {
           level: 'warn',

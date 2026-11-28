@@ -800,6 +800,183 @@ describe('projectArchive', () => {
   })
 })
 
+describe('projectBuildPreview (T-358, MAIN-033)', () => {
+  /** The first two ACTIVE project rows — the mock store's own rows are
+   * the seed; each test pins their write settings. */
+  const activeRows = (): MockProjectRow[] => {
+    const rows = mockState()
+      .projects.filter((row) => row.state === 'active')
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+    if (rows.length < 2) throw new Error('two active projects must exist')
+    return rows
+  }
+
+  /** A deterministic one-heading library: `## Style` over one active
+   * instruction whose Main carries a two-paragraph body (the fixture
+   * world's shapes are rng-driven; the preview's expected text is a
+   * literal, so the world must be one). */
+  const seedLibrary = (state: ReturnType<typeof mockState>): void => {
+    const at = '2026-11-27T10:00:00.000Z'
+    state.library = [
+      {
+        kind: 'heading',
+        id: 'heading-style',
+        position: 1,
+        headingLevel: 2,
+        title: 'Style',
+        state: 'active',
+        createdAt: at,
+        updatedAt: at,
+      },
+      {
+        kind: 'instruction',
+        id: 'instruction-brief',
+        position: 2,
+        title: 'Be brief',
+        state: 'active',
+        variants: [
+          {
+            id: 'variant-main',
+            name: 'Main',
+            content: 'Be brief.\n\nRun the checks.',
+            isMain: true,
+            state: 'active',
+            createdAt: at,
+            updatedAt: at,
+            deletedAt: null,
+          },
+        ],
+        createdAt: at,
+        updatedAt: at,
+      },
+    ]
+    state.assignments = []
+  }
+
+  it("composes scheme A's managed text and answers the target path", async () => {
+    // ALG-030/020…023 over the mock rows: the enabled reading line
+    // splices around the assigned cell's normalized text (the heading
+    // by ALG-020, the extend cell composed per ALG-023), the blocks
+    // joined by exactly one blank line — the same text the backend
+    // command builds from the same-shaped state (the real-sync
+    // oracle lives in the Rust battery; here the literals are the
+    // oracle).
+    const state = mockState()
+    const [row] = activeRows()
+    seedLibrary(state)
+    row.scheme = 'A'
+    row.baseName = 'AGENTS.md'
+    row.extraProjectEnabled = true
+    row.extraProjectPosition = 'start'
+    row.extraLocalEnabled = false
+    const extended = await commands.assignmentSetCustom(
+      row.id,
+      'instruction-brief',
+      'plus more\r\n',
+      'extend',
+    )
+    expect(extended?.target).toEqual({
+      kind: 'extend',
+      value: { base: 'variant-main', supplement: 'plus more\n' },
+    })
+    // The write command above journaled; the preview (a read) must add
+    // nothing to that.
+    const journalBefore = state.activity.length
+
+    const preview = await commands.projectBuildPreview(row.id)
+    expect(preview.target_path).toBe(`${row.path}/AGENTS.md`)
+    expect(preview.text).toBe(
+      'If AGENTS.project.md exists in the repository root, read it before starting \
+work and follow its instructions.\n\
+\n\
+## Style\n\
+\n\
+Be brief.\n\
+\n\
+Run the checks.\n\
+\n\
+plus more',
+    )
+    expect(preview.text).not.toContain('Created by EunomiaSync')
+    expect(state.activity).toHaveLength(journalBefore)
+  })
+
+  it('answers the managed block only for scheme B, ignoring the reading lines', async () => {
+    const state = mockState()
+    const [row] = activeRows()
+    seedLibrary(state)
+    row.scheme = 'B'
+    row.baseName = 'CLAUDE.md'
+    row.extraProjectEnabled = true
+    row.extraProjectPosition = 'end'
+    row.extraLocalEnabled = true
+    row.extraLocalPosition = 'end'
+    await commands.assignmentSet(row.id, 'instruction-brief', true, 'variant-main')
+
+    const preview = await commands.projectBuildPreview(row.id)
+    expect(preview.target_path).toBe(`${row.path}/CLAUDE.md`)
+    expect(preview.text).toBe('## Style\n\nBe brief.\n\nRun the checks.')
+    expect(preview.text).not.toContain('read it before starting work')
+  })
+
+  it('answers the scheme-C project path and empty text for an empty column', async () => {
+    const state = mockState()
+    const [row] = activeRows()
+    seedLibrary(state)
+    row.scheme = 'C'
+    row.baseName = 'AGENTS.md'
+    row.extraProjectEnabled = false
+    row.extraLocalEnabled = false
+    // A column with no assignments: the empty text (MAIN-033's note
+    // is the modal's own), the path still answered.
+    const preview = await commands.projectBuildPreview(row.id)
+    expect(preview.target_path).toBe(`${row.path}/AGENTS.project.md`)
+    expect(preview.text).toBe('')
+  })
+
+  it('normalizes the cells texts per ALG-002 before joining', async () => {
+    // The ALG-002 twin: a stored CRLF body with edge whitespace and a
+    // BOM builds the normalized block — the leading empty lines, the
+    // BOM and the trailing whitespace go, while the first CONTENT
+    // line's own leading spaces survive (ALG-002's rule: they are
+    // inside the text from there on).
+    const state = mockState()
+    const [row] = activeRows()
+    seedLibrary(state)
+    row.scheme = 'C'
+    const brief = state.library[1]
+    if (brief?.kind !== 'instruction') throw new Error('the seeded instruction must exist')
+    brief.variants[0]!.content = '\u{FEFF}\r\n\r\n  Be brief.  \r\n\n'
+    await commands.assignmentSet(row.id, 'instruction-brief', true, 'variant-main')
+
+    const preview = await commands.projectBuildPreview(row.id)
+    expect(preview.text).toBe('## Style\n\n  Be brief.')
+  })
+
+  it('refuses an archived or unknown id with the project_update envelope', async () => {
+    const state = mockState()
+    const archived = state.projects.find((row) => row.state === 'archived')
+    if (!archived) throw new Error('the fixture world must hold an archived project')
+    const journalBefore = state.activity.length
+    for (const id of [archived.id, 'no-such-project']) {
+      await expect(commands.projectBuildPreview(id)).rejects.toMatchObject({
+        code: 'E_VALIDATION',
+        params: {
+          field: 'project_id',
+          value: id,
+          reason: 'no active project has this id',
+        },
+      })
+    }
+    // D-115's cap, the bounded echo.
+    const longId = 'y'.repeat(70)
+    await expect(commands.projectBuildPreview(longId)).rejects.toMatchObject({
+      params: { value: `${'y'.repeat(64)} (+6 more code points)` },
+    })
+    expect(state.activity).toHaveLength(journalBefore)
+  })
+})
+
 describe('projectRestore', () => {
   it('restores an archived row, removes the exclusion, and journals it', async () => {
     // T-109/D-205's happy path over the mock store: the row flips
