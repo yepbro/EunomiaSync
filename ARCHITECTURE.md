@@ -818,9 +818,12 @@ file-log lines remain the whole journal of daily-copy creation: the
 creation" is the BKP-001 target-file family, not this database copy
 (see the boundary note on `logging::db_backup_daily`).
 
-Right after the daily copy and `app.manage`, the `setup` hook spawns
-the LOG-006 retention task (spec §7.7, §6.4 "Log and runs",
-DECISIONS.md D-054): `src-tauri/src/retention.rs` runs one cleanup
+After the daily copy, the invariants arm and the publication, the
+`setup` hook's shared tail spawns the LOG-006 retention task
+(spec §7.7, §6.4 "Log and runs",
+DECISIONS.md D-054) — after the dirty and watch services' own
+spawns, as the tail's third service (D-239's order map):
+`src-tauri/src/retention.rs` runs one cleanup
 pass immediately (asynchronously — `setup` does not wait) and then
 once every 24 h, on `tauri::async_runtime` with `tokio::time::sleep`
 as the timer. One pass is one `Db::run` operation: both `log.*`
@@ -867,6 +870,29 @@ order-based, so the invariant-check arm between the daily copy and
 the manage step leaves them green; the arm's own teeth are the
 `db_verify_tests.rs` startup tests (a planted violation journaled,
 the launch continuing — the mutation-verified wiring pin).
+
+T-132 (D-239) assembled the whole §5.5 sequence around those pins:
+the hook's pre-open half (the §5.5 layout → `config.toml` (SYS-011)
+→ file logging → `Db::open`, whose own internal order — the DB-004
+too-new gate, the §6.3 quick_check gate, the pragma open, the
+migrations with D-038's pre-migration copies — is a second source
+pin), then the tail above, then the state services in their spawn
+order (the DB-022 dirty recalc's startup pass first — its own
+startup permit, D-121; the §5.7 watch listener before the watch
+service; the LOG-006 retention task; DB-032's availability recheck
+deliberately last, after the listener it emits through exists). The
+order map, the two integration batteries (an empty and an existing
+database, through the real open path), and the §12.2 window-ready
+budget on set L live in `startup_tests.rs`; the budget reading is
+D-239's — the backend's synchronous share measured against the 2 s
+row with a documented CI margin, the release verdict a rerun on the
+reference machine, and the await-class regression caught by the
+structure pin (the tail returns while the first set-L dirty pass is
+still running), not by the clock. The sequence ends at the
+availability recheck: UPD-001's startup update check is T-134's
+scope, and the tail's end carries the seam comment marking where
+that step belongs (spawned, never awaited — the same NFR-002
+posture), not a stub.
 
 **Recovery mode** (spec §10 `E_DB_CORRUPT` row, §7.10 command notes;
 DECISIONS.md D-049): when the startup open fails the quick_check gate,

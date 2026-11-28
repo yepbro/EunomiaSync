@@ -1000,6 +1000,10 @@ impl StateServices {
 /// 5. **The state services** over the published database, in an order
 ///    of their own (each step's reason is at the step).
 ///
+/// The sequence ends there today; UPD-001's startup update check
+/// (§7.9, "if turned on in settings") is T-134's scope — the seam is
+/// marked at the tail's end, where that step belongs when it lands.
+///
 /// Infallible by contract: nothing here can fail the open that
 /// succeeded — every refusal degrades through the facade. One-shot
 /// per session: the callers' own guards make a second call
@@ -1137,6 +1141,18 @@ pub(crate) fn start_database_session<R: Runtime>(app: &AppHandle<R>, mut databas
     // unavailable (the baseline rule — `availability.rs` module
     // docs); a failure is logged through the facade, never fatal.
     availability::spawn_recheck(app.clone());
+    // UPD-001's startup half (§7.9: "Update check at startup (if
+    // turned on in settings)") is deliberately NOT here — T-134's
+    // scope, the command task that owns the whole updater surface.
+    // This comment is the seam, not a stub: no code runs for it
+    // today, and the honest startup sequence therefore ends with the
+    // availability recheck above. When it lands, the check belongs
+    // at this tail's end (the task card's order closes the startup
+    // sequence with it), reading its enablement through the managed
+    // database (§6.5's settings, the same state every command reads)
+    // — and it must SPAWN, never be awaited: a network round-trip on
+    // the launch path would breach the same NFR-002 window budget
+    // the passes above are spawned for (§12.2, UPD-001).
 }
 
 #[cfg(test)]
@@ -1225,6 +1241,12 @@ mod backups_tests;
 
 #[cfg(test)]
 mod db_verify_tests;
+
+// T-132's startup-sequence suite: the §5.5 order pins, the two
+// integration batteries (empty and existing database, over the real
+// open path), and the §12.2 window-ready budget on set L.
+#[cfg(test)]
+mod startup_tests;
 
 #[cfg(test)]
 mod tests {

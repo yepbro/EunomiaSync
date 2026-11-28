@@ -31579,3 +31579,326 @@ findings taken; none declined:
   paragraph's later note, D-203/D-238)"); the detailed note already
   carried the contract — only the first mention was silent. The
   review phase ends here (two rounds, no third).
+
+### D-239 — T-132: the §5.5 startup sequence assembled — the order map (every spec step matched, the card-paraphrase deviations owned by recorded readings), the two integration batteries, the 2 s budget on set L, and the UPD-001 seam — 2026-11-28
+
+Problem: the card ("[Backend] Assemble the application startup
+sequence") names a fourteen-step order — data directory, log, DB
+open, quick_check, version check, the pre-migration copy,
+migrations, the daily copy, invariants, interrupted runs, journal
+cleanup, project availability, the dirty recalc, the update check
+(if enabled) — with spec anchors §5.5, ERR-001, LOG-006, §9.4
+(Recovery), DB-022, UPD-001, §12.2, and a done-when of "an
+integration test of startup on an empty and on an existing DB; the
+window is ready within 2 s on the L set". The essence is as much
+verification as implementation: most steps exist individually (the
+card's own dependency list — all done), so the task is to map the
+spec's order against `start_database_session` and the setup path,
+fix any order deviation, and pin the sequence. Rule 1 before any
+code: the readings.
+
+1. **The spec imposes safety adjacencies, not a total order.** No
+   spec section lists the fourteen steps as a sequence; the card's
+   list is a paraphrase. What the spec DOES order, and what
+   therefore had to be verified and pinned: SYS-011 (config "before
+   logging and the database are set up"; §5.5 layout before all),
+   §6.3 + §10 (quick_check and the version gate at open, both
+   before the app "opens it for real" — the pragma set writes the
+   file), DB-004 (the pre-migration copy "before a migration"; a
+   newer version "not opened" — the app "does not change the
+   database"), ERR-001 (the daily copy "at every startup"), and —
+   by recorded reading, D-230 — the daily copy BEFORE the
+   invariants arm (the copy is the day's as-found snapshot). The
+   order map verified every one of these against the code; all
+   hold.
+2. **Four deviations from the card's paraphrase are recorded
+   readings, not spec violations — none was "fixed".** (a) The
+   version gate runs BEFORE quick_check, not after (db.rs: the
+   cheaper `user_version` read rejects a newer database before the
+   page-walking `quick_check` pays for it; both precede every
+   write — behaviorally pinned by `db_tests.rs`'s
+   `a_too_new_and_damaged_database_answers_too_new_first` and the
+   T-F11 byte-identity batteries). (b) The interrupted sweep is
+   the tail's FIRST step, not a step after the invariants arm
+   (D-147: the marking must precede the commit hook, and the
+   invariants arm requires the hook — the card's placement is
+   infeasible under the recorded readings; §9.4 itself orders
+   nothing between them). (c) The LOG-006 retention task is
+   spawned after the dirty and watch services, not before
+   availability (LOG-006 demands "at startup and once a day" only;
+   the dirty spawn's startup trigger is sent before the spawn —
+   D-121's coalescing note). (d) The availability recheck is
+   deliberately LAST (the watch listener must be registered before
+   the recheck can emit — the tail's own documented constraint).
+   The card's pin instruction names exactly the adjacencies that
+   matter (copy-before-migrations, quick_check-before-write,
+   version-before-migrations, daily-copy-before-invariants); the
+   paraphrase's other placements are not spec orders. No
+   production reorder was made; recording this is the order map's
+   verdict column.
+3. **The budget's honest reading** (§12.2: "Startup until the
+   window is ready (set L): no more than 2 s"; NFR-002): what a
+   unit harness can measure is the backend's synchronous share —
+   the whole sequence (layout, config, logging, the open with its
+   gates, the tail's synchronous steps) — a necessary condition of
+   the row (the window cannot be ready before the backend is);
+   the webview's own load is the e2e scripts' half. The CI assert
+   carries a documented 2× margin: §12.2's own wording settles
+   where the 2 s verdict lives ("checked with a benchmark before
+   release on a reference machine" — CI is not that machine, and
+   CI runs the DEBUG profile, where the sequence's measured share
+   is several times its release cost) — the D-135 "reference
+   machine, honestly" standing ruling. The await-class regression
+   — the thing the budget actually protects against — is caught
+   DETERMINISTICALLY, not by the clock: the structure pin (below)
+   proves the tail returns while the first dirty pass is still
+   running on the L world.
+4. **The UPD-001 seam is documented, not stubbed.** The update
+   check ("if turned on in settings") is T-134's scope (the
+   command task that owns the whole updater surface — the updater
+   module already exists, D-023/D-229, but no startup wiring
+   does). The tail's end now carries the seam comment — where the
+   step belongs (the task card's order closes with it), what it must
+   read (§6.5 settings through the managed database), and the
+   shape it must take (spawned, never awaited — the same NFR-002
+   posture). No code runs for it; faking a step the card's
+   dependencies list marks pending would violate Rule 11.
+
+Solution: `src-tauri/src/startup_tests.rs` (registered in
+`lib.rs` beside the other suites), five tests — the full-order
+source pin (the fourteen markers of `lib.rs`, each exactly-once,
+ascending: the layout/config/logging/open of the hook plus the
+tail's sweep → commit hook → daily copy → invariant check →
+publication → dirty spawn → watch listener → watch service →
+retention spawn → availability spawn), the open-gates source pin
+(`db.rs`: too-new → quick_check → pragma open → migrations — the
+app-layer half of the safety adjacencies; the pre-migration
+copy's before-migrations position stays pinned where the code
+lives, the store's `schema_v2.rs` copy-content oracle, cited not
+duplicated), the empty-DB battery (config.toml, the log file, a
+fresh `Db` published, exactly one valid daily copy at the fully
+migrated schema, a silent journal, an empty `sync_runs`, the
+parked service start spent, the first dirty pass run, the
+availability slot released, no wire diff on either oracle), the
+existing-DB battery (a seeded world — an assigned project with a
+live `.git` root, a project whose folder is gone, one corpse run
+row, a 1050-row journal over `log.max_entries` = 1000 — where
+the sweep marks the corpse `interrupted` with the finish stamp
+and no error code while the settled row keeps its shape, the
+daily copy exists and preserves the rows, LOG-006's startup run
+prunes to the limit, the invariants stay silent, the dirty
+verdict converges (assigned → dirty, unassigned gone project →
+clean, the wire diff exactly the newly dirty project), and the
+availability pass reports exactly the gone project), and the
+set-L budget test (§12.2's row over the real sequence on the
+generator's L — 500 projects / 1000 instructions / 100k
+assignments, synthetic roots, the store's own L-suite precedent:
+the synchronous sequence never touches a project folder — the
+folder-touching passes are spawned, SYS-001/NFR-002 — so
+synthetic roots measure the same work; the elapsed asserted
+against the spec's 2 s × the documented CI margin; the structure
+pin — the tail returns with the first L verdict unrecorded and
+zero completed passes; then the convergence — the first L
+project reads dirty, DB-021's first clause, the state D-121's
+probe measured). `lib.rs` gains only the additive seam comment at
+the tail's end, one doc-paragraph note on the tail's order list,
+and the module registration; no order change, no behavior change
+— `git diff` is 22 added lines plus the new file. The
+composition fact the batteries rely on: `start_database_session`
+takes its states from the harness the same way the hook takes
+them from `setup` (the `db_verify_tests.rs` `session_app` shape),
+and the batteries drive the hook's healthy database half verbatim
+(the `run()` wrapper stays un-launchable under a unit harness —
+the house posture); the abort and recovery arms are `db_tests.rs`'
+s own batteries.
+
+Measurements (this 8-core dev box, DEBUG profile — the release
+profile and the reference machine are the §12.2 release gate, a
+rerun recorded as open exactly like D-135's bench numbers): the
+set-L fixture is 38.3 MB; the measured synchronous sequence is
+**916 ms** — `Db::open` 180 ms (the quick_check gate over every
+page, the no-op migration run, the protective-copy retention pass,
+the orphan report), the ERR-001 `VACUUM INTO` copy 182 ms, the
+§6.3 invariant sweep 541 ms (the dominant share: DB-016's
+ALG-002-oracle text walk over the 3000 variants, debug-build
+cost); the first dirty pass runs in the background and completes
+in ~2 s — the two-orders-of-magnitude margin the structure pin
+asserts on. The 2 s row therefore has ~2× headroom in debug on
+this box and several times that in the release profile; the CI
+assert's 4 s bound tolerates the shared-runner spread.
+
+Mutation discipline (each reverted byte-for-byte, `git diff`
+back to the 22-line additive change after every run): M1 the
+invariants arm hoisted above the daily copy → the full-order pin
+red; M2 the sweep moved below the commit hook → the full-order
+pin AND the existing ipc wiring pin red; M3 the availability
+recheck hoisted above the watch listener → the full-order pin
+red; M4 `db.rs`'s quick_check gate dropped below the pragma open
+→ the open-gates pin red; M5 a 5 s synchronous stall in the tail
+→ the budget assert red (the clock's teeth, 5.9 s > 4 s); M6 the
+startup pass awaited instead of spawned
+(`block_on(recalc_and_emit)`) → the structure pin red at its own
+assert line (the verdict-recorded observable — the first L
+project's verdict — catches the await class deterministically;
+the pass-count observable alone would not, `note_pass` being the
+service loop's, a subtlety the first cut of the pin missed and
+the mutation exposed); M7a the sweep disabled → both the
+existing-DB battery (the corpse assertion) and the ipc wiring
+pin red; M7b the daily copy disabled → both integration
+batteries red (the copy's existence is each battery's ERR-001
+assertion).
+
+Checks (synchronous, `CARGO_BUILD_JOBS=2`, memory checked first —
+19 GB free): `cargo test --no-run -p eunomia-sync` (exit 0), the
+full workspace nextest battery (2083/2083 — the five new tests
+green, the two pre-existing source pins untouched by the
+additive lib.rs lines), doc tests, clippy `-D warnings`, fmt
+`--check`, `cargo deny check` all green (exit codes); the
+frontend untouched — no `.ts`/`.vue` file changed (the bindings
+export pin ran green inside the battery: no command surface
+changed), so the pnpm trio does not apply.
+
+Follow-ups: (1) T-134 (the update-check command) inherits the
+seam — the tail's end comment names its position, its settings
+read, and its must-spawn shape; its D-entry should close this
+one's "documented, not stubbed" note. (2) The §12.2 release gate:
+a release-profile rerun of the startup sequence on the actual
+4-core reference machine — the same open obligation D-135's bench
+numbers carry; the dev-box debug measurement (916 ms) and the
+breakdown travel with this entry. (3) A candidate for the owner,
+not made here: the §6.3 invariant sweep is now the dominant
+synchronous startup cost on L (541 ms debug / a fraction of that
+in release); if the reference-machine rerun ever approaches the
+budget, the recorded options are profiling DB-016's prefilter or
+moving the sweep off the synchronous tail — a behavior decision
+each, neither sanctioned by this card.
+
+Round-1 review addendum (D-239, same task; report
+`.opencode/reviews/t132-round1-report.md`, deepseek-v4.1-flash,
+exit 0 — VERDICT: APPROVE WITH NITS — 0×P0, 0×P1, 4×P2, 4×P3; the
+reviewer independently re-ran the five new tests green (measuring
+the L sequence at 912.3 ms against this entry's 916 ms), the whole
+crate in the CI shape (`cargo test -p eunomia-sync --lib`, one
+process: 967/967), fmt/clippy on the crate, verified the
+`task-id-mcp` provenance of D-239 (`peek` answered 240 — issued,
+not pre-reserved), traced every claimed mutation's causal chain in
+the source, and confirmed the T-356 frozen surface untouched and
+the pre-migration-copy citation sound — `schema_v2.rs`'s oracle
+really proves the copy's content is the pre-step state) — findings
+processed:
+
+- **P2-1 (ARCHITECTURE's pre-existing sentence "Right after the
+  daily copy and `app.manage`, the `setup` hook spawns the LOG-006
+  retention task" contradicting the actual order and the new
+  paragraph — Rule 11) TAKEN**: reworded to the true shape (after
+  the daily copy, the invariants arm and the publication, as the
+  tail's third service behind the dirty and watch spawns). The same
+  finding named the pre-existing "right after the manage step"
+  wording in `db_tests.rs`'s comment — NOT touched: that file is
+  outside this card's sanctioned set, and its pin (open → daily →
+  manage → retention) is true as ordered; recorded as the follow-up
+  below instead of a silent out-of-lane edit.
+- **P2-2 (the seam comment and this entry saying "the spec's list
+  closes with it" while reading 1 records that no spec section
+  lists the steps — an internal contradiction of record) TAKEN**:
+  both spellings now say "the task card's order".
+- **P2-3 (the budget test's name claiming the 2 s row while the
+  assert is the documented CI bound — no automated check proves the
+  done-when's literal 2 s; the reading itself was judged
+  defensible, "not hidden evasion") TAKEN as the rename**: the test
+  is now `startup_on_set_l_fits_the_ci_budget_bound`, its docs
+  leading with what the name states. The reviewer's alternative —
+  an opt-in strict 2 s assertion for the reference-machine run — is
+  REJECTED as speculative machinery: no release-gate script exists
+  to set the opt-in (D-135's standing shape runs the release
+  verdict by hand on the reference machine), and a flag nothing
+  flips is a pin that cannot redden.
+- **P2-4 (`wait_for_availability_slot` cannot prove the spawned
+  pass started — the slot is taken INSIDE the task, so a free slot
+  may mean "not yet polled", and the existing-DB battery's
+  `try_recv().expect(...)` raced the task's first poll) TAKEN**:
+  the battery now awaits the event itself
+  (`recv_timeout(EVENT_DEADLINE)` — the event is the pass's
+  observable), and the slot wait stays only as the teardown guard
+  before the temp directory drops (its actual purpose in the
+  `ipc_tests.rs` shape it was borrowed from).
+- **P3-1 TAKEN** (the module doc's "the fourteen §5.5 steps" →
+  "the fourteen startup call sites of `lib.rs`" — the markers are
+  the call sites; the open's internal steps are the second scan).
+- **P3-2 TAKEN** (the empty battery's comment "a fresh DB: no
+  migrations to apply" was wrong — a fresh bootstrap APPLIES every
+  migration; what it writes none of is the pre-migration copies,
+  D-038's fresh-run rule — the comment now says exactly that).
+- **P3-3 TAKEN** (`daily_copy_of` now asserts the copy's name
+  carries the UTC today — ERR-001's "none for today yet" is the
+  naming rule the helper previously trusted blindly).
+- **P3-4 TAKEN** (the module doc no longer promises a per-step
+  table this entry does not carry — D-239 "records the order map in
+  prose").
+
+The affected tests re-ran green after the fixes (the five-test
+filter, then the full workspace battery below); the checks' final
+state: fmt, clippy `-D warnings`, the full workspace nextest
+(2083/2083), doc tests, `cargo deny check`, and prettier on the two
+markdown files — all exit 0.
+
+Follow-up added by the round: the `db_tests.rs` comment's "right
+after the manage step" wording (P2-1's second half, left untouched
+above) — a one-line precision touch for whichever task next owns
+that file; the pin itself is correct and ordered.
+
+Round-2 review addendum (D-239, same task; report
+`.opencode/reviews/t132-round2-report.md`, hy4-flash-free — the
+next different model per the chain, exit 0 — VERDICT: APPROVE WITH
+NITS — 0×P0, 0×P1, 0×P2, 3×P3; the test audit its own PASS). The
+reviewer re-ran the targeted suite green (measuring the L sequence
+at 926.5 ms — the third independent reading inside this entry's
+916–927 ms band), fmt and clippy on the crate, verified every
+round-1 disposition landed in the diff with no new vacuous
+assertions, traced the structure pin's two observables to their
+source (`last_verdict`'s unobserved-id-reads-clean default at
+`dirty_recalc.rs:356` and `note_pass` as the service loop's only
+bump at :523 — "exactly the M6 subtlety D-239 records"), confirmed
+the `file_watch.rs:1175` listener registration behind
+"availability last", the `update.check_on_start` settings key
+behind the seam's §6.5 anchor, and the frozen T-356 surface
+untouched — findings processed:
+
+- **P3-1 (ARCHITECTURE's reworded retention sentence carried one
+  ~160-character line the surrounding ~80-column prose does not)
+  TAKEN**: reflowed to the paragraph's width.
+- **P3-2 (the EMPTY battery still treating the availability slot
+  as a completion guard — the slot is taken inside the spawned
+  task, so a free slot can mean "not yet polled", and `drop(temp)`
+  could race the first probe) TAKEN as the honest comment, not the
+  proposed machinery**: the reviewer's fix — keeping the
+  `spawn_recheck` `JoinHandle` — is unavailable by contract (the
+  tail DROPS the handle; "the returned join handle lets the IPC
+  tests await the pass deterministically; production callers drop
+  it"), and a test-only start observable would be production
+  machinery in `availability.rs` for a window that is benign by
+  construction on the empty world: the pass has no project to
+  probe, touches no path, and its only work is one empty read. The
+  empty battery's comment now states exactly that (the wait is the
+  teardown guard; the path-bearing battery awaits the pass's own
+  observable, the event — the round-1 P2-4 fix).
+- **P3-3 (`daily_copy_of` compared the copy's name against a FRESH
+  `Timestamp::now()` at assertion time — a UTC-midnight crossing
+  between the open-time stamp and the assertion would fail
+  spuriously) TAKEN**: both batteries now capture the day BEFORE
+  the sequence runs and pass it in.
+
+No code-path change in any of the three (a comment, a reflow, a
+time-capture hoist); the affected tests re-ran green (the
+five-test filter), and the final tree re-ran the whole chain below
+— the review phase ends here (two rounds, no third).
+
+Final checks on the amended tree (synchronous,
+`CARGO_BUILD_JOBS=2`, memory checked first — 20 GB free):
+`cargo test --no-run -p eunomia-sync` (exit 0), the full workspace
+nextest battery with `--test-threads=4` (2083/2083, exit 0), doc
+tests (exit 0), clippy `--workspace --all-targets -- -D warnings`
+(exit 0), fmt `--check` (exit 0), `cargo deny check` (exit 0),
+prettier on `ARCHITECTURE.md`/`DECISIONS.md` (exit 0); the
+frontend untouched (no `.ts`/`.vue` change; the bindings export pin
+green inside the battery), so the pnpm trio does not apply.
