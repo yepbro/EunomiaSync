@@ -77,6 +77,8 @@ benches/
   eunomia-load/           # §12.2 load benchmarks (criterion; local tool — CI runs its tests, never the benches)
     src/lib.rs            #   Fixtures (TempRepos + data_sets) + the reads + the parallel bench substrate + the assignment toggle + the composed §9.4 sync pass + the scan tree
     benches/              #   project_build, dirty_recalc, assignment_toggle, sync_pipeline, scan_walk (the five §12.2 budget rows)
+scripts/
+  measure-startup.sh      # §12.2 startup + RSS rows on set L — the repeatable measurement harness (T-140; local tool: CI runs its Linux test, never the script)
 src-tauri/
   src/availability.rs      # Availability service: re-probes + state://project-availability (working)
   src/assignments.rs       # assignment_set / assignments_bulk / assignment_set_custom (working)
@@ -900,7 +902,16 @@ D-239's — the backend's synchronous share measured against the 2 s
 row with a documented CI margin, the release verdict a rerun on the
 reference machine, and the await-class regression caught by the
 structure pin (the tail returns while the first set-L dirty pass is
-still running), not by the clock. The sequence ends at the
+still running), not by the clock. The same suite's `memory_row`
+module (Linux, `/proc`) carries the §12.2 memory row: the backend
+process's RSS over the L startup, measured in a fresh re-executed
+child over a pre-built world (the D-226 pattern), with the parent
+watching the child's `/proc` as an anti-stub cross-check — driven by
+`scripts/measure-startup.sh`, the repeatable measurement harness
+that records both numbers (the dev profile; the release-profile
+verdict of both rows is the manual smoke checklist's §12.2 item, a
+release-profile test build being impossible by design — D-101's
+fault-injection gate). The sequence ends at the
 availability recheck: UPD-001's startup update check is T-134's
 scope, and the tail's end carries the seam comment marking where
 that step belongs (spawned, never awaited — the same NFR-002
@@ -1318,15 +1329,15 @@ scope (spec 7.9).
 
 ## Testing strategy
 
-| Level       | Scope                                                                                                                 | Tooling / command                                                           |
-| ----------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Unit        | Rust crates and Vue components                                                                                        | `cargo test --workspace` / `pnpm run test` (Vitest)                         |
-| Integration | `eunomia-store` storage & migrations                                                                                  | `cargo test -p eunomia-store` (in-memory + file DB)                         |
-| API         | Tauri runtime behavior (updater init, wiring)                                                                         | `cargo test -p eunomia-sync` (`tauri::test` mocks)                          |
-| Executor    | DB transaction/rollback/runtime paths                                                                                 | `cargo test -p eunomia-sync` (`db_tests.rs`)                                |
-| Load        | Spec §12.2 budgets on generated data (five rows: build, dirty, toggle, sync pipeline, scan walk; set L today; M open) | `cargo bench -p eunomia-load` (criterion; local, DECISIONS.md D-135, D-159) |
-| E2E         | Browser scenarios against Vite server                                                                                 | `pnpm run e2e` (Playwright, DECISIONS.md D-007)                             |
-| Smoke       | App builds on all three platforms                                                                                     | CI `build` matrix: `tauri build --debug --no-bundle`                        |
+| Level       | Scope                                                                                                                                      | Tooling / command                                                                                                                                               |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Unit        | Rust crates and Vue components                                                                                                             | `cargo test --workspace` / `pnpm run test` (Vitest)                                                                                                             |
+| Integration | `eunomia-store` storage & migrations                                                                                                       | `cargo test -p eunomia-store` (in-memory + file DB)                                                                                                             |
+| API         | Tauri runtime behavior (updater init, wiring)                                                                                              | `cargo test -p eunomia-sync` (`tauri::test` mocks)                                                                                                              |
+| Executor    | DB transaction/rollback/runtime paths                                                                                                      | `cargo test -p eunomia-sync` (`db_tests.rs`)                                                                                                                    |
+| Load        | Spec §12.2 budgets on generated data (seven rows: build, dirty, toggle, sync pipeline, scan walk, startup share, RSS; set L today; M open) | `cargo bench -p eunomia-load` (criterion, D-135/D-159) + `scripts/measure-startup.sh` (startup + RSS, T-140; the in-CI half is `startup_tests.rs`'s Linux test) |
+| E2E         | Browser scenarios against Vite server                                                                                                      | `pnpm run e2e` (Playwright, DECISIONS.md D-007)                                                                                                                 |
+| Smoke       | App builds on all three platforms                                                                                                          | CI `build` matrix: `tauri build --debug --no-bundle`                                                                                                            |
 
 ## CI
 

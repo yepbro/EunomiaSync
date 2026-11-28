@@ -46,6 +46,19 @@
 //!    that makes the budget survivable, proven on the L world where
 //!    the first dirty pass is slow enough to straddle the tail's
 //!    return: the background passes are spawned, never awaited.
+//! 5. **The memory row** (`memory_row::
+//!    startup_rss_on_set_l_fits_the_memory_budget`, §12.2's
+//!    "Memory (RSS, set L): no more than 400 MB"): the backend
+//!    process's own footprint over the same L startup — measured in
+//!    a FRESH process (this test binary re-executed, the
+//!    `sync_kill_tests.rs` D-226 pattern), so the reading carries
+//!    neither sibling tests' allocations nor the L generation's
+//!    remnants. The child reports its own `/proc` checkpoints and
+//!    the parent watches the child's `/proc` independently — the
+//!    anti-stub cross-check that keeps the numbers honest. Linux
+//!    only (`/proc`); the driver of both halves is
+//!    `scripts/measure-startup.sh`, the card's repeatable
+//!    measurement harness.
 //!
 //! # Honest boundaries
 //!
@@ -82,10 +95,31 @@
 //!   release cost — still falsifiable (a synchronous step growing
 //!   past ~3 s goes red; a pass wrongly awaited is caught by the
 //!   structure pin, deterministically, not by the clock).
+//! * **The memory row's scope is the backend process.** The
+//!   measurement child is the mock-runtime app — no webview exists
+//!   under a unit harness — so its `/proc` reading is the backend's
+//!   own footprint, a NECESSARY share of the row, not a sufficient
+//!   one: the whole app adds the webview's processes, and the real
+//!   app's main process adds the real runtime's share (the
+//!   native host init the mock runtime replaces — neither is
+//!   measured here, in either direction: the reading carries a
+//!   ~60 MB harness + mock-runtime floor the real process does
+//!   not, and the real runtime's own footprint is outside the
+//!   measurement). What the assert therefore pins is the spec's
+//!   number on this proxy, verbatim-bounded, with the direction
+//!   unmeasured and the whole-app verdict (backend + webview,
+//!   release profile, the reference machine) left to the release
+//!   rerun, D-135's standing class, with its in-repo home in
+//!   `docs/manual-smoke.md`; on macOS and Windows there is no
+//!   `/proc`, and the row there is the release rerun's as well.
 
-#![allow(clippy::print_stderr)] // the set-L budget test prints its
-// measurement deliberately (the
-// `data_sets.rs` eprintln precedent)
+#![allow(clippy::print_stderr, clippy::print_stdout)] // the set-L budget
+// and memory tests print their
+// measurements deliberately (the
+// `data_sets.rs` eprintln
+// precedent; the memory row's
+// child prints its report to the
+// parent through the pipe)
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -111,8 +145,21 @@ use eunomia_store::data_sets::ProjectRoot;
 /// suite asserts state and files, not IPC.
 fn session_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
     let temp = tempfile::tempdir().expect("failed to create a temp directory");
-    crate::data_dirs::ensure_data_layout(temp.path())
-        .expect("creating the data-directory layout in a temp directory must work");
+    let app = session_app_at(temp.path());
+    (temp, app)
+}
+
+/// The [`session_app`] shell over an EXISTING data root — the same
+/// states and events, no temp directory of its own: the memory
+/// measurement's child process runs over a world another process
+/// built (see `memory_row`), so it must not re-create the root, only
+/// arm the shell the way the hook does over whatever is already
+/// there. [`session_app`] itself is the two-line wrapper every other
+/// test of this suite uses; the split is additive, the landed
+/// callers' behavior byte-identical.
+fn session_app_at(root: &Path) -> tauri::App<tauri::test::MockRuntime> {
+    crate::data_dirs::ensure_data_layout(root)
+        .expect("creating the data-directory layout must work");
     let app = mock_builder()
         .build(mock_context(noop_assets()))
         .expect("failed to build mock app");
@@ -132,7 +179,7 @@ fn session_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
             crate::file_watch::FileChangedEvent,
         ])
         .mount_events(&app);
-    (temp, app)
+    app
 }
 
 /// The `setup` hook's healthy database half, driven exactly as the
@@ -1120,4 +1167,629 @@ fn startup_on_set_l_fits_the_ci_budget_bound() {
     wait_for_availability_slot(&app);
     drop(app);
     drop(temp);
+}
+
+// ---------------------------------------------------------------------------
+// The §12.2 memory row on set L (Linux: /proc)
+// ---------------------------------------------------------------------------
+
+/// §12.2's memory measurement on set L (task T-140), everything in
+/// this module Linux-gated: the row is
+///
+/// ```text
+/// | Memory (RSS, set L) | no more than 400 MB |
+/// ```
+///
+/// and `/proc/<pid>/status` — Linux's own resident-set accounting —
+/// is the only oracle this suite can read without a new dependency
+/// (the `sysinfo`-style crates are an owner decision, D-035's
+/// discipline; `/proc` is std `fs`). On macOS and Windows there is
+/// no `/proc`: the row there is the release rerun's (D-135's
+/// standing class), whose in-repo home is the manual smoke
+/// checklist's §12.2 item.
+///
+/// # Why a child process, and two of them
+///
+/// The measurement must be of a process that carries the startup's
+/// own memory and nothing else — but every test runs inside the test
+/// binary's process, where `cargo test`'s parallel siblings and the
+/// L fixture's generation remnants (glibc arenas keep freed pages
+/// resident) would both inflate the reading without saying anything
+/// about the app. So the parent test spawns two children, this same
+/// test binary re-executed under its own `--exact` filter (the
+/// `sync_kill_tests.rs` D-226 pattern, the spec env vars carried
+/// process-local on the [`Command`]):
+///
+/// - the **world child** builds set L into a temp directory the
+///   PARENT owns and exits — its allocations die with it;
+/// - the **measure child** then starts VIRGIN over the pre-built
+///   world — exactly the real app's position (the L database exists
+///   on disk before the app launches) — arms the session shell
+///   (`session_app_at`), runs the real sequence
+///   ([`startup_sequence`], timing it), waits for the background
+///   passes to settle, and reports its own `/proc` checkpoints on
+///   stdout, which the parent reads through the pipe.
+///
+/// # The checkpoints
+///
+/// - **baseline** — the child's `VmRSS` after the shell is armed,
+///   before the sequence: the harness + mock-runtime floor the
+///   reading carries (the overstatement the memory assert absorbs).
+/// - **ready** — right after the sequence returned: the backend's
+///   synchronous share resident (the `Db::open` page walk, the
+///   ERR-001 `VACUUM INTO` copy, the §6.3 invariant sweep — the
+///   step costs D-239 measured at 916 ms debug on the dev box).
+/// - **settled** — after the first dirty pass and the availability
+///   recheck completed: the background services' footprint, the
+///   dominant share being DB-022's first pass reading the WHOLE
+///   ALG-001 snapshot (100 000 assignments, 3 000 variant texts)
+///   into memory before the chunked verdicts (D-121's shape).
+/// - **peak** — the child's `VmHWM` at the same moment: the
+///   process's true high-water mark, the strongest number — what a
+///   transient allocation between checkpoints cannot hide.
+///
+/// # What the parent asserts (and why each has teeth)
+///
+/// 1. Both children exit 0 — the world is §12.2's L (the world child
+///    asserts the generator's own count), the measurement completed.
+/// 2. The child's elapsed time fits the spec's 2 s row at the
+///    documented CI margin — the SAME policy and the SAME constants
+///    as the in-process budget test above (D-239's reading; not a
+///    fork, a re-measurement in a fresh process).
+/// 3. The child's settled and peak `VmRSS` fit the spec's 400 MiB
+///    reading of the row — no extra margin: the assert pins the
+///    spec's number on the measurable proxy (the reading carries a
+///    ~60 MB harness + mock-runtime floor the real process does not;
+///    the real runtime's own share is outside the measurement, so
+///    the direction is unmeasured — a necessary, not sufficient,
+///    check; see the module docs' honest boundaries).
+/// 4. The anti-stub cross-check: the parent polls the child's
+///    `/proc` while it runs and requires its own observed maximum to
+///    sit in the neighborhood of the reported checkpoints — at least
+///    the settled reading minus a small slack (a child inflating its
+///    numbers fails it) and at most the reported peak plus the same
+///    slack (a child understating them fails it — `VmRSS` never
+///    exceeds `VmHWM` at any instant, so the upper bound is
+///    structural). The numbers must describe the real live process,
+///    not constants.
+/// 5. The run's reality: exactly one day-carrying ERR-001 copy
+///    exists in the shared root, its stamp bounded by the parent's
+///    pre-spawn clock (the child's own day, or the next if UTC
+///    midnight crossed between the spawn and the child's open —
+///    the landed [`daily_copy_of`] rules spelled straddle-proof,
+///    because the child stamps the copy with its own clock), the
+///    root's database is L-sized (the [`L_DATABASE_FLOOR`] check),
+///    and the copy's size is within half of that database's own —
+///    the sequence's open+copy provably ran over the L world in
+///    this root (the world child's count assert pins what the root
+///    holds; a child that skipped the open, or measured some other
+///    root, cannot fake either half).
+///
+/// The parent then prints one machine-readable line (the
+/// `EUNOMIA-STARTUP-REPORT` prefix) carrying every reading — the
+/// interface `scripts/measure-startup.sh` parses; the script is the
+/// task card's "script", the repeatable measurement harness that
+/// records both §12.2 numbers (this row and the startup row) on the
+/// L set.
+#[cfg(target_os = "linux")]
+mod memory_row {
+    use std::io::Read;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use super::{
+        CI_TOLERANCE, WINDOW_READY_BUDGET, backups_dir_of, build_set_l, session_app_at,
+        startup_sequence, wait_for_availability_slot, wait_for_dirty_passes,
+    };
+
+    /// §12.2's memory budget: "Memory (RSS, set L): no more than
+    /// 400 MB" — read as 400 MiB (409 600 kB), the unit `/proc`
+    /// reports (kB is kibibytes there); the MiB reading is the
+    /// documented one (4.8 % above the strict decimal MB), recorded
+    /// here so the two spellings cannot drift apart silently. No CI
+    /// margin: the assert pins the spec's number on the measurable
+    /// proxy (the reading carries a ~60 MB harness + mock-runtime
+    /// floor the real process does not — the real runtime's own
+    /// share is outside the measurement, so the direction is
+    /// unmeasured and the whole-app verdict is the release rerun's,
+    /// see the module docs' honest boundaries); a margin here would
+    /// only blunt the assert without measuring anything more.
+    const MEMORY_BUDGET_KB: u64 = 400 * 1024;
+
+    /// The bound on the parent's wait for the WORLD child — the L
+    /// generation, which has no internal deadline of its own. The
+    /// dev box builds L in ~25 s under load; a slow shared runner
+    /// needs a few times that, so the bound sits an order of
+    /// magnitude above and still ends a hung child (a deadlock in
+    /// the fixture path) in minutes instead of the CI job's whole
+    /// timeout — the same finite-waiter posture as
+    /// [`super::EVENT_DEADLINE`], scaled to the child's real cost.
+    const WORLD_DEADLINE: Duration = Duration::from_secs(300);
+
+    /// The bound on the parent's wait for the MEASURE child. The
+    /// child's own waits are internally bounded (`EVENT_DEADLINE`,
+    /// 20 s each), so its legitimate total is well under a minute
+    /// even on a loaded runner; the parent's bound catches the hang
+    /// class the child cannot catch itself (a deadlock inside the
+    /// production path the child drives).
+    const MEASURE_DEADLINE: Duration = Duration::from_secs(120);
+
+    /// The floor the reality check holds the shared root's database
+    /// to: the generator's L database is ~38 MB (D-239's fixture
+    /// measurement) and an empty database tens of kB — 30 MiB sits
+    /// an order of magnitude above the one and below the other, so
+    /// the floor separates the L world from anything smaller without
+    /// pinning the generator's exact output size (the world child's
+    /// own count assert pins the deeper shape).
+    const L_DATABASE_FLOOR: u64 = 30 * 1024 * 1024;
+
+    /// The slack of both anti-stub neighborhood bounds. Upper side:
+    /// the parent's observed `VmRSS` may exceed the child's reported
+    /// `VmHWM` only by what the process can grow between the child's
+    /// last read and its exit (the report printing and the harness
+    /// teardown; structurally `VmRSS` never exceeds `VmHWM` at any
+    /// instant, so the slack only absorbs post-report growth). Lower
+    /// side: the post-pass state the child reads as settled persists
+    /// for seconds, so the parent's 100 ms poll cadence cannot miss
+    /// it — the slack only absorbs the checkpoint-to-poll gap and the
+    /// run-to-run allocator variance (the observed gap on the dev box
+    /// was ~2.5 MB). 16 MiB is an order of magnitude above both while
+    /// still catching the constants a stubbed report could print.
+    const CONSISTENCY_SLACK_KB: u64 = 16 * 1024;
+
+    /// How often the parent polls the measurement child's
+    /// `/proc/<pid>/status` while it runs — often enough that the
+    /// multi-second settled phase is sampled many times over, cheap
+    /// enough to be noise.
+    const POLL_CADENCE: Duration = Duration::from_millis(100);
+
+    /// The prefix of the report line both halves speak — the parent
+    /// prints it after its asserts (the interface the script greps),
+    /// the child prints it on stdout (the interface the parent
+    /// parses). One spelling, two pipes.
+    const REPORT_PREFIX: &str = "EUNOMIA-STARTUP-REPORT";
+
+    /// The process-local role switch (the D-226 pattern: the vars
+    /// ride the spawned `Command`, never the parent's own
+    /// environment, so parallel tests in one process cannot see each
+    /// other's children).
+    const ROLE_VAR: &str = "EUNOMIA_STARTUP_MEASUREMENT_ROLE";
+    /// The shared data root path the vars carry.
+    const ROOT_VAR: &str = "EUNOMIA_STARTUP_MEASUREMENT_ROOT";
+    /// The world-builder role's value.
+    const ROLE_WORLD: &str = "world";
+    /// The measurement role's value.
+    const ROLE_MEASURE: &str = "measure";
+
+    /// This test's own libtest name, derived from `module_path!` (the
+    /// D-226 `self_test_path` shape, re-spelled here so this suite
+    /// does not reach into a sibling module's private helpers): the
+    /// children re-execute the binary under `--exact <name>`, so a
+    /// renamed test fails loudly at the parent's report parse — the
+    /// child would run zero tests and exit without a report line.
+    fn self_test_path() -> String {
+        let module = module_path!();
+        let rest = module
+            .split_once("::")
+            .expect("the module path has a crate segment")
+            .1;
+        format!("{rest}::startup_rss_on_set_l_fits_the_memory_budget")
+    }
+
+    /// Reads one kilobyte-valued field of `/proc/<pid>/status`
+    /// (`VmRSS`, `VmHWM`) — the kernel's own accounting of the
+    /// process's resident set, the oracle this module cannot
+    /// fabricate. Answers `None` when the file or the field is not
+    /// there (a vanished process between polls, a non-Linux kernel):
+    /// the callers decide what absence means.
+    fn proc_status_field_kb(pid: u32, field: &str) -> Option<u64> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let prefix = format!("{field}:");
+        for line in status.lines() {
+            let Some(rest) = line.strip_prefix(&prefix) else {
+                continue;
+            };
+            // The fields look like `VmRSS:\t  61024 kB` — the value is
+            // the first whitespace-separated token, the unit (kB,
+            // kibibytes) is /proc's documented spelling.
+            let value = rest.split_whitespace().next()?;
+            return value.parse::<u64>().ok();
+        }
+        None
+    }
+
+    /// Reads one `key=value` number off the report line — the parse
+    /// panics (naming the key and the whole line) when the field is
+    /// missing or not a number, because a report that cannot be
+    /// parsed is a broken measurement, not a skipped one.
+    fn report_field(line: &str, key: &str) -> u64 {
+        let prefix = format!("{key}=");
+        for token in line.split_whitespace() {
+            if let Some(value) = token.strip_prefix(&prefix) {
+                return value
+                    .parse()
+                    .unwrap_or_else(|_| panic!("the report's {key} must be a number: {line}"));
+            }
+        }
+        panic!("the report line must carry {key}: {line}");
+    }
+
+    /// Spawns one measurement half: this test binary re-executed
+    /// under its own `--exact` filter (the D-226 pattern), carrying
+    /// the role and the shared data root as process-local env vars.
+    /// `--nocapture` is load-bearing for the measure child: libtest
+    /// captures the test's stdout unless it is disabled, and the
+    /// parent reads the child's report through the pipe. `--quiet`
+    /// halves the harness's own lines (the report prefix is what the
+    /// parent parses; the rest is diagnostics).
+    /// Waits for a spawned child to exit within `deadline`, killing
+    /// it on expiry: a hung child fails the test in minutes with the
+    /// elapsed time named, instead of hanging the whole test binary
+    /// until the CI job's timeout — the finite-waiter posture of
+    /// [`super::EVENT_DEADLINE`], applied at the process level. The
+    /// kill happens before the panic so no orphan outlives the
+    /// failing parent.
+    fn wait_within(child: &mut Child, deadline: Duration, who: &str) -> std::process::ExitStatus {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .unwrap_or_else(|error| panic!("polling {who} must work: {error}"))
+            {
+                return status;
+            }
+            if started.elapsed() > deadline {
+                let _ = child.kill();
+                panic!(
+                    "{who} did not exit within {deadline:?} — a hang, not \
+                     a slow run (killed at {:?}; the child's inherited \
+                     stderr carries whatever it printed before the hang)",
+                    started.elapsed()
+                );
+            }
+            std::thread::sleep(POLL_CADENCE);
+        }
+    }
+
+    fn spawn_role_child(role: &str, root: &Path, stdout: Stdio) -> Child {
+        let exe = std::env::current_exe().expect("the test binary's own path must resolve");
+        Command::new(exe)
+            .arg("--exact")
+            .arg(self_test_path())
+            .arg("--quiet")
+            .arg("--nocapture")
+            .stdout(stdout)
+            // stderr stays inherited — a child's panic text is the
+            // useful failure diagnostic, and it rides stderr.
+            .env(ROLE_VAR, role)
+            .env(ROOT_VAR, root)
+            .spawn()
+            .expect("the startup measurement child must spawn")
+    }
+
+    /// The world child's half: build set L into the parent-owned root
+    /// and return — the test passes in the child, the process exits,
+    /// and every allocation of the generation dies with it (the
+    /// measurement child starts with none of it in its RSS).
+    fn build_the_l_world(root: &Path) {
+        crate::data_dirs::ensure_data_layout(root)
+            .expect("creating the data-directory layout must work");
+        let generated = build_set_l(root);
+        assert_eq!(
+            generated.assignment_count, 100_000,
+            "the world child must build §12.2's set L (the generator's \
+             own suite pins the deeper shape)"
+        );
+    }
+
+    /// The measure child's half: the virgin process over the
+    /// pre-built world — the real app's position. Arms the shell,
+    /// checkpoints its own `/proc`, runs the real sequence (timed),
+    /// waits for the background passes to settle, checkpoints again,
+    /// and prints the report line the parent parses. The convergence
+    /// waits are the landed helpers: the pass-count wait proves the
+    /// spawned services really ran (their work is in the readings),
+    /// the availability slot wait releases the probe before the root
+    /// can drop under it in the parent.
+    fn run_the_startup_measurement(root: &Path) {
+        let app = session_app_at(root);
+        let baseline_kb = proc_status_field_kb(std::process::id(), "VmRSS")
+            .expect("the measurement child must be able to read its own /proc status");
+        let started = Instant::now();
+        startup_sequence(&app, root);
+        let elapsed = started.elapsed();
+        let ready_kb = proc_status_field_kb(std::process::id(), "VmRSS")
+            .expect("the measurement child must be able to read its own /proc status");
+        wait_for_dirty_passes(&app, 1);
+        wait_for_availability_slot(&app);
+        let settled_kb = proc_status_field_kb(std::process::id(), "VmRSS")
+            .expect("the measurement child must be able to read its own /proc status");
+        let peak_kb = proc_status_field_kb(std::process::id(), "VmHWM")
+            .expect("the measurement child must be able to read its own /proc status");
+        eprintln!(
+            "the set-L startup memory measurement: share {elapsed:?}, VmRSS baseline \
+             {baseline_kb} kB, ready {ready_kb} kB, settled {settled_kb} kB, peak (VmHWM) \
+             {peak_kb} kB"
+        );
+        println!(
+            "{REPORT_PREFIX} elapsed_ms={} baseline_kb={baseline_kb} ready_kb={ready_kb} \
+             settled_kb={settled_kb} peak_kb={peak_kb}",
+            elapsed.as_millis()
+        );
+        drop(app);
+    }
+
+    #[test]
+    fn startup_rss_on_set_l_fits_the_memory_budget() {
+        // The child halves run when the role var is present (the
+        // spawned `Command` set it); the parent half — everything
+        // below — is what CI and the script run.
+        if let Ok(role) = std::env::var(ROLE_VAR) {
+            let root = PathBuf::from(
+                std::env::var(ROOT_VAR).expect("the child spec carries the data root"),
+            );
+            match role.as_str() {
+                ROLE_WORLD => build_the_l_world(&root),
+                ROLE_MEASURE => run_the_startup_measurement(&root),
+                other => panic!("unknown startup measurement role: {other:?}"),
+            }
+            return;
+        }
+
+        // The shared world, owned by THIS process so it outlives both
+        // children and dies only after the asserts have read it.
+        let temp = tempfile::tempdir().expect("failed to create a temp directory");
+        let root = temp.path().to_path_buf();
+
+        // The world child: set L, built out-of-process, its memory
+        // never part of the measurement. The wait is bounded (see
+        // [`WORLD_DEADLINE`]) — the generation has no internal
+        // deadline of its own.
+        let mut world = spawn_role_child(ROLE_WORLD, &root, Stdio::null());
+        let world_status = wait_within(&mut world, WORLD_DEADLINE, "the world child");
+        assert!(
+            world_status.success(),
+            "the world child must build set L and exit cleanly ({world_status}), \
+             its stderr carries the generation diagnostics"
+        );
+
+        // The parent's clock, captured BEFORE the measure child
+        // spawns: the child's ERR-001 copy is stamped by the child's
+        // OWN now (at its open, seconds after this capture), so the
+        // copy's day is this day or the next — the bound the reality
+        // check below enforces instead of re-reading a later clock
+        // (a UTC-midnight crossing between the capture and the
+        // child's open names the next day, and reading the parent's
+        // now AFTER the run would then refuse a perfectly valid
+        // copy — the straddle class D-239's round-1 P3-3 closed for
+        // the in-process batteries, closed here at the process
+        // level by bounding the child's stamp from the pre-spawn
+        // capture).
+        let day0 = jiff::Timestamp::now();
+
+        // The measurement child: a virgin process over that world.
+        // The stdout pipe carries its report; the reader thread
+        // drains it while the main thread polls the child's /proc
+        // (the report is a few lines — the pipe cannot fill).
+        let mut measure = spawn_role_child(ROLE_MEASURE, &root, Stdio::piped());
+        let pid = measure.id();
+        let mut report_pipe = measure
+            .stdout
+            .take()
+            .expect("the measure child's stdout was piped");
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            report_pipe
+                .read_to_string(&mut text)
+                .expect("reading the measure child's report must work");
+            text
+        });
+
+        // The parent's own /proc watch of the child — the
+        // independent reading the anti-stub cross-check compares
+        // against. The loop ends when the child exits, and is
+        // bounded by [`MEASURE_DEADLINE`]: the child's own waits are
+        // internally deadlined (`EVENT_DEADLINE`), so a legitimate
+        // run cannot approach the bound — what it catches is the
+        // hang class the child cannot catch itself (a deadlock
+        // inside the production path it drives), killed and named
+        // with the elapsed time and the last observed state. Polls
+        // after the child's exit read nothing (the /proc entry
+        // vanishes once the process is reaped), which the Option
+        // absorbs.
+        let mut max_seen_kb = 0u64;
+        let mut polls = 0u64;
+        let measure_started = Instant::now();
+        let status = loop {
+            if let Some(status) = measure
+                .try_wait()
+                .expect("polling the measure child must work")
+            {
+                break status;
+            }
+            if measure_started.elapsed() > MEASURE_DEADLINE {
+                let _ = measure.kill();
+                panic!(
+                    "the measure child did not exit within {MEASURE_DEADLINE:?} \
+                     — a hang inside the startup path it drives, not a slow \
+                     run (killed at {:?}; {polls} /proc polls, max VmRSS \
+                     observed {max_seen_kb} kB; the child's inherited stderr \
+                     carries whatever it printed before the hang)",
+                    measure_started.elapsed()
+                );
+            }
+            if let Some(kb) = proc_status_field_kb(pid, "VmRSS") {
+                max_seen_kb = max_seen_kb.max(kb);
+                polls += 1;
+            }
+            std::thread::sleep(POLL_CADENCE);
+        };
+        assert!(
+            status.success(),
+            "the measure child must complete its run and exit cleanly ({status})"
+        );
+        let child_report = reader.join().expect("the report reader thread must finish");
+        let report_line = child_report
+            .lines()
+            .find(|line| line.starts_with(REPORT_PREFIX))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the measure child must print its {REPORT_PREFIX} line on stdout; \
+                     got: {child_report:?}"
+                )
+            });
+
+        // Assert 1 — the timing, at the landed policy: the spec's 2 s
+        // row with the documented CI margin (D-239's reading — the
+        // constants are the budget test's own, this is the same
+        // sequence re-measured in a fresh process, not a forked
+        // policy). A synchronous step growing past ~3 s of work goes
+        // red here exactly as it does above.
+        let elapsed_ms = report_field(report_line, "elapsed_ms");
+        assert!(
+            Duration::from_millis(elapsed_ms) <= WINDOW_READY_BUDGET * CI_TOLERANCE,
+            "§12.2: startup until the window is ready (set L) must be no more \
+             than 2 s (the CI assert grants the documented tolerance for the \
+             debug profile and the shared runner) — the fresh-process \
+             re-measurement of the backend's synchronous share took \
+             {elapsed_ms} ms"
+        );
+
+        // Assert 2 — the memory row, the spec's number on the
+        // measurable proxy (the 400 MiB reading, see
+        // [`MEMORY_BUDGET_KB`]): the reading carries the harness +
+        // mock-runtime floor, the real runtime's share is outside
+        // the measurement (a necessary, not sufficient, check — the
+        // whole-app verdict is the release rerun's), and the peak
+        // (VmHWM) closes the transient-allocation hole the settled
+        // checkpoint alone would leave.
+        let settled_kb = report_field(report_line, "settled_kb");
+        let peak_kb = report_field(report_line, "peak_kb");
+        assert!(
+            settled_kb <= MEMORY_BUDGET_KB,
+            "§12.2: Memory (RSS, set L) must be no more than 400 MB — the \
+             measurement process's settled VmRSS is {settled_kb} kB (the \
+             proxy reading: the harness + mock-runtime floor is inside it, \
+             the real runtime's share is outside — the whole-app verdict \
+             is the release rerun's)"
+        );
+        assert!(
+            peak_kb <= MEMORY_BUDGET_KB,
+            "§12.2: Memory (RSS, set L) must be no more than 400 MB — the \
+             measurement process's peak (VmHWM) is {peak_kb} kB (the peak \
+             is the strongest reading: no transient allocation between \
+             checkpoints can hide from it)"
+        );
+
+        // Assert 3 — the anti-stub cross-check: the numbers must
+        // describe the real live process. The parent's own /proc
+        // polls of the child bound the reported readings from both
+        // sides — its observed maximum must sit in the neighborhood
+        // of the reported checkpoints: at least the settled reading
+        // minus the slack (the post-pass state the child reads as
+        // settled persists for seconds, so the parent's 100 ms
+        // cadence cannot miss it — a report inflating the numbers
+        // fails this side) and at most the reported peak plus the
+        // same slack (VmRSS ≤ VmHWM at every instant, so a real
+        // process cannot exceed an honest peak — a report
+        // understating them fails that side).
+        assert!(
+            polls > 0,
+            "the parent must have observed the measure child's /proc status \
+             at least once — a child that exits before the first poll is a \
+             broken measurement, not a fast one"
+        );
+        assert!(
+            max_seen_kb + CONSISTENCY_SLACK_KB >= settled_kb,
+            "the child's reported settled VmRSS ({settled_kb} kB) must be a \
+             reading of the real process: the parent's own /proc polls never \
+             saw it above {max_seen_kb} kB — the report overstates what the \
+             kernel accounted"
+        );
+        assert!(
+            max_seen_kb <= peak_kb + CONSISTENCY_SLACK_KB,
+            "the child's reported peak ({peak_kb} kB) must be a reading of \
+             the real process: the parent's own /proc polls saw {max_seen_kb} \
+             kB resident — the report understates what the kernel accounted"
+        );
+
+        // Assert 4 — the run's reality: the sequence really ran over
+        // the L world in THIS root. The copy is found by a scan of
+        // the shared root's db-backups (the landed
+        // [`daily_copy_of`] rules — the daily-* name shape, the
+        // at-most-one copy — spelled here with the day bounded from
+        // the PRE-SPAWN capture instead of a post-run now: the
+        // child stamps the copy with its own clock, so a
+        // UTC-midnight crossing between the spawn and the open
+        // legitimately names the next day, and a post-run now would
+        // refuse it). The size checks then establish what the
+        // measurement ran over — the root's database is L-sized
+        // (the floor: the generator's L database is ~38 MB per
+        // D-239, an empty database tens of kB — the floor sits
+        // orders of magnitude above the one and just below the
+        // other; the world child's own count assert is what pins
+        // the deeper L shape) and the copy is of it (VACUUM INTO of
+        // a freshly generated, churn-free database preserves its
+        // size to well within half).
+        let day0_stamp = day0.strftime("%Y%m%d").to_string();
+        let day1_stamp = (day0 + jiff::SignedDuration::from_hours(24))
+            .strftime("%Y%m%d")
+            .to_string();
+        let mut copies = Vec::new();
+        for entry in std::fs::read_dir(backups_dir_of(&root))
+            .expect("the layout guarantees the db-backups directory is readable")
+        {
+            let name = entry
+                .expect("reading a db-backups entry must work")
+                .file_name()
+                .into_string()
+                .expect("the copy names are ASCII");
+            if name.starts_with("daily-") && name.ends_with(".sqlite3") {
+                let stamp = &name["daily-".len()..name.len() - ".sqlite3".len()];
+                assert!(
+                    stamp == day0_stamp || stamp == day1_stamp,
+                    "the day's ERR-001 copy must be named for the day the                      sequence ran ({day0_stamp}, or {day1_stamp} if UTC midnight                      crossed between the spawn and the child's open): found                      {name}"
+                );
+                copies.push(backups_dir_of(&root).join(name));
+            }
+        }
+        assert_eq!(
+            copies.len(),
+            1,
+            "the measure child's startup must have written exactly one              day-carrying ERR-001 copy (ERR-001's same-day rule)"
+        );
+        let copy = copies
+            .pop()
+            .expect("the length assert guarantees exactly one copy");
+        let copy_len = std::fs::metadata(&copy)
+            .expect("the day's ERR-001 copy must be readable")
+            .len();
+        let db_len = std::fs::metadata(crate::data_dirs::db_file_path(&root))
+            .expect("the set-L database must be readable")
+            .len();
+        assert!(
+            db_len >= L_DATABASE_FLOOR,
+            "the shared root's database must be the L world the world child \
+             built: {db_len} bytes against the {L_DATABASE_FLOOR}-byte floor \
+             (the generator's L database is ~38 MB, D-239; an empty database \
+             is tens of kB)"
+        );
+        assert!(
+            copy_len * 2 >= db_len,
+            "the day's ERR-001 copy must be a copy of the set-L database: \
+             {copy_len} bytes copied against the {db_len}-byte database — \
+             the measurement provably ran over the L world in this root"
+        );
+
+        // The report — the script's interface: every reading of the
+        // measurement, one line, grep-parsable.
+        let baseline_kb = report_field(report_line, "baseline_kb");
+        let ready_kb = report_field(report_line, "ready_kb");
+        eprintln!(
+            "{REPORT_PREFIX} elapsed_ms={elapsed_ms} baseline_kb={baseline_kb} \
+             ready_kb={ready_kb} settled_kb={settled_kb} peak_kb={peak_kb} \
+             parent_max_poll_kb={max_seen_kb} parent_polls={polls}"
+        );
+    }
 }

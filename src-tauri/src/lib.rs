@@ -1260,7 +1260,9 @@ mod db_verify_tests;
 
 // T-132's startup-sequence suite: the §5.5 order pins, the two
 // integration batteries (empty and existing database, over the real
-// open path), and the §12.2 window-ready budget on set L.
+// open path), and the §12.2 window-ready budget on set L; T-140's
+// memory row joined it (the Linux-gated fresh-process RSS
+// measurement on the same L world).
 #[cfg(test)]
 mod startup_tests;
 

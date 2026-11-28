@@ -32073,6 +32073,378 @@ addendum's column-shift number corrected from three to four (the
 measured `#` offset). The review phase ends here (two rounds, no
 third).
 
+### D-241 — T-140: the §12.2 startup and memory measurement on set L — the fresh-process RSS harness (the world child, the measure child, the anti-stub cross-check), the repeatable script, and the 400 MB row measured inside its budget — 2026-11-28
+
+Problem: the card ("[Backend] Measure the startup time and memory
+consumption on the L set... A script: startup until the window is
+ready, and the process RSS... Done when: startup ≤ 2 s, RSS ≤
+400 MB", spec §12.2) arrived after T-132 (D-239) had already landed
+the startup-sequence suite with the window-ready budget test — the
+backend's synchronous share measured in-process (916 ms debug) and
+the 2 s verdict assigned, per D-135's standing "reference machine,
+honestly" ruling, to a release-profile rerun. So the open half was
+the MEMORY row ("Memory (RSS, set L): no more than 400 MB" — no
+automated measurement anywhere: D-159's §12.2 mapping had filed
+startup-to-window, RSS, and the scan row's UI half under "not
+criterion-benchable... e2e-script territory", but the e2e scripts
+drive a MOCKED IPC backend, which measures the UI's share, not the
+backend's) plus the card's own deliverable: a repeatable harness
+that records BOTH numbers. Three readings were taken before any
+code (rule 1): what the measurable process is (the backend process
+running the real sequence over the L world — the mock-runtime app
+has no webview, so the reading is the backend's necessary share of
+the row; the whole-app verdict, webview processes included, is the
+release rerun's, D-135's class); what could keep the reading honest
+(no `sysinfo` crate — a new dependency is an owner decision, D-035;
+`/proc/<pid>/status` is std `fs` and the kernel's own accounting);
+and why the measurement cannot run in-process (a test process
+carries the fixture generation's retained arenas and, under plain
+`cargo test`, parallel siblings' allocations — both inflate RSS
+without saying anything about the app).
+
+Solution: two halves, the measurement and the script that drives
+it.
+
+- _The measurement_ — `src-tauri/src/startup_tests.rs` gains a
+  Linux-gated `memory_row` module (the `ipc_tests.rs` Linux-gate
+  precedent; `/proc` exists nowhere else, and the row on
+  macOS/Windows is the release rerun's). Three roles, one test: the
+  parent spawns this same test binary re-executed under its own
+  `--exact` filter (the `sync_kill_tests.rs` D-226 pattern, the
+  role and root carried as process-local `Command` env vars), twice.
+  The **world child** builds set L into a temp directory the parent
+  owns and exits — every allocation of the generation dies with it.
+  The **measure child** then starts VIRGIN over the pre-built world,
+  exactly the real app's position (the L database exists on disk
+  before the app launches): it arms the session shell, checkpoints
+  its own `/proc` (baseline — the harness + mock-runtime floor;
+  ready — after the real sequence returned, timed with `Instant`;
+  settled — after the first dirty pass and the availability recheck
+  completed; peak — `VmHWM`, the high-water mark no transient
+  allocation can hide from), and prints one machine-readable report
+  line on stdout. The **parent** polls the child's `/proc` while it
+  runs — the independent reading — then asserts and prints its own
+  consolidated report line (the script's interface). The `session_app`
+  helper split additively into `session_app` + `session_app_at` (the
+  shell over an existing root; the landed callers' behavior
+  byte-identical), so the measure child arms the shell without
+  re-creating the world.
+- _The asserts, each with teeth._ (1) Both children exit 0 — the
+  world child asserts the generator's own 100 000-assignment count.
+  (2) The child's elapsed share fits the spec's 2 s row at the
+  documented CI margin — the SAME policy and the SAME constants as
+  D-239's budget test (`WINDOW_READY_BUDGET` × `CI_TOLERANCE`): a
+  re-measurement in a fresh process, not a forked policy. (3) The
+  settled and peak `VmRSS` fit the spec's 400 MiB reading of the
+  row — no extra margin. The round-1 review corrected the first
+  draft's justification here: "the reading overstates the real
+  backend" asserted a direction nobody measured (the mock-runtime
+  process lacks the real runtime's native host init, so the two
+  footprints are not in a superset relation). What is proven: the
+  reading carries a ~60 MB harness + mock-runtime floor the real
+  process does not, and the real runtime's own share is outside
+  the measurement — the Linux test is a NECESSARY check, not a
+  sufficient one, the whole-app verdict stays the release rerun's,
+  and a margin here would only blunt the assert without measuring
+  anything more. (4) The anti-stub cross-check: the parent's
+  own polls must have observed the process in the neighborhood of
+  the reported checkpoints — at least the settled reading minus a
+  16 MiB slack, at most the reported peak plus the same slack (the
+  upper bound is structural: `VmRSS` never exceeds `VmHWM`). The
+  first cut's lower bound (`settled ≤ 2 × observed`) was rewritten
+  before landing: on the measured numbers (≈219 MB settled, 400 MB
+  budget) the halving bound was subsumed by the budget assert — a
+  within-budget inflated report could never trip it — while the
+  neighborhood bound bites for any inflation ≳17 MB above the real
+  reading. (5) The run's reality: the day's ERR-001 copy exists in
+  the shared root (through the landed `daily_copy_of` helper, which
+  also asserts its UTC naming) and its size is within half of the
+  database file's own — a copy of the 38 MB set-L database, proof
+  the sequence ran over the real L world.
+- _The script_ — `scripts/measure-startup.sh` (the card's "скрипт"):
+  builds and runs the filtered test, gates on `cargo test`'s exit
+  status first (the test's asserts all fire inside it — never a
+  grepped "ok"), parses the report line, and prints both numbers
+  against the budgets (the startup row at the CI margin, the memory
+  row verbatim), red on breach. The repo's cargo resource policy is
+  encoded in it (`CARGO_BUILD_JOBS=2` default, a 6 GB memory floor).
+  The `.sh` first gained a `.prettierignore` entry on the belief
+  that `format:check .` would error on the parser-less file — the
+  round-1 review disproved the premise (prettier's directory mode
+  silently skips unknown extensions; the "No parser could be
+  inferred" error fires only for explicitly passed paths — verified
+  against the repo's own prettier by removing the entry and running
+  `format:check` green, the un-ignored `.githooks/pre-commit`
+  being the precedent), so the entry was REMOVED: the file needs no
+  ignore, and no automated shell-syntax gate exists (the `bash -n`
+  of the first draft's comment was a one-off manual check, not CI
+  — corrected here).
+- _Why the script has no `--release` mode_ — a recorded discovery:
+  a release-profile cargo-test rerun of this crate is impossible BY
+  DESIGN. D-101's fault-injection gate (`compile_error!` under
+  `not(debug_assertions)`) fires for eunomia-fs whenever the
+  feature is on in a non-debug unit — and the D-226 dev-dependency
+  edge enables it for eunomia-sync's test builds in every profile.
+  The script's first cut carried a `--release` flag applying the
+  spec budgets verbatim; the attempt to run it failed exactly on
+  that gate, and the flag was removed (rule 11: docs must not lie).
+  The release-profile verdict of both rows therefore stays what
+  D-135's reading already assigned it: the manual smoke checklist's
+  §12.2 item (new section 7 of `docs/manual-smoke.md` — the real
+  app, webview included, on the reference machine; the whole-app
+  verdict no cargo-test rerun could produce anyway). This also
+  settles, for the record, the T-132 round-1 reviewer's rejected
+  "opt-in strict 2 s" alternative: its machinery remains unbuilt,
+  now for a structural reason, not a speculative one.
+- _The docs_ — `ARCHITECTURE.md` (the `scripts/` tree entry; the
+  testing-strategy Load row now counts seven §12.2 rows and names
+  the script beside `cargo bench`; the startup-sequence paragraph
+  carries the memory-row sentence) and `docs/manual-smoke.md`
+  (section 7, the release-gate item, in the file's Prepare/Do/Pass
+  shape with its sources named).
+
+Measurements (this 8-core dev box, dev profile — the release
+profile and the reference machine are the §12.2 release gate, the
+same open obligation D-135's and D-239's numbers carry; the
+readings travel with this entry):
+
+- **The startup share**: 896–963 ms across runs (D-239 measured
+  916 ms in-process — the fresh-process re-measurement agrees);
+  the breakdown is D-239's (open 180 + daily copy 182 + the §6.3
+  invariant sweep 541, the dominant synchronous step). Against the
+  spec's 2 s: 2.1× headroom in the DEV profile; several times that
+  at release. Against the CI bound (4 s): 4.2×.
+- **The memory row**: baseline 59–60 MB (the harness + mock-runtime
+  floor the real process does not carry — the floor's direction is
+  the measured one; the real runtime's own share is outside, see
+  the asserts above); ready 84 MB (+25 MB: the open's page walk,
+  the ERR-001 `VACUUM INTO` copy buffers, the invariant sweep's
+  transient text walk); settled 209–225 MB and peak (VmHWM) at or
+  just above it (the round-2 reviewer's independent run measured
+  settled 209.5 MB with peak 13 MB above — the transient copy
+  buffers can lift the high-water; the dominant allocation either
+  way is DB-022's first dirty pass reading the whole ALG-001
+  snapshot (100 000 assignments, 3 000 variant texts) into memory
+  before the chunked verdicts (D-121's shape), +135–138 MB over
+  ready). Against the spec's 400 MB (the documented 400 MiB
+  reading): 1.8× headroom — and the reading already includes the
+  harness share the real backend would not carry.
+- The measurement test's own cost: ~30 s in the battery (the L
+  generation out-of-process ~25 s under load + the measured run
+  ~4 s); CI's Linux legs run it as part of `cargo test --workspace`.
+
+Mutation discipline (each reverted byte-exact, `cmp` against the
+pristine copy after every run): M1 the memory budget const set to
+1 kB → the settled-RSS assert red; M2 a 5 s sleep inside the
+child's measured window → the timing assert red (5958 ms reported);
+M3 the child printing an inflated but within-budget settled
+constant (409 500 kB) → the anti-stub lower bound red ("the report
+overstates what the kernel accounted"); M4 an understated peak
+constant (500 kB) → the upper bound red ("understates"); M5 the
+sequence and settlement waits skipped → the anti-stub machinery
+red — the fast-exiting child's settled claim against the parent's
+polls that saw only the loader's 404 kB (a finding in its own
+right: a child that lives under one poll cadence cannot fake a
+settled reading); M5b the child measuring a private EMPTY world →
+the anti-stub machinery red again by the same fast-exit signature
+(the parent polls the same pid, but the empty-world child exits
+inside one cadence, so the polls never see the claimed resident
+state — the reality check would fire next, the copy being absent
+from the shared root, but the neighborhood bound fires first);
+M5c the day's copy removed from the shared root after a real run →
+the reality check red ("must have written the day's ERR-001 copy").
+Seven runs, six assert classes (M5 and M5b share the anti-stub
+fast-exit class), each its own red line.
+
+Checks (synchronous, `CARGO_BUILD_JOBS=2`, memory checked first —
+20 GB free): the full workspace nextest battery with
+`--test-threads=4` (2105/2105, exit 0 — the new test green at
+30.4 s), doc tests (exit 0), clippy `--workspace --all-targets
+-- -D warnings` (exit 0; one first-cut fix — a `trim()` before
+`split_whitespace` the linter named), fmt `--check` (exit 0),
+`cargo deny check` (exit 0 — no dependency changed), prettier
+`format:check` (exit 0 — the `.sh` needs no ignore: prettier's
+directory mode silently skips unknown extensions, verified green
+with the file present), eslint (exit 0), `vue-tsc` (exit 0); the
+script's own run (exit 0, the readings above). The frontend is
+untouched (no `.ts`/`.vue` change), so the pnpm trio ran as
+confirmation only. No file of T-358's (the command/lib/
+bindings/ipc surface) or T-134's (the updater) zones was touched:
+the diff is `startup_tests.rs` (T-132's own file, extended
+additively) with lib.rs's one-line module-registration comment
+note, `scripts/measure-startup.sh` (new), the two docs, and
+`DECISIONS.md`.
+
+Operational note (not a code decision): the task-id-mcp counter
+space gained an orphan this session — a garbled project string
+(`yepbro/Eunomiasync`) was fed once to `next_id` and issued number
+1 under a misspelled project before the correct
+`yepbro/EunomiaSync` spelling (AGENTS.local.md's "Decision
+Records" section) issued D-241. Per the counter policy
+(`set_counter` forbidden, issued numbers never corrected) the
+orphan stays; `list_counters` will show it, and no D-number was
+consumed by it (label `d` of the real project is unaffected).
+
+Follow-ups: (1) The §12.2 release gate (manual-smoke section 7):
+the whole-app verdict — startup-to-window and the process-tree RSS,
+webview included, on the reference machine — the same standing
+obligation D-135's bench numbers and D-239's startup numbers carry;
+the script answers the backend's share on any Linux box (its L
+world is the test's temp fixture, deleted at the end — the app's
+data directory for the manual item is seeded separately). (2) A
+seeding entry point for release runs: manual-smoke section 7 needs
+the L world in the APP's data directory, and no user-facing
+generator call exists (the script's world child is the shape, not
+the tool); a small `--seed` mode on the script or a fixture
+command is the candidate — deferred, the manual item naming the
+generator recipe meanwhile. (3) The dev-box debug reading of the
+first dirty pass
+(+135–138 MB retained) is now the dominant memory share of the row;
+if the reference-machine rerun ever approaches the 400 MB budget,
+the recorded option is the same class as the timing follow-up's —
+streaming the snapshot read (D-121's chunked mini-snapshots already
+exist for the verdicts; the full-snapshot pre-read is the memory
+cost) — a behavior decision for an owner card, not this one.
+
+Round-1 review addendum (D-241, same task; report
+`.opencode/reviews/t140-round1-report.md`, deepseek-v4.1-flash,
+exit 0 — VERDICT: APPROVE WITH NITS — 0×P0, 1×P1, 3×P2, 6×P3; the
+reviewer independently re-ran the filtered test green (922 ms /
+223 MB settled) and the script (exit 0, 1014 ms / 218 MB), verified
+the process lifecycle claim (the world child reaped before the
+measure child spawns; `execve` resets the address space and VmHWM —
+the "virgin child" premise holds), the no-`--release` claim
+(fault_injection.rs's gate + the dev-dep edge), the frozen zones
+(no T-358/T-134 surface), and the assert directions — findings
+processed:
+
+- **P1-1 (manual-smoke section 7 claimed the script "seeds the same
+  world the app below starts over" — the script's world is the
+  test's temp fixture, deleted at the end; the release operator
+  would launch against an empty data directory — a false procedure
+  in the one document that IS the whole-app verdict, rule 11) TAKEN:
+  the Prepare paragraph now states the script does NOT seed the
+  app's world, names the generator recipe for the operator's own
+  seeding, and records the dedicated seeding entry point as the new
+  follow-up (2).**
+- **P2-1 (the `.prettierignore` entry's stated reason is false —
+  prettier's directory mode silently skips parser-less files; the
+  "would error" claim came from an explicitly-passed path; and no
+  automated `bash -n` exists) TAKEN: the entry removed (verified by
+  running `format:check` green with the `.sh` present, the
+  `.githooks/pre-commit` precedent the reviewer named), the D-entry
+  sentence corrected above.**
+- **P2-2 ("the reading overstates the real backend" — an unverified
+  direction presented as the sole justification of the margin-free
+  assert; the mock-runtime process does not contain the real
+  runtime's native host init, so the footprints are not in a
+  superset relation) TAKEN: the claim replaced with what is proven
+  — a ~60 MB harness floor inside, the real runtime's share
+  outside, a necessary-not-sufficient check — in the module docs,
+  the memory_row docs, both assert messages, and this entry.**
+- **P2-3 (the parent's waits on both children were unbounded — a
+  hung child would hang the test binary up to the CI job's timeout,
+  contradicting the suite's own finite-waiter posture) TAKEN: both
+  waits are deadlined (the world child 300 s — the generation has
+  no internal deadline; the measure child 120 s — its own waits are
+  internally deadlined at 20 s each), the expiry kills the child
+  before the panic and names the elapsed time, the poll count and
+  the last observed VmRSS; the teeth proven by two new mutations
+  (M7 the measure deadline at 100 ms → killed at 100.4 ms with 1
+  poll / 32 kB observed, red; M8 the world deadline at 100 ms →
+  killed at 100.1 ms, red), each reverted byte-exact.**
+- **P3-1 ("verbatim" vs the 400 MiB const) TAKEN**: the const's
+  docs and the entry now say the documented 400 MiB reading of the
+  spec's 400 MB (4.8 % above strict decimal), not "verbatim".
+- **P3-2 (the script's header promised exit 1 for "the measurement
+  itself failed" while cargo's 101 propagates) TAKEN**: the header
+  now states cargo's status propagates verbatim and 1 is a budget
+  breach only.
+- **P3-3 (the mutation record's count and M5b's attribution were
+  inconsistent — seven entries under "six mutations", and M5b's
+  stated cause was wrong) TAKEN**: the entry now counts seven runs
+  / six assert classes and attributes M5b to the fast-exit
+  anti-stub signature (the neighborhood bound firing before the
+  reality check), which is what the observed run showed.
+- **P3-4 (the reality check's size comparison alone would also hold
+  for an empty database — "provably ran over the real L world"
+  overstated what that one assert establishes) TAKEN**: a
+  `L_DATABASE_FLOOR` (30 MiB) assert added on the shared root's
+  database, the copy comparison kept, and the module doc's claim
+  narrowed to what the pair establishes (the open+copy ran over the
+  L-sized database in THIS root; the world child's count assert
+  pins the deeper shape).
+- **P3-5 (lib.rs's module-registration comment for `startup_tests`
+  listed only T-132's halves — now incomplete) TAKEN**: one line
+  added naming the memory row (the comment sits on this suite's own
+  registration, not in T-358's zone — that task owns the new
+  command's registration lines).
+- **P3-6 (`report_field_kb` also parses `elapsed_ms` — the `_kb`
+  name lied) TAKEN**: renamed `report_field`.
+
+The affected tests re-ran green after the fixes (the filtered test
+at 942 ms / 225 MB, both mutations of the new deadlines red and
+reverted); the final tree re-ran the whole chain below — the review
+phase continues with round 2.
+
+Round-2 review addendum (D-241, same task; report
+`.opencode/reviews/t140-round2-report.md`, hy4-flash-free, exit 0 —
+VERDICT: APPROVE WITH NITS — 0×P0, 1×P1, 2×P2, 3×P3; the reviewer
+independently re-ran the filtered test green (948 ms, settled
+209.5 MB / peak 222.5 MB — 13 MB apart, a reading this entry's
+measurements bullet now carries honestly), passed the four-point
+test audit, and verified the D-239 reuse, the Linux gate, the
+no-`--release` story, and both frozen zones (the lib.rs hunk is
+only this suite's registration comment) — findings processed:
+
+- **P1-1 (the script's header still carried round 1's rejected
+  "the reading already overstates the real backend" justification
+  plus the "verbatim" wording — the exact claim P2-2 replaced
+  everywhere else; the script is the card's primary deliverable, so
+  an operator reading it would infer the unproven superset
+  relation) TAKEN**: the header now carries the adopted framing —
+  the documented 400 MiB reading, the ~60 MB floor inside, the real
+  runtime's share outside, a necessary-not-sufficient check.
+- **P2-1 (two residual "overstatement" wordings — the baseline
+  checkpoint's doc "the overstatement the memory assert absorbs"
+  and this entry's measurements bullet "the overstatement the
+  verbatim budget absorbs") TAKEN**: both reworded to the floor
+  framing.
+- **P2-2 (a UTC-midnight straddle false-red: the parent read its
+  `Timestamp::now()` AFTER the child exited, while the child stamps
+  the day's copy with its own earlier clock — a crossing between
+  the two panics `daily_copy_of`'s stamp assert; the same class
+  D-239's round-1 P3-3 closed for the in-process batteries) TAKEN
+  at the process level**: the parent now captures `day0` BEFORE
+  spawning the measure child and the reality check scans the shared
+  root's db-backups itself — exactly one daily-carrying copy, its
+  stamp bounded to day0 or day0+1 (the crossing tolerance), the
+  at-most-one rule, then the size checks as before. The landed
+  `daily_copy_of` helper keeps serving the in-process batteries;
+  the parent-local scan is the straddle-proof spelling of the same
+  rules, its teeth proven by a new mutation (M9: a never-matching
+  day bound → the stamp assert red naming the found copy, reverted
+  byte-exact).
+- **P3-1 (the script's exit-1 contract listed only "a budget
+  breach" while 1 also covers bad arguments, the memory floor and a
+  missing report line) TAKEN**: the header now says "a script-level
+  failure (bad arguments, the memory floor, a missing report line,
+  or a budget breach)".
+- **P3-2 (the floor's "an order of magnitude above the one and
+  below the other" overstated the lower margin — 30 MiB is ~1.2×
+  below the ~38 MB L database) TAKEN**: "orders of magnitude above
+  the one and just below the other", in both the const's docs and
+  the in-test comment.
+- **P3-3 (this entry's "VmHWM equals settled" did not reproduce —
+  the reviewer's run had the peak 13 MB above the settled reading)
+  TAKEN**: the measurements bullet now records the range and the
+  peak-above-settled possibility (the transient copy buffers).
+
+The affected test re-ran green after the fixes (936 ms / 225 MB,
+the new scan asserting exactly one day-bounded copy); the final
+tree re-ran the whole chain below — the review phase ends here
+(two rounds, no third).
+
 ### D-242 — T-269: the owner's TOCTOU ruling on scheme B's phase-3 splice — the plan is trusted, the between-phases window is a silent lost update (never corruption), and the v1 scope owns it — 2026-11-28
 
 Problem: T-116's round-1 review (P3-3, declined there and carded to

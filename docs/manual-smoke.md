@@ -18,9 +18,12 @@ suite cannot reach: the real clock, the production worker-thread path
 of the degradation warn, and Windows' GUI stderr and file locking.
 Section 4 (D-186) is the first any-OS item that joined them: the
 recovery path's re-arm of the state services; section 5 joined it in
-the same shape — the externally-modified display half of OUT-014 — and
+the same shape — the externally-modified display half of OUT-014 —
 section 6 (T-128) rejoins the Windows family: the real editor lock of
-§15.2 T-F8 inside a real sync run. Part two: the scenario
+§15.2 T-F8 inside a real sync run, and section 7 (T-140) is the
+release-gate half of §12.2's startup and memory rows: the whole-app
+verdict (webview included) on the reference machine, where the
+automated Linux measurement ends. Part two: the scenario
 runs S1–S7, S9, S10 that spec §15.5 conditions the release on (added
 by T-315). Items for other OSes and other subsystems may join below.
 
@@ -380,6 +383,55 @@ id>__<slug>/` gained this run's copy of the pre-sync bytes — the
 **Restore.** Release the holder; the scratch repos go with the
 scenario section's common-preparation cleanup (the backup copy stays
 by design).
+
+## 7. The §12.2 startup and memory rows on the reference machine (any OS)
+
+Source: spec §12.2 ("Startup until the window is ready (set L): no more
+than 2 s", "Memory (RSS, set L): no more than 400 MB", checked "with a
+benchmark before release on a reference machine (4 cores, 16 GB RAM,
+SSD)"), §15.5 ("The section 12.2 metrics are confirmed on set L");
+DECISIONS.md D-135's standing reading (the reference machine, honestly)
+and D-239/D-241's carry-forward. The backend's share is automated:
+`startup_tests.rs` pins the synchronous startup share (D-239) and the
+backend process's RSS over the L startup in a fresh child process
+(D-241), and `scripts/measure-startup.sh` reproduces both on
+any Linux box (the dev profile, the CI-class budgets). What no
+automation covers is the release-profile verdict of the whole row:
+the real app — webview included — on the reference machine (a
+release-profile cargo-test rerun is impossible by design: D-101's
+fault-injection gate refuses non-debug test builds), and on
+macOS/Windows where there is no `/proc` for the script's Linux half.
+
+**Prepare.** The reference machine (4 cores, 16 GB RAM, SSD). A
+release build of the app. The set-L world in the app's data directory:
+500 projects, 1000 instructions, 100 headings, 3 variants per
+instruction, 100 000 assignments — seeded through the store's
+`data_sets::generate` over the data root's database (the generator's
+own suite is the shape's oracle). NOTE the script does NOT seed this
+world for you: its set-L fixture lives in the test's temp directory
+and is deleted when the run ends, so the app's data directory must be
+seeded separately for the item below (a dedicated seeding entry point
+for release runs is a recorded follow-up, D-241). On Linux, run
+`scripts/measure-startup.sh` first: it answers the backend's share of
+both rows (the backend's synchronous startup and the backend
+process's RSS, at the documented CI margin) as the automated half of
+this item's evidence.
+
+**Do.** Quit the app, then launch it over the seeded data directory
+and time from the launch to the window answering input (the matrix
+painting the 500 projects). Read the process tree's resident memory
+(the app process plus its webview helper processes — Task Manager /
+Activity Monitor / `ps` around the app's pid; the sum is the row's
+subject).
+
+**Pass when.** The window is ready within 2 s of the launch; the
+process tree's resident memory stays at or under 400 MB with the L
+world loaded and the first recalculation settled (wait for the
+matrix's dirty marks — the first pass is the memory peak the backend
+reading isolates). Record both numbers with the release checklist.
+
+**Restore.** Delete the seeded data directory (or keep it for the
+other §12.2 release rows — the same world serves them all).
 
 ## Scenario runs S1–S7, S9, S10
 
